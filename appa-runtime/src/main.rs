@@ -22,7 +22,7 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
-use crate::config::Config;
+use crate::config::{Config, InitialFileAudience};
 use crate::default_config;
 use crate::{hooks, mcp};
 
@@ -55,25 +55,9 @@ struct Args {
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
 
-    /// Workspace served by runtime-owned file tools. Use the constrained claude-files launcher.
-    #[arg(long, env = "APPA_FILE_WORKSPACE", requires = "file_ledger")]
-    file_workspace: Option<PathBuf>,
-
-    /// Initialized file ledger outside the workspace. Missing ledgers fail closed.
-    #[arg(long, env = "APPA_FILE_LEDGER", requires = "file_workspace")]
-    file_ledger: Option<PathBuf>,
-
     /// Host-installed agentsh backend directory for isolated declared-input processing.
-    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND", requires = "file_workspace")]
+    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND")]
     file_process_backend: Option<PathBuf>,
-
-    /// First start only: classify all existing files with this policy trust name.
-    #[arg(long, requires = "file_workspace")]
-    initialize_file_trust: Option<String>,
-
-    /// Initial audience for every existing file. Required with initialization.
-    #[arg(long, requires = "initialize_file_trust", value_parser = ["self", "internal", "public"])]
-    initialize_file_audience: Option<String>,
 
     #[arg(long, env = "APPA_MODULES_DIR")]
     modules_dir: Option<PathBuf>,
@@ -528,6 +512,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let file_tracking = config.file_tracking.clone();
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
@@ -544,38 +529,23 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = if let Some(workspace) = args.file_workspace {
+    let runtime = if let Some(file_tracking) = file_tracking {
         let configure = || -> Result<Runtime, String> {
-            let workspace = fs::canonicalize(workspace).map_err(|error| error.to_string())?;
-            if fs::canonicalize(&config_path)
-                .map_err(|error| error.to_string())?
-                .starts_with(&workspace)
-            {
-                return Err("file tracking requires configuration outside the workspace".into());
-            }
-            let initial = match args.initialize_file_trust {
-                Some(trust) => {
-                    use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
-                    let audience = match args.initialize_file_audience.as_deref() {
-                        Some("public") => DeclaredAudience::Public,
-                        Some("internal") => DeclaredAudience::Union(
-                            Clause::new([ChainAudience::Internal], [], []).map_err(|e| e.to_string())?,
-                        ),
-                        Some("self") => DeclaredAudience::Union(
-                            Clause::new([ChainAudience::Self_], [], []).map_err(|e| e.to_string())?,
-                        ),
-                        _ => return Err("initialization requires --initialize-file-audience".into()),
-                    };
-                    Some(
-                        runtime
-                            .file_initial_label(&trust, audience)
-                            .map_err(|error| error.to_string())?,
-                    )
+            use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
+            let audience = match file_tracking.initial_audience {
+                InitialFileAudience::Public => DeclaredAudience::Public,
+                InitialFileAudience::Internal => {
+                    DeclaredAudience::Union(Clause::new([ChainAudience::Internal], [], []).map_err(|e| e.to_string())?)
                 }
-                None => None,
+                InitialFileAudience::Self_ => {
+                    DeclaredAudience::Union(Clause::new([ChainAudience::Self_], [], []).map_err(|e| e.to_string())?)
+                }
             };
+            let initial = runtime
+                .file_initial_label(&file_tracking.initial_trust, audience)
+                .map_err(|error| error.to_string())?;
             let runtime = runtime
-                .with_file_tracking(workspace, args.file_ledger.expect("clap requires a ledger"), initial)
+                .with_file_tracking(initial, config_path.clone())
                 .map_err(|error| error.to_string())?;
             match args.file_process_backend {
                 Some(backend) => runtime
@@ -592,6 +562,10 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             }
         }
     } else {
+        if args.file_process_backend.is_some() {
+            eprintln!("appa runtime: --file-process-backend requires [file_tracking] in the configuration");
+            return ExitCode::FAILURE;
+        }
         runtime
     };
     let runtime = Arc::new(runtime);
@@ -739,19 +713,13 @@ mod tests {
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
         let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
         assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
-        assert_eq!(default.file_workspace, None, "file tracking is opt-in");
-        assert_eq!(default.file_ledger, None, "file tracking is opt-in");
         assert_eq!(
             default.guide_listen, None,
             "Claude Code exposes no guide management listener"
         );
         assert!(
-            Args::try_parse_from(["appa runtime", "--file-workspace", "."]).is_err(),
-            "a workspace alone cannot activate file tracking"
-        );
-        assert!(
-            Args::try_parse_from(["appa runtime", "--file-ledger", "/tmp/files.db"]).is_err(),
-            "a ledger alone cannot activate file tracking"
+            Args::try_parse_from(["appa runtime", "--initial-file-trust", "suspicious"]).is_err(),
+            "the retired initial Label flags are refused"
         );
 
         let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])

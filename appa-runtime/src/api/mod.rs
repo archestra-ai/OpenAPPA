@@ -1308,16 +1308,15 @@ impl Runtime {
     /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
     /// Runtime-owned tools require native alternatives and implicit reads disabled.
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
-    /// Configure this before sharing the runtime. `Some(initial)`
-    /// explicitly initializes all existing files with the operator's source Label; `None`
-    /// requires an existing ledger. Never initialize again to recover a lost ledger.
+    /// Configure this before sharing the runtime. Each root session binds its first file call's
+    /// harness working directory and snapshots all existing files with the operator's source
+    /// Label. Child trajectories share their root's workspace and snapshot.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
         mut self,
-        workspace: PathBuf,
-        ledger: PathBuf,
-        initial: Option<appa_engine::label::Label>,
+        initial: appa_engine::label::Label,
+        config_path: PathBuf,
     ) -> Result<Self, OpenError> {
         let inner = Arc::get_mut(&mut self.inner)
             .and_then(|inner| Arc::get_mut(&mut inner.shared))
@@ -1327,15 +1326,10 @@ impl Runtime {
                 "file tracking requires the Claude Code adapter".into(),
             ));
         }
-        let workspace = std::fs::canonicalize(workspace).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if let Some(path) = &inner.state_path
-            && std::fs::canonicalize(path)
-                .map_err(|error| OpenError::Storage(error.to_string()))?
-                .starts_with(&workspace)
-        {
-            return Err(OpenError::Storage(
-                "the runtime database must be outside the tracked workspace".into(),
-            ));
+        let mut protected_paths =
+            vec![std::fs::canonicalize(config_path).map_err(|error| OpenError::Storage(error.to_string()))?];
+        if let Some(path) = &inner.state_path {
+            protected_paths.push(std::fs::canonicalize(path).map_err(|error| OpenError::Storage(error.to_string()))?);
         }
         let deployment = Arc::clone(
             inner
@@ -1349,34 +1343,22 @@ impl Runtime {
             ));
         }
         let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
-        if let Some(label) = &initial
-            && deployment
-                .resident
-                .registry()
-                .trust_chain()
-                .name_of(label.trust)
-                .is_none()
+        if deployment
+            .resident
+            .registry()
+            .trust_chain()
+            .name_of(initial.trust)
+            .is_none()
         {
             return Err(OpenError::Storage(
                 "initial file trust must be a configured policy rank".into(),
             ));
         }
-        let store = match initial {
-            Some(label) => appa_eventlog::files::FileStore::initialize(&ledger, &workspace, &policy_key, &label),
-            None => appa_eventlog::files::FileStore::open(
-                &ledger,
-                &workspace,
-                &policy_key,
-                &appa_engine::label::Label::top(),
-            ),
-        }
-        .map_err(|error| OpenError::Storage(error.to_string()))?;
         inner.files = Some(files::FileTracking {
-            store,
+            stores: std::sync::Mutex::new(std::collections::HashMap::new()),
+            initial,
             policy_key,
-            workspace,
-            #[cfg(feature = "daemon")]
-            ledger,
+            protected_paths,
             process_backend: None,
         });
         tracing::warn!(
@@ -1396,18 +1378,26 @@ impl Runtime {
             .as_mut()
             .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
         let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if backend.starts_with(&files.workspace)
-            || ["agentsh", "agentsh-unixwrap", "run.py"].iter().any(|name| {
-                std::fs::canonicalize(backend.join(name))
-                    .map_or(true, |path| !path.is_file() || path.starts_with(&files.workspace))
-            })
+        if ["agentsh", "agentsh-unixwrap", "run.py"]
+            .iter()
+            .any(|name| std::fs::canonicalize(backend.join(name)).map_or(true, |path| !path.is_file()))
         {
-            return Err(OpenError::Storage(
-                "processing requires a complete backend outside the workspace".into(),
-            ));
+            return Err(OpenError::Storage("processing requires a complete backend".into()));
         }
         files.process_backend = Some(backend);
         Ok(self)
+    }
+
+    #[cfg(feature = "daemon")]
+    pub(crate) fn bind_file_workspace(&self, root: &TrajectoryId, workspace: &str) -> Result<(), EventError> {
+        self.inner
+            .shared
+            .files
+            .as_ref()
+            .ok_or_else(|| files::refused("file tools are not enabled"))?
+            .bind(root, workspace)
+            .map(|_| ())
+            .map_err(files::refused)
     }
 
     /// Opens the modules, the engine, and the store. The `[policy]`

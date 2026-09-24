@@ -32,6 +32,7 @@ struct Response {
 
 pub(super) fn perform(
     files: &FileTracking,
+    workspace: &Path,
     call: &ProposedCall,
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
@@ -46,7 +47,7 @@ pub(super) fn perform(
         fs::create_dir(job.path().join("output"))?;
         for input in &pin.inputs {
             // The pinned paths were validated before dispatch. There are no outside writers.
-            let source = files.workspace.join(&input.path);
+            let source = workspace.join(&input.path);
             let target = job.path().join("inputs").join(&input.path);
             fs::create_dir_all(target.parent().expect("input paths have the staging parent"))?;
             fs::copy(source, target)?;
@@ -84,7 +85,7 @@ pub(super) fn perform(
     }
     publish(
         &job.path().join("output/result"),
-        &files.workspace.join(&pin.path),
+        &workspace.join(&pin.path),
         MAX_OUTPUT_BYTES,
     )
     .map_err(|error| format!("isolated output not published: {error}"))?;

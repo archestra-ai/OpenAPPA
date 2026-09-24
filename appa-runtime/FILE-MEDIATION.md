@@ -1,10 +1,10 @@
 # File mediation
 
-Runtime-owned file tools for a workspace the runtime owns: a durable version ledger, Label
+Runtime-owned file tools for a workspace the runtime owns: a session-local version ledger, Label
 propagation through file operations, and opt-in isolated processing of declared inputs.
 
-**Status: draft.** The file runtime is off unless an operator starts it with
-`--file-workspace` and `--file-ledger`. Read [What is verified](#what-is-verified) and
+**Status: draft.** The file runtime is off unless the APPA configuration contains a
+`[file_tracking]` table. Read [What is verified](#what-is-verified) and
 [What is not covered](#what-is-not-covered) before relying on it.
 
 Related documents:
@@ -64,7 +64,7 @@ flowchart LR
         engine["Engine<br/>policy, Labels, admission"]
         tools["file tools<br/>Read, Write, Edit, Copy, Move"]
         process["appa_process_files"]
-        ledger[("file ledger<br/>files.db")]
+        ledger[("session-local<br/>file ledgers")]
         log[("trajectory log<br/>runtime.db")]
     end
 
@@ -87,16 +87,15 @@ flowchart LR
     backend --> job
 ```
 
-The workspace, the ledger, the runtime database, the policy and the backend are host-owned
-state and live outside the managed workspace. The runtime never mounts the live workspace
-into the isolated command.
+The workspace, runtime database, policy, and backend are host-owned state. The file ledgers
+live only in runtime memory. The runtime never mounts the live workspace into an isolated command.
 
 | Piece | What it owns |
 | --- | --- |
 | `hooks` and the MCP endpoint | the harness boundary: proposals, results, session lifecycle |
 | `Engine` | the policy check, Label combination, and the trajectory log |
 | file tools | the six runtime-owned tools and the reservation protocol |
-| file ledger | versions, digests, Labels, content dependencies, and the live reservation |
+| file ledger | one root session's versions, digests, Labels, dependencies, and reservation |
 | agentsh backend | execution of `appa_process_files` under namespaces, Landlock and seccomp |
 
 ## How one call is checked
@@ -157,14 +156,15 @@ sequenceDiagram
    the pinned state.
 
 An operation that does not complete cleanly — a changed failure, a missing outcome, a digest
-that no longer matches the pin, an interrupted transfer — keeps the durable reservation and
+that no longer matches the pin, an interrupted transfer — keeps the live reservation and
 refuses every later file call in that workspace until an operator reconciles it. The
 runtime never guesses.
 
 ## The file tools
 
-All six are MCP tools on the runtime's `appa` server, advertised only while file tracking is
-enabled. Paths are workspace-relative or absolute inside the workspace.
+The five direct file tools are advertised while file tracking is enabled.
+`appa_process_files` is advertised only when `--file-process-backend` is also configured.
+Paths are workspace-relative or absolute inside the workspace.
 
 | Tool | Arguments | Returns to the trajectory | Publishes |
 | --- | --- | --- | --- |
@@ -214,52 +214,14 @@ replacement destroys content rather than deriving from it, so history is not a d
 
 ## The ledger
 
-`--file-ledger` names a SQLite database outside the workspace. It is bound to one workspace
-and one policy at initialization and refuses to open against another.
+The runtime keeps one in-memory ledger for each root session. A root trajectory and all child
+trajectories use the same root ID to select it. Therefore, subagents share file Labels,
+versions, receipts, and the live reservation. Another root session gets an independent ledger.
 
-```mermaid
-erDiagram
-    ledger_meta {
-        text workspace
-        text policy
-    }
-    versions {
-        int id PK
-        text path
-        text digest
-        text label
-        int previous FK
-        text content_dependencies
-        text dispatch
-    }
-    current_paths {
-        text path PK
-        int version FK
-    }
-    reservation {
-        int singleton PK
-        text actor
-        text call_key
-        text pin
-        text bound_dispatch
-        text output_label
-    }
-    receipts {
-        text actor PK
-        text call_key PK
-        text receipt
-    }
-    current_paths }o--|| versions : "currently holds"
-    versions }o--o| versions : "replaced"
-```
-
-| Table | Holds |
-| --- | --- |
-| `ledger_meta` | the workspace and policy the ledger is bound to |
-| `versions` | every published version: path, digest, Label, the version it replaced, its content dependencies, and the dispatch that produced it |
-| `current_paths` | which version each path currently holds |
-| `reservation` | the single live reservation: the actor, the call key, the pin, the dispatch it was bound to, and the Label its content will publish |
-| `receipts` | the outcome already returned for a call key, so a repeated report returns the same receipt |
+The first file operation in a root session scans the workspace. It gives every existing file
+the operator-configured initial Label. The ledger then holds every published version, the
+current version per path, one live reservation, and idempotent receipts for completed calls.
+The map and every ledger are process-local. Restarting the runtime discards them.
 
 Hashes verify bytes; they never classify them. Historical bytes are not retained, so a
 version is a record of what was there, not a copy of it.
@@ -276,24 +238,11 @@ stateDiagram-v2
     Prepared --> Free: the turn ends, the harness never ran it, the workspace matches
     Bound --> Quarantined: changed failure, missing outcome, or bytes moved
     Prepared --> Quarantined: the turn ends and the workspace moved away from the pin
-    Quarantined --> Free: an operator restores the bytes and releases
+    Quarantined --> [*]: the runtime restarts
 ```
 
-A quarantined workspace refuses every file call. Nothing recovers automatically, because
-the runtime cannot tell an unrun call from one whose report was lost, and guessing would
-publish bytes whose Label nobody recorded.
-
-### Reconciliation
-
-```sh
-appa file-ledger --ledger /host/files.db            # the reservation and every drifted path
-appa file-ledger --ledger /host/files.db --release  # give it back while the workspace matches
-```
-
-The command reads the ledger directly: no runtime, no policy file, and no workspace
-argument. It never releases a workspace that moved away from its pin. Stop the runtime before
-`--release`; a live reservation may belong to an operation that is running right now, and a
-running runtime releases its own abandoned calls at the turn end anyway.
+A quarantined ledger refuses every later file call in that root session. The runtime cannot
+tell an unrun call from one whose report was lost. It does not guess a Label for changed bytes.
 
 ## Isolated declared-input processing
 
@@ -334,29 +283,80 @@ launcher-failure contract and the acceptance probes are in the
 ## Operating it
 
 ```sh
-appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --file-workspace /host/work --file-ledger /host/files.db \
+appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   --file-process-backend /host/backend
 ```
 
-- The first start also classifies the workspace:
-  `--initialize-file-trust <rank> --initialize-file-audience <level>`. Initialization hashes
-  every file and refuses a workspace that holds a symlink or a hard link anywhere in it, so
-  give the runtime a dedicated directory rather than a working checkout.
-- Later starts require the same ledger and policy and omit the initialization flags.
-- Keep the policy, the ledger, the runtime database and the backend outside the workspace.
+- The `[file_tracking]` table in `file-policy.toml` is the feature flag. Omitting it disables
+  file tracking. A complete table supplies `initial_trust` and `initial_audience`.
+- Each root session binds to the `cwd` in its first file call. Its subagents share that
+  workspace and ledger. Another root session can bind to a different workspace.
+- The initial settings classify each root session's initial snapshot. They do not inspect
+  content. The policy separately defines which file-tool flows are permitted.
+- A snapshot refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
+- Keep the policy, runtime database, and backend outside the workspace.
 - The policy must name all six file tools. A tool the policy does not name is refused, not
   annotated.
 - The policy must not use sanitizers or rewrite routes. File tracking refuses to start when
   the registry holds any, because a rewritten call would render arguments the ledger never
   pinned.
-- In file mode, every call that reaches APPA and is not one of the six file tools is refused,
+- In file mode, APPA admits declared subagent spawns so children can use the root ledger.
+  Every other call that reaches APPA and is not one of the six file tools is refused,
   including APPA's own management tools. Run those from the `appa` command line.
-- One file operation runs at a time per workspace.
+- One file operation runs at a time per root session. A root and its subagents share that reservation.
 - `appa claude-files` is a separate constrained test launcher: it removes the native tools,
   starts Claude in a private empty directory, and serves the file tools over private stdio
   bound to a host-assigned trajectory. It is an experimental test path, not required by the
   plugin install.
+
+`file-policy.toml` is an ordinary APPA policy, not a second initial classification. Its
+file-tool contracts define the flows that the Engine permits after the snapshot has Labels.
+For example, this minimal policy permits all six mediated operations without adding a tool
+delta or requirement:
+
+```toml
+[policy]
+version = 2
+
+[file_tracking]
+initial_trust = "suspicious"
+initial_audience = "public"
+
+[[policy.tool]]
+name = "mcp/appa/appa_read_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_write_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_edit_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_copy_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_move_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_process_files"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Agent"
+delta = {}
+
+[policy.deployment]
+context_control = true
+```
+
+Add `requires` or a non-empty `delta` when the deployment needs tighter file flows. The
+`initial_trust` and `initial_audience` settings only Label bytes that exist when a root takes
+its snapshot; they do not replace these contracts.
 
 ## What is verified
 
@@ -364,22 +364,22 @@ Unit and integration tests cover the mediated contract, not the unmediated paths
 
 | Area | Covered by |
 | --- | --- |
-| Hook binding, duplicate results, competing trajectories | `managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results` |
+| Hook binding, duplicate results, and root-session isolation | `managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results` |
+| Subagent sharing and root-workspace isolation | `file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces` |
 | Label combination for Read/Write/Edit, restart and reopen | `managed_files_read_write_edit_and_restart_use_engine_labels`, `managed_files_bound_caller_retains_failure_taint_after_reopen` |
 | Check-before-match, admitted failure text | `managed_files_owned_execution_checks_before_matching_and_admits_errors` |
 | Copy/Move Labels without payload admission | `managed_files_copy_move_bypass_payload_admission_but_preserve_labels` |
 | Pinned path execution | `managed_files_execute_the_pinned_path_not_the_argument_path` |
-| Quarantine and release | `managed_files_failures_admit_observations_and_partial_writes_quarantine`, `managed_files_release_a_released_call_the_harness_never_ran` |
+| Quarantine and release | `managed_files_failures_quarantine_only_the_live_session_ledger`, `managed_files_release_a_released_call_the_harness_never_ran` |
 | Process Labels and dependencies | `managed_files_process_results_and_failures_keep_input_labels` |
-| Ledger invariants across reopen | `appa-eventlog/src/files.rs` unit tests |
-| The operator command | `appa-runtime/tests/file_ledger_cli.rs` |
+| In-memory ledger invariants and store isolation | `appa-eventlog/src/files.rs` unit tests |
 | Isolation: allowed processing, input immutability, control files, sockets, keyrings, inherited descriptors, parent memory, descendant teardown, the process ceiling | `integrations/agentsh/test_live.py` on a built backend |
 
 Live Claude Code 2.1.268 exercises through the installed plugin — run by hand, not part of
 the automated suites — cover Read/Write/Edit with narrowing, Copy/Move without a Read,
 overwrite and refusal cases, a two-input invoice calculation that persists both dependency
 edges, denied control-file, network and input-write attempts, symlink publication refusal,
-and a restart that preserves taint.
+and restart behavior under a fresh session ledger.
 
 ## What is not covered
 
@@ -397,9 +397,8 @@ and a restart that preserves taint.
   input contributes whether or not the command read it.
 - **Declassification.** No sanitizer or rewrite policy is supported in file mode, and no
   operation lowers a Label.
-- **Atomicity across the two databases.** The ledger and the trajectory log are separate
-  SQLite databases. A crash between them stops progress conservatively; there is no
-  automatic recovery, and `appa file-ledger` is the operator's tool.
+- **Restart persistence.** File versions, Labels, receipts, and reservations do not survive
+  a runtime restart. A reopened trajectory gets a fresh ledger from the current workspace.
 - **Metadata and timing flows, resource exhaustion, kernel vulnerabilities.** Resource
   ceilings bound cost rather than eliminate it.
 - **Writers outside the runtime.** The design assumes no process outside the harness edits
@@ -412,10 +411,8 @@ and a restart that preserves taint.
 | --- | --- |
 | [`src/api/files.rs`](src/api/files.rs) | the six tools, the reservation protocol, execution and admission |
 | [`src/api/process.rs`](src/api/process.rs) | the staged-input contract and output import |
-| [`src/file_ledger.rs`](src/file_ledger.rs) | `appa file-ledger` |
 | [`src/claude_files.rs`](src/claude_files.rs) | the constrained launcher and its private stdio server |
-| [`../appa-eventlog/src/files.rs`](../appa-eventlog/src/files.rs) | the durable version ledger |
+| [`../appa-eventlog/src/files.rs`](../appa-eventlog/src/files.rs) | the in-memory version ledger |
 | [`../appa-engine/src/value.rs`](../appa-engine/src/value.rs) | `FileBasis`, the two output labels |
 | [`../appa-engine/src/check.rs`](../appa-engine/src/check.rs) | requirement checking over a resolved call |
-| [`tests/file_ledger_cli.rs`](tests/file_ledger_cli.rs) | the operator command end to end |
 | [`../integrations/agentsh`](../integrations/agentsh) | the pinned, patched isolation backend |

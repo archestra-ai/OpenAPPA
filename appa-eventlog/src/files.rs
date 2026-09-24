@@ -1,6 +1,6 @@
-//! Durable file-version ledger for native filesystem tool calls.
+//! In-memory file-version ledger for native filesystem tool calls.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 #[cfg(unix)]
@@ -9,11 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use appa_engine::label::Label;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SCHEMA: i64 = 3;
 const ABSENT: &str = "-";
 /// How many input snapshots one Process call may declare. Every one of them is hashed at
 /// reservation and copied into the job, so the count is a ceiling on both, not a convenience.
@@ -21,12 +19,8 @@ const MAX_PROCESS_INPUTS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileStoreError {
-    #[error("invalid file-ledger configuration: {0}")]
+    #[error("invalid file tracking configuration: {0}")]
     Configuration(String),
-    #[error("file ledger is not initialized")]
-    Uninitialized,
-    #[error("file ledger belongs to a different workspace or policy")]
-    BindingMismatch,
     #[error("invalid workspace path: {0}")]
     InvalidPath(String),
     #[error("a file operation is already pending")]
@@ -45,10 +39,6 @@ pub enum FileStoreError {
     Corrupt(String),
     #[error("filesystem failure: {0}")]
     Io(#[from] std::io::Error),
-    #[error("storage failure: {0}")]
-    Storage(#[from] rusqlite::Error),
-    #[error("label encoding failure: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,69 +112,61 @@ pub enum AbandonOutcome {
     /// The workspace still showed the pinned state; the reservation is released.
     Released,
     /// The workspace moved away from the pin. The reservation stands, and every later file
-    /// call in this workspace is refused until an operator reconciles it.
+    /// call in this session is refused for the rest of the runtime process.
     Quarantined,
 }
 
 pub struct FileStore {
-    connection: Mutex<Connection>,
+    state: Mutex<State>,
     workspace: PathBuf,
 }
 
-impl FileStore {
-    pub fn initialize(db: &Path, workspace: &Path, policy: &str, initial: &Label) -> Result<Self, FileStoreError> {
-        let workspace = canonical_workspace(workspace)?;
-        validate_database_path(db, &workspace, true)?;
-        let mut connection = Connection::open(db)?;
-        configure(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        create_schema(&transaction)?;
-        if transaction.query_row("SELECT count(*) FROM ledger_meta", [], |r| r.get::<_, i64>(0))? != 0 {
-            return Err(FileStoreError::Configuration("ledger already initialized".into()));
-        }
-        transaction.execute(
-            "INSERT INTO ledger_meta(workspace,policy) VALUES (?1,?2)",
-            params![workspace.to_string_lossy(), policy],
-        )?;
-        let label = serde_json::to_string(initial)?;
-        for (relative, digest) in scan(&workspace)? {
-            transaction.execute("INSERT INTO versions(path,digest,label,previous,content_dependencies,dispatch) VALUES (?1,?2,?3,NULL,'[]',NULL)", params![relative, digest, label])?;
-            let id = transaction.last_insert_rowid();
-            transaction.execute(
-                "INSERT INTO current_paths(path,version) VALUES (?1,?2)",
-                params![relative, id],
-            )?;
-        }
-        transaction.pragma_update(None, "user_version", SCHEMA)?;
-        transaction.commit()?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            workspace,
-        })
-    }
+struct State {
+    next_id: i64,
+    versions: BTreeMap<i64, FileVersion>,
+    current: BTreeMap<String, i64>,
+    reservation: Option<StoredReservation>,
+    receipts: HashMap<(String, String), FileReceipt>,
+}
 
-    pub fn open(db: &Path, workspace: &Path, policy: &str, _initial: &Label) -> Result<Self, FileStoreError> {
+struct StoredReservation {
+    actor: String,
+    call_key: String,
+    pin: FilePin,
+    bound_dispatch: Option<String>,
+    output_label: Option<Label>,
+}
+
+impl FileStore {
+    pub fn new(workspace: &Path, initial: &Label) -> Result<Self, FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
-        validate_database_path(db, &workspace, false)?;
-        if !db.is_file() {
-            return Err(FileStoreError::Uninitialized);
-        }
-        let connection = Connection::open(db)?;
-        configure(&connection)?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != SCHEMA {
-            return Err(FileStoreError::Uninitialized);
-        }
-        let binding = connection
-            .query_row("SELECT workspace,policy FROM ledger_meta", [], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .optional()?;
-        if binding.as_ref() != Some(&(workspace.to_string_lossy().into_owned(), policy.to_owned())) {
-            return Err(FileStoreError::BindingMismatch);
+        let mut versions = BTreeMap::new();
+        let mut current = BTreeMap::new();
+        let mut next_id = 1;
+        for (path, digest) in scan(&workspace)? {
+            versions.insert(
+                next_id,
+                FileVersion {
+                    id: next_id,
+                    path: path.clone(),
+                    digest,
+                    label: initial.clone(),
+                    previous: None,
+                    content_dependencies: vec![],
+                    dispatch: None,
+                },
+            );
+            current.insert(path, next_id);
+            next_id += 1;
         }
         Ok(Self {
-            connection: Mutex::new(connection),
+            state: Mutex::new(State {
+                next_id,
+                versions,
+                current,
+                reservation: None,
+                receipts: HashMap::new(),
+            }),
             workspace,
         })
     }
@@ -206,15 +188,11 @@ impl FileStore {
         }
         let relative = validated_relative(&self.workspace, path)?;
         let absolute = self.workspace.join(&relative);
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tx.query_row("SELECT count(*) FROM reservation", [], |r| r.get::<_, i64>(0))? != 0 {
+        let mut state = self.lock()?;
+        if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let predecessor = current_tx(&tx, &relative)?;
+        let predecessor = current_state(&state, &relative);
         match operation {
             FileOperation::Read | FileOperation::Edit if predecessor.is_none() => {
                 return Err(FileStoreError::Untracked);
@@ -242,11 +220,7 @@ impl FileStore {
             source: None,
             inputs: vec![],
         };
-        tx.execute(
-            "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
-            params![actor, call_key, serde_json::to_string(&pin)?],
-        )?;
-        tx.commit()?;
+        state.reservation = Some(stored_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -273,15 +247,11 @@ impl FileStore {
         let source_absolute = self.workspace.join(&source);
         let destination_absolute = self.workspace.join(&destination);
 
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tx.query_row("SELECT count(*) FROM reservation", [], |r| r.get::<_, i64>(0))? != 0 {
+        let mut state = self.lock()?;
+        if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let source_version = current_tx(&tx, &source)?.ok_or(FileStoreError::Untracked)?;
+        let source_version = current_state(&state, &source).ok_or(FileStoreError::Untracked)?;
         if !source_absolute.exists() {
             return Err(FileStoreError::Untracked);
         }
@@ -290,7 +260,7 @@ impl FileStore {
         if hash(&source_absolute)? != source_version.digest {
             return Err(FileStoreError::DigestMismatch);
         }
-        let predecessor = current_tx(&tx, &destination)?;
+        let predecessor = current_state(&state, &destination);
         let destination_actual = state_digest(&destination_absolute)?;
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
@@ -312,11 +282,7 @@ impl FileStore {
             }),
             inputs: vec![],
         };
-        tx.execute(
-            "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
-            params![actor, call_key, serde_json::to_string(&pin)?],
-        )?;
-        tx.commit()?;
+        state.reservation = Some(stored_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -341,17 +307,13 @@ impl FileStore {
         if inputs.len() > MAX_PROCESS_INPUTS {
             return Err(FileStoreError::InvalidPath("too many process inputs".into()));
         }
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tx.query_row("SELECT count(*) FROM reservation", [], |r| r.get::<_, i64>(0))? != 0 {
+        let mut state = self.lock()?;
+        if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
         let mut pinned = Vec::with_capacity(inputs.len());
         for path in inputs {
-            let version = current_tx(&tx, &path)?.ok_or(FileStoreError::Untracked)?;
+            let version = current_state(&state, &path).ok_or(FileStoreError::Untracked)?;
             let absolute = self.workspace.join(&path);
             if !absolute.exists() {
                 return Err(FileStoreError::Untracked);
@@ -367,7 +329,7 @@ impl FileStore {
                 digest: version.digest,
             });
         }
-        let predecessor = current_tx(&tx, &destination)?;
+        let predecessor = current_state(&state, &destination);
         let destination_absolute = self.workspace.join(&destination);
         if state_digest(&destination_absolute)? != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
@@ -384,11 +346,7 @@ impl FileStore {
             source: None,
             inputs: pinned,
         };
-        tx.execute(
-            "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
-            params![actor, call_key, serde_json::to_string(&pin)?],
-        )?;
-        tx.commit()?;
+        state.reservation = Some(stored_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -399,77 +357,41 @@ impl FileStore {
         dispatch: &str,
         output_label: &Label,
     ) -> Result<(), FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let changed = connection.execute("UPDATE reservation SET bound_dispatch=?3,output_label=?4 WHERE actor=?1 AND call_key=?2 AND bound_dispatch IS NULL", params![actor,call_key,dispatch,serde_json::to_string(output_label)?])?;
-        if changed == 0 {
-            if reservation_exists(&connection, actor, call_key)? {
-                Err(FileStoreError::AlreadyBound)
-            } else {
-                Err(FileStoreError::UnknownReservation)
-            }
-        } else {
-            Ok(())
+        let mut state = self.lock()?;
+        let reservation = matching_reservation_mut(&mut state, actor, call_key)?;
+        if reservation.bound_dispatch.is_some() {
+            return Err(FileStoreError::AlreadyBound);
         }
+        reservation.bound_dispatch = Some(dispatch.into());
+        reservation.output_label = Some(output_label.clone());
+        Ok(())
     }
 
     pub fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        if connection.execute(
-            "DELETE FROM reservation WHERE actor=?1 AND call_key=?2 AND bound_dispatch IS NULL",
-            params![actor, call_key],
-        )? == 0
-        {
-            if reservation_exists(&connection, actor, call_key)? {
-                Err(FileStoreError::AlreadyBound)
-            } else {
-                Err(FileStoreError::UnknownReservation)
-            }
-        } else {
-            Ok(())
+        let mut state = self.lock()?;
+        if matching_reservation(&state, actor, call_key)?.bound_dispatch.is_some() {
+            return Err(FileStoreError::AlreadyBound);
         }
+        state.reservation = None;
+        Ok(())
     }
 
     pub fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(encoded) = tx
-            .query_row(
-                "SELECT receipt FROM receipts WHERE actor=?1 AND call_key=?2",
-                params![actor, call_key],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Ok(serde_json::from_str(&encoded)?);
+        let mut state = self.lock()?;
+        let key = (actor.to_owned(), call_key.to_owned());
+        if let Some(receipt) = state.receipts.get(&key) {
+            return Ok(receipt.clone());
         }
-        let row = tx
-            .query_row(
-                "SELECT pin,bound_dispatch,output_label FROM reservation WHERE actor=?1 AND call_key=?2",
-                params![actor, call_key],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?
+        let reservation = matching_reservation(&state, actor, call_key)?;
+        let pin = reservation.pin.clone();
+        let dispatch = reservation
+            .bound_dispatch
+            .clone()
             .ok_or(FileStoreError::UnknownReservation)?;
-        let (pin, dispatch, output): (FilePin, String, Label) = (
-            serde_json::from_str(&row.0)?,
-            row.1.ok_or(FileStoreError::UnknownReservation)?,
-            serde_json::from_str(&row.2.ok_or(FileStoreError::UnknownReservation)?)?,
-        );
+        let output = reservation
+            .output_label
+            .clone()
+            .ok_or(FileStoreError::UnknownReservation)?;
         let absolute = self.workspace.join(&pin.path);
         let actual = state_digest(&absolute)?;
         let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
@@ -550,31 +472,15 @@ impl FileStore {
                 return Err(FileStoreError::DigestMismatch);
             }
             check_regular(&absolute)?;
-            tx.execute(
-                "INSERT INTO versions(path,digest,label,previous,content_dependencies,dispatch) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    pin.path,
-                    actual,
-                    serde_json::to_string(&output)?,
-                    pin.predecessor_version,
-                    serde_json::to_string(&dependencies)?,
-                    dispatch
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            tx.execute(
-                "INSERT INTO current_paths(path,version) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET version=excluded.version",
-                params![pin.path, id],
-            )?;
+            let id = state.next_id;
+            state.next_id += 1;
             if pin.operation == FileOperation::Move {
-                tx.execute(
-                    "UPDATE current_paths SET version=NULL WHERE path=?1",
-                    [pin.source
+                state.current.remove(
+                    &pin.source
                         .as_ref()
                         .expect("successful Move validated its source pin")
-                        .path
-                        .as_str()],
-                )?;
+                        .path,
+                );
             }
             let version = FileVersion {
                 id,
@@ -585,6 +491,8 @@ impl FileStore {
                 content_dependencies: dependencies,
                 dispatch: Some(dispatch.clone()),
             };
+            state.versions.insert(id, version.clone());
+            state.current.insert(pin.path.clone(), id);
             FileReceipt {
                 path: pin.path.clone(),
                 operation: pin.operation,
@@ -594,22 +502,15 @@ impl FileStore {
                 dispatch: Some(dispatch),
             }
         };
-        tx.execute(
-            "INSERT INTO receipts(actor,call_key,receipt) VALUES (?1,?2,?3)",
-            params![actor, call_key, serde_json::to_string(&receipt)?],
-        )?;
-        tx.execute(
-            "DELETE FROM reservation WHERE actor=?1 AND call_key=?2",
-            params![actor, call_key],
-        )?;
-        tx.commit()?;
+        state.receipts.insert(key, receipt.clone());
+        state.reservation = None;
         Ok(receipt)
     }
 
     /// Whether the workspace still shows exactly the state this pin recorded: the bytes the
     /// operation would have replaced, the bytes a transfer would have consumed, and every
     /// declared input. `finish` and `abandon` answer the same question from values they have
-    /// already hashed; an operator surface asks it here.
+    /// already hashed; diagnostics can ask it here.
     pub fn pin_matches_workspace(&self, pin: &FilePin) -> Result<bool, FileStoreError> {
         let destination = state_digest(&self.workspace.join(&pin.path))?;
         let source = pin
@@ -628,24 +529,16 @@ impl FileStore {
     /// Release the reservation of a call that was released and never ran, provided the
     /// workspace still shows its pinned state. The runtime cannot tell an unrun call from one
     /// whose report was lost, so anything else keeps the reservation: a workspace that moved
-    /// is reconciled by an operator, never by guessing here.
+    /// is never released by guessing here.
     pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pin = tx
-            .query_row(
-                "SELECT pin FROM reservation WHERE actor=?1 AND call_key=?2",
-                params![actor, call_key],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        let Some(pin) = pin else {
+        let mut state = self.lock()?;
+        let Some(reservation) = state.reservation.as_ref() else {
             return Ok(AbandonOutcome::Absent);
         };
-        let pin: FilePin = serde_json::from_str(&pin)?;
+        if reservation.actor != actor || reservation.call_key != call_key {
+            return Ok(AbandonOutcome::Absent);
+        }
+        let pin = reservation.pin.clone();
         let destination = state_digest(&self.workspace.join(&pin.path))?;
         let source = pin
             .source
@@ -660,24 +553,15 @@ impl FileStore {
         if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
             return Ok(AbandonOutcome::Quarantined);
         }
-        tx.execute(
-            "DELETE FROM reservation WHERE actor=?1 AND call_key=?2",
-            params![actor, call_key],
-        )?;
-        tx.commit()?;
+        state.reservation = None;
         Ok(AbandonOutcome::Released)
     }
 
     /// Every tracked path that no longer holds the bytes its recorded version describes. A
     /// path that is gone counts: the ledger cannot tell a deletion from a loss.
     pub fn drifted(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let mut statement = connection.prepare("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.version IS NOT NULL ORDER BY v.path")?;
-        let current = decode_versions(statement.query_map([], decode_version)?)?;
-        drop(statement);
+        let state = self.lock()?;
+        let current = snapshot_state(&state);
         let mut drifted = Vec::new();
         for version in current {
             if state_digest(&self.workspace.join(&version.path))? != version.digest {
@@ -691,69 +575,23 @@ impl FileStore {
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
     pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let encoded = connection
-            .query_row(
-                "SELECT pin FROM reservation WHERE actor=?1 AND call_key=?2",
-                params![actor, call_key],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        encoded
-            .map(|pin| serde_json::from_str(&pin).map_err(FileStoreError::from))
-            .transpose()
+        let state = self.lock()?;
+        Ok(state
+            .reservation
+            .as_ref()
+            .filter(|r| r.actor == actor && r.call_key == call_key)
+            .map(|r| r.pin.clone()))
     }
 
     /// The live reservation, if any. One workspace holds at most one.
     pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let row = connection
-            .query_row("SELECT actor,call_key,pin,bound_dispatch FROM reservation", [], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .optional()?;
-        row.map(|(actor, call_key, pin, bound_dispatch)| {
-            Ok(Reservation {
-                actor,
-                call_key,
-                pin: serde_json::from_str(&pin)?,
-                bound_dispatch,
-            })
-        })
-        .transpose()
-    }
-
-    /// Open a ledger for operator inspection. The workspace and policy it is bound to are read
-    /// from the ledger itself, so no deployment configuration is needed to look at it.
-    pub fn inspect(db: &Path) -> Result<Self, FileStoreError> {
-        if !db.is_file() {
-            return Err(FileStoreError::Uninitialized);
-        }
-        let connection = Connection::open(db)?;
-        configure(&connection)?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != SCHEMA {
-            return Err(FileStoreError::Uninitialized);
-        }
-        let workspace = connection
-            .query_row("SELECT workspace FROM ledger_meta", [], |r| r.get::<_, String>(0))
-            .optional()?
-            .ok_or(FileStoreError::Uninitialized)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            workspace: PathBuf::from(workspace),
-        })
+        let state = self.lock()?;
+        Ok(state.reservation.as_ref().map(|r| Reservation {
+            actor: r.actor.clone(),
+            call_key: r.call_key.clone(),
+            pin: r.pin.clone(),
+            bound_dispatch: r.bound_dispatch.clone(),
+        }))
     }
 
     /// The workspace this ledger is bound to.
@@ -763,41 +601,31 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        current_connection(&connection, &relative)
+        let state = self.lock()?;
+        Ok(current_state(&state, &relative))
     }
 
     pub fn history(&self, path: &str) -> Result<Vec<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let mut statement = connection.prepare(
-            "SELECT id,path,digest,label,previous,content_dependencies,dispatch FROM versions WHERE path=?1 ORDER BY id",
-        )?;
-        decode_versions(statement.query_map([relative], decode_version)?)
+        let state = self.lock()?;
+        Ok(state
+            .versions
+            .values()
+            .filter(|v| v.path == relative)
+            .cloned()
+            .collect())
     }
 
     pub fn snapshot(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let mut statement = connection.prepare("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.version IS NOT NULL ORDER BY v.path")?;
-        decode_versions(statement.query_map([], decode_version)?)
+        let state = self.lock()?;
+        Ok(snapshot_state(&state))
     }
-}
 
-fn configure(c: &Connection) -> Result<(), rusqlite::Error> {
-    c.busy_timeout(std::time::Duration::from_secs(5))?;
-    c.pragma_update(None, "foreign_keys", "ON")
-}
-fn create_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
-    tx.execute_batch("CREATE TABLE ledger_meta(workspace TEXT NOT NULL,policy TEXT NOT NULL); CREATE TABLE versions(id INTEGER PRIMARY KEY,path TEXT NOT NULL,digest TEXT NOT NULL,label TEXT NOT NULL,previous INTEGER,content_dependencies TEXT NOT NULL,dispatch TEXT); CREATE TABLE current_paths(path TEXT PRIMARY KEY,version INTEGER REFERENCES versions(id)); CREATE TABLE reservation(singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK(singleton=1),actor TEXT NOT NULL,call_key TEXT NOT NULL,pin TEXT NOT NULL,bound_dispatch TEXT,output_label TEXT,UNIQUE(actor,call_key)); CREATE TABLE receipts(actor TEXT NOT NULL,call_key TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(actor,call_key));")
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>, FileStoreError> {
+        self.state
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("file store lock poisoned".into()))
+    }
 }
 fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
     if !cfg!(unix) {
@@ -810,28 +638,6 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
         return Err(FileStoreError::Configuration("workspace is not a directory".into()));
     }
     Ok(p)
-}
-fn validate_database_path(db: &Path, workspace: &Path, new: bool) -> Result<(), FileStoreError> {
-    if !db.is_absolute() {
-        return Err(FileStoreError::Configuration("database path must be absolute".into()));
-    }
-    let parent = db
-        .parent()
-        .ok_or_else(|| FileStoreError::Configuration("database has no parent".into()))?;
-    let parent = fs::canonicalize(parent)?;
-    let resolved_db = if db.exists() { Some(fs::canonicalize(db)?) } else { None };
-    if parent.starts_with(workspace)
-        || db.starts_with(workspace)
-        || resolved_db.as_ref().is_some_and(|path| path.starts_with(workspace))
-    {
-        return Err(FileStoreError::Configuration(
-            "database must be outside workspace".into(),
-        ));
-    }
-    if new && db.exists() {
-        return Err(FileStoreError::Configuration("database already exists".into()));
-    }
-    Ok(())
 }
 fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStoreError> {
     let supplied = Path::new(input);
@@ -956,50 +762,51 @@ fn undisturbed(pin: &FilePin, destination: &str, source_state: Option<&str>, inp
         && inputs.iter().all(|unchanged| *unchanged)
 }
 
-fn reservation_exists(c: &Connection, a: &str, k: &str) -> Result<bool, rusqlite::Error> {
-    c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM reservation WHERE actor=?1 AND call_key=?2)",
-        params![a, k],
-        |r| r.get(0),
-    )
+fn stored_reservation(actor: &str, call_key: &str, pin: &FilePin) -> StoredReservation {
+    StoredReservation {
+        actor: actor.into(),
+        call_key: call_key.into(),
+        pin: pin.clone(),
+        bound_dispatch: None,
+        output_label: None,
+    }
 }
-type StoredVersion = (i64, String, String, String, Option<i64>, String, Option<String>);
 
-fn decode_version(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredVersion> {
-    Ok((
-        r.get(0)?,
-        r.get(1)?,
-        r.get(2)?,
-        r.get(3)?,
-        r.get(4)?,
-        r.get(5)?,
-        r.get(6)?,
-    ))
+fn matching_reservation<'a>(
+    state: &'a State,
+    actor: &str,
+    call_key: &str,
+) -> Result<&'a StoredReservation, FileStoreError> {
+    state
+        .reservation
+        .as_ref()
+        .filter(|r| r.actor == actor && r.call_key == call_key)
+        .ok_or(FileStoreError::UnknownReservation)
 }
-fn version(v: StoredVersion) -> Result<FileVersion, FileStoreError> {
-    Ok(FileVersion {
-        id: v.0,
-        path: v.1,
-        digest: v.2,
-        label: serde_json::from_str(&v.3)?,
-        previous: v.4,
-        content_dependencies: serde_json::from_str(&v.5)?,
-        dispatch: v.6,
-    })
+
+fn matching_reservation_mut<'a>(
+    state: &'a mut State,
+    actor: &str,
+    call_key: &str,
+) -> Result<&'a mut StoredReservation, FileStoreError> {
+    state
+        .reservation
+        .as_mut()
+        .filter(|r| r.actor == actor && r.call_key == call_key)
+        .ok_or(FileStoreError::UnknownReservation)
 }
-fn decode_versions<I>(rows: I) -> Result<Vec<FileVersion>, FileStoreError>
-where
-    I: Iterator<Item = rusqlite::Result<StoredVersion>>,
-{
-    rows.map(|r| version(r?)).collect()
+
+fn current_state(state: &State, path: &str) -> Option<FileVersion> {
+    state.current.get(path).and_then(|id| state.versions.get(id)).cloned()
 }
-fn current_tx(tx: &Transaction<'_>, p: &str) -> Result<Option<FileVersion>, FileStoreError> {
-    let x=tx.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
-    x.map(version).transpose()
-}
-fn current_connection(c: &Connection, p: &str) -> Result<Option<FileVersion>, FileStoreError> {
-    let x=c.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
-    x.map(version).transpose()
+
+fn snapshot_state(state: &State) -> Vec<FileVersion> {
+    state
+        .current
+        .values()
+        .filter_map(|id| state.versions.get(id))
+        .cloned()
+        .collect()
 }
 
 #[cfg(all(test, unix))]
@@ -1021,7 +828,6 @@ mod tests {
     struct Fixture {
         _root: TempDir,
         workspace: PathBuf,
-        db: PathBuf,
     }
 
     impl Fixture {
@@ -1030,17 +836,11 @@ mod tests {
             let workspace = root.path().join("workspace");
             fs::create_dir(&workspace).unwrap();
             fs::write(workspace.join("tracked.txt"), "old").unwrap();
-            let db = root.path().join("state").join("files.sqlite");
-            fs::create_dir(db.parent().unwrap()).unwrap();
-            Self {
-                _root: root,
-                workspace,
-                db,
-            }
+            Self { _root: root, workspace }
         }
 
-        fn initialize(&self, label: &Label) -> FileStore {
-            FileStore::initialize(&self.db, &self.workspace, "policy-a", label).unwrap()
+        fn store(&self, label: &Label) -> FileStore {
+            FileStore::new(&self.workspace, label).unwrap()
         }
     }
 
@@ -1049,7 +849,7 @@ mod tests {
         let fixture = Fixture::new();
         // Both paths exist before initialization, so both are classified and tracked.
         fs::write(fixture.workspace.join("destination.txt"), "before").unwrap();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         // A released call the harness never ran: the workspace still shows the pin.
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
@@ -1082,57 +882,20 @@ mod tests {
     }
 
     #[test]
-    fn inspection_reads_the_binding_from_the_ledger_and_matches_a_pin() {
+    fn stores_over_the_same_workspace_are_isolated_in_memory() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
-        let pin = store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
-        store.bind("a", "read", "dispatch", &Label::top()).unwrap();
-        drop(store);
-
-        let inspected = FileStore::inspect(&fixture.db).unwrap();
-        assert_eq!(inspected.workspace(), fixture.workspace.as_path());
-        let reservation = inspected.reservation().unwrap().unwrap();
-        assert_eq!(reservation.pin.path, "tracked.txt");
-        assert_eq!(reservation.bound_dispatch.as_deref(), Some("dispatch"));
-        assert!(inspected.pin_matches_workspace(&pin).unwrap());
-        fs::write(fixture.workspace.join("tracked.txt"), "moved").unwrap();
-        assert!(!inspected.pin_matches_workspace(&pin).unwrap());
-        assert!(matches!(
-            FileStore::inspect(&fixture._root.path().join("absent.db")),
-            Err(FileStoreError::Uninitialized)
-        ));
-    }
-
-    #[test]
-    fn reopening_preserves_labels_and_excludes_other_connections() {
-        let fixture = Fixture::new();
-        let initial = Label::top();
-        let first = fixture.initialize(&initial);
+        let first = fixture.store(&Label::top());
+        let second = fixture.store(&Label::top());
         first.prepare("a", "one", FileOperation::Read, "tracked.txt").unwrap();
-
-        let second = FileStore::open(&fixture.db, &fixture.workspace, "policy-a", &initial).unwrap();
-        assert!(matches!(
-            second.prepare("b", "two", FileOperation::Read, "tracked.txt"),
-            Err(FileStoreError::Pending)
-        ));
-        drop(first);
-        assert_eq!(second.current("tracked.txt").unwrap().unwrap().label, initial);
-        assert!(matches!(
-            FileStore::open(&fixture.db, &fixture.workspace, "policy-b", &Label::top()),
-            Err(FileStoreError::BindingMismatch)
-        ));
-        let other = fixture._root.path().join("other");
-        fs::create_dir(&other).unwrap();
-        assert!(matches!(
-            FileStore::open(&fixture.db, &other, "policy-a", &Label::top()),
-            Err(FileStoreError::BindingMismatch)
-        ));
+        second.prepare("b", "two", FileOperation::Read, "tracked.txt").unwrap();
+        assert_eq!(first.reservation().unwrap().unwrap().call_key, "one");
+        assert_eq!(second.reservation().unwrap().unwrap().call_key, "two");
     }
 
     #[test]
     fn replace_uses_bound_label_and_edit_records_dependency() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         let output = Label::new(
             appa_engine::label::Trust::new(4),
             appa_engine::label::Audience::public(),
@@ -1162,7 +925,7 @@ mod tests {
     #[test]
     fn mismatch_and_failed_partial_write_stay_pending() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         fs::write(fixture.workspace.join("tracked.txt"), "foreign").unwrap();
         assert!(matches!(
             store.prepare("a", "bad", FileOperation::Read, "tracked.txt"),
@@ -1191,11 +954,7 @@ mod tests {
     #[test]
     fn rejects_missing_ledger_traversal_symlinks_and_hardlinks() {
         let fixture = Fixture::new();
-        assert!(matches!(
-            FileStore::open(&fixture.db, &fixture.workspace, "policy-a", &Label::top()),
-            Err(FileStoreError::Uninitialized)
-        ));
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         assert!(matches!(
             store.prepare("a", "escape", FileOperation::Replace, "../escape"),
             Err(FileStoreError::InvalidPath(_))
@@ -1219,7 +978,7 @@ mod tests {
         fs::write(fixture.workspace.join("tracked.txt"), [0, 255, 1, 128]).unwrap();
         fs::write(fixture.workspace.join("destination.bin"), [0, 255, 1, 128]).unwrap();
         let source_label = Label::top();
-        let store = fixture.initialize(&source_label);
+        let store = fixture.store(&source_label);
         let destination_label = Label::new(
             appa_engine::label::Trust::new(4),
             appa_engine::label::Audience::public(),
@@ -1253,7 +1012,7 @@ mod tests {
     #[test]
     fn move_marks_source_absent_preserves_history_and_allows_reuse() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         let source_id = store.current("tracked.txt").unwrap().unwrap().id;
         store
             .prepare_transfer("a", "move", FileOperation::Move, "tracked.txt", "moved.txt")
@@ -1280,9 +1039,9 @@ mod tests {
     }
 
     #[test]
-    fn transfer_reserves_both_paths_and_partial_failure_quarantines_across_reopen() {
+    fn transfer_reserves_both_paths_and_partial_failure_quarantines() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
             .unwrap();
@@ -1296,15 +1055,12 @@ mod tests {
             store.finish("a", "copy", false),
             Err(FileStoreError::Quarantined)
         ));
-        drop(store);
-
-        let reopened = FileStore::open(&fixture.db, &fixture.workspace, "policy-a", &Label::top()).unwrap();
         assert!(matches!(
-            reopened.prepare("b", "next", FileOperation::Read, "tracked.txt"),
+            store.prepare("b", "next", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
         ));
         assert!(matches!(
-            reopened.finish("a", "copy", false),
+            store.finish("a", "copy", false),
             Err(FileStoreError::Quarantined)
         ));
     }
@@ -1312,7 +1068,7 @@ mod tests {
     #[test]
     fn failed_transfer_releases_only_when_both_paths_are_unchanged() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
             .unwrap();
@@ -1322,11 +1078,11 @@ mod tests {
     }
 
     #[test]
-    fn process_pins_raw_multi_inputs_and_publishes_all_dependencies_across_reopen() {
+    fn process_pins_raw_multi_inputs_and_publishes_all_dependencies() {
         let fixture = Fixture::new();
         fs::write(fixture.workspace.join("second.bin"), [0, 255, 1, 128]).unwrap();
         fs::write(fixture.workspace.join("output.bin"), "previous").unwrap();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         let inputs = vec!["tracked.txt".to_string(), "second.bin".to_string()];
         let pin = store.prepare_process("a", "process", &inputs, "output.bin").unwrap();
         let dependencies: Vec<_> = pin.inputs.iter().map(|input| input.version).collect();
@@ -1342,16 +1098,14 @@ mod tests {
         assert_eq!(version.label, output);
         assert_eq!(version.previous, previous);
         assert_eq!(version.content_dependencies, dependencies);
-        drop(store);
-        let reopened = FileStore::open(&fixture.db, &fixture.workspace, "policy-a", &Label::top()).unwrap();
-        assert_eq!(reopened.current("output.bin").unwrap().unwrap(), version);
-        assert_eq!(reopened.history("output.bin").unwrap().len(), 2);
+        assert_eq!(store.current("output.bin").unwrap().unwrap(), version);
+        assert_eq!(store.history("output.bin").unwrap().len(), 2);
     }
 
     #[test]
     fn process_refuses_missing_or_aliased_inputs_and_quarantines_partial_failure() {
         let fixture = Fixture::new();
-        let store = fixture.initialize(&Label::top());
+        let store = fixture.store(&Label::top());
         assert!(matches!(
             store.prepare_process("a", "missing", &["missing".into()], "output"),
             Err(FileStoreError::Untracked)

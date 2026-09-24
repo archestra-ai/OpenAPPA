@@ -32,6 +32,9 @@ pub struct Config {
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
     /// that every session's opening binds to.
     pub reporting: Reporting,
+    /// Root-local file tracking configuration. Its presence enables one in-memory file
+    /// ledger per root trajectory; it is not part of the stored policy bytes.
+    pub file_tracking: Option<FileTrackingConfig>,
     included_batteries: Vec<String>,
 }
 
@@ -41,6 +44,22 @@ pub struct Reporting {
     /// May an agent send a report on its own, through the `yell` tool? Off unless the
     /// deployment says otherwise, so an upgrade never starts an agent reporting.
     pub agent_yell: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileTrackingConfig {
+    pub initial_trust: String,
+    pub initial_audience: InitialFileAudience,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InitialFileAudience {
+    #[serde(rename = "self")]
+    Self_,
+    Internal,
+    Public,
 }
 
 /// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
@@ -639,6 +658,8 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
+    /// Root-file only, and stripped before the composed document is rendered.
+    file_tracking: Option<FileTrackingConfig>,
     /// Offline packaging inputs, not part of the policy identity.
     #[serde(default)]
     bundle: RawBundle,
@@ -884,10 +905,15 @@ impl Config {
         let reporting = Reporting {
             agent_yell: root.reporting.agent_yell,
         };
+        let file_tracking = root.file_tracking.clone();
         document
             .as_table_mut()
             .expect("RawConfig parsed the root as a table")
             .remove("reporting");
+        document
+            .as_table_mut()
+            .expect("RawConfig parsed the root as a table")
+            .remove("file_tracking");
         // Keep authored packaging inputs out of the composed policy, just as
         // reporting settings remain local to the deployment root.
         let _ = &root.bundle.files;
@@ -904,6 +930,7 @@ impl Config {
             stored,
             raw,
             reporting,
+            file_tracking,
             origins,
             included_batteries.into_iter().collect(),
             |var| std::env::var(var).ok(),
@@ -1045,6 +1072,7 @@ impl Config {
             rendered,
             raw,
             Reporting::default(),
+            None,
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             |var| std::env::var(var).ok(),
@@ -1114,13 +1142,23 @@ impl Config {
             .into_iter()
             .map(|key| (key, source_dir.to_path_buf()))
             .collect();
-        Config::validate_composed(text, raw, Reporting::default(), origins, Vec::new(), lookup)
+        let file_tracking = raw.file_tracking.clone();
+        Config::validate_composed(
+            text,
+            raw,
+            Reporting::default(),
+            file_tracking,
+            origins,
+            Vec::new(),
+            lookup,
+        )
     }
 
     fn validate_composed(
         text: String,
         raw: RawConfig,
         reporting: Reporting,
+        file_tracking: Option<FileTrackingConfig>,
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
         lookup: impl Fn(&str) -> Option<String>,
@@ -1157,6 +1195,7 @@ impl Config {
             credentials: raw.credentials,
             inventory: raw.appa_inventory,
             reporting,
+            file_tracking,
             included_batteries,
             externals: Externals {
                 timeout: Duration::from_millis(timeout_ms),
@@ -3355,6 +3394,10 @@ mod tests {
             ("include", "include = [\"battery.toml\"]"),
             ("appa_composed", "[appa_composed]\ncommand_cwd = {}"),
             ("reporting", "[reporting]\nagent_yell = true"),
+            (
+                "file_tracking",
+                "[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"",
+            ),
             ("bundle", "[bundle]\nfiles = []"),
             ("appa_inventory", "[appa_inventory]\ntools = []"),
         ] {
@@ -3633,6 +3676,50 @@ mod tests {
         )
         .expect("the configuration is written");
         assert!(matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })));
+    }
+
+    #[test]
+    fn file_tracking_is_off_without_its_complete_root_table() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        assert!(reporting_config(dir.path(), "").file_tracking.is_none());
+
+        let enabled = reporting_config(
+            dir.path(),
+            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"self\"\n",
+        )
+        .file_tracking
+        .expect("the complete table enables file tracking");
+        assert_eq!(enabled.initial_trust, "suspicious");
+        assert_eq!(enabled.initial_audience, InitialFileAudience::Self_);
+
+        for table in [
+            "[file_tracking]\ninitial_trust=\"suspicious\"\n",
+            "[file_tracking]\ninitial_audience=\"public\"\n",
+            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"unknown\"\n",
+            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\nextra=true\n",
+        ] {
+            let path = dir.path().join("appa.toml");
+            std::fs::write(
+                &path,
+                format!("[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n{table}"),
+            )
+            .expect("the configuration is written");
+            assert!(
+                matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_tracking_settings_do_not_move_the_policy_file_key() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let without = reporting_config(dir.path(), "");
+        let with = reporting_config(
+            dir.path(),
+            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\n",
+        );
+        assert_eq!(without.policy_file().bytes(), with.policy_file().bytes());
     }
 
     /// A fragment confines the results of tools it declares itself, and nothing else of the
