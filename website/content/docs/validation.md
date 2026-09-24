@@ -18,8 +18,6 @@ Install the CLI on Linux or macOS:
 curl -fsSL https://openappa.com/install.sh | sh
 ```
 
-The installer places `appa` in `~/.local/bin`. Add that directory to your `PATH` if needed. No Claude Code plugin is required.
-
 ## Make policy tests a required CI check
 
 Keep the workflow, policy, and tests in the same repository:
