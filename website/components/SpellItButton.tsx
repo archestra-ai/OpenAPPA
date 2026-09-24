@@ -2,13 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { publishSong } from "@/lib/song";
-
-/* A recording, not speech synthesis: APPA is said as a word, and every
-   respelling that made a system voice land on it ("Ahpa", "Ahp-pah",
-   "Op-pa") traded one part of the sound for another. The song settles it,
-   and it sounds the same on every machine. */
-const AUDIO_SRC = "/brand/openappa-check-the-flow.mp3";
+import { playSong, stopSong, subscribeSong } from "@/lib/song";
 
 /* How long the "are you sure?" label waits for the second click before the
    button goes back to idle. Long enough to read the question, short enough
@@ -16,18 +10,16 @@ const AUDIO_SRC = "/brand/openappa-check-the-flow.mp3";
 const CONFIRM_TIMEOUT_MS = 5000;
 
 export function SpellItButton() {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [playing, setPlaying] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
+  // The song lives in lib/song and keeps playing when this page is left; a
+  // button mounted while it plays shows the stop state straight away.
+  useEffect(() => subscribeSong((audio) => setPlaying(audio !== null)), []);
+
   useEffect(() => {
-    // A clip left running survives a client-side navigation away from the
-    // page, so stop it on unmount.
-    const audio = audioRef.current;
     return () => {
-      audio?.pause();
-      publishSong(null);
       if (confirmTimer.current) clearTimeout(confirmTimer.current);
     };
   }, []);
@@ -41,12 +33,8 @@ export function SpellItButton() {
   }
 
   function toggle() {
-    const audio = audioRef.current;
-    if (!audio) return;
     if (playing) {
-      audio.pause();
-      audio.currentTime = 0;
-      setPlaying(false);
+      stopSong();
       return;
     }
     // First click only arms the button: the song is loud and long enough that
@@ -60,17 +48,7 @@ export function SpellItButton() {
       return;
     }
     clearConfirm();
-    // Rewind first: a second click after the clip ended would otherwise
-    // resume from the end and play nothing.
-    audio.currentTime = 0;
-    setPlaying(true);
-    // Nothing to recover from — a rejected play() (no codec, blocked media)
-    // just means the button goes back to idle.
-    audio
-      .play()
-      // The header mascot dances to whatever is published here.
-      .then(() => publishSong(audio))
-      .catch(() => setPlaying(false));
+    void playSong();
   }
 
   const label = playing
@@ -109,21 +87,6 @@ export function SpellItButton() {
       <span className="spell-it-say">
         {confirming ? "The song will play, are you sure?" : "How to sing “OpenAPPA”"}
       </span>
-      {/* Metadata only: a ~2.8MB song nobody clicks should not cost every
-          visitor a download on the landing page. */}
-      <audio
-        ref={audioRef}
-        src={AUDIO_SRC}
-        preload="metadata"
-        onEnded={() => {
-          publishSong(null);
-          setPlaying(false);
-        }}
-        onPause={() => {
-          publishSong(null);
-          setPlaying(false);
-        }}
-      />
     </button>
   );
 }

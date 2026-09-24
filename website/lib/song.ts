@@ -1,19 +1,58 @@
 import { SONG_BAR_INTENSITY, SONG_BEATS_MS, SONG_BEATS_PER_BAR } from "@/lib/song-beats";
 
-/* The song button owns the <audio>; the header mascot, in another tree,
-   dances to it. This is the one line between them: the button publishes the
-   playing element, the mascot subscribes. Module state rather than context
-   because the two never share a parent below the root layout. */
+/* A recording, not speech synthesis: APPA is said as a word, and every
+   respelling that made a system voice land on it ("Ahpa", "Ahp-pah",
+   "Op-pa") traded one part of the sound for another. The song settles it,
+   and it sounds the same on every machine. */
+const SONG_SRC = "/brand/openappa-check-the-flow.mp3";
+
+/* The song outlives the page it was started from: the element lives here,
+   in module state, not in the button that starts it, so a navigation away
+   from the landing page neither stops the song nor the header mascot dancing
+   to it. The button and the mascot both subscribe; nothing else needs to
+   share a parent with them. The element is created on the first play, so a
+   visitor who never clicks never downloads the clip. */
 
 type Listener = (audio: HTMLAudioElement | null) => void;
 
+let element: HTMLAudioElement | null = null;
 let playing: HTMLAudioElement | null = null;
 const listeners = new Set<Listener>();
 
-export function publishSong(audio: HTMLAudioElement | null) {
+function publish(audio: HTMLAudioElement | null) {
   if (audio === playing) return;
   playing = audio;
   for (const listener of listeners) listener(audio);
+}
+
+function audioElement(): HTMLAudioElement {
+  if (!element) {
+    element = new Audio(SONG_SRC);
+    element.preload = "none";
+    element.addEventListener("ended", () => publish(null));
+    element.addEventListener("pause", () => publish(null));
+  }
+  return element;
+}
+
+/** Starts the song from the top. Resolves false when the browser refused to play. */
+export async function playSong(): Promise<boolean> {
+  const audio = audioElement();
+  audio.currentTime = 0;
+  try {
+    await audio.play();
+  } catch {
+    // Nothing to recover from: no codec, or blocked media.
+    return false;
+  }
+  publish(audio);
+  return true;
+}
+
+export function stopSong() {
+  if (!element) return;
+  element.pause();
+  element.currentTime = 0;
 }
 
 /** Calls `listener` with the playing element now and on every change. */
