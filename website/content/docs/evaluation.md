@@ -25,9 +25,8 @@ No scored attack succeeded against guarded OpenAPPA in **5,628 evaluations**:
 720 from
 [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench),
 and 4,308 from a replay of the Kaggle competition
-[AI Agent Security – Multi-Step Tool Attacks](https://www.kaggle.com/competitions/ai-agent-security-multi-step-tool-attacks).
-The first two suites tested standard and adversarial prompts. The Kaggle replay
-tested ordinary requests over data that carries the attacks.
+[AI Agent Security](https://www.kaggle.com/competitions/ai-agent-security-multi-step-tool-attacks).
+The first two suites tested standard and adversarial prompts.
 
 In Bench-Corp, the evaluated
 [Microsoft FIDES](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/)
@@ -61,34 +60,14 @@ task completion followed by attack success rate (ASR).
 | DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
-The [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)
-uses the competition's own sandbox and scorer. The user asks for ordinary work,
-and the attack sits in the data the agent reads. In each task the agent reads
-one of the organizers' 319 support emails and mails a triage summary. 63 of
-these emails carry an attack. We ran GPT-OSS 20B and Gemma 4 26B, the small
-open models the competition used, plus GLM 5.3 Flash and GPT-6 Luna.
-
-| Model | Guarded OpenAPPA | Same subagent, unchecked | Organizers' rule guardrail | No guardrail |
-|---|---:|---:|---:|---:|
-| GPT-6 Luna | **100% / 0** | 100% / 0 | 87.1% / 19 | 86.0% / 20 |
-| GPT-OSS 20B | **100% / 0** | 100% / 0 | 82.4% / 112 | 82.3% / 109 |
-| Gemma 4 26B | **100% / 0** | 98.3% / 0 | 69.7% / 143 | 68.0% / 150 |
-| GLM 5.3 Flash | **98.3% / 0** | 98.6% / 0 | 38.8% / 189 | 49.1% / 222 |
-
-Each entry shows the share of 957 runs done cleanly, followed by the number of
-runs that sent mail carrying the attacker's link. A run is done cleanly when the
-summary arrives, the scorer finds no breach, and the mail carries no such link.
-
-Guarded OpenAPPA reads each email in a [subagent](/how-it-works#subagent-reads)
-that may return only four typed fields. That design brings the utility: the
-second column runs the same subagent without OpenAPPA and finishes about as
-many tasks. OpenAPPA turns the design's safety into a check. Unchecked,
-Gemma's subagent handed back something other than the four fields in one
-answer in five, most often the schema itself, and the main agent took it as
-data. OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
-whatever the model or harness does. The competition's leaderboard guardrails
-pass its own benign check, but they deny every send after the agent reads an
-email, so they finish no triage task.
+In the [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md), the agent reads one of 319 support emails,
+63 of them malicious, and mails a triage summary. Guarded OpenAPPA finished
+98–100% of these tasks cleanly and never relayed the attacker's link. The
+competition's guardrails finished at most 87% and relayed the link in up to 189
+of 957 runs; its leaderboard guardrails finished none. Most of this utility
+comes from reading each email in a [subagent](/how-it-works#subagent-reads);
+OpenAPPA makes what the subagent returns a
+[checked shape](/contracts#structured-child-returns).
 
 In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
 completion for all three models. In the standard tests, it led with Luna and
@@ -157,10 +136,8 @@ OpenAPPA policy engine alone.
   comparison covers all 97 `banking_knowledge` tasks, with four trials for each
   agent configuration. Matching tasks and random seeds makes the comparison
   fairer, but separate model sessions can still differ.
-- **Kaggle AI Agent Security** replays the competition's sandbox, scorer and
-  fixtures (`aicomp_sdk` 3.1.2). It covers the triage task over all 319
-  organizer emails, the 31 collected attacks in which the user only asks for
-  ordinary work, and 9 chains that target the public guardrail's five-call
-  window. Each model ran every task three times. The
-  [report](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)
-  gives the method, every outcome table and the limits.
+- **[Kaggle AI Agent Security](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)** replays the competition's sandbox
+  and scorer: triage over all 319 organizer emails, and 40 attacks in which the
+  user asks only for ordinary work. It ran GPT-OSS 20B and Gemma 4 26B, the
+  small models the competition used, plus GLM 5.3 Flash and GPT-6 Luna, three
+  times each.
