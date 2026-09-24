@@ -238,6 +238,12 @@ const CLAUDE_CONSULT_PERMITS: usize = 4;
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
 
+/// How many jev consults may run at once across a runtime. A consult is one small HTTPS
+/// request of about 0.3 s, so the gate admits two command batches' worth; it bounds the
+/// requests a burst sends TypeSafe (a hedge or retry adds at most two per consult) and the
+/// connections it opens.
+const JEV_CONSULT_PERMITS: usize = 16;
+
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
 /// fan-out would time out in the queue rather than run; a narrower one would cost a
@@ -274,7 +280,7 @@ impl ConsultGates {
             claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
             llm: Arc::new(LlmGate::new(0)),
-            jev: Arc::new(JevClients::new()),
+            jev: Arc::new(JevClients::new(JEV_CONSULT_PERMITS)),
         }
     }
 

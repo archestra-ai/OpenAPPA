@@ -7,9 +7,10 @@ serves the Annotator through its `jev` builtin; the battery ships no
 script. The battery declares no tool. A deployment routes its own tools to
 the Annotator.
 
-**Every annotated call's name and arguments are sent to the TypeSafe API.**
-The runtime redacts known secret shapes and cuts each value at 4,000
-characters first. Internal paths, hostnames, and message text still leave.
+**Every annotated call's name, description, and arguments are sent to the
+TypeSafe API.** The runtime first redacts known secret shapes and the value
+of any field named for a secret, such as `password` or `Authorization`, and
+cuts each string at 4,000 characters. Internal paths, hostnames, and message text still leave.
 Install the battery only where that flow is acceptable.
 
 ## Install

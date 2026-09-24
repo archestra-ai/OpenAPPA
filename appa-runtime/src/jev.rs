@@ -4,8 +4,9 @@
 //! annotation: `delta.audience`, `delta.trust`, `requires.audience` and `requires.trust`. It
 //! never answers an effect, a `history` entry or an attention mark.
 //!
-//! The call's name and arguments leave for the TypeSafe API. Known secret shapes are
-//! redacted and long values are cut first. An unsure label moves to its safer neighbour
+//! The call's name, description and arguments leave for the TypeSafe API. Known secret
+//! shapes and the values of fields named for a secret are redacted and long text is cut
+//! first. An unsure label moves to its safer neighbour
 //! instead of refusing the call: the narrower result audience, the lower trust rank, the
 //! wider required audience. A label the mandate does not admit, a consult that is not a
 //! complete call, and every provider failure are no answer.
@@ -168,7 +169,21 @@ impl JevBackend {
             questions: Questions::new(declaration.hint.as_deref()),
         };
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
-        let labels = self.ask(&body, key, started + self.budget, exchange).await?;
+        // One deadline covers the permit wait and the attempts, as for command consults.
+        let deadline = started + self.budget;
+        let permit = match tokio::time::timeout_at(deadline, self.clients.permits.acquire()).await {
+            Ok(permit) => permit.expect("the jev consult gate is never closed"),
+            Err(_) => {
+                tracing::warn!(
+                    name = consult.name,
+                    "the jev consult gate stayed saturated for the whole budget"
+                );
+                return Err((JevFailure::NoAnswer, NoAnswerReason::Timeout));
+            }
+        };
+        let labels = self.ask(&body, key, deadline, exchange).await;
+        drop(permit);
+        let labels = labels?;
         annotation(&labels, declaration)
             .map_err(|detail| (JevFailure::OutsideMandate, NoAnswerReason::MalformedAnswer(detail)))
     }
@@ -442,7 +457,7 @@ struct State<'a> {
     tool: &'a str,
     arguments: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
+    description: Option<String>,
 }
 
 impl<'a> State<'a> {
@@ -453,13 +468,16 @@ impl<'a> State<'a> {
         Some(State {
             tool,
             arguments: outbound(arguments),
-            description: args.get("description").and_then(serde_json::Value::as_str),
+            description: args
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(redacted),
         })
     }
 }
 
 /// The known secret shapes, in the order they are redacted, with their replacements.
-static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 7]> = std::sync::LazyLock::new(|| {
+static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 8]> = std::sync::LazyLock::new(|| {
     let pattern = |source: &str| regex::Regex::new(source).expect("the secret patterns compile");
     [
         (pattern(r"sk-[A-Za-z0-9_\-]{16,}"), "<REDACTED_KEY>"),
@@ -478,7 +496,14 @@ static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 7]> = std::sy
             pattern(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
             "<REDACTED_JWT>",
         ),
+        (pattern(r"(?is)^(bearer|basic)(\s+)\S.*$"), "${1}${2}<REDACTED_KEY>"),
     ]
+});
+
+/// A field whose name contains one of these words holds a secret, whatever its value.
+static SECRET_FIELD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)api[_-]?key|secret|token|password|authorization|cookie|credential|private[_-]?key")
+        .expect("the secret field pattern compiles")
 });
 
 /// One argument value as it leaves for the provider: secrets redacted, long text cut.
@@ -488,7 +513,10 @@ fn outbound(value: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(fields) => serde_json::Value::Object(
             fields
                 .iter()
-                .map(|(key, value)| (key.clone(), outbound(value)))
+                .map(|(key, value)| match SECRET_FIELD.is_match(key) {
+                    true => (key.clone(), serde_json::Value::String("<REDACTED>".to_string())),
+                    false => (key.clone(), outbound(value)),
+                })
                 .collect(),
         ),
         serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(outbound).collect()),
@@ -728,18 +756,18 @@ fn annotation(labels: &Labels, declaration: &AnnotationDeclaration) -> Result<se
 /// connection, over HTTP/1.1 and HTTP/2 alike.
 pub(crate) struct JevClients {
     state: Mutex<Pool>,
+    /// One permit per consult in flight, held across its hedges and retries.
+    permits: tokio::sync::Semaphore,
 }
 
 #[derive(Default)]
 struct Pool {
     url: Option<String>,
     current: Option<Arc<ClientSlot>>,
-    minted: u64,
 }
 
-/// One client and the identity the pool compares it by.
+/// One client and what the pool knows of its connection.
 pub(crate) struct ClientSlot {
-    id: u64,
     client: reqwest::Client,
     /// When a response last came back through this client.
     answered: Mutex<Option<Instant>>,
@@ -759,9 +787,10 @@ impl ClientSlot {
 }
 
 impl JevClients {
-    pub(crate) fn new() -> JevClients {
+    pub(crate) fn new(permits: usize) -> JevClients {
         JevClients {
             state: Mutex::new(Pool::default()),
+            permits: tokio::sync::Semaphore::new(permits),
         }
     }
 
@@ -780,7 +809,7 @@ impl JevClients {
         match &pool.current {
             Some(slot) => Arc::clone(slot),
             None => {
-                let slot = pool.mint(url);
+                let slot = mint(url);
                 pool.current = Some(Arc::clone(&slot));
                 slot
             }
@@ -789,7 +818,7 @@ impl JevClients {
 
     /// A client outside the pool: its first request opens a new connection.
     fn fresh(&self, url: &str) -> Arc<ClientSlot> {
-        self.pool().mint(url)
+        mint(url)
     }
 
     /// Adopt a client whose connection answered promptly, where the pool holds none and no
@@ -802,36 +831,32 @@ impl JevClients {
     }
 
     /// Never hand this client out again.
-    fn evict(&self, slot: &ClientSlot) {
+    fn evict(&self, slot: &Arc<ClientSlot>) {
         let mut pool = self.pool();
         slot.condemned.store(true, Ordering::Relaxed);
-        if pool.current.as_ref().is_some_and(|current| current.id == slot.id) {
+        if pool.current.as_ref().is_some_and(|current| Arc::ptr_eq(current, slot)) {
             pool.current = None;
         }
     }
 }
 
-impl Pool {
-    fn mint(&mut self, url: &str) -> Arc<ClientSlot> {
-        crate::tls::install_crypto_provider();
-        let builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-            .tcp_keepalive(TCP_KEEPALIVE);
-        let builder = match Endpoint::new(url.to_string(), None).host() {
-            EndpointHost::Loopback => builder.no_proxy(),
-            EndpointHost::Remote => builder,
-        };
-        self.minted += 1;
-        Arc::new(ClientSlot {
-            id: self.minted,
-            client: builder
-                .build()
-                .expect("the reqwest client builds: the crypto provider is installed above"),
-            answered: Mutex::new(None),
-            condemned: AtomicBool::new(false),
-        })
-    }
+fn mint(url: &str) -> Arc<ClientSlot> {
+    crate::tls::install_crypto_provider();
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(TCP_KEEPALIVE);
+    let builder = match Endpoint::new(url.to_string(), None).host() {
+        EndpointHost::Loopback => builder.no_proxy(),
+        EndpointHost::Remote => builder,
+    };
+    Arc::new(ClientSlot {
+        client: builder
+            .build()
+            .expect("the reqwest client builds: the crypto provider is installed above"),
+        answered: Mutex::new(None),
+        condemned: AtomicBool::new(false),
+    })
 }
 
 #[cfg(test)]
@@ -850,6 +875,7 @@ mod tests {
     use appa_engine::registry::AudienceVocabulary;
 
     const KEY: &str = "jev-test-key";
+    const TEST_PERMITS: usize = 16;
 
     /// The standard timing scaled down so a hedge fires within a test's patience.
     const FAST: JevTiming = JevTiming {
@@ -917,7 +943,13 @@ mod tests {
             url: url.to_string(),
             key: JevKey::Set(Token::new(KEY.to_string())),
         };
-        JevBackend::new(&profile, timeout, 65_536, Arc::new(JevClients::new()), timing)
+        JevBackend::new(
+            &profile,
+            timeout,
+            65_536,
+            Arc::new(JevClients::new(TEST_PERMITS)),
+            timing,
+        )
     }
 
     fn diagnostics(record: &JevRecord) -> serde_json::Value {
@@ -1275,6 +1307,9 @@ mod tests {
             ("PASSWORD:\"hunter2hunter2hunter2\"", "PASSWORD:<REDACTED>"),
             ("mytoken=abcdefghijklmnop", "mytoken=abcdefghijklmnop"),
             ("secret: short", "secret: short"),
+            ("Bearer abc", "Bearer <REDACTED_KEY>"),
+            ("basic dXNlcjpwYXNz", "basic <REDACTED_KEY>"),
+            ("use Bearer tokens", "use Bearer tokens"),
             (
                 "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
                 "jwt <REDACTED_JWT>",
@@ -1286,6 +1321,37 @@ mod tests {
             outbound(&json!({"list": [SECRET, {"deep": SECRET}], "n": 7, "flag": true, "none": null})),
             json!({"list": ["<REDACTED_KEY>", {"deep": "<REDACTED_KEY>"}], "n": 7, "flag": true, "none": null})
         );
+    }
+
+    #[test]
+    fn a_field_named_for_a_secret_is_redacted_whatever_it_holds() {
+        assert_eq!(
+            outbound(&json!({
+                "password": "hunter2",
+                "api_key": 12345,
+                "headers": {"Authorization": "Bearer abc", "X-Forward": "Basic dXNlcjpwYXNz", "Accept": "*/*"},
+                "hosts": [{"name": "db", "Client-Secret": {"v": "s"}}, {"sessionCookie": "c", "port": 5432}],
+                "user": "me",
+            })),
+            json!({
+                "password": "<REDACTED>",
+                "api_key": "<REDACTED>",
+                "headers": {"Authorization": "<REDACTED>", "X-Forward": "Basic <REDACTED_KEY>", "Accept": "*/*"},
+                "hosts": [{"name": "db", "Client-Secret": "<REDACTED>"}, {"sessionCookie": "<REDACTED>", "port": 5432}],
+                "user": "me",
+            })
+        );
+    }
+
+    #[test]
+    fn the_description_leaves_redacted_and_cut_like_an_argument() {
+        let long = "d".repeat(MAX_VALUE_CHARS + 5);
+        let args = json!({"name": "Bash", "arguments": {}, "description": format!("uses {SECRET} {long}")});
+        let state = State::of(&args).expect("a complete call");
+        assert_eq!(state.description, Some(redacted(&format!("uses {SECRET} {long}"))));
+        let description = state.description.expect("a description");
+        assert!(description.starts_with("uses <REDACTED_KEY> ddd"), "{description}");
+        assert_eq!(description.chars().take_while(|c| *c != '…').count(), MAX_VALUE_CHARS);
     }
 
     #[test]
@@ -1590,6 +1656,34 @@ mod tests {
         assert_eq!(stub.per_connection(), [2]);
     }
 
+    /// With the one permit held by a hung consult, a second consult with a shorter budget
+    /// waits for it until its own deadline and sends nothing.
+    #[tokio::test]
+    async fn a_consult_waits_for_a_permit_within_its_budget() {
+        let (url, stub) = serve(vec![Scripted::Late(Duration::from_secs(30))], vec![]).await;
+        let profile = JevProfile {
+            url,
+            key: JevKey::Set(Token::new(KEY.to_string())),
+        };
+        let clients = Arc::new(JevClients::new(1));
+        let patient = JevBackend::new(&profile, Duration::from_secs(2), 65_536, Arc::clone(&clients), FAST);
+        let hasty = JevBackend::new(&profile, Duration::from_millis(600), 65_536, clients, FAST);
+        let consult = call();
+        let late = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let started = std::time::Instant::now();
+            let consulted = hasty.consult(&consult).await;
+            (consulted, started.elapsed())
+        };
+        let ((first, _), ((second, record), waited)) = tokio::join!(patient.consult(&consult), late);
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+        assert_eq!(first, Err(NoAnswerReason::Timeout));
+        assert_eq!(second, Err(NoAnswerReason::Timeout));
+        assert_eq!(attempts(&record), json!([]));
+        assert_eq!(diagnostics(&record)["error"], "no_answer");
+        assert_eq!(stub.requests().len(), 2, "the first consult and its hedge");
+    }
+
     #[tokio::test]
     async fn prompt_consults_share_one_connection() {
         let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
@@ -1615,7 +1709,7 @@ mod tests {
             &unset,
             Duration::from_secs(2),
             65_536,
-            Arc::new(JevClients::new()),
+            Arc::new(JevClients::new(TEST_PERMITS)),
             FAST,
         );
         let (answered, record) = keyless.consult(&call()).await;
@@ -1666,7 +1760,7 @@ mod tests {
             &profile,
             Duration::from_secs(5),
             65_536,
-            Arc::new(JevClients::new()),
+            Arc::new(JevClients::new(TEST_PERMITS)),
             JevTiming::STANDARD,
         );
         let mut elapsed = Vec::new();
@@ -1710,13 +1804,12 @@ mod tests {
         sorted.sort();
         let at = |quantile: f64| sorted[((sorted.len() - 1) as f64 * quantile).round() as usize].as_millis();
         eprintln!(
-            "{CONSULTS} consults {spacing:?} apart: min {} ms, p50 {} ms, p90 {} ms, max {} ms, mean {} ms; {hedged} hedged or retried; {} clients built; {agreed} agree with the worked example",
+            "{CONSULTS} consults {spacing:?} apart: min {} ms, p50 {} ms, p90 {} ms, max {} ms, mean {} ms; {hedged} hedged or retried; {agreed} agree with the worked example",
             at(0.0),
             at(0.5),
             at(0.9),
             at(1.0),
             elapsed.iter().sum::<Duration>().as_millis() / CONSULTS as u128,
-            jev.clients.pool().minted,
         );
     }
 }
