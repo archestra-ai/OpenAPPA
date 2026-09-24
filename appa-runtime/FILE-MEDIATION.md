@@ -296,7 +296,8 @@ appa runtime --config /host/policy.toml --db /host/runtime.db \
 - The policy must not use sanitizers or rewrite routes. File tracking refuses to start when
   the registry holds any, because a rewritten call would render arguments the ledger never
   pinned.
-- In file mode, every call that reaches APPA and is not one of the six file tools is refused,
+- In file mode, APPA admits declared subagent spawns so children can use the root ledger.
+  Every other call that reaches APPA and is not one of the six file tools is refused,
   including APPA's own management tools. Run those from the `appa` command line.
 - One file operation runs at a time per root session. A root and its subagents share that reservation.
 - `appa claude-files` is a separate constrained test launcher: it removes the native tools,

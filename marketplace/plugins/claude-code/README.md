@@ -180,8 +180,9 @@ have, so give the file runtime a policy of its own:
   pinned. The starting policy declares the Claude fallback annotator's sanitizers, so
   `--file-workspace` against it stops at startup with that reason.
 
-In file mode, every call that reaches APPA and is not one of the six file tools is
-refused — including APPA's own management tools (`appa_get_runtime_state`,
+In file mode, APPA admits declared subagent spawns so children can use the root
+session's ledger. Every other call that reaches APPA and is not one of the six file
+tools is refused — including APPA's own management tools (`appa_get_runtime_state`,
 `appa_include_battery`, `appa_match_batteries`, `appa_reload_policy`,
 `appa_refresh_batteries`, `appa_update_policy`). Run those from the `appa` command
 line. The model keeps its native tools, but their calls are refused at the hook.

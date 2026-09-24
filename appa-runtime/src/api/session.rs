@@ -419,6 +419,14 @@ impl Session {
         let Some(files) = &self.inner.shared.files else {
             return self.propose_tool_call(call, call_id, spawn, None).await;
         };
+        if !super::files::owns(&call) {
+            if spawn {
+                return self.propose_tool_call(call, call_id, true, None).await;
+            }
+            return Err(super::files::refused(
+                "file tracking permits only runtime-owned file tools and declared subagent spawns",
+            ));
+        }
         let (operation, path) = super::files::operation(&call)?;
         let log = self.inner.log(&self.root)?;
         if crate::engine::policy_file_key(log.policy_file()) != files.policy_key

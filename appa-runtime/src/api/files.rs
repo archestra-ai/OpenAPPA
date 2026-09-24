@@ -438,6 +438,11 @@ delta = {}
 [[policy.tool]]
 name = "mcp/appa/appa_process_files"
 delta = {}
+[[policy.tool]]
+name = "host/claude-code/Agent"
+delta = {}
+[policy.deployment]
+context_control = true
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
@@ -535,6 +540,54 @@ max_body_bytes = 65536
             .unwrap()
             .into_decision()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_files_allow_declared_subagent_spawns_but_refuse_other_native_tools() {
+        use appa_runtime_api::HookDecision;
+        let dir = fixture();
+        let runtime = open(dir.path());
+        assert!(matches!(
+            hook(
+                &runtime,
+                serde_json::json!({
+                    "hook_event_name":"SessionStart", "session_id":"spawn-test"
+                }),
+            )
+            .await,
+            HookDecision::Context { .. }
+        ));
+
+        let spawn = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "tool_name":"Agent",
+                "tool_input":{
+                    "description":"read a managed file",
+                    "subagent_type":"general-purpose",
+                    "prompt":"Read the managed file."
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(spawn, HookDecision::DenyCall { ref offers, .. } if !offers.is_empty()),
+            "the declared spawn should reach the engine's return contract: {spawn:?}"
+        );
+
+        let native = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "tool_name":"Read", "tool_input":{"file_path":"source.txt"}
+            }),
+        )
+        .await;
+        assert!(
+            matches!(native, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("only runtime-owned file tools and declared subagent spawns")),
+            "an unrelated native tool should remain refused: {native:?}"
+        );
     }
 
     #[tokio::test]
