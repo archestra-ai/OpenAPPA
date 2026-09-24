@@ -17,6 +17,7 @@ use crate::label::{
     MembershipContext, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagName};
+use crate::params::ArgumentShape;
 use crate::value::{ToolDeclarationId, ToolName};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -54,17 +55,22 @@ pub(crate) enum PatternPart {
 }
 
 impl ToolMatcher {
-    /// Every declared clause must match: the argument is present, it is a string, and its
-    /// value matches that clause's pattern. A missing or non-string argument does not match.
+    /// Every declared clause must match: the argument is a string whose value matches that
+    /// clause's pattern, or a non-empty array of strings that each match it. A missing
+    /// argument, an empty array, or any other value does not match.
     fn matches(&self, arguments: &serde_json::Value) -> bool {
         match self {
             ToolMatcher::Bare => true,
             ToolMatcher::Arguments(ArgumentPatterns(clauses)) => {
-                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| {
-                    arguments
-                        .get(argument)
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|value| wildcard_matches(pattern, value))
+                let string_matches = |pattern: &[PatternPart], value: &serde_json::Value| {
+                    value.as_str().is_some_and(|value| wildcard_matches(pattern, value))
+                };
+                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| match arguments.get(argument) {
+                    Some(serde_json::Value::Array(values)) => {
+                        !values.is_empty() && values.iter().all(|value| string_matches(pattern, value))
+                    }
+                    Some(value) => string_matches(pattern, value),
+                    None => false,
                 };
                 // Clauses that reject on a lookup run before clauses that scan the value. A
                 // conjunction is commutative, so this moves cost and never the answer: an
@@ -386,7 +392,7 @@ impl AudienceVocabulary {
             .collect()
     }
 
-    /// The vocabulary for one call: each selector placeholder becomes the group the call's
+    /// The vocabulary for one call: each selector placeholder becomes the groups the call's
     /// arguments spell. A vocabulary without placeholders is its own instantiation; a call
     /// that fills no placeholder — never a minted one — has no vocabulary.
     pub fn instantiate(
@@ -398,7 +404,7 @@ impl AudienceVocabulary {
             ..self.clone()
         };
         for placeholder in &self.placeholders {
-            instantiated.groups.insert(placeholder.instantiate(arguments)?);
+            instantiated.groups.extend(placeholder.instantiate(arguments)?);
         }
         Ok(instantiated)
     }
@@ -1106,15 +1112,14 @@ impl Registry {
                     ToolDeclaration::Declared(tool) => &mut tool.parameters,
                     ToolDeclaration::Annotated { parameters, .. } => parameters,
                 };
-                for argument in bound_arguments {
-                    *parameters =
-                        parameters
-                            .require_string(&argument)
-                            .map_err(|fault| LoadError::AudienceBindingSchema {
-                                context: format!("tool {tool_name}"),
-                                argument,
-                                fault,
-                            })?;
+                for (argument, shape) in bound_arguments {
+                    *parameters = parameters.require_argument(&argument, shape).map_err(|fault| {
+                        LoadError::AudienceBindingSchema {
+                            context: format!("tool {tool_name}"),
+                            argument,
+                            fault,
+                        }
+                    })?;
                 }
             }
             let base_name = match contract {
@@ -1696,7 +1701,13 @@ impl Registry {
 fn audience_arguments(
     declaration: &ToolDeclaration,
     annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
-) -> Vec<String> {
+) -> BTreeSet<(String, ArgumentShape)> {
+    let selector_arguments = |placeholder: &SelectorPlaceholder| {
+        placeholder
+            .arguments()
+            .map(|argument| (argument.to_string(), ArgumentShape::StringOrStrings))
+            .collect::<Vec<_>>()
+    };
     match declaration {
         ToolDeclaration::Declared(tool) => {
             let recipients = tool
@@ -1704,21 +1715,20 @@ fn audience_arguments(
                 .audience_requirements()
                 .iter()
                 .filter_map(|requirement| match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => Some(argument.clone()),
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => {
+                        Some((argument.clone(), ArgumentShape::String))
+                    }
                     AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
                 });
             recipients
-                .chain(
-                    tool.selector_placeholders()
-                        .flat_map(|placeholder| placeholder.arguments().map(str::to_string)),
-                )
+                .chain(tool.selector_placeholders().flat_map(selector_arguments))
                 .collect()
         }
         ToolDeclaration::Annotated { annotator, .. } => annotators
             .get(annotator)
             .into_iter()
             .flat_map(|declared| declared.audiences.iter().flat_map(AudienceVocabulary::placeholders))
-            .flat_map(|placeholder| placeholder.arguments().map(str::to_string))
+            .flat_map(selector_arguments)
             .collect(),
     }
 }
@@ -2622,6 +2632,24 @@ mod tests {
         assert!(registry.placeholders_filled(post, &no_arguments).is_err());
     }
 
+    /// A mandate placeholder filled from an array admits an answer naming any of the listed
+    /// collections, and none the call did not list.
+    #[test]
+    fn a_mandate_filled_from_an_array_admits_only_the_listed_collections() {
+        let group = |id: &str| GroupRef::Source {
+            provider: "slack".to_string(),
+            selector: format!("channel/{id}"),
+        };
+        let clause =
+            |ids: &[&str]| Clause::new([], ids.iter().map(|id| group(id)), []).expect("a group clause names no reader");
+        let mandate = vocabulary(&["@slack:channel/$channel"])
+            .instantiate(&serde_json::json!({ "channel": ["C1", "C2"] }))
+            .expect("the array fills the placeholder");
+        assert!(mandate.permits_clause(&clause(&["C1", "C2"])));
+        assert!(mandate.permits_clause(&clause(&["C2"])));
+        assert!(!mandate.permits_clause(&clause(&["C1", "C3"])));
+    }
+
     #[test]
     fn an_omitted_mandate_bound_resolves_to_the_whole_policy_vocabulary() {
         let mut catalogued = tool("send");
@@ -2706,6 +2734,28 @@ mod tests {
 
         let dotted = parsed("read(a.b:x)").expect("a dotted argument name is valid");
         assert!(dotted.matches(&serde_json::json!({ "a.b": "x" })));
+    }
+
+    /// An array argument matches when it is non-empty and every element is a string the
+    /// pattern matches, so `teams:*` selects a call that sent a list of teams.
+    #[test]
+    fn an_array_argument_matches_when_every_element_does() {
+        let parsed = |name| parse_tool_selector(name).map(|(_, matcher)| matcher);
+        let teams = |value: serde_json::Value| serde_json::json!({ "teams": value });
+        let any = parsed("edit(teams:*)").expect("the selector is valid");
+        assert!(any.matches(&teams(serde_json::json!(["a"]))));
+        assert!(any.matches(&teams(serde_json::json!(["a", "b"]))));
+        assert!(
+            !any.matches(&teams(serde_json::json!([]))),
+            "an empty list names no team"
+        );
+        assert!(!any.matches(&teams(serde_json::json!(["a", 1]))));
+        assert!(!any.matches(&teams(serde_json::json!([["a"]]))));
+        assert!(!any.matches(&serde_json::json!({})));
+
+        let platform = parsed("edit(teams:platform-*)").expect("the selector is valid");
+        assert!(platform.matches(&teams(serde_json::json!(["platform-a", "platform-b"]))));
+        assert!(!platform.matches(&teams(serde_json::json!(["platform-a", "sales"]))));
     }
 
     /// The conjunction: a selector may name several arguments, and a call is selected only

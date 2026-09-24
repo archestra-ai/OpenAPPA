@@ -53,7 +53,7 @@ const TERMS = {
 
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. Every argument:pattern clause must match its top-level string argument. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback. A sanitizer rewrite selecting another contract is judged under that contract.",
+    "An ordered tool contract selector. Every argument:pattern clause must match its top-level argument: a string, or a non-empty array whose every element is a matching string. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged. Its audience may be one selector placeholder such as @slack:channel/$channel_id, resolved from the call's arguments at check time.",
   requires:
