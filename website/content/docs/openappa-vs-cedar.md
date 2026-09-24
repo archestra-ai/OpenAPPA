@@ -24,7 +24,7 @@ Cedar checks the context you supply. OpenAPPA also carries data restrictions for
 | | Cedar (open source) | Cedar through AWS services | OpenAPPA |
 |---|---|---|---|
 | Deployment | Embed the [Cedar library](https://github.com/cedar-policy/cedar) or run it behind your own service | Managed policy evaluation through [Verified Permissions](https://docs.aws.amazon.com/verifiedpermissions/latest/userguide/what-is-avp.html) or [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html) | Run alongside your agent process or deploy as a shared Kubernetes service |
-| Agent connection | Your code supplies policies and context, then enforces decisions | Call Verified Permissions and enforce its decisions, or route tool calls through AgentCore for gateway enforcement | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/writing-an-integration) |
+| Agent connection | Your code supplies policies and context, then enforces decisions | Call Verified Permissions and enforce its decisions, or route tool calls through AgentCore for gateway enforcement | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/add-to-agent) |
 
 With the Cedar library or Verified Permissions, your application decides where to ask for permission and how to handle the answer. AgentCore puts that check in the tool-call path, so calls routed through its gateway can be blocked without adding a check inside each tool. Its history-based rules use Dogwood; see [OpenAPPA vs Dogwood](/openappa-vs-dogwood).
 

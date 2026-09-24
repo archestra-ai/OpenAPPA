@@ -27,7 +27,7 @@ Both can use an agent's history to check its next action. The clearest practical
 | | Dogwood (open source) | Dogwood through AgentCore | OpenAPPA |
 |---|---|---|---|
 | Deployment | [Rust library and CLI](https://github.com/dogwood-policy/dogwood) for exploring policies | [AWS-managed service](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html) | Run alongside your agent process or deploy as a shared Kubernetes service |
-| Agent connection | Your code submits events and enforces decisions | Tool calls through AgentCore Gateway | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/writing-an-integration) |
+| Agent connection | Your code submits events and enforces decisions | Tool calls through AgentCore Gateway | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/add-to-agent) |
 
 With open-source Dogwood, you choose which events to submit and how to connect the decisions to your agent. With AgentCore, the gateway records the calls passing through it. Your application groups related calls into a [policy session](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-session-based-temporal.html), so a rule can connect an earlier approval or read to a later action.
 
