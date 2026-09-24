@@ -1011,28 +1011,17 @@ impl Runtime {
     /// one dispatch ([`LogStore::lease`]) handles that dispatch through such a view, so the
     /// engine's records land in the transaction the lease holds.
     pub fn on(&self, store: Arc<LogStore>) -> Runtime {
-        Runtime {
-            inner: Arc::new(Inner {
-                shared: Arc::clone(&self.inner.shared),
-                store,
-                recorder: None,
-                pinned: self.inner.pinned.clone(),
-            }),
-        }
+        self.view(|view| {
+            view.store = store;
+            view.recorder = None;
+        })
     }
 
     /// This view with every consult its sessions make handed to `recorder`, once the
     /// consult's outcome is known. Deployment probes and [`Runtime::on`] views of it
     /// record nothing.
     pub fn recording(&self, recorder: Arc<dyn ConsultRecorder>) -> Runtime {
-        Runtime {
-            inner: Arc::new(Inner {
-                shared: Arc::clone(&self.inner.shared),
-                store: Arc::clone(&self.inner.store),
-                recorder: Some(recorder),
-                pinned: self.inner.pinned.clone(),
-            }),
-        }
+        self.view(|view| view.recorder = Some(recorder))
     }
 
     /// This view serving `deployment` instead of the runtime's serving one: every root it
@@ -1043,6 +1032,12 @@ impl Runtime {
     /// after a reload. [`Runtime::on`] and [`Runtime::recording`] views of this one keep the
     /// pin.
     ///
+    /// A pin selects the policy and its externals, not whose trajectories a view reaches.
+    /// A host serving several tenants from one runtime gives each dispatch its tenant's
+    /// store through [`Runtime::on`], a store that reads and writes that tenant's logs
+    /// alone, and names roots uniquely across the whole runtime: the runtime's in-process
+    /// diagnostics and each root's last working directory are keyed by root id alone.
+    ///
     /// The deployment's `llm` pool is its own, bounded by its profile's `max_concurrent`.
     /// The `command` and `claude-code` permit pools are the runtime's, shared by every
     /// deployment it serves or pins.
@@ -1051,14 +1046,21 @@ impl Runtime {
     ///
     /// On a deployment another runtime prepared.
     pub fn pinned(&self, deployment: &PreparedDeployment) -> Runtime {
-        Runtime {
-            inner: Arc::new(Inner {
-                shared: Arc::clone(&self.inner.shared),
-                store: Arc::clone(&self.inner.store),
-                recorder: self.inner.recorder.clone(),
-                pinned: Some(self.own(deployment)),
-            }),
-        }
+        let pinned = self.own(deployment);
+        self.view(|view| view.pinned = Some(pinned))
+    }
+
+    /// Another view of this runtime's shared state: this view's store, recorder and pin,
+    /// with what `vary` changes.
+    fn view(&self, vary: impl FnOnce(&mut Inner)) -> Runtime {
+        let mut inner = Inner {
+            shared: Arc::clone(&self.inner.shared),
+            store: Arc::clone(&self.inner.store),
+            recorder: self.inner.recorder.clone(),
+            pinned: self.inner.pinned.clone(),
+        };
+        vary(&mut inner);
+        Runtime { inner: Arc::new(inner) }
     }
 
     /// Run the serving load checks without opening a store, making network requests,
