@@ -3,8 +3,8 @@
 Runtime-owned file tools for a workspace the runtime owns: a session-local version ledger, Label
 propagation through file operations, and opt-in isolated processing of declared inputs.
 
-**Status: draft.** The file runtime is off unless an operator starts it with
-`--file-workspace` with an initial file Label. Read [What is verified](#what-is-verified) and
+**Status: draft.** The file runtime is off unless an operator starts it with an initial file
+Label. Read [What is verified](#what-is-verified) and
 [What is not covered](#what-is-not-covered) before relying on it.
 
 Related documents:
@@ -156,7 +156,7 @@ sequenceDiagram
    the pinned state.
 
 An operation that does not complete cleanly — a changed failure, a missing outcome, a digest
-that no longer matches the pin, an interrupted transfer — keeps the durable reservation and
+that no longer matches the pin, an interrupted transfer — keeps the live reservation and
 refuses every later file call in that workspace until an operator reconciles it. The
 runtime never guesses.
 
@@ -283,12 +283,14 @@ launcher-failure contract and the acceptance probes are in the
 
 ```sh
 appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --file-workspace /host/work \
   --initial-file-trust suspicious --initial-file-audience public \
   --file-process-backend /host/backend
 ```
 
-- The initial file flags classify each root session's initial snapshot. They do not inspect content.
+- Each root session binds to the `cwd` in its first file call. Its subagents share that
+  workspace and ledger. Another root session can bind to a different workspace.
+- The initial file flags classify each root session's initial snapshot. They do not inspect
+  content. The policy separately defines which file-tool flows are permitted.
 - A snapshot refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
 - Keep the policy, runtime database, and backend outside the workspace.
 - The policy must name all six file tools. A tool the policy does not name is refused, not
@@ -305,6 +307,51 @@ appa runtime --config /host/policy.toml --db /host/runtime.db \
   bound to a host-assigned trajectory. It is an experimental test path, not required by the
   plugin install.
 
+`file-policy.toml` is an ordinary APPA policy, not a second initial classification. Its
+file-tool contracts define the flows that the Engine permits after the snapshot has Labels.
+For example, this minimal policy permits all six mediated operations without adding a tool
+delta or requirement:
+
+```toml
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/appa/appa_read_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_write_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_edit_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_copy_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_move_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa/appa_process_files"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Agent"
+delta = {}
+
+[policy.deployment]
+context_control = true
+```
+
+Add `requires` or a non-empty `delta` when the deployment needs tighter file flows. The
+`--initial-file-trust` and `--initial-file-audience` flags only Label bytes that exist when a
+root takes its snapshot; they do not replace these contracts.
+
 ## What is verified
 
 Unit and integration tests cover the mediated contract, not the unmediated paths around it:
@@ -312,7 +359,7 @@ Unit and integration tests cover the mediated contract, not the unmediated paths
 | Area | Covered by |
 | --- | --- |
 | Hook binding, duplicate results, and root-session isolation | `managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results` |
-| Subagent sharing and root-session isolation | `file_ledgers_are_shared_by_subagents_and_isolated_between_root_sessions` |
+| Subagent sharing and root-workspace isolation | `file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces` |
 | Label combination for Read/Write/Edit, restart and reopen | `managed_files_read_write_edit_and_restart_use_engine_labels`, `managed_files_bound_caller_retains_failure_taint_after_reopen` |
 | Check-before-match, admitted failure text | `managed_files_owned_execution_checks_before_matching_and_admits_errors` |
 | Copy/Move Labels without payload admission | `managed_files_copy_move_bypass_payload_admission_but_preserve_labels` |

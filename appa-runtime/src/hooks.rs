@@ -395,7 +395,8 @@ impl Dispatcher<'_> {
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
                            appa_edit_file(file_path, old_string, new_string), and \
                            appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-                           Paths resolve within the host-configured workspace. The harness's own file tools and \
+                           Paths resolve within this root session's working directory. The root and its subagents \
+                           share that workspace. The harness's own file tools and \
                            its tool discovery are not used in this mode. Observations the harness makes before a \
                            call are not tracked."
                         .to_owned()

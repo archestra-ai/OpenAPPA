@@ -46,10 +46,11 @@
 //!
 //! # Enabling the draft
 //!
-//! Start `appa runtime` with `--file-workspace /absolute/workspace` and supply
+//! Start `appa runtime` with
 //! `--initial-file-trust suspicious --initial-file-audience public` (or the operator's
-//! actual classification). Each root session classifies and hashes the files that exist when
-//! it first uses a file tool. Its subagents share that ledger; other root sessions do not.
+//! actual classification). Each root session binds to its first file call's working directory,
+//! then classifies and hashes the files that exist there. Its subagents share that workspace
+//! and ledger; another root session can bind to a different workspace.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
@@ -90,28 +91,60 @@ pub(super) struct FileTracking {
     pub(super) stores: std::sync::Mutex<HashMap<String, std::sync::Arc<FileStore>>>,
     pub(super) initial: appa_engine::label::Label,
     pub policy_key: String,
-    pub workspace: PathBuf,
+    pub protected_paths: Vec<PathBuf>,
     pub process_backend: Option<PathBuf>,
 }
 
 impl FileTracking {
-    /// One ledger per root trajectory. Child trajectories use their parent's root here, so
-    /// every subagent in a session shares file versions and reservations without exposing
-    /// them to another session served by the same runtime.
-    pub(super) fn store(
+    /// Bind one root trajectory to the harness working directory reported on its first file
+    /// call. Child trajectories use their parent's root, so they resolve to this same store.
+    /// A later call cannot move the root to another workspace.
+    pub(super) fn bind(
         &self,
         root: &super::TrajectoryId,
+        workspace: &str,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+        let workspace = std::fs::canonicalize(workspace)?;
         let mut stores = self
             .stores
             .lock()
             .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
         if let Some(store) = stores.get(&root.0) {
+            if store.workspace() != workspace {
+                return Err(appa_eventlog::files::FileStoreError::Configuration(
+                    "a session cannot change its tracked workspace".into(),
+                ));
+            }
             return Ok(std::sync::Arc::clone(store));
         }
-        let store = std::sync::Arc::new(FileStore::new(&self.workspace, &self.initial)?);
+        if self.protected_paths.iter().any(|path| path.starts_with(&workspace))
+            || self
+                .process_backend
+                .as_ref()
+                .is_some_and(|path| path.starts_with(&workspace))
+        {
+            return Err(appa_eventlog::files::FileStoreError::Configuration(
+                "runtime state, configuration, and process backends must be outside the tracked workspace".into(),
+            ));
+        }
+        let store = std::sync::Arc::new(FileStore::new(&workspace, &self.initial)?);
         stores.insert(root.0.clone(), std::sync::Arc::clone(&store));
         Ok(store)
+    }
+
+    pub(super) fn store(
+        &self,
+        root: &super::TrajectoryId,
+    ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+        let stores = self
+            .stores
+            .lock()
+            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
+        stores.get(&root.0).cloned().ok_or_else(|| {
+            appa_eventlog::files::FileStoreError::Configuration(
+                "the session has not supplied a working directory for file tracking".into(),
+            )
+        })
     }
 }
 
@@ -208,14 +241,14 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
 #[cfg(feature = "daemon")]
 pub(super) fn perform(
     files: &FileTracking,
+    workspace: &Path,
     call: &ProposedCall,
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
-    let workspace = &files.workspace;
     let (operation, _) = operation(call).map_err(|error| error.to_string())?;
     let path = workspace.join(&pin.path);
     match operation {
-        FileOperation::Process => process::perform(files, call, pin),
+        FileOperation::Process => process::perform(files, workspace, call, pin),
         FileOperation::Read => std::fs::read_to_string(path).map_err(|error| error.to_string()),
         FileOperation::Replace => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
@@ -282,7 +315,6 @@ fn replace(path: &Path, content: &str) -> std::io::Result<()> {
 pub(crate) struct Deployment {
     pub config: PathBuf,
     pub db: PathBuf,
-    pub workspace: PathBuf,
     pub initial: appa_engine::label::Label,
     pub process_backend: Option<PathBuf>,
 }
@@ -306,7 +338,6 @@ impl super::Runtime {
         Some(Deployment {
             config: std::fs::canonicalize(config).ok()?,
             db: std::fs::canonicalize(self.inner.shared.state_path.as_ref()?).ok()?,
-            workspace: files.workspace.clone(),
             initial: files.initial.clone(),
             process_backend: files.process_backend.clone(),
         })
@@ -456,7 +487,7 @@ max_body_bytes = 65536
             appa_adapter_claude_code::adapter(),
         )
         .unwrap()
-        .with_file_tracking(dir.join("work"), Label::new(Trust::new(0), Audience::public()))
+        .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
         .unwrap()
     }
 
@@ -468,25 +499,50 @@ max_body_bytes = 65536
     }
 
     #[test]
-    fn file_ledgers_are_shared_by_subagents_and_isolated_between_root_sessions() {
+    fn file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces() {
         let dir = fixture();
+        let other_workspace = dir.path().join("other-work");
+        std::fs::create_dir(&other_workspace).unwrap();
+        std::fs::write(other_workspace.join("other.txt"), "other information").unwrap();
         let runtime = open(dir.path());
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let root = TrajectoryId("cc:session".into());
         let same_root_for_child = TrajectoryId("cc:session".into());
         let other_root = TrajectoryId("cc:other-session".into());
 
+        files.bind(&root, dir.path().join("work").to_str().unwrap()).unwrap();
+        files.bind(&other_root, other_workspace.to_str().unwrap()).unwrap();
         let parent = files.store(&root).unwrap();
         let child = files.store(&same_root_for_child).unwrap();
         let other = files.store(&other_root).unwrap();
         assert!(std::sync::Arc::ptr_eq(&parent, &child));
         assert!(!std::sync::Arc::ptr_eq(&parent, &other));
+        assert_eq!(
+            parent.workspace(),
+            std::fs::canonicalize(dir.path().join("work")).unwrap()
+        );
+        assert_eq!(other.workspace(), std::fs::canonicalize(&other_workspace).unwrap());
+        assert!(parent.current("other.txt").unwrap().is_none());
+        assert!(other.current("source.txt").unwrap().is_none());
+        assert!(files.bind(&root, other_workspace.to_str().unwrap()).is_err());
+        assert!(
+            files
+                .bind(&TrajectoryId("cc:unsafe".into()), dir.path().to_str().unwrap())
+                .is_err(),
+            "the runtime database and policy cannot be inside a root's workspace"
+        );
 
         child
             .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
             .unwrap();
         assert_eq!(parent.reservation().unwrap().unwrap().actor, "cc:session:child");
         assert!(other.reservation().unwrap().is_none());
+    }
+
+    fn bind(runtime: &Runtime, root: &TrajectoryId, dir: &Path) {
+        runtime
+            .bind_file_workspace(root, dir.join("work").to_str().unwrap())
+            .unwrap();
     }
 
     fn call(tool: &str, path: &str) -> ProposedCall {
@@ -562,6 +618,7 @@ max_body_bytes = 65536
             &runtime,
             serde_json::json!({
                 "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                    "cwd":dir.path().join("work"),
                 "tool_name":"Agent",
                 "tool_input":{
                     "description":"read a managed file",
@@ -580,6 +637,7 @@ max_body_bytes = 65536
             &runtime,
             serde_json::json!({
                 "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                    "cwd":dir.path().join("work"),
                 "tool_name":"Read", "tool_input":{"file_path":"source.txt"}
             }),
         )
@@ -594,6 +652,8 @@ max_body_bytes = 65536
     async fn managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results() {
         use appa_runtime_api::HookDecision;
         let dir = fixture();
+        let other_workspace = dir.path().join("other-work");
+        std::fs::create_dir(&other_workspace).unwrap();
         let runtime = open(dir.path());
         let start = hook(
             &runtime,
@@ -615,6 +675,7 @@ max_body_bytes = 65536
                 &runtime,
                 serde_json::json!({
                     "hook_event_name":"PreToolUse", "session_id":"plugin-test",
+                    "cwd":dir.path().join("work"),
                     "tool_name":"mcp__appa__appa_write_file", "tool_input":arguments
                 })
             )
@@ -635,6 +696,7 @@ max_body_bytes = 65536
             &runtime,
             serde_json::json!({
                 "hook_event_name":"PreToolUse", "session_id":"other-session",
+                "cwd":other_workspace,
                 "tool_name":"mcp__appa__appa_write_file",
                 "tool_input":{"file_path":"other.txt", "content":"other"}
             }),
@@ -703,6 +765,7 @@ max_body_bytes = 65536
             root: TrajectoryId("host-bound-stdio".into()),
             child: None,
         };
+        bind(&runtime, &actor.root, dir.path());
         runtime.create_session(actor.root.clone()).unwrap();
         let arguments = serde_json::json!({
             "file_path": "source.txt", "old_string": "absent", "new_string": "replacement"
@@ -725,6 +788,7 @@ max_body_bytes = 65536
         );
         drop(runtime);
         let runtime = open(dir.path());
+        bind(&runtime, &actor.root, dir.path());
         assert!(matches!(
             runtime.create_session(actor.root.clone()),
             Err(EventError::TrajectoryExists)
@@ -764,6 +828,7 @@ max_body_bytes = 65536
         let runtime = open(dir.path());
         for (index, old) in ["absent substring", "outside"].into_iter().enumerate() {
             let id = TrajectoryId(format!("host-probe-{index}"));
+            bind(&runtime, &id, dir.path());
             let session = runtime.create_session(id.clone()).unwrap();
             let proposal = ProposedCall {
                 tool: format!("{PREFIX}appa_edit_file"),
@@ -845,6 +910,7 @@ else:
         let runtime = open(dir.path()).with_file_process_backend(backend).unwrap();
         for command in ["success", "absolute", "fail"] {
             let id = TrajectoryId(format!("process-{command}"));
+            bind(&runtime, &id, dir.path());
             runtime.create_session(id.clone()).unwrap();
             let input = if command == "absolute" {
                 dir.path().join("work/source.txt").to_str().unwrap().to_string()
@@ -951,6 +1017,7 @@ else:
             root: TrajectoryId("file-transfer-test".into()),
             child: None,
         };
+        bind(&runtime, &actor.root, dir.path());
         runtime.create_session(actor.root.clone()).unwrap();
         for (tool, source, destination) in [
             ("appa_copy_file", "source.txt", "copied.txt"),
@@ -1005,6 +1072,7 @@ else:
         assert_eq!(label(&runtime, &actor.root, "ack-only.txt").trust, Trust::new(1));
         drop(runtime);
         let runtime = open(dir.path());
+        bind(&runtime, &actor.root, dir.path());
         assert!(
             matches!(runtime.execute_bound_file(&actor, "appa_read_file", serde_json::json!({
             "file_path":"moved.txt"
@@ -1047,6 +1115,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
         runtime.create_session(id.clone()).unwrap();
         allow(&runtime, &id, call("Write", "clean.txt")).await;
         std::fs::write(dir.path().join("work/clean.txt"), "independent text").unwrap();
@@ -1062,6 +1131,7 @@ else:
         drop(runtime);
 
         let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
         allow(&runtime, &id, call("Edit", "clean.txt")).await;
         std::fs::write(
             dir.path().join("work/clean.txt"),
@@ -1093,6 +1163,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
         runtime.create_session(id.clone()).unwrap();
         allow(&runtime, &id, call("Edit", "source.txt")).await;
         runtime
@@ -1129,6 +1200,7 @@ else:
         );
         drop(runtime);
         let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
         assert!(
             runtime
                 .session(&id, &id)
@@ -1154,6 +1226,10 @@ else:
             cwd: None,
         };
         let files = runtime.inner.shared.files.as_ref().unwrap();
+        let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
+        files
+            .bind(&TrajectoryId("direct-perform".into()), workspace.to_str().unwrap())
+            .unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
             operation: FileOperation::Replace,
@@ -1163,7 +1239,10 @@ else:
             source: None,
             inputs: vec![],
         };
-        assert_eq!(perform(files, &call, &pin).unwrap(), "file written".to_string());
+        assert_eq!(
+            perform(files, &workspace, &call, &pin).unwrap(),
+            "file written".to_string()
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("work/source.txt")).unwrap(),
             "pinned content"
@@ -1176,6 +1255,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
         let session = runtime.create_session(id.clone()).unwrap();
         // The policy released this call and the harness never ran it — a declined prompt, an
         // interrupted turn. The turn end gives the reservation back instead of wedging the
@@ -1212,6 +1292,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
         let session = runtime.create_session(id.clone()).unwrap();
         for proposal in [
             call("Bash", "source.txt"),

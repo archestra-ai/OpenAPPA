@@ -1302,14 +1302,15 @@ impl Runtime {
     /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
     /// Runtime-owned tools require native alternatives and implicit reads disabled.
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
-    /// Configure this before sharing the runtime. Each root session snapshots all existing
-    /// files with the operator's source Label. Child trajectories share their root's snapshot.
+    /// Configure this before sharing the runtime. Each root session binds its first file call's
+    /// harness working directory and snapshots all existing files with the operator's source
+    /// Label. Child trajectories share their root's workspace and snapshot.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
         mut self,
-        workspace: PathBuf,
         initial: appa_engine::label::Label,
+        config_path: PathBuf,
     ) -> Result<Self, OpenError> {
         let inner = Arc::get_mut(&mut self.inner)
             .and_then(|inner| Arc::get_mut(&mut inner.shared))
@@ -1319,15 +1320,10 @@ impl Runtime {
                 "file tracking requires the Claude Code adapter".into(),
             ));
         }
-        let workspace = std::fs::canonicalize(workspace).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if let Some(path) = &inner.state_path
-            && std::fs::canonicalize(path)
-                .map_err(|error| OpenError::Storage(error.to_string()))?
-                .starts_with(&workspace)
-        {
-            return Err(OpenError::Storage(
-                "the runtime database must be outside the tracked workspace".into(),
-            ));
+        let mut protected_paths =
+            vec![std::fs::canonicalize(config_path).map_err(|error| OpenError::Storage(error.to_string()))?];
+        if let Some(path) = &inner.state_path {
+            protected_paths.push(std::fs::canonicalize(path).map_err(|error| OpenError::Storage(error.to_string()))?);
         }
         let deployment = Arc::clone(
             inner
@@ -1356,7 +1352,7 @@ impl Runtime {
             stores: std::sync::Mutex::new(std::collections::HashMap::new()),
             initial,
             policy_key,
-            workspace,
+            protected_paths,
             process_backend: None,
         });
         tracing::warn!(
@@ -1376,18 +1372,26 @@ impl Runtime {
             .as_mut()
             .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
         let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if backend.starts_with(&files.workspace)
-            || ["agentsh", "agentsh-unixwrap", "run.py"].iter().any(|name| {
-                std::fs::canonicalize(backend.join(name))
-                    .map_or(true, |path| !path.is_file() || path.starts_with(&files.workspace))
-            })
+        if ["agentsh", "agentsh-unixwrap", "run.py"]
+            .iter()
+            .any(|name| std::fs::canonicalize(backend.join(name)).map_or(true, |path| !path.is_file()))
         {
-            return Err(OpenError::Storage(
-                "processing requires a complete backend outside the workspace".into(),
-            ));
+            return Err(OpenError::Storage("processing requires a complete backend".into()));
         }
         files.process_backend = Some(backend);
         Ok(self)
+    }
+
+    #[cfg(feature = "daemon")]
+    pub(crate) fn bind_file_workspace(&self, root: &TrajectoryId, workspace: &str) -> Result<(), EventError> {
+        self.inner
+            .shared
+            .files
+            .as_ref()
+            .ok_or_else(|| files::refused("file tools are not enabled"))?
+            .bind(root, workspace)
+            .map(|_| ())
+            .map_err(files::refused)
     }
 
     /// Opens the modules, the engine, and the store. The `[policy]`

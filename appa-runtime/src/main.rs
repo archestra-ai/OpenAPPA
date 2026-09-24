@@ -55,16 +55,12 @@ struct Args {
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
 
-    /// Workspace served by runtime-owned file tools. Use the constrained claude-files launcher.
-    #[arg(long, env = "APPA_FILE_WORKSPACE", requires = "initial_file_trust")]
-    file_workspace: Option<PathBuf>,
-
     /// Host-installed agentsh backend directory for isolated declared-input processing.
-    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND", requires = "file_workspace")]
+    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND", requires = "initial_file_trust")]
     file_process_backend: Option<PathBuf>,
 
     /// Classify the files present in each session's first snapshot with this policy trust name.
-    #[arg(long, requires_all = ["file_workspace", "initial_file_audience"])]
+    #[arg(long, requires = "initial_file_audience")]
     initial_file_trust: Option<String>,
 
     /// Initial audience for every existing file in a session snapshot.
@@ -540,18 +536,8 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = if let Some(workspace) = args.file_workspace {
+    let runtime = if let Some(trust) = args.initial_file_trust {
         let configure = || -> Result<Runtime, String> {
-            let workspace = fs::canonicalize(workspace).map_err(|error| error.to_string())?;
-            if fs::canonicalize(&config_path)
-                .map_err(|error| error.to_string())?
-                .starts_with(&workspace)
-            {
-                return Err("file tracking requires configuration outside the workspace".into());
-            }
-            let trust = args
-                .initial_file_trust
-                .expect("clap requires initial trust with a file workspace");
             use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
             let audience = match args.initial_file_audience.as_deref() {
                 Some("public") => DeclaredAudience::Public,
@@ -567,7 +553,7 @@ async fn serve(args: Args) -> ExitCode {
                 .file_initial_label(&trust, audience)
                 .map_err(|error| error.to_string())?;
             let runtime = runtime
-                .with_file_tracking(workspace, initial)
+                .with_file_tracking(initial, config_path.clone())
                 .map_err(|error| error.to_string())?;
             match args.file_process_backend {
                 Some(backend) => runtime
@@ -721,27 +707,25 @@ mod tests {
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
         let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
         assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
-        assert_eq!(default.file_workspace, None, "file tracking is opt-in");
+        assert_eq!(default.initial_file_trust, None, "file tracking is opt-in");
         assert_eq!(
             default.guide_listen, None,
             "Claude Code exposes no guide management listener"
         );
         assert!(
-            Args::try_parse_from(["appa runtime", "--file-workspace", "."]).is_err(),
-            "a workspace without an initial Label cannot activate file tracking"
+            Args::try_parse_from(["appa runtime", "--initial-file-trust", "suspicious"]).is_err(),
+            "an incomplete initial Label cannot activate file tracking"
         );
         assert!(
             Args::try_parse_from([
                 "appa runtime",
-                "--file-workspace",
-                ".",
                 "--initial-file-trust",
                 "suspicious",
                 "--initial-file-audience",
                 "public",
             ])
             .is_ok(),
-            "a workspace and complete initial Label activate file tracking"
+            "a complete initial Label activates per-session file tracking"
         );
 
         let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])

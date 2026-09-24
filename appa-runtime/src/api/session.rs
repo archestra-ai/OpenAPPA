@@ -427,6 +427,14 @@ impl Session {
                 "file tracking permits only runtime-owned file tools and declared subagent spawns",
             ));
         }
+        match call.cwd.as_deref() {
+            Some(cwd) => {
+                files.bind(&self.root, cwd).map_err(super::files::refused)?;
+            }
+            None => {
+                files.store(&self.root).map_err(super::files::refused)?;
+            }
+        }
         let (operation, path) = super::files::operation(&call)?;
         let log = self.inner.log(&self.root)?;
         if crate::engine::policy_file_key(log.policy_file()) != files.policy_key
@@ -660,9 +668,12 @@ impl Session {
         .ok_or_else(|| super::files::refused("the released call holds no file reservation"))?;
         let result = {
             let inner = self.inner.clone();
-            let (call, pin) = (call.clone(), pin.clone());
+            let (root, call, pin) = (self.root.clone(), call.clone(), pin.clone());
             tokio::task::spawn_blocking(move || match inner.shared.files.as_ref() {
-                Some(files) => super::files::perform(files, &call, &pin),
+                Some(files) => files
+                    .store(&root)
+                    .map_err(|error| error.to_string())
+                    .and_then(|store| super::files::perform(files, store.workspace(), &call, &pin)),
                 None => Err("file tools are not enabled".to_string()),
             })
             .await

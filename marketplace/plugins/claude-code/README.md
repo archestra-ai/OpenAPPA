@@ -59,7 +59,7 @@ carries the component map, the call sequence, the ledger model and the boundary 
 - Check proposals that reach `PreToolUse` before releasing the hooked call.
   Admit reported observations and execute remedies against the host-bound
   trajectory. Coverage depends on Claude invoking the corresponding hooks.
-- Keep policy evaluation, Label combination, and durable state in the shared
+- Keep policy evaluation, Label combination, and trajectory state in the shared
   runtime. The plugin translates harness events; it does not define a separate
   file-Label algebra or persistence format.
 - Runtime-owned file tools can check before content-dependent validation and
@@ -105,7 +105,7 @@ plugin installation disables native tools or implicit reads.
    two. Test descendant processes, forbidden accesses, network attempts, and
    restart behavior before claiming coverage of shell `cp` and `mv`.
 
-Copy/Move precedes isolation because its Label and persistence contracts are
+Copy/Move precedes isolation because its Label and publication contracts are
 needed by either execution backend. Actual shell-command coverage still
 depends on enforcing that commands use the isolated backend; recognizing a
 command name does not establish mediation.
@@ -121,7 +121,7 @@ content; its prior version remains in history but does not taint the new bytes.
 The destination Label combines the source, receiving trajectory, and tool delta.
 Policy requirements check that combined Label. Constant acknowledgements do not
 carry the payload into the trajectory; reading the destination does. The ledger
-pins both paths under one durable reservation and records the source version as
+pins both paths under one live reservation and records the source version as
 a content dependency. Move also records source-path absence. An incomplete or
 inconsistent outcome keeps the reservation and stops further file calls.
 
@@ -130,8 +130,8 @@ acknowledgement-only Write without narrowing, then Read with narrowing and a
 tainted summary. A second exercise verified overwrite and refusal of same-path
 copy, missing-source move, and a move into `CLAUDE.md`. Unit tests cover raw bytes,
 distinct Labels on identical bytes, source-path reuse, destination requirements,
-and incomplete transfers across ledger reopen. These tests establish the mediated
-tool contract, not native-tool or arbitrary subprocess confinement.
+incomplete transfers, and fresh-ledger behavior after restart. These tests establish the
+mediated tool contract, not native-tool or arbitrary subprocess confinement.
 
 ### Isolated declared-input processing
 
@@ -159,18 +159,21 @@ The file runtime is off unless the operator starts it that way:
 
 ```sh
 appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --file-workspace /host/work \
   --initial-file-trust suspicious --initial-file-audience public \
   --file-process-backend /host/backend
 ```
 
-The initial file flags classify the workspace snapshot for each root session. The runtime
+Each root session binds to the working directory in its first file call. Its subagents share
+that workspace and in-memory ledger. Another root session can use another workspace on the
+same runtime. The initial file flags classify each root session's workspace snapshot. The runtime
 hashes every file and refuses a workspace that holds a symlink or hard link anywhere in it.
 Give it a dedicated directory rather than a working checkout. Keep the policy, runtime
 database, and backend outside that directory.
 
 The policy this runtime runs needs two things the shipped starting policy does not
-have, so give the file runtime a policy of its own:
+have, so give the file runtime a policy of its own. The
+[architecture note](../../../appa-runtime/FILE-MEDIATION.md#operating-it) includes a minimal
+complete example.
 
 - It must name all six file tools (`mcp/appa/appa_read_file`, `appa_write_file`,
   `appa_edit_file`, `appa_copy_file`, `appa_move_file`, `appa_process_files`); a tool
@@ -178,7 +181,7 @@ have, so give the file runtime a policy of its own:
 - It must not use sanitizers or rewrite routes. File tracking refuses to start when the
   registry holds any, because a rewritten call would render arguments the ledger never
   pinned. The starting policy declares the Claude fallback annotator's sanitizers, so
-  `--file-workspace` against it stops at startup with that reason.
+  enabling file tracking against it stops at startup with that reason.
 
 In file mode, APPA admits declared subagent spawns so children can use the root
 session's ledger. Every other call that reaches APPA and is not one of the six file

@@ -148,7 +148,9 @@ statusline reads.
 ## File mediation (draft)
 
 A second, opt-in mode makes the runtime own the file tools themselves. Start it with
-`--file-workspace`, `--initial-file-trust`, and `--initial-file-audience`. The runtime serves `appa_read_file`,
+`--initial-file-trust` and `--initial-file-audience`. Each root session binds its first file
+call to that session's working directory, so one runtime can serve different workspaces.
+The runtime serves `appa_read_file`,
 `appa_write_file`, `appa_edit_file`, `appa_copy_file`, `appa_move_file` and, with
 `--file-process-backend`, `appa_process_files`. The runtime pins each file version, checks
 the call with the pinned Label, performs the operation and records the version it published,

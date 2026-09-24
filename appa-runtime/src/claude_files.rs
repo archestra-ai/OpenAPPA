@@ -44,7 +44,6 @@ impl TryFrom<DeploymentArgs> for Deployment {
         Ok(Deployment {
             config: args.config,
             db: args.db,
-            workspace: args.workspace,
             initial: serde_json::from_str(&args.initial).map_err(|error| format!("invalid initial Label: {error}"))?,
             process_backend: args.process_backend,
         })
@@ -62,12 +61,14 @@ pub struct ServeArgs {
 pub fn serve(args: ServeArgs) -> ExitCode {
     crate::tls::install_crypto_provider();
     let result = (|| {
+        let workspace = args.deployment.workspace.clone();
         let deployment = Deployment::try_from(args.deployment)?;
         let config = crate::config::Config::load(&deployment.config).map_err(|error| error.to_string())?;
+        let config_path = deployment.config.clone();
         let runtime =
             crate::api::Runtime::open_served(config, deployment.db, None, appa_adapter_claude_code::adapter())
                 .map_err(|error| error.to_string())?
-                .with_file_tracking(deployment.workspace, deployment.initial)
+                .with_file_tracking(deployment.initial, config_path)
                 .map_err(|error| error.to_string())?;
         let runtime = match deployment.process_backend {
             Some(backend) => runtime
@@ -79,6 +80,9 @@ pub fn serve(args: ServeArgs) -> ExitCode {
             root: appa_runtime_api::TrajectoryId(format!("cc:{}", args.trajectory)),
             child: None,
         };
+        runtime
+            .bind_file_workspace(&actor.root, workspace.to_str().ok_or("workspace path must be UTF-8")?)
+            .map_err(|error| error.to_string())?;
         match runtime.create_session(actor.root.clone()) {
             Ok(_) | Err(crate::api::EventError::TrajectoryExists) => {}
             Err(error) => return Err(error.to_string()),
@@ -127,13 +131,19 @@ fn endpoint(input: &str) -> Result<url::Url, String> {
     Ok(url)
 }
 
-fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> Result<Command, String> {
+fn command(
+    binary: &Path,
+    deployment: &Deployment,
+    workspace: &Path,
+    cwd: &Path,
+    args: &Args,
+) -> Result<Command, String> {
     let trajectory = uuid::Uuid::new_v4().to_string();
     let mut server_args = vec!["file-mcp".to_string(), "--trajectory".into(), trajectory.clone()];
     for (flag, path) in [
-        ("--config", &deployment.config),
-        ("--db", &deployment.db),
-        ("--workspace", &deployment.workspace),
+        ("--config", deployment.config.as_path()),
+        ("--db", deployment.db.as_path()),
+        ("--workspace", workspace),
     ] {
         server_args.push(flag.into());
         server_args.push(path.to_str().ok_or("deployment paths must be UTF-8")?.to_string());
@@ -197,11 +207,14 @@ fn launch(args: Args) -> Result<std::process::ExitStatus, String> {
             .await
             .map_err(|error| error.to_string())
     })?;
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| error.to_string())?;
     let private = tempfile::tempdir().map_err(|error| error.to_string())?;
     let cwd = private.path().join("session");
     std::fs::create_dir(&cwd).map_err(|error| error.to_string())?;
     let binary = std::env::current_exe().map_err(|error| error.to_string())?;
-    let mut command = command(&binary, &deployment, &cwd, &args)?;
+    let mut command = command(&binary, &deployment, &workspace, &cwd, &args)?;
     command.status().map_err(|error| error.to_string())
 }
 
@@ -219,13 +232,13 @@ mod tests {
         let deployment = Deployment {
             config: "/host/policy.toml".into(),
             db: "/host/runtime.db".into(),
-            workspace: "/work".into(),
             initial: appa_engine::label::Label::top(),
             process_backend: None,
         };
         let command = command(
             Path::new("/host/appa"),
             &deployment,
+            Path::new("/work"),
             Path::new("/private/session"),
             &launch,
         )
