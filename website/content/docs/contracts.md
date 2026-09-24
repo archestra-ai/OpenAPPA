@@ -7,6 +7,8 @@ description: TOML configuration for tool contracts, restrictions, annotations, a
 
 An OpenAPPA policy defines restrictions on tool results and requirements for tool calls. It also defines the approvals and data transformations available when a call is blocked.
 
+> **Let the [`appa-guide` skill](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/appa-guide) write it.** We suggest using it for the initial policy and for every later change: it inspects your installed tools, proposes contracts in plain English, and applies them after you approve. See [Claude Code](/claude-code#1-teach-openappa-about-your-tools) or [kagent](/kagent#2-initialize-policy-with-appa-guide) for how to run it.
+
 This page specifies the configuration format. For the concepts behind these rules, see [How it works](/how-it-works#the-core-concepts).
 
 ## Policy file
