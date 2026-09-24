@@ -1068,7 +1068,13 @@ fn render_listing(output: &mut impl Write, kind: &str, result: &serde_json::Valu
 
 pub fn bundle(args: Bundle) -> ExitCode {
     let result = (|| {
-        let installation = Installation::open(&args.target.path())?;
+        let path = args.target.path();
+        // Opening creates the deployment's directories; a config with nothing
+        // installed is refused before that.
+        if matches!(Installation::inspect(&path), Ok(None)) {
+            return Err(InstallError::Invalid("no installed selection to export".into()));
+        }
+        let installation = Installation::open(&path)?;
         let digest = installation.export_bundle(&args.output)?;
         let revision = installation
             .selection()?

@@ -263,6 +263,17 @@ fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host()
     assert!(!root.path().join("config/.appa").exists());
 }
 
+#[test]
+fn bundling_without_a_deployment_is_refused_before_creating_state() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = root.path().join("bundle.tar.gz");
+    let output = run(root.path(), &["bundle", "--output", bundle.to_str().unwrap(), "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["code"], "invalid_input");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
 fn deployment(root: &Path) -> std::path::PathBuf {
     stage(root, None, &["github"])
 }
