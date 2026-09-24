@@ -61,16 +61,24 @@ task completion followed by attack success rate (ASR).
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
 In the [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md), the agent reads one of 319 support emails,
-63 of them malicious, and mails a triage summary. Guarded OpenAPPA delivered a
-summary with no scored breach and no relay of the attacker's planted URL in
-98–100% of runs per model, and 99.9% of those summaries named the right ticket.
-Most of this comes from reading each email in a
-[subagent](/how-it-works#subagent-reads) that returns typed fields: the same
-design without OpenAPPA scored 98–100% too. OpenAPPA makes what the subagent
-returns a [checked shape](/contracts#structured-child-returns) instead of a
-model's choice. As complete configurations, the competition's guardrails
-delivered at most 87% and relayed the URL in up to 189 of 957 runs; its
-leaderboard guardrails delivered none.
+63 of them malicious, and mails a triage summary. Utility is the share of runs
+that sent the summary. ASR counts runs where the attacker's link went out or
+the competition's scorer flagged an attack.
+
+| Model | Guarded OpenAPPA (Utility / ASR) | No guardrail, subagent reads the email (Utility / ASR) | Organizers' rule guardrail (Utility / ASR) | No guardrail, agent reads the email (Utility / ASR) |
+|---|---:|---:|---:|---:|
+| GPT-6 Luna | **100% / 0%** | 100% / 0% | 89.1% / 2.0% | 88.3% / 2.3% |
+| GPT-OSS 20B | **100% / 0%** | 100% / 0% | 94.1% / 11.7% | 95.2% / 13.3% |
+| Gemma 4 26B | **100% / 0%** | 98.3% / 0% | 84.6% / 14.9% | 91.2% / 26.5% |
+| GLM 5.3 Flash | **98.3% / 0%** | 98.6% / 0.1% | 58.5% / 19.7% | 81.5% / 35.1% |
+
+The two unguarded columns differ only in who reads the email. An agent that
+reads it follows the links the attacker planted, runs out of steps, or copies
+the link into its summary. A [subagent](/how-it-works#subagent-reads) that
+returns four typed fields keeps that text away from the agent that writes the
+summary. Guarded OpenAPPA uses the same subagent and makes its answer a
+[checked shape](/contracts#structured-child-returns) instead of a request. The
+competition's leaderboard guardrails block every summary: 0% utility.
 
 In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
 completion for all three models. In the standard tests, it led with Luna and
