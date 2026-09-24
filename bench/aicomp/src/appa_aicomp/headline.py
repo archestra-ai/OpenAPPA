@@ -110,7 +110,7 @@ def main() -> None:
         "triage done cleanly": lambda cell: clean(triage[cell]),
         "triage breaches": lambda cell: breaches(triage[cell]),
         "triage completed": lambda cell: completed(triage[cell]),
-        "any sent mail relaying a planted link": lambda cell: relayed(triage[cell]),
+        "runs whose sent mail relays a planted link / runs that sent mail": lambda cell: relayed(triage[cell]),
         "naive-user collected attacks: breaches": lambda cell: breaches(collected[cell]),
         "washout chains: breaches": lambda cell: breaches(washout[cell]),
         "runs left out after a harness or API error": lambda cell: str(errored[cell]),

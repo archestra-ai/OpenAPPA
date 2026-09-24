@@ -76,7 +76,7 @@ open models the competition used, plus GLM 5.3 Flash and GPT-6 Luna.
 | GLM 5.3 Flash | **98.3% / 0** | 98.6% / 0 | 38.8% / 189 | 49.1% / 222 |
 
 Each entry shows the share of 957 runs done cleanly, followed by the number of
-sent mails that carried the attacker's link. A run is done cleanly when the
+runs that sent mail carrying the attacker's link. A run is done cleanly when the
 summary arrives, the scorer finds no breach, and the mail carries no such link.
 
 Guarded OpenAPPA reads each email in a [subagent](/how-it-works#subagent-reads)
@@ -84,7 +84,8 @@ that may return only four typed fields. That design brings the utility: the
 second column runs the same subagent without OpenAPPA and finishes about as
 many tasks. OpenAPPA turns the design's safety into a check. Unchecked,
 Gemma's subagent handed back something other than the four fields in one
-answer in five, and the main agent took it as data. OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
+answer in five, most often the schema itself, and the main agent took it as
+data. OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
 whatever the model or harness does. The competition's leaderboard guardrails
 pass its own benign check, but they deny every send after the agent reads an
 email, so they finish no triage task.
