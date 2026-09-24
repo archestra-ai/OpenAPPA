@@ -2645,13 +2645,22 @@ impl Engine {
     }
 }
 
-/// Each freshly opened staged offer beside the plan it binds: `open_offers` opens one offer per
-/// plan, in the stage's order.
+/// Each freshly opened staged offer beside the stage plan its id binds.
 fn staged_plans(
     offers: Vec<(crate::value::OfferId, plan::PlanId)>,
     stage: Vec<plan::ExecutableRemedyPlan>,
 ) -> Vec<(crate::value::OfferId, plan::ExecutableRemedyPlan)> {
-    offers.into_iter().map(|(offer, _)| offer).zip(stage).collect()
+    offers
+        .into_iter()
+        .map(|(offer, id)| {
+            let plan = stage
+                .iter()
+                .find(|plan| plan.id == id)
+                .expect("a staged offer binds one of its stage's plans")
+                .clone();
+            (offer, plan)
+        })
+        .collect()
 }
 
 /// Each standing staged offer beside the plan its record carries.
