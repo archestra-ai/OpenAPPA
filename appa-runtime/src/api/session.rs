@@ -4572,6 +4572,82 @@ confined_results = ["leak"]
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
 
+    #[tokio::test]
+    async fn a_withhold_remedy_commits_effects_without_admitting_the_result() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "unused"})).await;
+        let runtime =
+            Runtime::open(emitting_leak_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+        let ToolCallDecision::Deny { offers, .. } = session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the narrowing block is delivered")
+        else {
+            panic!("the narrowing call must block before execution");
+        };
+        let quoted = offers
+            .iter()
+            .map(|offer| OfferId(offer.id.clone()))
+            .find(|offer| {
+                matches!(
+                    runtime.offer_kind(&root(), offer),
+                    Some(crate::api::OfferKind::Withhold)
+                )
+            })
+            .expect("the confined result offers withholding");
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session
+                .on_remedy(offer, RemedyArguments::default(), None, None)
+                .await
+                .expect("the withhold offer executes"),
+            RemedyDecision::Authorized { .. }
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the approved call releases"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let decision = session
+            .on_tool_result(
+                leak(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("raw with pii".to_string()),
+                },
+            )
+            .await
+            .expect("the successful result closes");
+        let ToolResultDecision::Replace { placeholder, .. } = decision else {
+            panic!("the raw result must be replaced");
+        };
+        assert_eq!(placeholder, "[appa] the result is withheld");
+
+        let facts = runtime.log_facts(&root());
+        assert!(
+            facts
+                .iter()
+                .any(|fact| matches!(fact, appa_engine::fact::Fact::OutputWithheld { .. }))
+        );
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            appa_engine::fact::Fact::DispatchClosed {
+                outcome: appa_engine::fact::CloseOutcome::Success { effects },
+                ..
+            } if effects.contains(&appa_engine::fact::EffectKind::new("leak"))
+        )));
+        assert!(
+            facts
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::ValueAdmitted { .. })),
+            "withholding admits no value",
+        );
+    }
+
     /// A tool whose result narrows on two dimensions with a sanitizer
     /// that clears only one: the derivation is admitted and staged, and
     /// the residual narrowing is what the model is told about.

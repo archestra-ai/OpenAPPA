@@ -1005,7 +1005,9 @@ See [The consult request](#the-consult-request) for the full request format.
 
 The authorities, sanitizers, and integration settings in the policy determine which remedy plans OpenAPPA can offer. These plans give the agent ways to continue when a call is blocked or a result would add restrictions.
 
-For a blocked call, a plan can request approval or change the proposed arguments. For a restricted result, a plan can clean it before the agent reads it or let the agent accept its restrictions.
+For a blocked call, a plan can request approval or change the proposed arguments. For a restricted result, a plan can clean it or let the agent accept its restrictions. If the tool declares effects, a plan can instead withhold its result.
+
+A withhold plan runs the tool and delivers no result Value to the agent. This includes output that reports a failure. A successful call still records its declared effects. The result does not change the trajectory Label.
 
 ### Subagent Returns
 
@@ -1196,7 +1198,7 @@ name = "get_ticket_from_crm"
 delta = { audience = ["internal"] }
 ```
 
-`confined_results` lists tools whose results the integration can withhold from the agent.
+`confined_results` lists tools whose results the integration can withhold from the agent. A restricted result from a listed tool that declares effects offers a withhold plan. The agent selects this plan before the tool runs.
 
 `context_control = true` declares that the integration can keep a child agent's data hidden from the parent and withhold the child's answer until OpenAPPA allows it. This lets OpenAPPA check or clean the answer before the parent reads it. The integration must implement this behavior; the setting alone does not provide it.
 

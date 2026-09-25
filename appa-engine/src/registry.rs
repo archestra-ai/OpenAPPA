@@ -882,7 +882,13 @@ fn worst_case_plan_alternatives(
                 .count()
         }
     };
-    multiply(applicable + 1);
+    // Acceptance is always one settlement. A confined side-effecting result adds withholding
+    // beside every applicable output sanitizer. An Annotator may declare effects per call.
+    let may_emit = match declaration {
+        ToolDeclaration::Annotated { .. } => true,
+        ToolDeclaration::Declared(tool) => !tool.emits.is_empty(),
+    };
+    multiply(applicable + 1 + usize::from(confined && may_emit));
     // Under context control any call may be a marked spawn, whose every plan ends in one of the
     // return declarations: the bare floor, or the floor behind an untagged output sanitizer.
     if context_control {
@@ -3267,16 +3273,17 @@ mod tests {
         cfg.tools = vec![annotated("lookup", "classifier")];
         cfg.sanitizers = (0..16).map(output_sanitizer).collect();
         // Without context control no return declaration multiplies the menu:
-        // 1 × (16 sanitizers + 1 bare release) + the declaration itself as a redispatch = 18.
+        // 1 × (16 sanitizers + 1 bare release + 1 withhold) + the declaration itself as a
+        // redispatch = 19.
         let mut uncontrolled = crate::profile::covering_declaration(&cfg);
         uncontrolled.context_control = false;
         let uncontrolled =
             crate::profile::DeploymentProfile::declare(uncontrolled).expect("the declaration normalizes");
         assert!(matches!(
-            Registry::build(cfg.clone(), PlannerCap::new(17).expect("nonzero"), uncontrolled.clone()),
-            Err(LoadError::TooManyPlanAlternatives { count: 18, max: 17, ref tool }) if tool == "lookup"
+            Registry::build(cfg.clone(), PlannerCap::new(18).expect("nonzero"), uncontrolled.clone()),
+            Err(LoadError::TooManyPlanAlternatives { count: 19, max: 18, ref tool }) if tool == "lookup"
         ));
-        assert!(Registry::build(cfg, PlannerCap::new(18).expect("nonzero"), uncontrolled).is_ok());
+        assert!(Registry::build(cfg, PlannerCap::new(19).expect("nonzero"), uncontrolled).is_ok());
     }
 
     /// An Annotated declaration's requirements exist only per call, so the lint takes the worst
@@ -3305,7 +3312,7 @@ mod tests {
         assert!(Registry::build_covered_with_cap(wide(3), PlannerCap::new(64).expect("nonzero")).is_ok());
         assert!(matches!(
             Registry::build_covered_with_cap(wide(4), PlannerCap::new(64).expect("nonzero")),
-            Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, ref tool }) if tool == "wire"
+            Err(LoadError::TooManyPlanAlternatives { count: 129, max: 64, ref tool }) if tool == "wire"
         ));
     }
 

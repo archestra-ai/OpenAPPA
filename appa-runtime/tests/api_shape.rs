@@ -218,6 +218,7 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
             AuditEvent::SanitizerBound { sanitizer } | AuditEvent::Sanitized { sanitizer } => {
                 let _: String = sanitizer;
             }
+            AuditEvent::OutputWithheld => {}
             AuditEvent::ChildReturn { sanitizer, label } => {
                 let _: (Option<String>, AuditLabel) = (sanitizer, label);
             }

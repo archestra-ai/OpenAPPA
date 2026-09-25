@@ -37,7 +37,7 @@ const TERMS = {
   remedy:
     "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
   remedies:
-    "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
+    "Actionable paths returned on a policy refusal explaining how to unblock execution safely, such as approval, sanitization, withholding a tool result, or narrowing acceptance.",
 
   /* Tool identity */
   "canonical tool id":
@@ -182,7 +182,7 @@ const TERMS = {
   remedy_plans:
     "Returned on a refusal: exact valid paths forward to unblock execution.",
   confined_results:
-    "Tools whose results the integration can keep hidden until OpenAPPA allows delivery. A tool must be listed here for its results to use an output sanitizer. Tools that run inside the model provider's service cannot be listed.",
+    "Tools whose results the integration can keep hidden. A restricted result can pass through an output sanitizer. If the tool declares effects, the agent can instead select withholding before the tool runs. Tools that run inside the model provider's service cannot be listed.",
   trajectory:
     "One agent's work and security state. A root and its spawned subagents are separate trajectories recorded in one family log.",
   "trajectory family":

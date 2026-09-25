@@ -23,15 +23,16 @@
 //!
 //! **Alternatives.** A clearable block offers **every sound alternative**: each unique grouped
 //! authority assignment (per-gap choice among competent authorities) crossed with each way of
-//! settling the narrowing — acceptance, or an applicable output sanitizer with the residual it
-//! cannot shed. Enumeration is made total by the registry's load-time bound ([`crate::registry`]'s
+//! settling the narrowing — acceptance, withholding the result, or an applicable output sanitizer
+//! with the residual it cannot shed. Enumeration is made total by the registry's load-time bound ([`crate::registry`]'s
 //! `PlannerCap`), which spans both factors — no runtime truncation. A separate
 //! assignment-set property checks the enumeration set-equal against an independent reference
 //! enumerator, and the redispatch list is checked against an independent direct-set reference.
 //!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
 //! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
-//! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing),
+//! (narrowing), `Withhold` (execution without admitting result output), `Sanitize` (an
+//! output sanitizer's relabel standing in for the raw crossing),
 //! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing tools, in
 //! name order — the agent picks, and each redispatch is separately checked for real.
 //! The empty-proof is complete over exactly this subset.
@@ -86,7 +87,8 @@ impl PlanId {
 
 /// One engine-side act in an executable plan. All are atomic: `Authorize` records a ruling
 /// that admits the dispatch despite a gap; `Accept` records the agent's acceptance of the
-/// narrowing; `Sanitize` binds an output sanitizer to the dispatch; `Return` declares the
+/// narrowing; `Withhold` binds no-result delivery to the dispatch; `Sanitize` binds an output
+/// sanitizer to the dispatch; `Return` declares the
 /// child's return policy on a marked spawn — the floor is the parent's parameter at execution,
 /// the sanitizer (none, `attest-schema` over a schema the parent also supplies, or a registered
 /// output sanitizer) is the plan's. None edits a trajectory label — `Sanitize` changes only
@@ -95,9 +97,18 @@ impl PlanId {
 pub enum RemedyStep {
     Authorize(AuthorityName),
     Accept(Narrowing),
+    Withhold,
     Sanitize(SanitizerName),
     Derive(SanitizerName),
     Return(Option<SanitizerName>),
+}
+
+/// The result treatment a selected call remedy binds to its eventual dispatch. `None` on an
+/// approval means the raw result crosses normally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputRemedy {
+    Withhold,
+    Sanitize(SanitizerName),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,14 +125,34 @@ impl ExecutableRemedyPlan {
     pub fn narrowing(&self) -> Option<&Narrowing> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Accept(narrowing) => Some(narrowing),
-            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => None,
+            RemedyStep::Authorize(_)
+            | RemedyStep::Withhold
+            | RemedyStep::Sanitize(_)
+            | RemedyStep::Derive(_)
+            | RemedyStep::Return(_) => None,
+        })
+    }
+
+    pub fn withholds_output(&self) -> bool {
+        self.steps.iter().any(|step| matches!(step, RemedyStep::Withhold))
+    }
+
+    pub fn output_remedy(&self) -> Option<OutputRemedy> {
+        self.steps.iter().find_map(|step| match step {
+            RemedyStep::Withhold => Some(OutputRemedy::Withhold),
+            RemedyStep::Sanitize(sanitizer) => Some(OutputRemedy::Sanitize(sanitizer.clone())),
+            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => None,
         })
     }
 
     pub fn sanitizer(&self) -> Option<&SanitizerName> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Sanitize(sanitizer) => Some(sanitizer),
-            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => None,
+            RemedyStep::Authorize(_)
+            | RemedyStep::Accept(_)
+            | RemedyStep::Withhold
+            | RemedyStep::Derive(_)
+            | RemedyStep::Return(_) => None,
         })
     }
 
@@ -131,7 +162,11 @@ impl ExecutableRemedyPlan {
     pub fn return_step(&self) -> Option<Option<&SanitizerName>> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Return(sanitizer) => Some(sanitizer.as_ref()),
-            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) => None,
+            RemedyStep::Authorize(_)
+            | RemedyStep::Accept(_)
+            | RemedyStep::Withhold
+            | RemedyStep::Sanitize(_)
+            | RemedyStep::Derive(_) => None,
         })
     }
 
@@ -395,6 +430,7 @@ pub(crate) fn enumerate_plans(
                 for declares in &returns {
                     let mut steps: Vec<RemedyStep> = match settlement {
                         NarrowingSettlement::Accept(narrowing) => vec![RemedyStep::Accept(narrowing.clone())],
+                        NarrowingSettlement::Withhold => vec![RemedyStep::Withhold],
                         NarrowingSettlement::Nothing | NarrowingSettlement::Sanitize(_) => Vec::new(),
                     };
                     steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
@@ -730,22 +766,24 @@ fn enumerate_assignments(
     }
 }
 
-/// One way a block's narrowing settles: the agent accepts it, or a bound output
-/// sanitizer withholds the raw result and the confined stage settles whatever residual its relabel
-/// cannot shed. Never both — a sanitizer route accepts no guessed residual — and a block with no
+/// One way a block's narrowing settles: the agent accepts it, withholds the result, or binds an
+/// output sanitizer. A sanitizer withholds the raw result, and the confined stage settles any
+/// residual its relabel cannot shed. These choices are mutually exclusive. A block with no
 /// narrowing settles nothing. The settlement carries *what* is settled; [`enumerate_plans`]
 /// composes it into the canonical step order.
 pub(crate) enum NarrowingSettlement {
     Nothing,
     Accept(Narrowing),
+    Withhold,
     Sanitize(SanitizerName),
 }
 
-/// The ways this block's narrowing can be settled: acceptance where the fork's floor
-/// permits it, then one settlement per applicable output sanitizer, in registry name order. A
-/// block with no narrowing yields one empty settlement, so the caller's cross product still
-/// produces the plain authority plans. A narrowing below the floor keeps every other plan and
-/// loses only the acceptance: the child cannot take what its parent will not receive.
+/// The ways this block's narrowing can be settled: acceptance where the fork's floor permits it,
+/// withholding when the integration confines the result, then one settlement per applicable
+/// output sanitizer in registry name order. A block with no narrowing yields one empty settlement,
+/// so the caller's cross product still produces the plain authority plans. A narrowing below the
+/// floor keeps every other plan and loses only the acceptance: the child cannot take what its
+/// parent will not receive.
 pub(crate) fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
@@ -764,6 +802,9 @@ pub(crate) fn narrowing_remedies(
     }
     if !registry.profile().confines_result(&contract.name) {
         return settlements;
+    }
+    if !contract.emits.is_empty() {
+        settlements.push(NarrowingSettlement::Withhold);
     }
     let output = contract.output_label();
     for sanitizer in applicable_output_sanitizers(registry, contract, &output, context, needs) {
@@ -4214,7 +4255,10 @@ mod tests {
                 multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
             }
             let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
-            bound = bound.saturating_mul(1 + output_sanitizers as u128);
+            let withhold = u128::from(
+                registry.profile().confines_result(&contract.name) && !contract.emits.is_empty(),
+            );
+            bound = bound.saturating_mul(1 + withhold + output_sanitizers as u128);
             let priors: BTreeSet<&EffectKind> = contract
                 .requires
                 .history
@@ -4417,6 +4461,9 @@ mod tests {
                     .expect("a finite strict partial order has a minimal element");
                 used[next] = true;
                 expected.push(enumerated[next].clone());
+            }
+            if raw.narrowing.is_some() && !contract.emits.is_empty() {
+                expected = expected.into_iter().flat_map(|assignment| [assignment.clone(), assignment]).collect();
             }
 
             let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
