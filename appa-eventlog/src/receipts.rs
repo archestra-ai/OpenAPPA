@@ -6,10 +6,7 @@
 //! the same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
 //! through their own migrations.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-
-use super::{LogStore, Store, immediate, lock};
 
 /// Scope binding for a durable receipt: conversation session or authenticated caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -50,12 +47,6 @@ pub struct OfferOwnerKey {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ReceiptStorageError(pub String);
-
-impl From<rusqlite::Error> for ReceiptStorageError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self(error.to_string())
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
@@ -149,16 +140,11 @@ impl StoredOperationInput {
         }
     }
 
-    pub(crate) fn decode(value: Value) -> Result<Self, ReceiptStorageError> {
+    pub(crate) fn decode(value: Value) -> Result<Self, String> {
         match serde_json::from_value::<Self>(value) {
             Ok(stored) if stored.version == 1 => Ok(stored),
-            Ok(stored) => Err(ReceiptStorageError(format!(
-                "operation receipt has unsupported version {}",
-                stored.version
-            ))),
-            Err(error) => Err(ReceiptStorageError(format!(
-                "operation receipt input is not a v1 envelope: {error}"
-            ))),
+            Ok(stored) => Err(format!("operation receipt has unsupported version {}", stored.version)),
+            Err(error) => Err(format!("operation receipt input is not a v1 envelope: {error}")),
         }
     }
 }
@@ -178,16 +164,16 @@ pub(crate) struct StoredOperation {
 }
 
 impl StoredOperation {
+    /// Whether `requested` may act on this receipt: the same organization, session and binding,
+    /// and for a caller-bound receipt the same caller.
     fn owned_by(&self, requested: &ReceiptScope) -> bool {
-        scope_matches(
-            &ReceiptScope {
-                organization_id: self.organization_id.clone(),
-                caller_id: self.caller_id.clone(),
-                session_id: self.session_id.clone(),
-                binding: self.input.binding,
-            },
-            requested,
-        )
+        self.organization_id == requested.organization_id
+            && self.session_id == requested.session_id
+            && self.input.binding == requested.binding
+            && match self.input.binding {
+                ReceiptBinding::Session => true,
+                ReceiptBinding::Caller => self.caller_id == requested.caller_id,
+            }
     }
 }
 
@@ -221,19 +207,6 @@ pub(crate) fn parse_binding(value: &str) -> Result<ReceiptBinding, String> {
         "session" => Ok(ReceiptBinding::Session),
         "caller" => Ok(ReceiptBinding::Caller),
         other => Err(format!("offer owner has an invalid binding {other}")),
-    }
-}
-
-fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> bool {
-    if saved.organization_id != requested.organization_id
-        || saved.session_id != requested.session_id
-        || saved.binding != requested.binding
-    {
-        return false;
-    }
-    match saved.binding {
-        ReceiptBinding::Session => true,
-        ReceiptBinding::Caller => saved.caller_id == requested.caller_id,
     }
 }
 
@@ -357,333 +330,10 @@ impl From<ReceiptStorageError> for ReceiptError {
     }
 }
 
-impl From<rusqlite::Error> for ReceiptError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
-}
-
-impl LogStore {
-    /// Stores an offer owner record. Repeated writes with identical data are idempotent.
-    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                sqlite_store_offer_owner(connection, &record)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.store_offer_owner(record),
-        }
-    }
-
-    /// Reads an offer owner record by key.
-    pub fn offer_owner(&self, key: OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
-        match &self.store {
-            Store::Sqlite(connection) => sqlite_read_offer_owner(&lock(connection), &key),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.offer_owner(key).map_err(Into::into),
-        }
-    }
-
-    /// Deletes stored offer owner records for a session scope.
-    pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, ReceiptStorageError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                Ok(connection.execute(
-                    "DELETE FROM offer_owners WHERE organization_id=?1 AND caller_id IS ?2 AND session_id=?3",
-                    params![scope.organization_id, scope.caller_id, scope.session_id],
-                )? as u64)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.expire_offer_owners(scope).map_err(Into::into),
-        }
-    }
-
-    /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
-    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                sqlite_claim_operation(connection, &request)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.claim_operation(request),
-        }
-    }
-
-    /// Completes a claimed operation receipt with its final decision.
-    pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                sqlite_complete_operation(connection, &key, &decision)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.complete_operation(key, decision),
-        }
-    }
-
-    /// Claims a durable processed-result receipt before result processing.
-    pub fn claim_processed_result(
-        &self,
-        request: ProcessedResultRequest,
-    ) -> Result<ProcessedResultClaim, ReceiptError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                sqlite_claim_processed_result(connection, &request)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.claim_processed_result(request),
-        }
-    }
-
-    /// Completes a processed-result receipt with its approved output and decision.
-    pub fn complete_processed_result(
-        &self,
-        key: ProcessedResultKey,
-        approved_output: String,
-        decision: Value,
-    ) -> Result<(), ReceiptError> {
-        match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
-                sqlite_complete_processed_result(connection, &key, &approved_output, &decision)
-            }),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision),
-        }
-    }
-
-    /// Checks whether pending receipts exist for a root trajectory.
-    pub fn has_pending_receipts(&self, root: String) -> Result<bool, ReceiptStorageError> {
-        match &self.store {
-            Store::Sqlite(connection) => {
-                let found: Option<i64> = lock(connection)
-                    .query_row(
-                        "SELECT 1 FROM operations WHERE root=?1 AND status='pending'
-                 UNION ALL
-                 SELECT 1 FROM processed_results WHERE root=?1 AND status='pending'
-                 LIMIT 1",
-                        params![root],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok(found.is_some())
-            }
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
-        }
-    }
-}
-
-fn sqlite_store_offer_owner(connection: &Connection, record: &OfferOwnerRecord) -> Result<(), ReceiptError> {
-    let inserted = connection.execute(
-        "INSERT INTO offer_owners (organization_id, caller_id, session_id, binding, offer_id, root, parent_id, arguments, tool, spelling)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-         ON CONFLICT (organization_id, offer_id) DO NOTHING",
-        params![
-            record.scope.organization_id,
-            record.scope.caller_id,
-            record.scope.session_id,
-            binding_name(record.scope.binding),
-            record.offer_id,
-            record.root,
-            record.parent_id,
-            record.arguments,
-            record.tool,
-            record.spelling,
-        ],
-    )?;
-    if inserted == 1 {
-        return Ok(());
-    }
-    let existing = sqlite_read_offer_owner(
-        connection,
-        &OfferOwnerKey {
-            organization_id: record.scope.organization_id.clone(),
-            offer_id: record.offer_id.clone(),
-        },
-    )?;
-    resolve_offer_owner(existing, record)
-}
-
-fn sqlite_read_offer_owner(
-    connection: &Connection,
-    key: &OfferOwnerKey,
-) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
-    let row = connection
-        .query_row(
-            "SELECT caller_id, session_id, binding, root, parent_id, arguments, tool, spelling
-             FROM offer_owners WHERE organization_id=?1 AND offer_id=?2",
-            params![key.organization_id, key.offer_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((caller_id, session_id, binding, root, parent_id, arguments, tool, spelling)) = row else {
-        return Ok(None);
-    };
-    Ok(Some(OfferOwnerRecord {
-        scope: ReceiptScope {
-            organization_id: key.organization_id.clone(),
-            caller_id,
-            session_id,
-            binding: parse_binding(&binding).map_err(ReceiptStorageError)?,
-        },
-        offer_id: key.offer_id.clone(),
-        root,
-        parent_id,
-        arguments,
-        tool,
-        spelling,
-    }))
-}
-
-fn sqlite_read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
-    connection
-        .query_row(
-            "SELECT organization_id, caller_id, session_id, root, input, status, decision
-             FROM operations WHERE session_id=?1 AND operation_id=?2",
-            params![key.scope.session_id, key.operation_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            },
-        )
-        .optional()?
-        .map(
-            |(organization_id, caller_id, session_id, root, input, status, decision)| {
-                Ok(StoredOperation {
-                    organization_id,
-                    caller_id,
-                    session_id,
-                    root,
-                    input: StoredOperationInput::decode(json(&input)?)?,
-                    status,
-                    decision: decision.as_deref().map(json),
-                })
-            },
-        )
-        .transpose()
-}
-
-fn sqlite_claim_operation(connection: &Connection, request: &OperationRequest) -> Result<OperationClaim, ReceiptError> {
-    let claim = resolve_operation_claim(sqlite_read_operation(connection, &request.key)?, request)?;
-    if claim == OperationClaim::Claimed {
-        let stored = serde_json::to_string(&StoredOperationInput::from_request(request))
-            .map_err(|error| ReceiptError::storage(error.to_string()))?;
-        connection.execute(
-            "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
-             VALUES (?1,?2,?3,?4,?5,?6,'pending')",
-            params![
-                request.key.scope.organization_id,
-                request.key.scope.caller_id,
-                request.key.scope.session_id,
-                request.key.operation_id,
-                request.root,
-                stored,
-            ],
-        )?;
-    }
-    Ok(claim)
-}
-
-fn sqlite_complete_operation(
-    connection: &Connection,
-    key: &OperationKey,
-    decision: &Value,
-) -> Result<(), ReceiptError> {
-    let existing = sqlite_read_operation(connection, key)?;
-    if let Completion::Write = resolve_operation_completion(existing, key, decision)? {
-        let encoded = serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
-        connection.execute(
-            "UPDATE operations SET status='complete', decision=?3 WHERE session_id=?1 AND operation_id=?2",
-            params![key.scope.session_id, key.operation_id, encoded],
-        )?;
-    }
-    Ok(())
-}
-
-fn sqlite_read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Option<StoredResult>, ReceiptError> {
-    Ok(connection
-        .query_row(
-            "SELECT organization_id, session_id, root, status, approved_output, decision
-             FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![key.session_id, key.tool_call_id],
-            |row| {
-                Ok(StoredResult {
-                    organization_id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    root: row.get(2)?,
-                    status: row.get(3)?,
-                    approved_output: row.get(4)?,
-                    decision: row.get::<_, Option<String>>(5)?.as_deref().map(json),
-                })
-            },
-        )
-        .optional()?)
-}
-
-fn sqlite_claim_processed_result(
-    connection: &Connection,
-    request: &ProcessedResultRequest,
-) -> Result<ProcessedResultClaim, ReceiptError> {
-    let claim = resolve_result_claim(sqlite_read_result(connection, &request.key)?, request)?;
-    if claim == ProcessedResultClaim::Claimed {
-        connection.execute(
-            "INSERT INTO processed_results (organization_id, caller_id, session_id, tool_call_id, root, status)
-             VALUES (?1,?2,?3,?4,?5,'pending')",
-            params![
-                request.key.organization_id,
-                request.key.caller_id,
-                request.key.session_id,
-                request.key.tool_call_id,
-                request.root,
-            ],
-        )?;
-    }
-    Ok(claim)
-}
-
-fn sqlite_complete_processed_result(
-    connection: &Connection,
-    key: &ProcessedResultKey,
-    approved_output: &str,
-    decision: &Value,
-) -> Result<(), ReceiptError> {
-    let existing = sqlite_read_result(connection, key)?;
-    if let Completion::Write = resolve_result_completion(existing, key, approved_output, decision)? {
-        let encoded = serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
-        connection.execute(
-            "UPDATE processed_results SET status='complete', approved_output=?3, decision=?4
-             WHERE session_id=?1 AND tool_call_id=?2",
-            params![key.session_id, key.tool_call_id, approved_output, encoded],
-        )?;
-    }
-    Ok(())
-}
-
-fn json(raw: &str) -> StoredJson {
-    serde_json::from_str(raw).map_err(|error| ReceiptStorageError(error.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Backend;
+    use crate::{Backend, LogStore};
 
     /// Each test runs on both SQLite-backed stores: the file and the in-memory one.
     fn stores() -> Vec<(LogStore, Option<tempfile::TempDir>)> {

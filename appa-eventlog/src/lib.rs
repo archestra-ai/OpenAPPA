@@ -56,27 +56,30 @@
 //! re-validation on read is the gate.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::SystemTime;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+#[cfg(feature = "fault-injection")]
+use rusqlite::params;
 
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
+mod encoding;
 pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod receipts;
+mod sqlite;
+
+use encoding::encode;
+use sqlite::Sqlite;
 
 pub use receipts::{
     OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
     ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
 };
-
-const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -105,7 +108,7 @@ pub struct LogStore {
 
 /// Where this store's log is kept. [`Backend::Memory`] is a SQLite connection to `:memory:`.
 enum Store {
-    Sqlite(Mutex<Connection>),
+    Sqlite(Sqlite),
     #[cfg(feature = "postgres")]
     Postgres(postgres::PostgresStore),
 }
@@ -118,7 +121,7 @@ struct FaultPoints {
     failing_reads: std::sync::atomic::AtomicU64,
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
-    contending_record: Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
+    contending_record: std::sync::Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
 /// The records of one read, and the position they were read at.
@@ -221,31 +224,6 @@ pub struct CallBinding<'a> {
     pub trajectory: &'a TrajectoryId,
     pub call_id: &'a str,
     pub dispatch: &'a DispatchId,
-}
-
-/// One stored batch. Both streams share a position, so an engine decision and the host
-/// observation it belongs with are durable together or not at all.
-///
-/// The encoding is the shape: a batch carrying no host observation is the bare JSON array of
-/// its facts, and one carrying an observation is an object with both fields. Nothing sniffs
-/// between unrelated payloads — the first token settles which of the two a stored row is.
-struct Record {
-    facts: Vec<Fact>,
-    host: Option<HostObservation>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostRow {
-    #[serde(default)]
-    facts: Vec<Fact>,
-    host: HostObservation,
-}
-
-#[derive(serde::Serialize)]
-struct HostRowRef<'a> {
-    facts: &'a [Fact],
-    host: &'a HostObservation,
 }
 
 impl Log {
@@ -463,28 +441,8 @@ impl LogStore {
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
         let store = match backend {
-            Backend::Sqlite { path } => {
-                let connection = Connection::open(&path)?;
-                let path = path.display().to_string();
-                let probe = || -> Result<String, rusqlite::Error> {
-                    connection.busy_timeout(std::time::Duration::from_secs(5))?;
-                    connection.pragma_update(None, "journal_mode", "WAL")?;
-                    connection.pragma_update(None, "synchronous", "FULL")?;
-                    connection.query_row("PRAGMA quick_check", [], |row| row.get(0))
-                };
-                let check = probe().map_err(|error| OpenError::Damaged {
-                    path: path.clone(),
-                    detail: error.to_string(),
-                })?;
-                if check != "ok" {
-                    return Err(OpenError::Damaged { path, detail: check });
-                }
-                Store::Sqlite(Mutex::new(install(connection, path)?))
-            }
-            Backend::Memory => Store::Sqlite(Mutex::new(install(
-                Connection::open_in_memory()?,
-                ":memory:".to_string(),
-            )?)),
+            Backend::Sqlite { path } => Store::Sqlite(Sqlite::open(&path)?),
+            Backend::Memory => Store::Sqlite(Sqlite::memory()?),
             #[cfg(feature = "postgres")]
             Backend::Postgres { url, max_connections } => {
                 Store::Postgres(postgres::PostgresStore::open(url, max_connections)?)
@@ -507,23 +465,8 @@ impl LogStore {
         }
         let bytes = encode(&opening, None);
         match &self.store {
-            Store::Sqlite(connection) => immediate(&mut lock(connection), |transaction| {
-                transaction.execute(
-                    "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-                    params![key.as_str(), policy_file],
-                )?;
-                match transaction.execute(
-                    "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
-                    params![root.as_str(), bytes],
-                ) {
-                    Ok(_) => {}
-                    Err(error) if is_taken(&error) => {
-                        return Err(CreateError::AlreadyExists {
-                            root: root.as_str().to_string(),
-                        });
-                    }
-                    Err(error) => return Err(CreateError::Storage(error)),
-                }
+            Store::Sqlite(sqlite) => sqlite::immediate(&mut sqlite.connection(), |transaction| {
+                sqlite::create(transaction, &root, &key, policy_file, &bytes)?;
                 #[cfg(feature = "fault-injection")]
                 if self.failure_fires() {
                     // Dropping the transaction rolls it back, exactly as a process kill before
@@ -542,16 +485,7 @@ impl LogStore {
     /// read on the path that then goes on to read it properly.
     pub fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
         match &self.store {
-            Store::Sqlite(connection) => {
-                let found: Option<i64> = lock(connection)
-                    .query_row(
-                        "SELECT 1 FROM logs WHERE root = ?1 LIMIT 1",
-                        params![root.as_str()],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok(found.is_some())
-            }
+            Store::Sqlite(sqlite) => sqlite.has_root(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.has_root(root).map_err(Into::into),
         }
@@ -563,10 +497,7 @@ impl LogStore {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
         match &self.store {
-            Store::Sqlite(connection) => {
-                let (batches, policy_file) = stored(&lock(connection), root)?;
-                decoded(root, batches, policy_file)
-            }
+            Store::Sqlite(sqlite) => sqlite.log(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.log(root),
         }
@@ -606,15 +537,7 @@ impl LogStore {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
         match &self.store {
-            Store::Sqlite(connection) => {
-                let connection = lock(connection);
-                let mut statement =
-                    connection.prepare("SELECT root FROM host_keys WHERE key = ?1 ORDER BY root ASC")?;
-                let roots = statement
-                    .query_map(params![key], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(roots.into_iter().map(TrajectoryId::new).collect())
-            }
+            Store::Sqlite(sqlite) => sqlite.roots_mentioning(key),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.roots_mentioning(key),
         }
@@ -623,18 +546,14 @@ impl LogStore {
     /// One batch at one position, and the key row beside it where the batch names a key.
     fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
         match &self.store {
-            Store::Sqlite(connection) => {
-                let mut connection = lock(connection);
+            Store::Sqlite(sqlite) => {
+                let mut connection = sqlite.connection();
                 #[cfg(feature = "fault-injection")]
                 if self.contention_fires() {
                     self.contend(&mut connection, root)?;
                 }
-                immediate(&mut connection, |transaction| {
-                    let current = position(transaction, root)?;
-                    if current != basis {
-                        return Err(AppendError::Conflict { current });
-                    }
-                    insert_batch(transaction, root, current, &bytes, key)?;
+                sqlite::immediate(&mut connection, |transaction| {
+                    sqlite::append(transaction, root, basis, &bytes, key)?;
                     #[cfg(feature = "fault-injection")]
                     if self.failure_fires() {
                         return Err(AppendError::Injected);
@@ -647,6 +566,89 @@ impl LogStore {
         }
     }
 
+    /// Stores an offer owner record. Repeated writes with identical data are idempotent.
+    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.store_offer_owner(&record),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.store_offer_owner(record),
+        }
+    }
+
+    /// Reads an offer owner record by key.
+    pub fn offer_owner(&self, key: OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.offer_owner(&key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.offer_owner(key).map_err(Into::into),
+        }
+    }
+
+    /// Deletes stored offer owner records for a session scope.
+    pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.expire_offer_owners(&scope),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.expire_offer_owners(scope).map_err(Into::into),
+        }
+    }
+
+    /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
+    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.claim_operation(&request),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_operation(request),
+        }
+    }
+
+    /// Completes a claimed operation receipt with its final decision.
+    pub fn complete_operation(&self, key: OperationKey, decision: serde_json::Value) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.complete_operation(&key, &decision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_operation(key, decision),
+        }
+    }
+
+    /// Claims a durable processed-result receipt before result processing.
+    pub fn claim_processed_result(
+        &self,
+        request: ProcessedResultRequest,
+    ) -> Result<ProcessedResultClaim, ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.claim_processed_result(&request),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_processed_result(request),
+        }
+    }
+
+    /// Completes a processed-result receipt with its approved output and decision.
+    pub fn complete_processed_result(
+        &self,
+        key: ProcessedResultKey,
+        approved_output: String,
+        decision: serde_json::Value,
+    ) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.complete_processed_result(&key, &approved_output, &decision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision),
+        }
+    }
+
+    /// Checks whether pending receipts exist for a root trajectory.
+    pub fn has_pending_receipts(&self, root: String) -> Result<bool, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.has_pending_receipts(&root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
+        }
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+impl LogStore {
     /// A foreign writer wins the race in its own committed transaction, exactly as a second
     /// process would. It takes the position and records nothing, so this caller's append
     /// conflicts on position and replays, and an assertion reads whose write landed from the
@@ -656,8 +658,7 @@ impl LogStore {
     /// names another family it records there and still takes this one's position: a foreign
     /// writer that changed a sibling's log is the race a reader of several families has to
     /// survive.
-    #[cfg(feature = "fault-injection")]
-    fn contend(&self, connection: &mut Connection, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
+    fn contend(&self, connection: &mut rusqlite::Connection, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
         let armed = self
             .faults
             .contending_record
@@ -665,10 +666,10 @@ impl LogStore {
             .expect("the injection mutex is never poisoned")
             .take()
             .filter(|(racing, _, _)| racing == root);
-        immediate(connection, |transaction| {
+        sqlite::immediate(connection, |transaction| {
             let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
-                let at = position(transaction, into)?;
-                insert_batch(transaction, into, at, &bytes, key)
+                let at = sqlite::position(transaction, into)?;
+                sqlite::insert_batch(transaction, into, at, &bytes, key)
             };
             match &armed {
                 Some((_, recorded_in, observation)) => {
@@ -685,7 +686,6 @@ impl LogStore {
 
     /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
     /// process kill inside the transaction would. A PostgreSQL store never consults it.
-    #[cfg(feature = "fault-injection")]
     pub fn fail_commit_after(&self, skip: u64) {
         self.faults
             .commits_until_failure
@@ -695,7 +695,6 @@ impl LogStore {
     /// Arm the read fail point: the next `count` reads answer with a failure instead of the
     /// store's rows. A caller that refuses without asking the store leaves the arming where
     /// it was, so the read that comes after it still meets the failure.
-    #[cfg(feature = "fault-injection")]
     pub fn fail_next_reads(&self, count: u64) {
         self.faults
             .failing_reads
@@ -705,7 +704,6 @@ impl LogStore {
     /// Arm the contention point: the next `count` appends are raced by a foreign writer that
     /// wins, so each loses the compare-and-swap and its caller replays. A PostgreSQL store
     /// never consults it.
-    #[cfg(feature = "fault-injection")]
     pub fn contend_next_appends(&self, count: u64) {
         self.faults
             .contended_appends
@@ -715,7 +713,6 @@ impl LogStore {
     /// Arm the contention point once, with what the winner records. The next append to `root`
     /// loses to a writer that put `observation` in the log, so the caller's next derivation
     /// answers to a state another writer changed rather than to a position it only moved.
-    #[cfg(feature = "fault-injection")]
     pub fn contend_next_append_with(
         &self,
         racing: &TrajectoryId,
@@ -735,14 +732,12 @@ impl LogStore {
     /// file this database no longer holds. Damage stated in this
     /// crate's own vocabulary, so a caller can pin how it refuses without
     /// learning the schema. SQLite only.
-    #[cfg(feature = "fault-injection")]
     pub fn forget_policy_files(&self) {
         self.damage("DELETE FROM policy_files", []);
     }
 
     /// Replace the bytes of every stored policy file, so each stops hashing to
     /// the key its roots' openings name. SQLite only.
-    #[cfg(feature = "fault-injection")]
     pub fn corrupt_policy_files(&self, bytes: &[u8]) {
         self.damage("UPDATE policy_files SET bytes = ?1", params![bytes]);
     }
@@ -750,7 +745,6 @@ impl LogStore {
     /// Replace what one batch of a root's log holds. The bytes are stored as
     /// given, so a caller can leave records that do not decode, or records
     /// that decode but are not the history they claim to be. SQLite only.
-    #[cfg(feature = "fault-injection")]
     pub fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) {
         let changed = self.damage(
             "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
@@ -759,140 +753,29 @@ impl LogStore {
         assert_eq!(changed, 1, "the batch to corrupt exists");
     }
 
-    #[cfg(feature = "fault-injection")]
     fn damage(&self, sql: &str, params: impl rusqlite::Params) -> usize {
         match &self.store {
-            Store::Sqlite(connection) => lock(connection).execute(sql, params).expect("the damage lands"),
+            Store::Sqlite(sqlite) => sqlite.connection().execute(sql, params).expect("the damage lands"),
             #[cfg(feature = "postgres")]
             Store::Postgres(_) => panic!("SQLite-only operation"),
         }
     }
 
-    #[cfg(feature = "fault-injection")]
     fn failure_fires(&self) -> bool {
         consume(&self.faults.commits_until_failure) == Some(1)
     }
 
-    #[cfg(feature = "fault-injection")]
     fn contention_fires(&self) -> bool {
         consume(&self.faults.contended_appends).is_some()
     }
 
-    #[cfg(feature = "fault-injection")]
     fn read_refused(&self) -> Result<(), ReadError> {
         match consume(&self.faults.failing_reads) {
             Some(_) => Err(ReadError::Injected),
             None => Ok(()),
         }
     }
-
-    /// The SQLite connection, for tests that reach under the log's API.
-    #[cfg(test)]
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        match &self.store {
-            Store::Sqlite(connection) => lock(connection),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(_) => panic!("SQLite-only operation"),
-        }
-    }
 }
-
-fn lock(connection: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
-    connection
-        .lock()
-        .expect("the log store mutex is never poisoned: no panics under the lock")
-}
-
-/// Run `operation` in an immediate transaction, committed only when it succeeds.
-fn immediate<T, E: From<rusqlite::Error>>(
-    connection: &mut Connection,
-    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, E>,
-) -> Result<T, E> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = operation(&transaction)?;
-    transaction.commit()?;
-    Ok(result)
-}
-
-/// Give a fresh database the schema and its version stamp, or check an existing one.
-fn install(mut connection: Connection, path: String) -> Result<Connection, OpenError> {
-    {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        // Only an empty file is initialized. A database that holds tables
-        // but carries no stamp was written by something else — an earlier
-        // store, another tool — and creating this schema beside its data
-        // would leave its histories present and invisible.
-        if version == 0 && is_empty(&transaction)? {
-            transaction.execute_batch(SCHEMA)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        } else if version != SCHEMA_VERSION {
-            return Err(OpenError::ForeignSchema {
-                path,
-                found: version,
-                expected: SCHEMA_VERSION,
-            });
-        } else if !has_schema(&transaction)? {
-            return Err(OpenError::Damaged {
-                path,
-                detail: "stamped at this build's schema version, but its tables are missing".to_string(),
-            });
-        }
-        transaction.commit()?;
-    }
-    Ok(connection)
-}
-
-const SCHEMA: &str = "CREATE TABLE logs (
-                         root  TEXT NOT NULL,
-                         seq   INTEGER NOT NULL,
-                         facts BLOB NOT NULL,
-                         PRIMARY KEY (root, seq)
-                     );
-                     CREATE TABLE policy_files (
-                         key   TEXT PRIMARY KEY,
-                         bytes BLOB NOT NULL
-                     );
-                     CREATE TABLE host_keys (
-                         key  TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         PRIMARY KEY (key, root)
-                     );
-                     CREATE TABLE offer_owners (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         binding TEXT NOT NULL,
-                         offer_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         parent_id TEXT,
-                         arguments TEXT,
-                         tool TEXT,
-                         spelling TEXT,
-                         PRIMARY KEY (organization_id, offer_id)
-                     );
-                     CREATE TABLE operations (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         operation_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         input TEXT NOT NULL,
-                         status TEXT NOT NULL,
-                         decision TEXT,
-                         PRIMARY KEY (session_id, operation_id)
-                     );
-                     CREATE TABLE processed_results (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         tool_call_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         status TEXT NOT NULL,
-                         approved_output TEXT,
-                         decision TEXT,
-                         PRIMARY KEY (session_id, tool_call_id)
-                     );";
 
 #[cfg(feature = "fault-injection")]
 fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
@@ -903,24 +786,6 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
             remaining => Some(remaining - 1),
         })
         .ok()
-}
-
-fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
-    let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'offer_owners', 'operations', 'processed_results')",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(found == 6)
-}
-
-fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
-    let tables: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(tables == 0)
 }
 
 fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateError> {
@@ -939,161 +804,21 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
     }
 }
 
-fn insert_batch(
-    connection: &Connection,
-    root: &TrajectoryId,
-    at: u64,
-    bytes: &[u8],
-    key: Option<&str>,
-) -> Result<(), rusqlite::Error> {
-    connection.execute(
-        "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-        params![root.as_str(), at as i64, bytes],
-    )?;
-    if let Some(key) = key {
-        connection.execute(
-            "INSERT OR IGNORE INTO host_keys (key, root) VALUES (?1, ?2)",
-            params![key, root.as_str()],
-        )?;
-    }
-    Ok(())
-}
-
-fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
-    let next: i64 = connection.query_row(
-        "SELECT COALESCE(MAX(seq) + 1, 0) FROM logs WHERE root = ?1",
-        params![root.as_str()],
-        |row| row.get(0),
-    )?;
-    Ok(next as u64)
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("event sequence contains a gap: expected position {expected}, found {found}")]
-struct SequenceGap {
-    expected: u64,
-    found: i64,
-}
-
-/// The batches of rows read in `seq` order, refused unless their positions run 0, 1, 2, …
-fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
-    rows.into_iter()
-        .enumerate()
-        .map(|(expected, (found, batch))| match found == expected as i64 {
-            true => Ok(batch),
-            false => Err(SequenceGap {
-                expected: expected as u64,
-                found,
-            }),
-        })
-        .collect()
-}
-
-fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>, Vec<u8>), ReadError> {
-    let mut statement = connection.prepare("SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq ASC")?;
-    let rows = statement
-        .query_map(params![root.as_str()], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let batches = contiguous(rows).map_err(|gap| {
-        ReadError::Storage(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
-            Some(gap.to_string()),
-        ))
-    })?;
-    let Some(first) = batches.first() else {
-        return Err(ReadError::UnknownRoot {
-            root: root.as_str().to_string(),
-        });
-    };
-    let opening = decode(first)?;
-    let Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
-        policy_file_key: key, ..
-    })) = opening.facts.first()
-    else {
-        return Err(ReadError::Undecodable(
-            "the log does not open with a TrajectoryOpened record".to_string(),
-        ));
-    };
-    let policy_file: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT bytes FROM policy_files WHERE key = ?1",
-            params![key.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(policy_file) = policy_file else {
-        return Err(ReadError::PolicyFileMissing {
-            key: key.as_str().to_string(),
-        });
-    };
-    Ok((batches, policy_file))
-}
-
-fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let basis = batches.len() as u64;
-    let mut facts = Vec::new();
-    let mut host = Vec::new();
-    for (seq, batch) in batches.iter().enumerate() {
-        let record = decode(batch)?;
-        facts.extend(record.facts);
-        if let Some(observation) = record.host {
-            host.push(HostRecord {
-                seq: seq as u64,
-                observation,
-            });
-        }
-    }
-    Ok(Log {
-        root: root.clone(),
-        facts,
-        basis,
-        policy_file,
-        host,
-    })
-}
-
-fn encode(facts: &[Fact], host: Option<&HostObservation>) -> Vec<u8> {
-    let expectation = "records serialize: every field is a serde type with no float or map key";
-    match host {
-        None => serde_json::to_vec(facts).expect(expectation),
-        Some(host) => serde_json::to_vec(&HostRowRef { facts, host }).expect(expectation),
-    }
-}
-
-/// Which of the two shapes a stored row is, from its first token. A row that is neither —
-/// an older encoding, or bytes this build cannot read — refuses the whole log.
-fn decode(bytes: &[u8]) -> Result<Record, ReadError> {
-    let undecodable = |error: serde_json::Error| ReadError::Undecodable(error.to_string());
-    match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
-        Some(b'[') => serde_json::from_slice(bytes)
-            .map(|facts| Record { facts, host: None })
-            .map_err(undecodable),
-        Some(b'{') => serde_json::from_slice::<HostRow>(bytes)
-            .map(|row| Record {
-                facts: row.facts,
-                host: Some(row.host),
-            })
-            .map_err(undecodable),
-        _ => Err(ReadError::Undecodable(
-            "a stored batch is neither an engine batch nor a host record".to_string(),
-        )),
-    }
-}
-
-fn is_taken(error: &rusqlite::Error) -> bool {
-    const PRIMARY_KEY: i32 = 1555;
-    const UNIQUE: i32 = 2067;
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(e, _) if e.extended_code == PRIMARY_KEY || e.extended_code == UNIQUE
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+
+    /// The SQLite connection, for tests that reach under the log's API.
+    impl LogStore {
+        pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+            match &self.store {
+                Store::Sqlite(sqlite) => sqlite.connection(),
+                #[cfg(feature = "postgres")]
+                Store::Postgres(_) => panic!("SQLite-only operation"),
+            }
+        }
+    }
 
     const POLICY: &str = r#"
         version = 2
@@ -1106,7 +831,7 @@ mod tests {
             .clone()
     }
 
-    fn root() -> TrajectoryId {
+    pub(crate) fn root() -> TrajectoryId {
         TrajectoryId::new("cc:root")
     }
 
@@ -1117,7 +842,7 @@ mod tests {
             .into_unsealed()
     }
 
-    fn punctuation() -> Vec<Fact> {
+    pub(crate) fn punctuation() -> Vec<Fact> {
         vec![Fact::Boundary {
             trajectory: root(),
             kind: appa_engine::fact::BoundaryKind::VoidReturn,
@@ -1208,7 +933,7 @@ mod tests {
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
     }
 
-    fn observed(actor: &str, server: &str) -> HostObservation {
+    pub(crate) fn observed(actor: &str, server: &str) -> HostObservation {
         HostObservation::Inventory {
             actor: TrajectoryId::new(actor),
             adapter: AdapterName::Kagent,
@@ -1220,48 +945,6 @@ mod tests {
                 sources: Vec::new(),
             },
         }
-    }
-
-    /// One observation of every kind, in declaration order, so a golden covers each wire tag.
-    fn golden_observations() -> Vec<HostObservation> {
-        let actor = HostActor {
-            root: root(),
-            child: Some(TrajectoryId::new("cc:child")),
-        };
-        vec![
-            observed(root().as_str(), "demo"),
-            HostObservation::CallBound {
-                trajectory: root(),
-                call_id: "toolu_1".to_string(),
-                dispatch: DispatchId::new(
-                    root(),
-                    serde_json::from_value(serde_json::json!("ab".repeat(32))).expect("a digest decodes"),
-                    7,
-                ),
-            },
-            HostObservation::Vouched {
-                actor: actor.clone(),
-                key: "offer:one".to_string(),
-                ruling: Some(Ruling::Approve),
-            },
-            HostObservation::Claimed {
-                actor: actor.clone(),
-                key: "offer:one".to_string(),
-                until: SystemTime::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 5),
-            },
-            HostObservation::Released {
-                actor: actor.clone(),
-                key: "offer:one".to_string(),
-            },
-            HostObservation::PromptSeen { actor: actor.clone() },
-            HostObservation::PromptSettled {
-                actor: HostActor {
-                    root: root(),
-                    child: None,
-                },
-            },
-            HostObservation::TurnEnded { actor },
-        ]
     }
 
     fn observations(log: &Log) -> Vec<HostObservation> {
@@ -1332,151 +1015,6 @@ mod tests {
         assert_eq!(bindings[0].call_id, "toolu_1");
         assert_eq!(bindings[0].dispatch, &dispatch);
         assert_eq!(bindings[0].trajectory, &root());
-    }
-
-    /// The encoding is the shape, and a batch with no observation is byte-for-byte what an
-    /// engine-only store wrote: nothing sniffs between two unrelated payloads.
-    #[test]
-    fn a_batch_without_an_observation_is_the_bare_array_of_its_facts() {
-        assert_eq!(
-            encode(&punctuation(), None),
-            serde_json::to_vec(&punctuation()).unwrap()
-        );
-        let host = observed(root().as_str(), "demo");
-        let object: serde_json::Value = serde_json::from_slice(&encode(&[], Some(&host))).unwrap();
-        assert_eq!(object["facts"], serde_json::json!([]));
-        assert_eq!(object["host"]["kind"], "inventory");
-    }
-
-    /// The stored batch bytes are a persisted format: every host observation kind, the bare
-    /// fact array, and an observation with no facts, byte for byte.
-    #[test]
-    fn stored_batch_bytes_are_frozen() {
-        let facts = r#"[{"Boundary":{"trajectory":"cc:root","kind":"VoidReturn"}}]"#;
-        let hosts = [
-            r#"{"kind":"inventory","actor":"cc:root","adapter":"kagent","inventory":{"tools":[{"name":"read","tool":"mcp:demo/read"}],"sources":[]}}"#,
-            r#"{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{"trajectory":"cc:root","digest":"abababababababababababababababababababababababababababababababab","occurrence":7}}"#,
-            r#"{"kind":"vouched","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","ruling":"approve"}"#,
-            r#"{"kind":"claimed","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","until":{"secs_since_epoch":1700000000,"nanos_since_epoch":5}}"#,
-            r#"{"kind":"released","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one"}"#,
-            r#"{"kind":"prompt_seen","actor":{"root":"cc:root","child":"cc:child"}}"#,
-            r#"{"kind":"prompt_settled","actor":{"root":"cc:root","child":null}}"#,
-            r#"{"kind":"turn_ended","actor":{"root":"cc:root","child":"cc:child"}}"#,
-        ];
-        let observations = golden_observations();
-        assert_eq!(observations.len(), hosts.len());
-
-        let bare = encode(&punctuation(), None);
-        assert_eq!(String::from_utf8(bare.clone()).unwrap(), facts);
-        assert!(matches!(decode(&bare), Ok(Record { facts, host: None }) if facts == punctuation()));
-
-        for (observation, host) in observations.iter().zip(hosts) {
-            let with_facts = encode(&punctuation(), Some(observation));
-            assert_eq!(
-                String::from_utf8(with_facts.clone()).unwrap(),
-                format!(r#"{{"facts":{facts},"host":{host}}}"#)
-            );
-            assert!(matches!(
-                decode(&with_facts),
-                Ok(Record { facts, host: Some(decoded) }) if facts == punctuation() && &decoded == observation
-            ));
-            let alone = encode(&[], Some(observation));
-            assert_eq!(
-                String::from_utf8(alone.clone()).unwrap(),
-                format!(r#"{{"facts":[],"host":{host}}}"#)
-            );
-            assert!(matches!(
-                decode(&alone),
-                Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && &decoded == observation
-            ));
-        }
-    }
-
-    /// Decode settles the shape on the first non-whitespace byte, and an object may omit
-    /// its facts.
-    #[test]
-    fn decode_dispatches_on_the_first_non_whitespace_byte() {
-        let facts = r#"[{"Boundary":{"trajectory":"cc:root","kind":"VoidReturn"}}]"#;
-        let host = r#"{"kind":"prompt_seen","actor":{"root":"cc:root","child":null}}"#;
-        let seen = HostObservation::PromptSeen {
-            actor: HostActor {
-                root: root(),
-                child: None,
-            },
-        };
-        assert!(matches!(
-            decode(format!(" \n\t{facts}").as_bytes()),
-            Ok(Record { facts, host: None }) if facts == punctuation()
-        ));
-        assert!(matches!(
-            decode(format!("\r\n {{\"host\":{host}}}").as_bytes()),
-            Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && decoded == seen
-        ));
-        for row in [b"".as_slice(), b"   ", br#""text""#, b"42", b"null"] {
-            assert!(
-                matches!(decode(row), Err(ReadError::Undecodable(_))),
-                "{}",
-                String::from_utf8_lossy(row)
-            );
-        }
-    }
-
-    /// The SQLite schema is a persisted format: its version stamp and the DDL of each table,
-    /// compared token for token.
-    #[test]
-    fn a_fresh_sqlite_store_has_the_frozen_schema() {
-        let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
-        let expected: Vec<(String, String, Option<String>)> = [
-            ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
-            ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
-            ("offer_owners", Some("CREATE TABLE offer_owners ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL, offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT, PRIMARY KEY (organization_id, offer_id) )")),
-            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (session_id, operation_id) )")),
-            ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
-            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (session_id, tool_call_id) )")),
-            ("sqlite_autoindex_host_keys_1", None),
-            ("sqlite_autoindex_logs_1", None),
-            ("sqlite_autoindex_offer_owners_1", None),
-            ("sqlite_autoindex_operations_1", None),
-            ("sqlite_autoindex_policy_files_1", None),
-            ("sqlite_autoindex_processed_results_1", None),
-        ]
-        .into_iter()
-        .map(|(name, sql)| {
-            let kind = if sql.is_some() { "table" } else { "index" };
-            (kind.to_owned(), name.to_owned(), sql.map(str::to_owned))
-        })
-        .collect();
-
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let backends = [
-            Backend::Sqlite {
-                path: dir.path().join("appa.db"),
-            },
-            Backend::Memory,
-        ];
-        for backend in backends {
-            let store = LogStore::open(backend).expect("a fresh store opens");
-            let connection = store.lock();
-            let version: i64 = connection
-                .query_row("PRAGMA user_version", [], |row| row.get(0))
-                .expect("the version reads");
-            assert_eq!(version, 3);
-            let mut statement = connection
-                .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
-                .expect("the schema query prepares");
-            let found = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?.map(|sql| normalize(&sql)),
-                    ))
-                })
-                .expect("the schema reads")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("every schema row reads");
-            assert_eq!(found, expected);
-        }
     }
 
     /// The wire names a caller reports a failure class under.
@@ -1722,76 +1260,6 @@ mod tests {
         let replayed = second.log(&root()).expect("the log reads");
         second.append(&replayed, &punctuation()).expect("the replay lands");
         assert_eq!(first.log(&root()).expect("the log reads").basis(), 3);
-    }
-
-    #[test]
-    fn a_database_at_another_schema_version_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
-        Connection::open(&path)
-            .expect("the file reopens")
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .expect("the version moves");
-
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
-            }
-            other => panic!("expected a schema refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_stamped_database_without_its_tables_is_damaged() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        Connection::open(&path)
-            .expect("the file opens")
-            .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .expect("the stamp lands");
-
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::Damaged { .. }) => {}
-            other => panic!("expected a damage refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_unstamped_database_that_already_holds_tables_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        Connection::open(&path)
-            .expect("the file opens")
-            .execute_batch("CREATE TABLE batches (family TEXT, seq INTEGER, bytes BLOB);")
-            .expect("the older schema lands");
-
-        match LogStore::open(Backend::Sqlite { path: path.clone() }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (0, SCHEMA_VERSION));
-            }
-            other => panic!("expected a schema refusal, got {other:?}"),
-        }
-        let tables: i64 = Connection::open(&path)
-            .expect("the file reopens")
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("the count runs");
-        assert_eq!(tables, 0, "the refusal wrote nothing");
-    }
-
-    #[test]
-    fn a_damaged_file_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::Damaged { .. }) => {}
-            other => panic!("expected a damage refusal, got {other:?}"),
-        }
     }
 
     #[test]

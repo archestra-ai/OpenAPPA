@@ -9,21 +9,12 @@
 //! A connection that returns to the pool closed, or that does not answer its
 //! reset, is dropped, and a later checkout opens another in its place.
 //!
-//! The schema the host's migrations must provide:
-//!
-//! ```sql
-//! CREATE TABLE openappa_events (root TEXT NOT NULL, seq BIGINT NOT NULL, payload BYTEA NOT NULL,
-//!                               PRIMARY KEY (root, seq));
-//! CREATE TABLE openappa_policy_files (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL);
-//! CREATE TABLE openappa_host_keys (key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root));
-//! CREATE TABLE openappa_offer_owners (
-//!     organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL,
-//!     offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT,
-//!     PRIMARY KEY (organization_id, offer_id));
-//! ```
+//! The host's migrations provide the schema: `openappa_events`, `openappa_policy_files`,
+//! `openappa_host_keys`, and the receipt tables `openappa_offer_owners`, `openappa_operations`
+//! and `openappa_processed_results`. `tests/fixtures/host_schema.sql` holds the full DDL.
 
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Condvar, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use ::postgres::Client;
@@ -31,6 +22,7 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
+use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
     Completion, StoredOperation, StoredOperationInput, StoredResult, binding_name, parse_binding, resolve_offer_owner,
     resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
@@ -678,18 +670,10 @@ impl PostgresStore {
             contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
                 .map_err(|gap| PostgresError(gap.to_string()))
         })?;
-        let Some(first) = batches.first() else {
-            return Err(ReadError::UnknownRoot {
-                root: root.as_str().to_owned(),
-            });
-        };
-        let opening = decode(first)?;
-        let Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening { policy_file_key, .. })) =
-            opening.facts.first()
-        else {
-            return Err(ReadError::Undecodable("log does not begin with an opening".into()));
-        };
-        let hash = policy_file_key.as_str().to_owned();
+        let hash = opening_key(root, &batches)?
+            .ok_or_else(|| ReadError::Undecodable("log does not begin with an opening".into()))?
+            .as_str()
+            .to_owned();
         let lookup = hash.clone();
         let policy = self
             .query(move |client| {
@@ -780,7 +764,7 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
                 caller_id: row.get(1),
                 session_id: row.get(2),
                 root: row.get(3),
-                input: StoredOperationInput::decode(row.get(4))?,
+                input: StoredOperationInput::decode(row.get(4)).map_err(ReceiptStorageError)?,
                 status: row.get(5),
                 decision: row.get::<_, Option<Value>>(6).map(Ok),
             })
