@@ -548,6 +548,13 @@ impl ValidatedFactBatch {
         &self.facts
     }
 
+    /// The batch that appends no facts at `view`'s position: what a store append carrying only
+    /// host records moves. It passes the validator trivially, so advancing by it moves the
+    /// revision and nothing else.
+    pub fn empty(view: &EngineView) -> ValidatedFactBatch {
+        ValidatedFactBatch::seal(Vec::new(), view.revision(), view.policy(), view.family().clone())
+    }
+
     /// Serialization removes the seal: what crosses to storage is the plain records,
     /// and what comes back is untrusted until it passes the validator again.
     pub fn into_unsealed(self) -> Vec<Fact> {
@@ -568,7 +575,10 @@ pub enum ViewMismatch {
 /// The engine's derived working picture of one family log: the validated records and
 /// the projection built from them. Opaque and disposable — the runtime stores it for the next
 /// event, but every constructor and mutator here belongs to the engine.
-#[derive(Debug)]
+///
+/// Equality is equality of the derived picture: a view advanced batch by batch equals the view
+/// a replay of the same log builds, because both reach the log through the one fold.
+#[derive(Debug, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
     policy: PolicyIdentityV1,
