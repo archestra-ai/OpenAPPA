@@ -265,9 +265,20 @@ fn install_claude(
     .render(Style::of_stdout()))
 }
 
+/// Holds the Claude profile lock until dropped.
+struct ProfileLock(fs::File);
+
+impl Drop for ProfileLock {
+    // A child spawned concurrently shares this descriptor's lock until its exec, so closing
+    // our descriptor alone would not release it.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// Different deployment configs may target one Claude profile. Serialize the
 /// native mutation on that shared profile, not only on each config's store.
-fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
+fn lock_claude_profile(directory: &Path) -> Result<ProfileLock, InitError> {
     fs::create_dir_all(directory).map_err(|source| InitError::WriteFile {
         path: directory.to_owned(),
         source,
@@ -301,7 +312,7 @@ fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
         path,
         message: format!("cannot lock Claude profile; another APPA operation may be running: {error}"),
     })?;
-    Ok(file)
+    Ok(ProfileLock(file))
 }
 
 /// The steps of the switch, each recording what it changed.
@@ -869,8 +880,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = lock_claude_profile(root.path()).unwrap();
         assert!(lock_claude_profile(root.path()).is_err());
+        let inherited = first.0.try_clone().unwrap();
         drop(first);
         assert!(root.path().join(".appa-install.lock").is_file());
         assert!(lock_claude_profile(root.path()).is_ok());
+        drop(inherited);
     }
 }
