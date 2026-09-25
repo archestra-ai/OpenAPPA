@@ -8,7 +8,7 @@ digest = "sha256:c2656e5e55a6b222517253adce4b80214e879a9f4e5330a1e2de7af8f16df31
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:44742d5a0ceb0a5350cd221a4ebfa711fe5c9d76eff083726d0106a2ca194049"
+digest = "sha256:9527103aeb9633644b8f62487c6d47789a23740f56d67beb8dc1f622c30cc492"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
@@ -44,7 +44,7 @@ digest = "sha256:2e653283fc9e992172d65a6a78d910b33dbc267365a4c6bf97f011cf5cf8973
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:2542abb0bdf666be8ead96b6bc94336b69894a0f349ef9977937f851edb6eb7f"
+digest = "sha256:4d1390b3599f6c068e9d79d82f180a835800df98b7b3515b149854a012c07169"
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"
