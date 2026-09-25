@@ -556,8 +556,8 @@ max_body_bytes = 65536
         child
             .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
             .unwrap();
-        assert_eq!(parent.reservation().unwrap().unwrap().actor, "cc:session:child");
-        assert!(other.reservation().unwrap().is_none());
+        assert!(parent.pin_for("cc:session:child", "call").unwrap().is_some());
+        assert!(other.pin_for("cc:session:child", "call").unwrap().is_none());
     }
 
     fn bind(runtime: &Runtime, root: &TrajectoryId, dir: &Path) {

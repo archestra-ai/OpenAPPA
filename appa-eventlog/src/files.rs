@@ -97,15 +97,6 @@ pub struct FileReceipt {
     pub dispatch: Option<String>,
 }
 
-/// A live reservation: the pinned operation a released call holds the workspace for.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reservation {
-    pub actor: String,
-    pub call_key: String,
-    pub pin: FilePin,
-    pub bound_dispatch: Option<String>,
-}
-
 /// What releasing a call that never ran did to its reservation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbandonOutcome {
@@ -128,11 +119,12 @@ struct State {
     next_id: i64,
     versions: BTreeMap<i64, FileVersion>,
     current: BTreeMap<String, i64>,
-    reservation: Option<StoredReservation>,
+    reservation: Option<Reservation>,
     receipts: HashMap<(String, String), FileReceipt>,
 }
 
-struct StoredReservation {
+/// A live reservation: the pinned operation a released call holds the workspace for.
+struct Reservation {
     actor: String,
     call_key: String,
     pin: FilePin,
@@ -173,7 +165,7 @@ impl FileStore {
             ));
         }
         let relative = validated_relative(&self.workspace, path)?;
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -206,7 +198,7 @@ impl FileStore {
             source: None,
             inputs: vec![],
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -233,7 +225,7 @@ impl FileStore {
         let source_absolute = self.workspace.join(&source);
         let destination_absolute = self.workspace.join(&destination);
 
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -270,7 +262,7 @@ impl FileStore {
             }),
             inputs: vec![],
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -295,7 +287,7 @@ impl FileStore {
         if inputs.len() > MAX_PROCESS_INPUTS {
             return Err(FileStoreError::InvalidPath("too many process inputs".into()));
         }
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -332,7 +324,7 @@ impl FileStore {
             source: None,
             inputs: pinned,
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -343,7 +335,7 @@ impl FileStore {
         dispatch: &str,
         output_label: &Label,
     ) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let reservation = matching_reservation_mut(&mut state, actor, call_key)?;
         if reservation.bound_dispatch.is_some() {
             return Err(FileStoreError::AlreadyBound);
@@ -354,7 +346,7 @@ impl FileStore {
     }
 
     pub fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if matching_reservation(&state, actor, call_key)?.bound_dispatch.is_some() {
             return Err(FileStoreError::AlreadyBound);
         }
@@ -363,7 +355,7 @@ impl FileStore {
     }
 
     pub fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let key = (actor.to_owned(), call_key.to_owned());
         if let Some(receipt) = state.receipts.get(&key) {
             return Ok(receipt.clone());
@@ -378,19 +370,8 @@ impl FileStore {
             .output_label
             .clone()
             .ok_or(FileStoreError::UnknownReservation)?;
-        let actual = state_digest(&self.workspace, &pin.path)?;
+        let observed = Observed::of(&self.workspace, &pin)?;
         let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
-        let source_actual = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace, &source.path))
-            .transpose()?;
-        let input_states = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        let inputs_unchanged = input_states.iter().all(|unchanged| *unchanged);
         let source_label = if pin.operation == FileOperation::Process {
             pin.inputs
                 .iter()
@@ -403,7 +384,7 @@ impl FileStore {
                 .or_else(|| pin.predecessor_label.clone())
         };
         let receipt = if !success {
-            if !undisturbed(&pin, &actual, source_actual.as_deref(), &input_states) {
+            if !observed.undisturbed(&pin) {
                 return Err(FileStoreError::Quarantined);
             }
             FileReceipt {
@@ -415,7 +396,7 @@ impl FileStore {
                 dispatch: Some(dispatch),
             }
         } else if pin.operation == FileOperation::Read {
-            if actual != expected {
+            if observed.destination != expected {
                 return Err(FileStoreError::DigestMismatch);
             }
             FileReceipt {
@@ -435,17 +416,17 @@ impl FileStore {
                         .as_ref()
                         .ok_or_else(|| FileStoreError::Corrupt("transfer has no source pin".into()))?;
                     let source_ok = if pin.operation == FileOperation::Move {
-                        source_actual.as_deref() == Some(ABSENT)
+                        observed.source.as_deref() == Some(ABSENT)
                     } else {
-                        source_actual.as_deref() == Some(source.digest.as_str())
+                        observed.source.as_deref() == Some(source.digest.as_str())
                     };
-                    if !source_ok || actual != source.digest {
+                    if !source_ok || observed.destination != source.digest {
                         return Err(FileStoreError::DigestMismatch);
                     }
                     vec![source.version]
                 }
                 FileOperation::Process => {
-                    if !inputs_unchanged {
+                    if !observed.inputs_unchanged {
                         return Err(FileStoreError::DigestMismatch);
                     }
                     pin.inputs.iter().map(|input| input.version).collect()
@@ -453,7 +434,7 @@ impl FileStore {
                 FileOperation::Replace => vec![],
                 FileOperation::Read => unreachable!(),
             };
-            if actual == ABSENT {
+            if observed.destination == ABSENT {
                 return Err(FileStoreError::DigestMismatch);
             }
             let id = state.next_id;
@@ -469,7 +450,7 @@ impl FileStore {
             let version = FileVersion {
                 id,
                 path: pin.path.clone(),
-                digest: actual,
+                digest: observed.destination,
                 label: output,
                 previous: pin.predecessor_version,
                 content_dependencies: dependencies,
@@ -491,91 +472,35 @@ impl FileStore {
         Ok(receipt)
     }
 
-    /// Whether the workspace still shows exactly the state this pin recorded: the bytes the
-    /// operation would have replaced, the bytes a transfer would have consumed, and every
-    /// declared input. `finish` and `abandon` answer the same question from values they have
-    /// already hashed; diagnostics can ask it here.
-    pub fn pin_matches_workspace(&self, pin: &FilePin) -> Result<bool, FileStoreError> {
-        let destination = state_digest(&self.workspace, &pin.path)?;
-        let source = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace, &source.path))
-            .transpose()?;
-        let inputs = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        Ok(undisturbed(pin, &destination, source.as_deref(), &inputs))
-    }
-
     /// Release the reservation of a call that was released and never ran, provided the
     /// workspace still shows its pinned state. The runtime cannot tell an unrun call from one
     /// whose report was lost, so anything else keeps the reservation: a workspace that moved
     /// is never released by guessing here.
     pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let Some(reservation) = state.reservation.as_ref() else {
             return Ok(AbandonOutcome::Absent);
         };
         if reservation.actor != actor || reservation.call_key != call_key {
             return Ok(AbandonOutcome::Absent);
         }
-        let pin = reservation.pin.clone();
-        let destination = state_digest(&self.workspace, &pin.path)?;
-        let source = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace, &source.path))
-            .transpose()?;
-        let inputs = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
+        if !Observed::of(&self.workspace, &reservation.pin)?.undisturbed(&reservation.pin) {
             return Ok(AbandonOutcome::Quarantined);
         }
         state.reservation = None;
         Ok(AbandonOutcome::Released)
     }
 
-    /// Every tracked path that no longer holds the bytes its recorded version describes. A
-    /// path that is gone counts: the ledger cannot tell a deletion from a loss.
-    pub fn drifted(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let state = self.lock()?;
-        let current = snapshot_state(&state);
-        let mut drifted = Vec::new();
-        for version in current {
-            if state_digest(&self.workspace, &version.path)? != version.digest {
-                drifted.push(version);
-            }
-        }
-        Ok(drifted)
-    }
-
     /// The pin a live reservation holds for this exact call, if it holds one. What an
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
     pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(state
             .reservation
             .as_ref()
             .filter(|r| r.actor == actor && r.call_key == call_key)
             .map(|r| r.pin.clone()))
-    }
-
-    /// The live reservation, if any. One workspace holds at most one.
-    pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
-        let state = self.lock()?;
-        Ok(state.reservation.as_ref().map(|r| Reservation {
-            actor: r.actor.clone(),
-            call_key: r.call_key.clone(),
-            pin: r.pin.clone(),
-            bound_dispatch: r.bound_dispatch.clone(),
-        }))
     }
 
     /// The workspace this ledger is bound to.
@@ -585,30 +510,14 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(current_state(&state, &relative))
     }
 
-    pub fn history(&self, path: &str) -> Result<Vec<FileVersion>, FileStoreError> {
-        let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
-        Ok(state
-            .versions
-            .values()
-            .filter(|v| v.path == relative)
-            .cloned()
-            .collect())
-    }
-
-    pub fn snapshot(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let state = self.lock()?;
-        Ok(snapshot_state(&state))
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>, FileStoreError> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
-            .map_err(|_| FileStoreError::Corrupt("file store lock poisoned".into()))
+            .expect("the file store mutex is never poisoned: no panics under the lock")
     }
 }
 fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
@@ -625,24 +534,36 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
 }
 fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStoreError> {
     let supplied = Path::new(input);
-    let joined = if supplied.is_absolute() {
-        supplied.to_path_buf()
-    } else {
-        workspace.join(supplied)
+    let stripped = match supplied.is_absolute() {
+        false => supplied,
+        true if supplied.components().any(|c| c == Component::ParentDir) => {
+            return Err(FileStoreError::InvalidPath(input.into()));
+        }
+        // The harness may spell the workspace through a symlinked ancestor (macOS `/var`,
+        // `/tmp`); the shortest ancestor that is the canonical workspace anchors the path.
+        true => {
+            let mut ancestors: Vec<&Path> = supplied.ancestors().collect();
+            ancestors.reverse();
+            ancestors
+                .into_iter()
+                .find(|ancestor| fs::canonicalize(ancestor).is_ok_and(|canonical| canonical == workspace))
+                .and_then(|anchor| supplied.strip_prefix(anchor).ok())
+                .ok_or_else(|| FileStoreError::InvalidPath(input.into()))?
+        }
     };
-    let stripped = joined
-        .strip_prefix(workspace)
-        .map_err(|_| FileStoreError::InvalidPath(input.into()))?;
     if stripped.as_os_str().is_empty() || stripped.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(FileStoreError::InvalidPath(input.into()));
     }
     let mut cursor = workspace.to_path_buf();
     for component in stripped.components() {
         cursor.push(component);
-        if let Ok(meta) = fs::symlink_metadata(&cursor)
-            && meta.file_type().is_symlink()
-        {
-            return Err(FileStoreError::InvalidPath("symlink component".into()));
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(FileStoreError::InvalidPath("symlink component".into()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(stripped.to_string_lossy().into_owned())
@@ -722,21 +643,47 @@ fn check_links(dir: &Path) -> Result<(), FileStoreError> {
     }
     Ok(())
 }
-/// Whether a pin still describes the workspace: the destination holds the bytes the operation
-/// would have replaced, a transfer's source is where the operation would have left it, and
-/// every declared input is unchanged. `finish` and `abandon` compute these values themselves;
-/// both ask this one question of them.
-fn undisturbed(pin: &FilePin, destination: &str, source_state: Option<&str>, inputs: &[bool]) -> bool {
-    destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
-        && pin
-            .source
-            .as_ref()
-            .is_none_or(|source| source_state == Some(source.digest.as_str()))
-        && inputs.iter().all(|unchanged| *unchanged)
+/// What the workspace holds now at every path a pin recorded, each hashed once.
+struct Observed {
+    destination: String,
+    source: Option<String>,
+    inputs_unchanged: bool,
 }
 
-fn stored_reservation(actor: &str, call_key: &str, pin: &FilePin) -> StoredReservation {
-    StoredReservation {
+impl Observed {
+    fn of(workspace: &Path, pin: &FilePin) -> Result<Self, FileStoreError> {
+        let destination = state_digest(workspace, &pin.path)?;
+        let source = pin
+            .source
+            .as_ref()
+            .map(|source| state_digest(workspace, &source.path))
+            .transpose()?;
+        let mut inputs_unchanged = true;
+        for input in &pin.inputs {
+            inputs_unchanged &= state_digest(workspace, &input.path)? == input.digest;
+        }
+        Ok(Self {
+            destination,
+            source,
+            inputs_unchanged,
+        })
+    }
+
+    /// Whether the pin still describes the workspace: the destination holds the bytes the
+    /// operation would have replaced, a transfer's source is where the operation would have
+    /// left it, and every declared input is unchanged.
+    fn undisturbed(&self, pin: &FilePin) -> bool {
+        self.destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
+            && pin
+                .source
+                .as_ref()
+                .is_none_or(|source| self.source.as_deref() == Some(source.digest.as_str()))
+            && self.inputs_unchanged
+    }
+}
+
+fn pending_reservation(actor: &str, call_key: &str, pin: &FilePin) -> Reservation {
+    Reservation {
         actor: actor.into(),
         call_key: call_key.into(),
         pin: pin.clone(),
@@ -745,11 +692,7 @@ fn stored_reservation(actor: &str, call_key: &str, pin: &FilePin) -> StoredReser
     }
 }
 
-fn matching_reservation<'a>(
-    state: &'a State,
-    actor: &str,
-    call_key: &str,
-) -> Result<&'a StoredReservation, FileStoreError> {
+fn matching_reservation<'a>(state: &'a State, actor: &str, call_key: &str) -> Result<&'a Reservation, FileStoreError> {
     state
         .reservation
         .as_ref()
@@ -761,7 +704,7 @@ fn matching_reservation_mut<'a>(
     state: &'a mut State,
     actor: &str,
     call_key: &str,
-) -> Result<&'a mut StoredReservation, FileStoreError> {
+) -> Result<&'a mut Reservation, FileStoreError> {
     state
         .reservation
         .as_mut()
@@ -803,15 +746,6 @@ fn touch(state: &mut State, workspace: &Path, path: &str) -> Result<Touched, Fil
         }
     };
     Ok(Touched { version, actual })
-}
-
-fn snapshot_state(state: &State) -> Vec<FileVersion> {
-    state
-        .current
-        .values()
-        .filter_map(|id| state.versions.get(id))
-        .cloned()
-        .collect()
 }
 
 #[cfg(all(test, unix))]
@@ -856,14 +790,9 @@ mod tests {
         // A released call the harness never ran: the workspace still shows the pin.
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
-        assert_eq!(store.reservation().unwrap().unwrap().actor, "a");
-        assert!(
-            store
-                .pin_matches_workspace(&store.reservation().unwrap().unwrap().pin)
-                .unwrap()
-        );
+        assert!(store.pin_for("a", "unrun").unwrap().is_some());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
-        assert!(store.reservation().unwrap().is_none());
+        assert!(store.pin_for("a", "unrun").unwrap().is_none());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);
         // The next call proceeds: the release did not leave the workspace wedged.
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
@@ -877,7 +806,7 @@ mod tests {
         store.bind("a", "copy", "dispatch-2", &Label::top()).unwrap();
         fs::write(fixture.workspace.join("destination.txt"), "partial").unwrap();
         assert_eq!(store.abandon("a", "copy").unwrap(), AbandonOutcome::Quarantined);
-        assert!(store.reservation().unwrap().is_some());
+        assert!(store.pin_for("a", "copy").unwrap().is_some());
         assert!(matches!(
             store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
@@ -891,8 +820,10 @@ mod tests {
         let second = fixture.store(&Label::top());
         first.prepare("a", "one", FileOperation::Read, "tracked.txt").unwrap();
         second.prepare("b", "two", FileOperation::Read, "tracked.txt").unwrap();
-        assert_eq!(first.reservation().unwrap().unwrap().call_key, "one");
-        assert_eq!(second.reservation().unwrap().unwrap().call_key, "two");
+        assert!(first.pin_for("a", "one").unwrap().is_some());
+        assert!(first.pin_for("b", "two").unwrap().is_none());
+        assert!(second.pin_for("b", "two").unwrap().is_some());
+        assert!(second.pin_for("a", "one").unwrap().is_none());
     }
 
     #[test]
@@ -917,12 +848,11 @@ mod tests {
         let pin = store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "edit", "dispatch-2", &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
-        let edited = store.finish("a", "edit", true).unwrap();
-        assert_eq!(
-            edited.version.unwrap().content_dependencies,
-            vec![pin.predecessor_version.unwrap()]
-        );
-        assert_eq!(store.history("tracked.txt").unwrap().len(), 3);
+        let edited = store.finish("a", "edit", true).unwrap().version.unwrap();
+        assert_eq!(pin.predecessor_version, Some(replaced.version.unwrap().id));
+        assert_eq!(edited.previous, pin.predecessor_version);
+        assert_eq!(edited.content_dependencies, vec![pin.predecessor_version.unwrap()]);
+        assert_eq!(store.current("tracked.txt").unwrap(), Some(edited));
     }
 
     #[test]
@@ -954,6 +884,32 @@ mod tests {
             store.prepare("b", "next", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
         ));
+    }
+
+    #[test]
+    fn absolute_paths_through_a_symlinked_workspace_alias_resolve_to_the_workspace() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        let alias = fixture._root.path().join("alias");
+        std::os::unix::fs::symlink(&fixture.workspace, &alias).unwrap();
+        std::os::unix::fs::symlink(".", fixture.workspace.join("inner")).unwrap();
+        let absolute = |path: PathBuf| path.to_str().unwrap().to_string();
+
+        let pin = store
+            .prepare("a", "alias", FileOperation::Read, &absolute(alias.join("tracked.txt")))
+            .unwrap();
+        assert_eq!(pin.path, "tracked.txt");
+        store.cancel("a", "alias").unwrap();
+        for rejected in [
+            alias.join("inner/tracked.txt"),
+            alias.join("../workspace/tracked.txt"),
+            fixture._root.path().join("tracked.txt"),
+        ] {
+            assert!(matches!(
+                store.prepare("a", "rejected", FileOperation::Read, &absolute(rejected)),
+                Err(FileStoreError::InvalidPath(_))
+            ));
+        }
     }
 
     #[test]
@@ -995,8 +951,9 @@ mod tests {
         assert!(store.abandon("a", "edit").is_err());
         fs::write(outside.join("file.txt"), "escaped").unwrap();
         assert!(store.finish("a", "edit", true).is_err());
-        assert!(store.snapshot().unwrap().contains(&pinned));
-        assert!(store.drifted().is_err());
+        fs::remove_file(fixture.workspace.join("sub")).unwrap();
+        fs::rename(fixture.workspace.join("real"), fixture.workspace.join("sub")).unwrap();
+        assert_eq!(store.current("sub/file.txt").unwrap(), Some(pinned));
     }
 
     #[test]
@@ -1053,8 +1010,14 @@ mod tests {
         let moved = store.finish("a", "move", true).unwrap();
         assert_eq!(moved.version.unwrap().content_dependencies, vec![source_id]);
         assert!(store.current("tracked.txt").unwrap().is_none());
-        assert_eq!(store.history("tracked.txt").unwrap().len(), 1);
-        assert!(!store.snapshot().unwrap().iter().any(|v| v.path == "tracked.txt"));
+        // The moved-away version stays in the ledger, so bytes reappearing out of band are
+        // not adopted as a fresh first touch.
+        fs::write(fixture.workspace.join("tracked.txt"), "out of band").unwrap();
+        assert!(matches!(
+            store.prepare("a", "reappeared", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::Untracked)
+        ));
+        fs::remove_file(fixture.workspace.join("tracked.txt")).unwrap();
 
         store
             .prepare("a", "reuse", FileOperation::Replace, "tracked.txt")
@@ -1126,7 +1089,7 @@ mod tests {
         assert_eq!(version.previous, previous);
         assert_eq!(version.content_dependencies, dependencies);
         assert_eq!(store.current("output.bin").unwrap().unwrap(), version);
-        assert_eq!(store.history("output.bin").unwrap().len(), 2);
+        assert!(previous.is_some());
     }
 
     #[test]
@@ -1186,12 +1149,30 @@ mod tests {
             return;
         }
         let store = fixture.store(&Label::top());
-        assert!(store.snapshot().unwrap().is_empty());
+        assert!(store.current("tracked.txt").unwrap().is_none());
         assert!(matches!(
             store.prepare("a", "sealed", FileOperation::Read, "sealed.bin"),
             Err(FileStoreError::Io(_))
         ));
         store.prepare("a", "other", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn a_path_whose_parent_cannot_be_inspected_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let locked = fixture.workspace.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("file.txt"), "hidden").unwrap();
+        let store = fixture.store(&Label::top());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let inspectable = fs::symlink_metadata(locked.join("file.txt")).is_ok();
+        let lookup = store.current("locked/file.txt");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if inspectable {
+            return;
+        }
+        assert!(matches!(lookup, Err(FileStoreError::Io(_))));
     }
 
     #[test]
@@ -1212,7 +1193,6 @@ mod tests {
             store.prepare("a", "again", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::DigestMismatch)
         ));
-        assert_eq!(store.drifted().unwrap().len(), 1);
     }
 
     #[test]
