@@ -576,8 +576,10 @@ pub enum ConfigError {
     SelectorDeclaration(Box<appa_policy::ConfigError>),
     #[error("included config {path} uses policy version {found}, but the root uses {root}")]
     IncludedVersion { path: String, root: i64, found: i64 },
-    #[error("included config {path} repeats [externals.jev], which a deployment declares once")]
-    DuplicateJevProfile { path: String },
+    #[error("included config {path} repeats [externals.jev] field {field:?}, which a deployment declares once")]
+    DuplicateJevProfile { path: String, field: String },
+    #[error("[externals.jev] names no token_env: the root config or a battery must name the key")]
+    MissingJevKey,
     #[error("included config {path} repeats [externals.{section}] entry {name:?}")]
     DuplicateExternal {
         path: String,
@@ -925,7 +927,7 @@ struct RawLlm {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawJev {
-    token_env: String,
+    token_env: Option<String>,
     timeout_ms: Option<u64>,
     max_concurrent: Option<u32>,
 }
@@ -1729,13 +1731,28 @@ fn compose_include(
     for (section_name, entries) in included_externals {
         // The one profile a fragment may carry: the `jev` key reaches only the TypeSafe API,
         // so a battery that routes tools to Jev can ship the profile its annotator reads.
+        // The profile composes per field, so the root can tune the limits of a battery's.
         if section_name == JEV_SECTION {
-            if root_externals.contains_key(JEV_SECTION) {
-                return Err(ConfigError::DuplicateJevProfile {
-                    path: include_path.display().to_string(),
-                });
+            let fields = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
+                path: include_path.display().to_string(),
+                field: section_name.clone(),
+            })?;
+            let destination = root_externals
+                .entry(JEV_SECTION.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::RootField {
+                    field: format!("externals.{JEV_SECTION}"),
+                })?;
+            for (field, value) in fields {
+                if destination.contains_key(field) {
+                    return Err(ConfigError::DuplicateJevProfile {
+                        path: include_path.display().to_string(),
+                        field: field.clone(),
+                    });
+                }
+                destination.insert(field.clone(), value.clone());
             }
-            root_externals.insert(JEV_SECTION.to_string(), entries.clone());
             continue;
         }
         let Some(section) = Section::parse(section_name) else {
@@ -2103,11 +2120,12 @@ fn resolve_jev(
     lookup: &impl Fn(&str) -> Option<String>,
     operator_url: Option<String>,
 ) -> Result<JevProfile, ConfigError> {
-    if !raw.token_env.starts_with(RUNTIME_VARIABLE_PREFIX) {
+    let token_env = raw.token_env.ok_or(ConfigError::MissingJevKey)?;
+    if !token_env.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section: JEV_SECTION,
             name: JEV_SECTION.to_string(),
-            var: raw.token_env,
+            var: token_env,
         });
     }
     let url = match operator_url {
@@ -2128,7 +2146,7 @@ fn resolve_jev(
     }
     Ok(JevProfile {
         url,
-        key: ProfileKey::read(raw.token_env, lookup),
+        key: ProfileKey::read(token_env, lookup),
         limits,
     })
 }
@@ -4113,7 +4131,7 @@ mod tests {
         }
 
         let raw = || RawJev {
-            token_env: JEV_KEY.to_string(),
+            token_env: Some(JEV_KEY.to_string()),
             timeout_ms: None,
             max_concurrent: None,
         };
@@ -4173,6 +4191,31 @@ mod tests {
             Config::load(&root),
             Err(ConfigError::DuplicateJevProfile { .. })
         ));
+    }
+
+    #[test]
+    fn the_root_tunes_the_limits_of_a_battery_jev_profile() {
+        let battery = HostedBattery {
+            name: "jev",
+            policy: "[policy]\nversion = 2\n[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
+            token_env: &[JEV_KEY],
+        };
+        let limits = format!("{HOSTED_ROOT}[externals.jev]\ntimeout_ms = 3000\nmax_concurrent = 4\n");
+        let tuned = hosted_composed(&limits, &[battery])
+            .expect("the root's limits compose with the battery's key")
+            .externals
+            .jev
+            .expect("the profile is declared");
+        assert!(matches!(&tuned.key, ProfileKey::Unset { var } if var == JEV_KEY));
+        assert_eq!(tuned.limits.timeout, Duration::from_millis(3000));
+        assert_eq!(tuned.limits.max_concurrent, 4);
+
+        let keyed = format!("{HOSTED_ROOT}[externals.jev]\ntoken_env = \"{JEV_KEY}\"\n");
+        assert!(matches!(
+            hosted_composed(&keyed, &[battery]),
+            Err(ConfigError::DuplicateJevProfile { field, .. }) if field == "token_env"
+        ));
+        assert!(matches!(hosted_composed(&limits, &[]), Err(ConfigError::MissingJevKey)));
     }
 
     #[test]

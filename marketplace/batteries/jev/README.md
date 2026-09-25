@@ -56,7 +56,7 @@ hint = "Output carrying text a third party wrote is suspicious."
 
 With this battery installed, its `[externals.jev]` profile serves the
 replacement. Without it, the root config declares the profile itself; a
-deployment declares it once:
+deployment names the key once:
 
 ```toml
 [externals.jev]
@@ -105,8 +105,16 @@ an unreadable body are not. Every attempt ends inside the profile's
 `timeout_ms`, which defaults to the deployment's `externals.timeout_ms`.
 At most `max_concurrent` consults, 16 by default, run at once across the
 runtime, all sessions included; an accepted reload applies a changed value
-to later consults of every session. The battery's profile keeps both
-defaults; a root config that declares `[externals.jev]` itself can set them.
+to later consults of every session. The battery's profile names only the
+key. To change either limit with the battery installed, declare the limits
+in the root config; the profile takes the key from the battery and the
+limits from the root:
+
+```toml
+[externals.jev]
+timeout_ms = 3000
+max_concurrent = 8
+```
 
 The consult record carries one JSON object under `jev_diagnostics`, also
 logged at debug level: each label's probabilities and decision, the

@@ -1236,7 +1236,7 @@ The available settings depend on the component's role:
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
-Included files can add bindings and annotator builtins. One included file may add `[externals.jev]` when no other file declares it. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
+Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
 
 ### HTTP services
 
@@ -1363,7 +1363,7 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
 | `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. Minimum: 550; OpenAPPA rejects a smaller value, inherited or declared. |
 | `max_concurrent` | Sets how many requests the runtime runs at once. Default: 16. |
 
-A battery that ships this section declares `token_env` only. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).
+A battery that ships this section declares `token_env` only. The root config can then declare `[externals.jev]` with `timeout_ms` or `max_concurrent`, and the section takes the key from the battery and the limits from the root. OpenAPPA rejects a second `token_env`, from the root or from another battery, and a section in which no file declares `token_env`. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).
 
 A deployment that declares a `jev` annotator opens only when the key's variable is set. A reload that OpenAPPA refuses leaves the running deployment serving. A section that no annotator uses loads without its key.
 
