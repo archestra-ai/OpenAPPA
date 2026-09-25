@@ -166,7 +166,7 @@ impl FileStore {
             ));
         }
         let relative = validated_relative(&self.workspace, path)?;
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -226,7 +226,7 @@ impl FileStore {
         let source_absolute = self.workspace.join(&source);
         let destination_absolute = self.workspace.join(&destination);
 
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -288,7 +288,7 @@ impl FileStore {
         if inputs.len() > MAX_PROCESS_INPUTS {
             return Err(FileStoreError::InvalidPath("too many process inputs".into()));
         }
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
@@ -336,7 +336,7 @@ impl FileStore {
         dispatch: &str,
         output_label: &Label,
     ) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let reservation = matching_reservation_mut(&mut state, actor, call_key)?;
         if reservation.bound_dispatch.is_some() {
             return Err(FileStoreError::AlreadyBound);
@@ -347,7 +347,7 @@ impl FileStore {
     }
 
     pub fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if matching_reservation(&state, actor, call_key)?.bound_dispatch.is_some() {
             return Err(FileStoreError::AlreadyBound);
         }
@@ -356,7 +356,7 @@ impl FileStore {
     }
 
     pub fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let key = (actor.to_owned(), call_key.to_owned());
         if let Some(receipt) = state.receipts.get(&key) {
             return Ok(receipt.clone());
@@ -478,7 +478,7 @@ impl FileStore {
     /// whose report was lost, so anything else keeps the reservation: a workspace that moved
     /// is never released by guessing here.
     pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let Some(reservation) = state.reservation.as_ref() else {
             return Ok(AbandonOutcome::Absent);
         };
@@ -496,7 +496,7 @@ impl FileStore {
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
     pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(state
             .reservation
             .as_ref()
@@ -506,7 +506,7 @@ impl FileStore {
 
     /// The live reservation, if any. One workspace holds at most one.
     pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(state.reservation.clone())
     }
 
@@ -517,14 +517,14 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(current_state(&state, &relative))
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>, FileStoreError> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
-            .map_err(|_| FileStoreError::Corrupt("file store lock poisoned".into()))
+            .expect("the file store mutex is never poisoned: no panics under the lock")
     }
 }
 fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
