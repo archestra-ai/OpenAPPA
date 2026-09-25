@@ -131,6 +131,7 @@ fn a_failure_at_the_start_puts_the_previous_profile_back() {
         .expect("appa activates");
 
     assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("deliberate fake starter failure"));
     assert_eq!(Installed::of(&fixture), before);
     assert!(!fixture.deployed_binary().with_extension("prev").exists());
     assert!(
