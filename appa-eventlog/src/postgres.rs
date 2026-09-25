@@ -109,6 +109,7 @@ impl Worker {
                     SELECT key, root FROM openappa_host_keys LIMIT 0;
                     SET lock_timeout = '30s'; SET statement_timeout = '60s'",
                     )?;
+                    check_receipt_keys(&mut client)?;
                     Ok(client)
                 };
                 match connect() {
@@ -822,6 +823,45 @@ fn read_offer_owner(client: &mut Client, key: &OfferOwnerKey) -> Result<Option<O
         tool: row.get(6),
         spelling: row.get(7),
     }))
+}
+
+/// The primary key each receipt table must carry, column for column. A host on another key
+/// would let one organization's receipt collide with another's, so its store refuses to open.
+const RECEIPT_KEYS: [(&str, &[&str]); 2] = [
+    (
+        "openappa_operations",
+        &["organization_id", "session_id", "operation_id"],
+    ),
+    (
+        "openappa_processed_results",
+        &["organization_id", "session_id", "tool_call_id"],
+    ),
+];
+
+fn check_receipt_keys(client: &mut Client) -> Result<(), PostgresError> {
+    for (table, expected) in RECEIPT_KEYS {
+        let found: Vec<String> = client
+            .query(
+                "SELECT a.attname::text \
+                 FROM pg_constraint c \
+                 CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, position) \
+                 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+                 WHERE c.contype = 'p' AND c.conrelid = to_regclass($1) \
+                 ORDER BY k.position",
+                &[&table],
+            )?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if found != expected {
+            return Err(PostgresError(format!(
+                "incompatible host migration: {table} has primary key ({}), expected ({})",
+                found.join(", "),
+                expected.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn offer_owner_lock(organization_id: &str, offer_id: &str) -> String {

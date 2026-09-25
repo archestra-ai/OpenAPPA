@@ -2351,6 +2351,65 @@ mod tests {
         forget_postgres_roots(&store, vec![root, created]);
     }
 
+    /// A host whose receipt tables are keyed without the organization, or with its columns in
+    /// another order, refuses to open rather than let organizations collide on a receipt.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_refuses_a_host_whose_receipt_keys_omit_the_organization() {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let fixture = include_str!("../tests/fixtures/host_schema.sql");
+        let unique = tempfile::tempdir().expect("a unique schema name exists");
+        let suffix: String = unique
+            .path()
+            .display()
+            .to_string()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_lowercase();
+        let hosts = [
+            ("current", fixture.to_owned(), true),
+            (
+                "unscoped",
+                fixture
+                    .replace(
+                        "(organization_id, session_id, operation_id)",
+                        "(session_id, operation_id)",
+                    )
+                    .replace(
+                        "(organization_id, session_id, tool_call_id)",
+                        "(session_id, tool_call_id)",
+                    ),
+                false,
+            ),
+            (
+                "reordered",
+                fixture.replace(
+                    "(organization_id, session_id, tool_call_id)",
+                    "(session_id, organization_id, tool_call_id)",
+                ),
+                false,
+            ),
+        ];
+        let mut admin = ::postgres::Client::connect(&url, ::postgres::NoTls).expect("the admin connection opens");
+        for (name, ddl, opens) in hosts {
+            let schema = format!("appa_probe_{name}_{suffix}");
+            admin
+                .batch_execute(&format!("CREATE SCHEMA {schema}; SET search_path TO {schema}; {ddl}"))
+                .expect("the probe schema installs");
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let opened = LogStore::open(Backend::Postgres {
+                url: format!("{url}{separator}options=-c%20search_path%3D{schema}"),
+                max_connections: std::num::NonZeroUsize::new(1).expect("a pool holds a connection"),
+            });
+            admin
+                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE; RESET search_path"))
+                .expect("the probe schema drops");
+            assert_eq!(opened.is_ok(), opens, "{name}");
+        }
+    }
+
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
