@@ -294,7 +294,7 @@ mod tests {
     fn a_refused_address_falls_through_to_the_next_the_authority_resolves_to() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
         let live = listening.local_addr().expect("the listener has an address");
-        let vacated = std::net::TcpListener::bind("127.0.0.2:0").expect("a second loopback port binds");
+        let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a second loopback port binds");
         let closed = vacated.local_addr().expect("the listener has an address");
         drop(vacated);
 

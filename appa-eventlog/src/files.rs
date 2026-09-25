@@ -625,14 +625,23 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
 }
 fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStoreError> {
     let supplied = Path::new(input);
-    let joined = if supplied.is_absolute() {
-        supplied.to_path_buf()
-    } else {
-        workspace.join(supplied)
+    let stripped = match supplied.is_absolute() {
+        false => supplied,
+        true if supplied.components().any(|c| c == Component::ParentDir) => {
+            return Err(FileStoreError::InvalidPath(input.into()));
+        }
+        // The harness may spell the workspace through a symlinked ancestor (macOS `/var`,
+        // `/tmp`); the shortest ancestor that is the canonical workspace anchors the path.
+        true => {
+            let mut ancestors: Vec<&Path> = supplied.ancestors().collect();
+            ancestors.reverse();
+            ancestors
+                .into_iter()
+                .find(|ancestor| fs::canonicalize(ancestor).is_ok_and(|canonical| canonical == workspace))
+                .and_then(|anchor| supplied.strip_prefix(anchor).ok())
+                .ok_or_else(|| FileStoreError::InvalidPath(input.into()))?
+        }
     };
-    let stripped = joined
-        .strip_prefix(workspace)
-        .map_err(|_| FileStoreError::InvalidPath(input.into()))?;
     if stripped.as_os_str().is_empty() || stripped.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(FileStoreError::InvalidPath(input.into()));
     }
@@ -954,6 +963,32 @@ mod tests {
             store.prepare("b", "next", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
         ));
+    }
+
+    #[test]
+    fn absolute_paths_through_a_symlinked_workspace_alias_resolve_to_the_workspace() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        let alias = fixture._root.path().join("alias");
+        std::os::unix::fs::symlink(&fixture.workspace, &alias).unwrap();
+        std::os::unix::fs::symlink(".", fixture.workspace.join("inner")).unwrap();
+        let absolute = |path: PathBuf| path.to_str().unwrap().to_string();
+
+        let pin = store
+            .prepare("a", "alias", FileOperation::Read, &absolute(alias.join("tracked.txt")))
+            .unwrap();
+        assert_eq!(pin.path, "tracked.txt");
+        store.cancel("a", "alias").unwrap();
+        for rejected in [
+            alias.join("inner/tracked.txt"),
+            alias.join("../workspace/tracked.txt"),
+            fixture._root.path().join("tracked.txt"),
+        ] {
+            assert!(matches!(
+                store.prepare("a", "rejected", FileOperation::Read, &absolute(rejected)),
+                Err(FileStoreError::InvalidPath(_))
+            ));
+        }
     }
 
     #[test]
