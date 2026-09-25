@@ -843,7 +843,10 @@ impl PostgresStore {
         let key = key.map(str::to_owned);
         let conflict = self.with_tx(Some(root.clone()), move |client| {
             let current = client
-                .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&root])?
+                .query_one(
+                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
+                    &[&root],
+                )?
                 .get::<_, i64>(0) as u64;
             if current != basis {
                 return Ok(Some(current));

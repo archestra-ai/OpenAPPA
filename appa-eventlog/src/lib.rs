@@ -919,12 +919,12 @@ fn insert_batch(
 }
 
 fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM logs WHERE root = ?1",
+    let next: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(seq) + 1, 0) FROM logs WHERE root = ?1",
         params![root.as_str()],
         |row| row.get(0),
     )?;
-    Ok(count as u64)
+    Ok(next as u64)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1506,6 +1506,32 @@ mod tests {
             .expect("the middle row deletes");
         let error = store.log(&root()).expect_err("a gapped log does not read");
         assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+    }
+
+    /// The position is one past the highest stored `seq`, not the row count, so the two
+    /// differ only on a damaged log.
+    #[test]
+    fn the_append_position_follows_the_highest_stored_seq() {
+        let store = opened();
+        for _ in 0..2 {
+            let log = store.log(&root()).expect("the log reads");
+            store.append(&log, &punctuation()).expect("the append lands");
+        }
+        let log = store.log(&root()).expect("the log reads");
+        store
+            .lock()
+            .execute("DELETE FROM logs WHERE seq = 1", [])
+            .expect("the middle row deletes");
+        store.append(&log, &punctuation()).expect("the append lands at seq 3");
+        let seqs = store
+            .lock()
+            .prepare("SELECT seq FROM logs ORDER BY seq")
+            .expect("the query prepares")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("the seqs read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every seq reads");
+        assert_eq!(seqs, [0, 2, 3]);
     }
 
     #[test]
@@ -2331,7 +2357,7 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
-    fn postgres_a_log_with_a_sequence_gap_refuses_the_read() {
+    fn postgres_a_gapped_log_refuses_the_read_and_appends_after_its_highest_seq() {
         let store = postgres_store(1);
         let root = postgres_root(&store, "gapped");
         let boundary = vec![Fact::Boundary {
@@ -2342,6 +2368,7 @@ mod tests {
             let log = store.log(&root).expect("the log reads");
             store.append(&log, &boundary).expect("the append lands");
         }
+        let before = store.log(&root).expect("the log reads");
         let gapped = root.as_str().to_owned();
         store
             .lease()
@@ -2355,6 +2382,22 @@ mod tests {
             .expect("the middle row deletes");
         let error = store.log(&root).expect_err("a gapped log does not read");
         assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+        store.append(&before, &boundary).expect("the append lands at seq 3");
+        let listed = root.as_str().to_owned();
+        let seqs: Vec<i64> = store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                Ok(client
+                    .query("SELECT seq FROM openappa_events WHERE root=$1 ORDER BY seq", &[&listed])?
+                    .into_iter()
+                    .map(|row| row.get(0))
+                    .collect())
+            })
+            .expect("the seqs read");
+        assert_eq!(seqs, [0, 2, 3]);
         forget_postgres_roots(&store, vec![root]);
     }
 
