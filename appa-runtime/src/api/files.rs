@@ -73,10 +73,10 @@
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
 use appa_engine::value::{FileBasis, FileSource};
+#[cfg(feature = "daemon")]
+use appa_eventlog::files::beneath::{self, Entry};
 use appa_eventlog::files::{FileOperation, FilePin, FileStore};
 use std::collections::HashMap;
-#[cfg(feature = "daemon")]
-use std::io::Write;
 #[cfg(feature = "daemon")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -246,13 +246,12 @@ pub(super) fn perform(
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
     let (operation, _) = operation(call).map_err(|error| error.to_string())?;
-    let path = workspace.join(&pin.path);
     match operation {
         FileOperation::Process => process::perform(files, workspace, call, pin),
-        FileOperation::Read => std::fs::read_to_string(path).map_err(|error| error.to_string()),
+        FileOperation::Read => read(workspace, &pin.path).map_err(|error| error.to_string()),
         FileOperation::Replace => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
-            replace(&path, &args.content)
+            replace(workspace, &pin.path, &args.content)
                 .map(|()| "file written".into())
                 .map_err(|error| error.to_string())
         }
@@ -261,30 +260,29 @@ pub(super) fn perform(
             if args.old_string.is_empty() {
                 return Err("old_string must not be empty".into());
             }
-            let content = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            let content = read(workspace, &pin.path).map_err(|error| error.to_string())?;
             if content.matches(&args.old_string).count() != 1 {
                 return Err("old_string must match exactly once".into());
             }
-            replace(&path, &content.replacen(&args.old_string, &args.new_string, 1))
-                .map(|()| "file edited".into())
-                .map_err(|error| error.to_string())
+            replace(
+                workspace,
+                &pin.path,
+                &content.replacen(&args.old_string, &args.new_string, 1),
+            )
+            .map(|()| "file edited".into())
+            .map_err(|error| error.to_string())
         }
         FileOperation::Copy | FileOperation::Move => {
             let source = pin.source.as_ref().ok_or("the transfer pin carries no source")?;
             let result = (|| -> std::io::Result<()> {
-                let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
-                std::fs::create_dir_all(parent)?;
-                let source = workspace.join(&source.path);
+                let destination = Entry::create(workspace, &pin.path)?;
                 if operation == FileOperation::Move {
-                    std::fs::rename(source, &path)?;
+                    Entry::locate(workspace, &source.path)?
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
+                        .rename_to(&destination)
                 } else {
-                    let mut input = std::fs::File::open(source)?;
-                    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-                    std::io::copy(&mut input, &mut staged)?;
-                    staged.as_file().sync_all()?;
-                    staged.persist(&path).map_err(|error| error.error)?;
+                    destination.publish(&mut existing(workspace, &source.path)?)
                 }
-                Ok(())
             })();
             // No source-derived error body is admitted at the acknowledgement Label.
             result
@@ -295,16 +293,18 @@ pub(super) fn perform(
 }
 
 #[cfg(feature = "daemon")]
-fn replace(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing parent directory"))?;
-    std::fs::create_dir_all(parent)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    staged.write_all(content.as_bytes())?;
-    staged.as_file().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
-    Ok(())
+fn replace(workspace: &Path, relative: &str, content: &str) -> std::io::Result<()> {
+    Entry::create(workspace, relative)?.publish(&mut content.as_bytes())
+}
+
+#[cfg(feature = "daemon")]
+fn existing(workspace: &Path, relative: &str) -> std::io::Result<std::fs::File> {
+    beneath::open(workspace, relative)?.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+#[cfg(feature = "daemon")]
+fn read(workspace: &Path, relative: &str) -> std::io::Result<String> {
+    std::io::read_to_string(existing(workspace, relative)?)
 }
 
 /// Where one constrained file launcher's runtime lives: the paths a private
@@ -1248,6 +1248,48 @@ else:
             "pinned content"
         );
         assert!(!dir.path().join("work/elsewhere.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn managed_files_never_follow_a_parent_swapped_for_a_symlink() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let files = runtime.inner.shared.files.as_ref().unwrap();
+        let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
+        files
+            .bind(&TrajectoryId("parent-swap".into()), workspace.to_str().unwrap())
+            .unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("target.txt"), "outside bytes").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("sub")).unwrap();
+        let pin = |operation| FilePin {
+            path: "sub/target.txt".into(),
+            operation,
+            predecessor_version: None,
+            predecessor_label: None,
+            predecessor_digest: None,
+            source: None,
+            inputs: vec![],
+        };
+        let write = ProposedCall {
+            tool: format!("{PREFIX}appa_write_file"),
+            arguments: super::super::session::raw(
+                serde_json::json!({"file_path": "sub/target.txt", "content": "escaped"}),
+            ),
+            cwd: None,
+        };
+        let read = ProposedCall {
+            tool: format!("{PREFIX}appa_read_file"),
+            arguments: super::super::session::raw(serde_json::json!({"file_path": "sub/target.txt"})),
+            cwd: None,
+        };
+        assert!(perform(files, &workspace, &write, &pin(FileOperation::Replace)).is_err());
+        assert!(perform(files, &workspace, &read, &pin(FileOperation::Read)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("target.txt")).unwrap(),
+            "outside bytes"
+        );
     }
 
     #[tokio::test]

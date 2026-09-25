@@ -222,6 +222,7 @@ dependencies = [
  "postgres",
  "postgres-native-tls",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

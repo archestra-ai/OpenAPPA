@@ -11,7 +11,8 @@
 //! Native Claude tools, inference traffic, resource exhaustion and timing flows remain outside
 //! this subprocess contract. No sanitizer or declassification occurs here.
 
-use super::{FileTracking, ProcessArgs, ProposedCall};
+use super::{FileTracking, ProcessArgs, ProposedCall, existing};
+use appa_eventlog::files::beneath::Entry;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -46,11 +47,9 @@ pub(super) fn perform(
         fs::create_dir(job.path().join("inputs"))?;
         fs::create_dir(job.path().join("output"))?;
         for input in &pin.inputs {
-            // The pinned paths were validated before dispatch. There are no outside writers.
-            let source = workspace.join(&input.path);
             let target = job.path().join("inputs").join(&input.path);
             fs::create_dir_all(target.parent().expect("input paths have the staging parent"))?;
-            fs::copy(source, target)?;
+            std::io::copy(&mut existing(workspace, &input.path)?, &mut fs::File::create(target)?)?;
         }
         fs::write(
             job.path().join("request.json"),
@@ -83,12 +82,9 @@ pub(super) fn perform(
     if response.result.exit_code != 0 {
         return Err(text);
     }
-    publish(
-        &job.path().join("output/result"),
-        &workspace.join(&pin.path),
-        MAX_OUTPUT_BYTES,
-    )
-    .map_err(|error| format!("isolated output not published: {error}"))?;
+    Entry::create(workspace, &pin.path)
+        .and_then(|destination| publish(&job.path().join("output/result"), &destination, MAX_OUTPUT_BYTES))
+        .map_err(|error| format!("isolated output not published: {error}"))?;
     Ok(text)
 }
 
@@ -96,7 +92,7 @@ pub(super) fn perform(
 /// RLIMIT_FSIZE, which is the same ceiling; this refuses the bytes before they are copied.
 const MAX_OUTPUT_BYTES: u64 = 64 << 20;
 
-fn publish(source: &Path, destination: &Path, limit: u64) -> std::io::Result<()> {
+fn publish(source: &Path, destination: &Entry, limit: u64) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() {
         return Err(std::io::Error::other("output must be a regular file"));
@@ -111,16 +107,7 @@ fn publish(source: &Path, destination: &Path, limit: u64) -> std::io::Result<()>
             return Err(std::io::Error::other("linked output is not supported"));
         }
     }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing output parent"))?;
-    fs::create_dir_all(parent)?;
-    let mut input = fs::File::open(source)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    std::io::copy(&mut input, &mut staged)?;
-    staged.as_file().sync_all()?;
-    staged.persist(destination).map_err(|error| error.error)?;
-    Ok(())
+    destination.publish(&mut fs::File::open(source)?)
 }
 
 #[cfg(all(test, unix))]
@@ -135,21 +122,22 @@ mod tests {
         let destination = dir.path().join("destination");
         fs::write(&input, b"private bytes").unwrap();
         fs::write(&destination, b"old bytes").unwrap();
+        let target = Entry::create(dir.path(), "destination").unwrap();
         std::os::unix::fs::symlink(&input, &output).unwrap();
-        assert!(publish(&output, &destination, MAX_OUTPUT_BYTES).is_err());
+        assert!(publish(&output, &target, MAX_OUTPUT_BYTES).is_err());
         fs::remove_file(&output).unwrap();
         fs::hard_link(&input, &output).unwrap();
-        assert!(publish(&output, &destination, MAX_OUTPUT_BYTES).is_err());
+        assert!(publish(&output, &target, MAX_OUTPUT_BYTES).is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
         fs::remove_file(&output).unwrap();
         // The ceiling is refused before any byte is copied, and the destination is untouched.
         fs::write(&output, b"four").unwrap();
-        assert!(publish(&output, &destination, 3).is_err());
+        assert!(publish(&output, &target, 3).is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
-        assert!(publish(&output, &destination, 4).is_ok());
+        assert!(publish(&output, &target, 4).is_ok());
         assert_eq!(fs::read(&destination).unwrap(), b"four");
         fs::write(&output, [0, 255, 17]).unwrap();
-        publish(&output, &destination, MAX_OUTPUT_BYTES).unwrap();
+        publish(&output, &target, MAX_OUTPUT_BYTES).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), [0, 255, 17]);
     }
 }
