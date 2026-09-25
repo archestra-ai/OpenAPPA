@@ -104,8 +104,7 @@ fn top_trust(chain: &TrustChain) -> Trust {
 impl RawTool {
     pub(crate) fn convert(mut self, chain: &TrustChain) -> Result<ToolDeclaration, ConfigError> {
         if let Some(server) = self.server.take() {
-            let boundary = self.name.find('(').unwrap_or(self.name.len());
-            let (name, selector) = self.name.split_at(boundary);
+            let (name, selector) = split_selector(&self.name);
             let invalid = |reason: String| ConfigError::ToolServer {
                 tool: self.name.clone(),
                 reason,
@@ -118,12 +117,7 @@ impl RawTool {
             self.name = format!("{id}{selector}");
         }
         let ctx = || format!("tool {}", self.name);
-        if self.implementation.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "tool",
-                name: self.name,
-            });
-        }
+        refuse_inline_binding("tool", &self.name, self.implementation.as_ref())?;
         let parameters = match &self.parameters {
             Some(authored) => ToolParameters::compile(authored).map_err(|source| ConfigError::ToolParameters {
                 tool: self.name.clone(),
@@ -246,12 +240,7 @@ impl RawRequires {
 
 impl RawAuthority {
     pub(crate) fn convert(self, chain: &TrustChain) -> Result<Authority, ConfigError> {
-        if self.implementation.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "authority",
-                name: self.name,
-            });
-        }
+        refuse_inline_binding("authority", &self.name, self.implementation.as_ref())?;
         let ctx = format!("authority {}", self.name);
         let mandate = self.permits.convert(chain, &ctx)?;
         Ok(Authority {
@@ -294,12 +283,7 @@ fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, Confi
 
 impl RawSanitizer {
     pub(crate) fn convert(self, chain: &TrustChain) -> Result<Sanitizer, ConfigError> {
-        if self.implementation.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "sanitizer",
-                name: self.name,
-            });
-        }
+        refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
         let on = parse_points(&self.on, &self.name)?;
         let transition = self.permits.convert(chain, &self.name)?;
         Ok(Sanitizer {
@@ -351,6 +335,25 @@ pub fn parse_delta(
         audience: audience.map(<[String]>::to_vec),
     }
     .convert(chain, context)
+}
+
+pub(crate) fn refuse_inline_binding(
+    kind: &'static str,
+    name: &str,
+    implementation: Option<&toml::Value>,
+) -> Result<(), ConfigError> {
+    match implementation {
+        Some(_) => Err(ConfigError::ForbiddenInlineBinding {
+            kind,
+            name: name.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// A tool name split before its argument selector, if any: `send(to)` → (`send`, `(to)`).
+pub(crate) fn split_selector(name: &str) -> (&str, &str) {
+    name.split_at(name.find('(').unwrap_or(name.len()))
 }
 
 pub(crate) fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, ConfigError> {

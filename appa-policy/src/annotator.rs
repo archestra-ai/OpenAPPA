@@ -6,7 +6,7 @@ use appa_engine::fact::EffectKind;
 use appa_engine::names::{AnnotatorName, MarkName};
 use appa_engine::registry::{AnnotatorDeclaration, LoadError, MAX_HINT_CHARS, TrustChain};
 
-use crate::convert::{parse_annotator_audiences, parse_trust};
+use crate::convert::{parse_annotator_audiences, parse_trust, refuse_inline_binding};
 use crate::error::ConfigError;
 use crate::raw::RawAnnotator;
 
@@ -138,12 +138,7 @@ pub(crate) fn compile_annotators(
             return Err(ConfigError::BadAnnotatorName(annotator.name));
         }
         let name = AnnotatorName::new(annotator.name);
-        if annotator.implementation.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "annotator",
-                name: name.as_str().to_string(),
-            });
-        }
+        refuse_inline_binding("annotator", name.as_str(), annotator.implementation.as_ref())?;
         let builtin = match annotator.builtin {
             Some(builtin) => match AnnotatorBuiltin::parse(&builtin) {
                 Some(builtin) => Some(builtin),

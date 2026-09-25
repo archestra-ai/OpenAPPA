@@ -10,7 +10,7 @@ use appa_engine::registry::{AudienceVocabulary, PlannerCap, Registry, RegistryCo
 
 use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
-use crate::convert::default_boundary_label;
+use crate::convert::{default_boundary_label, split_selector};
 use crate::error::ConfigError;
 use crate::raw::{RawConfig, RawDeployment, RawTool};
 
@@ -198,21 +198,12 @@ fn compile_tools(
     let mut tools = Vec::new();
     let mut qualified = QualifiedNames::new();
     for t in raw {
-        let authored = t
-            .name
-            .split('(')
-            .next()
-            .expect("split always yields one entry")
-            .to_string();
+        let authored = split_selector(&t.name).0.to_string();
         let tool = t.convert(trust_chain)?;
-        qualified.entry(authored).or_default().insert(
-            tool.name()
-                .as_str()
-                .split('(')
-                .next()
-                .expect("split always yields one entry")
-                .to_string(),
-        );
+        qualified
+            .entry(authored)
+            .or_default()
+            .insert(split_selector(tool.name().as_str()).0.to_string());
         tools.push(tool);
     }
     Ok((tools, qualified))
