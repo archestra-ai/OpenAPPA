@@ -6,10 +6,10 @@
 //!
 //! The call's name, description and arguments leave for the TypeSafe API. Redaction first
 //! is best effort: well-known token and key shapes, private-key blocks, `Authorization`
-//! header values, and the values of fields named for a secret; long text is then cut. An
-//! unsure label moves to its safer neighbour instead of refusing the call: the narrower
-//! result audience, the lower trust rank, the wider required audience. A label the mandate does not admit, a consult that is not a
-//! complete call, and every provider failure are no answer.
+//! header values, and the values of fields named for a secret; long text is then cut. Each
+//! label is Jev's likeliest option, and a tie goes to the safer one: the narrower result
+//! audience, the lower trust rank, the wider required audience. A label the mandate does not
+//! admit, a consult that is not a complete call, and every provider failure are no answer.
 //!
 //! A new connection to the API lands on a slow backend often enough to matter, and stays
 //! slow for its whole life. So an attempt with no answer after its hedge delay is hedged by
@@ -40,8 +40,6 @@ const DIAGNOSTICS_VERSION: u32 = 1;
 
 /// Each argument string is cut to this many characters before it leaves.
 const MAX_VALUE_CHARS: usize = 4000;
-/// Below this probability a choice moves to the safer of its two likeliest options.
-const CONFIDENCE_FLOOR: f64 = 0.6;
 /// At or above this probability the call requires the highest trust rank.
 const REQUIRES_TRUSTED_CUTOFF: f64 = 0.5;
 
@@ -566,8 +564,8 @@ const REQUIRED_AUDIENCES: [(RequiredAudience, &str); 3] = [
     (RequiredAudience::None, "none"),
 ];
 
-/// Each label's probabilities as Jev answered them, its threshold, and the decision, in the
-/// order the labels settle; a label past the first one Jev answered badly is absent.
+/// Each label's probabilities as Jev answered them, the cutoff of `requires_trusted`, and the
+/// decision, in the order the labels settle; a label past the first one Jev answered badly is absent.
 #[derive(Debug, Default, Serialize)]
 struct LabelTrace {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -583,7 +581,6 @@ struct LabelTrace {
 #[derive(Debug, Serialize)]
 struct ChoiceTrace<O> {
     probabilities: serde_json::Value,
-    threshold: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<O>,
 }
@@ -601,8 +598,7 @@ fn probability(value: &serde_json::Value) -> Option<f64> {
     value.as_f64().filter(|p| p.is_finite() && (0.0..=1.0).contains(p))
 }
 
-/// The option Jev chose, or the safer of its two likeliest when it is unsure. `options` are
-/// safest first; the sort is stable, so a tie ranks the safer option first.
+/// The option Jev finds likeliest. `options` are safest first, and a tie goes to the safer.
 fn settled_choice<O: Copy>(options: &[(O, &str)], probabilities: &serde_json::Value) -> Option<O> {
     let probabilities = probabilities.as_object()?;
     let same_options =
@@ -610,18 +606,17 @@ fn settled_choice<O: Copy>(options: &[(O, &str)], probabilities: &serde_json::Va
     if !same_options {
         return None;
     }
-    let mut ranked = options
+    let weighed = options
         .iter()
-        .enumerate()
-        .map(|(safety, (_, name))| Some((safety, probability(&probabilities[*name])?)))
-        .collect::<Option<Vec<(usize, f64)>>>()?;
-    ranked.sort_by(|(_, left), (_, right)| right.total_cmp(left));
-    let chosen = match ranked.as_slice() {
-        [(top, p), ..] if *p >= CONFIDENCE_FLOOR => *top,
-        [(first, _), (second, _), ..] => (*first).min(*second),
-        _ => return None,
-    };
-    Some(options[chosen].0)
+        .map(|(option, name)| Some((*option, probability(&probabilities[*name])?)))
+        .collect::<Option<Vec<(O, f64)>>>()?;
+    weighed
+        .into_iter()
+        .reduce(|best, next| match next.1 > best.1 {
+            true => next,
+            false => best,
+        })
+        .map(|(option, _)| option)
 }
 
 fn choice<O: Copy>(
@@ -638,7 +633,6 @@ fn choice<O: Copy>(
     let decision = settled_choice(options, &probabilities);
     *trace = Some(ChoiceTrace {
         probabilities,
-        threshold: CONFIDENCE_FLOOR,
         decision,
     });
     decision
@@ -826,7 +820,7 @@ mod tests {
     /// What [`jev_answers`] annotates under the fixture mandate.
     fn jev_annotation() -> serde_json::Value {
         json!({
-            "delta": {"audience": ["internal"]},
+            "delta": {},
             "requires": {"history": [], "attention": [], "audience": {"contains": "public"}, "trust": "trusted"},
             "emits": [],
         })
@@ -1013,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn a_confident_label_stands_and_an_unsure_one_moves_to_the_safer_of_its_two_likeliest() {
+    fn each_label_is_its_likeliest_option_however_unsure() {
         let confident = json!({
             "delta_audience": {"probabilities": {"self": 0.0, "internal": 0.1, "public": 0.9}},
             "delta_trust": {"probabilities": {"suspicious": 0.1, "trusted": 0.9}},
@@ -1038,9 +1032,9 @@ mod tests {
         assert_eq!(
             settle(unsure).0,
             Some(labels(
-                ResultAudience::Internal,
-                ResultTrust::Suspicious,
-                RequiredAudience::Public,
+                ResultAudience::Public,
+                ResultTrust::Trusted,
+                RequiredAudience::None,
                 true
             ))
         );
@@ -1052,11 +1046,10 @@ mod tests {
         );
     }
 
-    /// Equal probabilities rank safest first, so a tie never settles on the riskier option.
     #[test]
-    fn a_tie_ranks_the_safer_option_first() {
+    fn a_tie_settles_on_the_safer_option() {
         let tied = json!({
-            "delta_audience": {"probabilities": {"public": 0.4, "internal": 0.3, "self": 0.3}},
+            "delta_audience": {"probabilities": {"public": 0.4, "internal": 0.4, "self": 0.2}},
             "delta_trust": {"probabilities": {"trusted": 0.7, "suspicious": 0.7}},
             "requires_audience": {"probabilities": {"none": 0.2, "internal": 0.4, "public": 0.4}},
             "requires_trusted": {"noul": 0.0},
@@ -1064,11 +1057,38 @@ mod tests {
         assert_eq!(
             settle(tied).0,
             Some(labels(
-                ResultAudience::Self_,
+                ResultAudience::Internal,
                 ResultTrust::Suspicious,
                 RequiredAudience::Public,
                 false
             ))
+        );
+    }
+
+    fn delta_of(delta_audience: serde_json::Value) -> serde_json::Value {
+        let (settled, _) = settle(answers_with("delta_audience", json!({"probabilities": delta_audience})));
+        let settled = settled.expect("every label settles");
+        annotation(
+            &settled,
+            &declaration(&["suspicious", "trusted"], &["self", "internal"]),
+        )
+        .expect("the mandate admits every label")["delta"]
+            .clone()
+    }
+
+    #[test]
+    fn a_public_majority_leaves_the_result_audience_open() {
+        assert_eq!(
+            delta_of(json!({"public": 0.56, "internal": 0.4, "self": 0.04})),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn an_internal_majority_narrows_the_result_audience() {
+        assert_eq!(
+            delta_of(json!({"public": 0.3, "internal": 0.65, "self": 0.05})),
+            json!({"audience": ["internal"]})
         );
     }
 
@@ -1107,10 +1127,9 @@ mod tests {
             json!({
                 "delta_audience": {
                     "probabilities": jev_answers()["delta_audience"]["probabilities"],
-                    "threshold": 0.6,
-                    "decision": "internal",
+                    "decision": "public",
                 },
-                "delta_trust": {"probabilities": {"trusted": 1.0}, "threshold": 0.6},
+                "delta_trust": {"probabilities": {"trusted": 1.0}},
             }),
             "the trace stops at the first label Jev answered badly"
         );
