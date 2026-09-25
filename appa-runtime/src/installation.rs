@@ -243,6 +243,15 @@ pub struct Installation {
     _lock: File,
 }
 
+/// A child forked by any thread of this process shares the lock's open file
+/// description until its `exec` closes the descriptor; closing ours alone
+/// would leave the lock held that long. Unlocking releases it for every copy.
+impl Drop for Installation {
+    fn drop(&mut self) {
+        let _ = self._lock.unlock();
+    }
+}
+
 impl Installation {
     /// Read-only inspection does not create directories or acquire a mutation
     /// lock. Atomic selection publication gives readers a complete record.
@@ -1358,9 +1367,11 @@ mod tests {
         let first = Installation::open(&path).unwrap();
         assert!(matches!(Installation::open(&path), Err(InstallError::Busy(_))));
         let lock_path = first.state.join("install.lock");
+        let forked_child_copy = first._lock.try_clone().unwrap();
         drop(first);
         assert!(lock_path.is_file());
         assert!(Installation::open(&path).is_ok());
+        drop(forked_child_copy);
     }
 
     #[test]
