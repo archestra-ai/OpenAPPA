@@ -117,15 +117,24 @@ def git_target(words, directory):
             return None
     if unfollowable:
         raise Unfollowable(f"git {unfollowable} changes which repository a push reaches")
+    def destination(word):
+        if "://" in word or word.startswith("git@"):
+            return ("slug", named(word), directory)
+        return ("remote", named(word), directory)
+
+    # A positional repository wins over `--repo`, as in git itself.
+    repo = None
     arguments = iter(words[index + 1 :])
     for word in arguments:
-        if word in PUSH_OPTIONS_WITH_VALUE:
+        if word == "--repo":
+            repo = next(arguments, None)
+        elif word.startswith("--repo="):
+            repo = word.removeprefix("--repo=")
+        elif word in PUSH_OPTIONS_WITH_VALUE:
             next(arguments, None)
         elif not word.startswith("-"):
-            if "://" in word or word.startswith("git@"):
-                return ("slug", named(word), directory)
-            return ("remote", named(word), directory)
-    return ("default", None, directory)
+            return destination(word)
+    return destination(repo) if repo else ("default", None, directory)
 
 
 def gh_targets(words, environment, directory):

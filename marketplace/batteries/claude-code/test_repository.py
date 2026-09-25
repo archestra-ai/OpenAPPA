@@ -70,7 +70,10 @@ class RepositoryTargets(unittest.TestCase):
     def test_a_push_names_a_url_or_a_remote_in_its_directory(self):
         self.assertEqual(INPUT.repository_targets("git push https://github.com/acme/api.git main", None), slugs("acme/api"))
         self.assertEqual(INPUT.repository_targets("git push git@github.com:acme/api.git", None), slugs("acme/api"))
+        self.assertEqual(INPUT.repository_targets("git push --repo https://github.com/acme/api.git", None), slugs("acme/api"))
+        self.assertEqual(INPUT.repository_targets("git push --repo=git@github.com:acme/api.git", None), slugs("acme/api"))
         for command in (
+            "git push --repo upstream",
             "cd /w && git push -u upstream feat 2>&1 | tail -2",
             "  git push upstream",
             "git status\ngit push upstream",
