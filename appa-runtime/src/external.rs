@@ -1790,9 +1790,17 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         }
     }
 
+    /// How long a freshly written fixture script may take to start and act. Under a loaded
+    /// parallel suite its cold execs take seconds on macOS; this bounds a hang, not the
+    /// latency under test. Recording a pid and awaiting its end together stay under the
+    /// fixtures' `sleep 30`, so a descendant cannot pass by exiting on its own.
+    #[cfg(unix)]
+    const PROCESS_BUDGET: Duration = Duration::from_secs(10);
+
     #[cfg(unix)]
     async fn recorded_pid(path: &std::path::Path) -> i32 {
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + PROCESS_BUDGET;
+        while tokio::time::Instant::now() < deadline {
             if let Ok(value) = std::fs::read_to_string(path)
                 && let Ok(pid) = value.trim().parse()
             {
@@ -1811,7 +1819,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[cfg(unix)]
     async fn assert_process_gone(pid: i32) {
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + PROCESS_BUDGET;
+        while tokio::time::Instant::now() < deadline {
             if !process_exists(pid) {
                 return;
             }
@@ -1949,7 +1958,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let raw = run_claude_code(
             &claude_backend(command, 65_536),
             &prompt,
-            tokio::time::Instant::now() + Duration::from_millis(2000),
+            tokio::time::Instant::now() + PROCESS_BUDGET,
             None,
         )
         .await
