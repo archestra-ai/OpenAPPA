@@ -172,7 +172,7 @@ is then read by everyone who can act as that account.
 `APPA_PROVIDER_HUGGINGFACE_TOKEN`, which each binding's `token_env`
 forwards; when it is unset they read the token the Hugging Face CLI
 stored at `hf auth login` (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else
-`~/.cache/huggingface/token`). The install names the variable and this
+`$XDG_CACHE_HOME/huggingface/token`, `~/.cache` when unset). The install names the variable and this
 fallback after it includes the battery. A read token covers every read
 and the audience source; `hf_fs_write` and `create_repo` need a write
 token. Neither present, the script stops and names both fixes. The
