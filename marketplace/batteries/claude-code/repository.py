@@ -37,7 +37,8 @@ OPERATORS = "();<>&|\n"
 PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
 INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "busybox", "eval", "source", ".", "xargs"}
 GLOB = set("*?[")
-SETTERS = {"declare", "typeset", "local", "readonly", "read", "mapfile", "readarray", "getopts", "alias"}
+SETTERS = {"declare", "typeset", "local", "readonly", "read", "mapfile", "readarray", "getopts", "alias", "unset"}
+REMOTE_CHANGES = {"add", "set-url", "rename", "remove", "rm", "set-head"}
 PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
@@ -101,8 +102,15 @@ def git_target(words, directory):
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
         index += 1
-    if words[index : index + 1] != ["push"]:
-        return None
+    match words[index : index + 2]:
+        case ["config", *_]:
+            raise Unfollowable("git config changes where a later push goes")
+        case ["remote", change] if change in REMOTE_CHANGES:
+            raise Unfollowable(f"git remote {change} changes where a later push goes")
+        case ["push", *_]:
+            pass
+        case _:
+            return None
     if unfollowable:
         raise Unfollowable(f"git {unfollowable} changes which repository a push reaches")
     arguments = iter(words[index + 1 :])
@@ -126,6 +134,8 @@ def gh_targets(words, environment, directory):
     for index, word in enumerate(words):
         if word.startswith("--hostname"):
             raise Unfollowable("gh --hostname reaches a host other than github.com")
+        if ("$" in word or "`" in word) and (words[0] == "repo" or "repos/" in word or "github.com" in word):
+            raise Unfollowable(f"{word} is computed when the command runs")
         if word in ("--repo", "-R") and index + 1 < len(words):
             chosen.append(words[index + 1])
         elif word.startswith(("--repo=", "-R")) and word not in ("--repo", "-R"):
@@ -161,6 +171,8 @@ def repository_targets(command, cwd):
         if not words and exporting:
             exported = environment
             continue
+        if exporting:
+            raise Unfollowable(f"export {' '.join(words)} changes settings this input cannot follow")
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
             continue
@@ -179,7 +191,7 @@ def repository_targets(command, cwd):
                 raise Unfollowable(f"{' '.join(words)} moves to a directory this input cannot follow")
             case _ if program in INTERPRETERS:
                 raise Unfollowable(f"{program} runs commands this input cannot follow")
-            case _ if program in SETTERS or program == "printf" and "-v" in words:
+            case _ if program in SETTERS or program == "printf" and any(word.startswith("-v") for word in words):
                 raise Unfollowable(f"{program} sets a variable this input cannot follow")
             case _ if (
                 GLOB & set(program)

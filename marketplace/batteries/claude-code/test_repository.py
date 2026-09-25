@@ -93,6 +93,7 @@ class RepositoryTargets(unittest.TestCase):
             "gh api repos/{owner}/{repo}/pulls",
             'gh pr create --body "see https://github.com/acme/public"',
             "git -c color.ui=never status && git push",
+            "git remote -v && git push",
             "git commit -m \"$(cat <<'EOF'\nfix the parser\nEOF\n)\" && git push",
         ):
             self.assertEqual(INPUT.repository_targets(command, "/w"), [("default", None, "/w")], command)
@@ -123,6 +124,13 @@ class RepositoryTargets(unittest.TestCase):
             "GH_REPO=acme/secret; gh pr create",
             "declare -x GIT_DIR=/tmp/evil; git push origin",
             "printf -v GIT_DIR /tmp/evil; git push origin",
+            "printf -vGIT_DIR /tmp/evil; export GIT_DIR; git push origin",
+            "export GH_REPO=acme/private; unset GH_REPO; gh pr create",
+            "export GH_REPO=acme/private; export -n GH_REPO; gh pr create",
+            "gh repo view $REPO",
+            "gh api repos/$OWNER/api",
+            "git remote set-url origin https://github.com/acme/public.git && git push origin",
+            "git config url.https://github.com/acme/public.insteadOf origin && git push origin",
             "xargs git push",
             "git -c url.x.insteadOf=y push origin",
             "git --git-dir=/tmp/x push origin",
