@@ -17,8 +17,8 @@ input cannot follow — a shell, `eval`, `source` or subshell, `git -c`,
 an environment setting such as `GIT_DIR`, a computed program or target —
 and whatever else cannot be established answers `null` with a
 reason and a zero exit: the annotator then reads the finding, not a
-guess. Only a transport failure — a crash, a timeout — is a refused
-answer.
+guess. A `gh` timeout answers the same way; only a crash of this
+script is a refused answer.
 """
 
 import json
@@ -44,6 +44,7 @@ HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
 API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)")
+CHECKOUT_API_PATH = re.compile(r"^/?repos/\{owner\}/\{repo\}(?:/|$)")
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
 INVOCATION = re.compile(r"\b(git|gh)\s")
@@ -131,6 +132,13 @@ def gh_targets(words, environment, directory):
     body rather than the destination."""
     chosen = [environment["GH_REPO"]] if "GH_REPO" in environment else []
     mentioned = []
+    match words:
+        case ["api", *rest]:
+            endpoint = next((word for word in rest if not word.startswith("-")), "")
+            if not (API_PATH.match(endpoint) or CHECKOUT_API_PATH.match(endpoint)):
+                raise Unfollowable(f"gh api {endpoint} names no repository this input can establish")
+        case [_, _, argument, *_] if "://" in argument and not GITHUB_URL.match(argument):
+            raise Unfollowable(f"{argument} is on a host other than github.com")
     for index, word in enumerate(words):
         if word.startswith("--hostname"):
             raise Unfollowable("gh --hostname reaches a host other than github.com")
