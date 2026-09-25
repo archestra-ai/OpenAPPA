@@ -927,11 +927,40 @@ fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlit
     Ok(count as u64)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("event sequence contains a gap: expected position {expected}, found {found}")]
+struct SequenceGap {
+    expected: u64,
+    found: i64,
+}
+
+/// The batches of rows read in `seq` order, refused unless their positions run 0, 1, 2, …
+fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(expected, (found, batch))| match found == expected as i64 {
+            true => Ok(batch),
+            false => Err(SequenceGap {
+                expected: expected as u64,
+                found,
+            }),
+        })
+        .collect()
+}
+
 fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>, Vec<u8>), ReadError> {
-    let mut statement = connection.prepare("SELECT facts FROM logs WHERE root = ?1 ORDER BY seq ASC")?;
-    let batches = statement
-        .query_map(params![root.as_str()], |row| row.get::<_, Vec<u8>>(0))?
+    let mut statement = connection.prepare("SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq ASC")?;
+    let rows = statement
+        .query_map(params![root.as_str()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
+    let batches = contiguous(rows).map_err(|gap| {
+        ReadError::Storage(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some(gap.to_string()),
+        ))
+    })?;
     let Some(first) = batches.first() else {
         return Err(ReadError::UnknownRoot {
             root: root.as_str().to_string(),
@@ -1462,6 +1491,21 @@ mod tests {
                 String::from_utf8_lossy(row)
             );
         }
+    }
+
+    #[test]
+    fn a_log_with_a_sequence_gap_refuses_the_read() {
+        let store = opened();
+        for _ in 0..2 {
+            let log = store.log(&root()).expect("the log reads");
+            store.append(&log, &punctuation()).expect("the append lands");
+        }
+        store
+            .lock()
+            .execute("DELETE FROM logs WHERE seq = 1", [])
+            .expect("the middle row deletes");
+        let error = store.log(&root()).expect_err("a gapped log does not read");
+        assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
     }
 
     #[test]
@@ -2282,6 +2326,36 @@ mod tests {
                 Ok(())
             })
             .expect("the test roots clean up");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_log_with_a_sequence_gap_refuses_the_read() {
+        let store = postgres_store(1);
+        let root = postgres_root(&store, "gapped");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        for _ in 0..2 {
+            let log = store.log(&root).expect("the log reads");
+            store.append(&log, &boundary).expect("the append lands");
+        }
+        let gapped = root.as_str().to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_events WHERE root=$1 AND seq=1", &[&gapped])?;
+                Ok(())
+            })
+            .expect("the middle row deletes");
+        let error = store.log(&root).expect_err("a gapped log does not read");
+        assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+        forget_postgres_roots(&store, vec![root]);
     }
 
     #[cfg(feature = "postgres")]

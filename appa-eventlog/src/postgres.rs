@@ -790,14 +790,8 @@ impl PostgresStore {
                 "SELECT seq, payload FROM openappa_events WHERE root = $1 ORDER BY seq",
                 &[&id],
             )?;
-            let mut batches = Vec::with_capacity(rows.len());
-            for (index, row) in rows.into_iter().enumerate() {
-                if row.get::<_, i64>(0) != index as i64 {
-                    return Err(PostgresError("event sequence contains a gap".into()));
-                }
-                batches.push(row.get::<_, Vec<u8>>(1));
-            }
-            Ok(batches)
+            contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+                .map_err(|gap| PostgresError(gap.to_string()))
         })?;
         let Some(first) = batches.first() else {
             return Err(ReadError::UnknownRoot {
