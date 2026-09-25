@@ -152,11 +152,11 @@ const TERMS = {
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":
-    "Selects the provider, model, authentication, and request limits shared by all builtin = \"llm\" components. This section is required when any component uses that implementation.",
+    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all builtin = \"llm\" components. This section and its key are required when any component uses that implementation.",
   'builtin = "jev"':
     "Asks TypeSafe's Jev classifier to label an annotator's call with audience and trust. Sends the redacted tool name, description, and arguments to the TypeSafe API. Requires [externals.jev].",
   "[externals.jev]":
-    "Names the environment variable holding the TypeSafe API key for all builtin = \"jev\" annotators. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
+    "Names the environment variable holding the TypeSafe API key for all builtin = \"jev\" annotators, and optional request limits (timeout_ms, max_concurrent). A deployment that declares a jev annotator opens only when the key is set. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
 
   /* Sanitizers */
   on: "Selects the data a sanitizer can transform: tool_output for a tool result or child agent's answer, or tool_input for a tool call's arguments.",

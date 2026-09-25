@@ -29,7 +29,7 @@ use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use tokio::time::Instant;
 
-use crate::config::{Endpoint, EndpointHost, JevKey, JevProfile};
+use crate::config::{Endpoint, EndpointHost, JevProfile, Token};
 use crate::consult::{Consult, ConsultBody};
 use crate::external::{NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
@@ -58,7 +58,7 @@ pub(crate) struct JevTiming {
     pub(crate) hedge_delay: Duration,
     /// The same for an attempt that opens its connection, which the hedge would open too.
     pub(crate) cold_hedge_delay: Duration,
-    /// Taken off the deployment's consult timeout, so the consult settles inside it.
+    /// Taken off the profile's `timeout_ms`, so the consult settles inside it.
     pub(crate) budget_margin: Duration,
     /// No retry or hedge starts with less of the budget left than this.
     pub(crate) min_attempt: Duration,
@@ -76,14 +76,17 @@ impl JevTiming {
     };
 }
 
-/// The `[externals.jev]` profile bound to the runtime's one client pool.
+/// The `[externals.jev]` profile bound to the runtime's one client pool. Its permit pool is
+/// the deployment's own, bounded by `max_concurrent`: one permit per consult in flight,
+/// held across its hedges and retries.
 #[derive(Clone)]
 pub(crate) struct JevBackend {
     url: String,
-    key: JevKey,
+    key: Token,
     budget: Duration,
     max_body_bytes: usize,
     timing: JevTiming,
+    permits: Arc<tokio::sync::Semaphore>,
     clients: Arc<JevClients>,
 }
 
@@ -96,21 +99,28 @@ pub(crate) struct JevRecord {
 }
 
 impl JevBackend {
+    /// The backend of a profile whose key is set, `None` otherwise: a deployment that
+    /// consults a keyless profile refuses to open, so none is ever asked for.
     pub(crate) fn new(
         profile: &JevProfile,
-        timeout: Duration,
         max_body_bytes: usize,
         clients: Arc<JevClients>,
         timing: JevTiming,
-    ) -> JevBackend {
-        JevBackend {
+    ) -> Option<JevBackend> {
+        Some(JevBackend {
             url: profile.url.clone(),
-            key: profile.key.clone(),
-            budget: timeout.saturating_sub(timing.budget_margin),
+            key: profile.key.token()?.clone(),
+            budget: profile.limits.timeout.saturating_sub(timing.budget_margin),
             max_body_bytes,
             timing,
+            permits: Arc::new(tokio::sync::Semaphore::new(profile.limits.max_concurrent)),
             clients,
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.permits.available_permits()
     }
 
     /// One annotation consult: the answer, and what a consult record keeps of it.
@@ -162,13 +172,7 @@ impl JevBackend {
             return Err(unsupported);
         }
         let state = State::of(&artifact.args).ok_or(unsupported)?;
-        let key = match &self.key {
-            JevKey::Set(token) => token.reveal(),
-            JevKey::Unset { var } => {
-                tracing::warn!(var, "the jev key is not set");
-                return Err((JevFailure::MissingKey, NoAnswerReason::Unreachable));
-            }
-        };
+        let key = self.key.reveal();
         let request = JevRequest {
             state,
             model: MODEL,
@@ -177,7 +181,7 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let permit = acquire_within(&self.clients.permits, deadline, "jev", &consult.name)
+        let permit = acquire_within(&self.permits, deadline, "jev", &consult.name)
             .await
             .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let labels = self.ask(&body, key, deadline, exchange).await;
@@ -416,7 +420,6 @@ enum JevFailure {
     /// Not an annotation of the complete call.
     UnsupportedConsult,
     ConsultTooLarge,
-    MissingKey,
     /// The API did not answer: a status, a timeout, or a connection failure.
     NoAnswer,
     InvalidResponse,
@@ -667,15 +670,14 @@ fn labels_of(body: &[u8], trace: &mut LabelTrace) -> Option<Labels> {
 
 // ---------------------------------------------------------------- clients
 
-/// The runtime's HTTP clients for the Jev API, shared by every deployment snapshot. A
-/// client holds its own connections, so dropping one closes them: the pool keeps one
-/// current client while its connection answers promptly, and forgets it the moment a
-/// response through it is slow. A hedge gets a client of its own, so it always opens a new
-/// connection, over HTTP/1.1 and HTTP/2 alike.
+/// The runtime's HTTP clients for the Jev API, shared by every deployment snapshot, so a
+/// reload keeps the connection that answers promptly. A client holds its own connections,
+/// so dropping one closes them: the pool keeps one current client while its connection
+/// answers promptly, and forgets it the moment a response through it is slow. A hedge gets
+/// a client of its own, so it always opens a new connection, over HTTP/1.1 and HTTP/2 alike.
+#[derive(Default)]
 pub(crate) struct JevClients {
     state: Mutex<Pool>,
-    /// One permit per consult in flight, held across its hedges and retries.
-    permits: tokio::sync::Semaphore,
 }
 
 #[derive(Default)]
@@ -706,13 +708,6 @@ impl ClientSlot {
 }
 
 impl JevClients {
-    pub(crate) fn new(permits: usize) -> JevClients {
-        JevClients {
-            state: Mutex::new(Pool::default()),
-            permits: tokio::sync::Semaphore::new(permits),
-        }
-    }
-
     fn pool(&self) -> std::sync::MutexGuard<'_, Pool> {
         self.state.lock().expect("the jev pool mutex is never poisoned")
     }
@@ -790,7 +785,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{JEV_DEFAULT_URL, Token};
+    use crate::config::{JEV_DEFAULT_URL, ModelLimits, ProfileKey};
     use crate::consult::{AnnotationArtifact, AnnotationDeclaration};
     use appa_engine::registry::AudienceVocabulary;
 
@@ -860,17 +855,19 @@ mod tests {
     }
 
     fn backend(url: &str, timeout: Duration, timing: JevTiming) -> JevBackend {
+        backend_limited(url, timeout, TEST_PERMITS, timing)
+    }
+
+    fn backend_limited(url: &str, timeout: Duration, max_concurrent: usize, timing: JevTiming) -> JevBackend {
         let profile = JevProfile {
             url: url.to_string(),
-            key: JevKey::Set(Token::new(KEY.to_string())),
+            key: ProfileKey::Set(Token::new(KEY.to_string())),
+            limits: ModelLimits {
+                timeout,
+                max_concurrent,
+            },
         };
-        JevBackend::new(
-            &profile,
-            timeout,
-            65_536,
-            Arc::new(JevClients::new(TEST_PERMITS)),
-            timing,
-        )
+        JevBackend::new(&profile, 65_536, Arc::default(), timing).expect("the key is set")
     }
 
     fn diagnostics(record: &JevRecord) -> serde_json::Value {
@@ -1646,13 +1643,11 @@ mod tests {
     #[tokio::test]
     async fn a_consult_waits_for_a_permit_within_its_budget() {
         let (url, stub) = serve(vec![Scripted::Late(Duration::from_secs(30))], vec![]).await;
-        let profile = JevProfile {
-            url,
-            key: JevKey::Set(Token::new(KEY.to_string())),
+        let patient = backend_limited(&url, Duration::from_secs(2), 1, FAST);
+        let hasty = JevBackend {
+            budget: Duration::from_millis(600) - FAST.budget_margin,
+            ..patient.clone()
         };
-        let clients = Arc::new(JevClients::new(1));
-        let patient = JevBackend::new(&profile, Duration::from_secs(2), 65_536, Arc::clone(&clients), FAST);
-        let hasty = JevBackend::new(&profile, Duration::from_millis(600), 65_536, clients, FAST);
         let consult = call();
         let late = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1682,25 +1677,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_consult_without_a_key_or_a_complete_call_sends_nothing() {
+    async fn a_consult_that_is_not_a_complete_call_sends_nothing() {
         let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
-        let unset = JevProfile {
-            url: url.clone(),
-            key: JevKey::Unset {
-                var: "APPA_PROVIDER_JEV_API_KEY".to_string(),
-            },
-        };
-        let keyless = JevBackend::new(
-            &unset,
-            Duration::from_secs(2),
-            65_536,
-            Arc::new(JevClients::new(TEST_PERMITS)),
-            FAST,
-        );
-        let (answered, record) = keyless.consult(&call()).await;
-        assert_eq!(answered, Err(NoAnswerReason::Unreachable));
-        assert_eq!(diagnostics(&record)["error"], "missing_key");
-
         let jev = backend(&url, Duration::from_secs(2), FAST);
         let mut with_inputs = call();
         if let ConsultBody::Annotation { declaration, .. } = &mut with_inputs.body {
@@ -1739,15 +1717,13 @@ mod tests {
         let key = std::env::var("APPA_PROVIDER_JEV_API_KEY").expect("APPA_PROVIDER_JEV_API_KEY is set");
         let profile = JevProfile {
             url: JEV_DEFAULT_URL.to_string(),
-            key: JevKey::Set(Token::new(key)),
+            key: ProfileKey::Set(Token::new(key)),
+            limits: ModelLimits {
+                timeout: Duration::from_secs(5),
+                max_concurrent: TEST_PERMITS,
+            },
         };
-        let jev = JevBackend::new(
-            &profile,
-            Duration::from_secs(5),
-            65_536,
-            Arc::new(JevClients::new(TEST_PERMITS)),
-            JevTiming::STANDARD,
-        );
+        let jev = JevBackend::new(&profile, 65_536, Arc::default(), JevTiming::STANDARD).expect("the key is set");
         let mut elapsed = Vec::new();
         let mut hedged = 0;
         let mut agreed = 0;

@@ -729,7 +729,7 @@ Alternatively, use a built-in annotator. The available options are:
 
 Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]`. `jev` requires `[externals.jev]`, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or an implementation unavailable on that system.
+`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, an implementation unavailable on that system, or a model implementation whose key is not set.
 
 ### Annotator protocol
 
@@ -1222,7 +1222,7 @@ url = "https://approver.corp/rule"
 token_env = "APPA_APPROVER_TOKEN"
 ```
 
-`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment.
+`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section.
 
 The available settings depend on the component's role:
 
@@ -1315,11 +1315,12 @@ OpenAPPA checks authority and annotator answers against their permits and assign
 
 | Field | Purpose |
 |---|---|
-| `command` | Selects the executable. |
-| `model` | Selects the model. |
-| `timeout_ms` | Sets the timeout for one request. |
+| `command` | Selects the executable. Default: `claude`. |
+| `model` | Selects the model. Default: `sonnet`. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: 60,000. |
+| `max_concurrent` | Sets how many requests the deployment runs at once. Default: 4. |
 
-Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables. Each OpenAPPA instance runs at most four of these requests at once.
+Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables.
 
 `[externals.llm]` selects the model used by all `builtin = "llm"` components. This example uses an Anthropic model, a token from `APPA_LLM_TOKEN`, a 30-second timeout, and up to four concurrent requests:
 
@@ -1334,7 +1335,9 @@ max_concurrent = 4
 # url = "https://gateway.corp/v1"
 ```
 
-Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` is required except for `ollama`. An optional `url` selects a custom endpoint and follows the same URL rules as [HTTP services](#http-services).
+Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` follows the rules of [HTTP services](#http-services). An optional `url` selects a custom endpoint and follows the same URL rules. `timeout_ms` defaults to 60,000 and includes the wait for a free slot. `max_concurrent` defaults to 4.
+
+A deployment in which any component uses `builtin = "llm"` opens only when the section's key is available: `token_env` names a variable that is set, or the provider is `ollama` and the section names no `token_env`. A section that no component uses loads without its key.
 
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
 
@@ -1345,8 +1348,19 @@ Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_en
 ```toml
 [externals.jev]
 token_env = "APPA_PROVIDER_JEV_API_KEY"
+# Optional limits:
+# timeout_ms = 2000
+# max_concurrent = 16
 ```
 
-`token_env` is the only field and must start with `APPA_`. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services). While the key's variable is unset, every `jev` consult returns no answer.
+| Field | Purpose |
+|---|---|
+| `token_env` | Names the variable that holds the TypeSafe API key. Required. Must start with `APPA_`. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. |
+| `max_concurrent` | Sets how many requests the deployment runs at once. Default: 16. |
+
+A battery that ships this section declares `token_env` only. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).
+
+A deployment that declares a `jev` annotator opens only when the key's variable is set. A reload that OpenAPPA refuses leaves the running deployment serving. A section that no annotator uses loads without its key.
 
 Each consult sends the tool's name, description, and arguments to that endpoint. OpenAPPA first redacts, on a best-effort basis, what it recognizes as a secret: well-known token and key shapes, private-key blocks, `Authorization` header values, and the value of any field named for a secret, such as `password`, `token`, or `auth`. It then cuts each string at 4,000 characters. Redaction is not a proof that no secret remains. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.

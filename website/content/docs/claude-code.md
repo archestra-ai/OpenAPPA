@@ -161,12 +161,14 @@ command = "/usr/local/bin/claude"
 model = "sonnet"
 # the consult's own budget — a model call is slower than an endpoint
 timeout_ms = 60000
+# how many consults this deployment runs at once
+max_concurrent = 4
 
 [externals.authorities.operator]
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries OpenAPPA's label guide — the criteria for each trust and audience leaf, and worked examples spelled in the mandate's names — then the annotator's trusted `hint`, which overrides the guide, and its mandate vocabulary: the trust ranks, audiences, attention marks, and effect kinds an answer may use. The only user turn is the artifact selected by the annotator's `inputs` mapping: the complete call (`name`, declared `description`, and `arguments`) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries OpenAPPA's label guide — the criteria for each trust and audience leaf, and worked examples spelled in the mandate's names — then the annotator's trusted `hint`, which overrides the guide, and its mandate vocabulary: the trust ranks, audiences, attention marks, and effect kinds an answer may use. The only user turn is the artifact selected by the annotator's `inputs` mapping: the complete call (`name`, declared `description`, and `arguments`) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. At most `max_concurrent` Claude consults, 4 by default, run at once in one deployment.
 
 A model annotator is a trusted classifier rather than a sandboxed policy authority: it rules the whole contract of every call it covers, bounded only by its declared mandate, and argument-level prompt-injection resistance is best-effort. Bound as an authority or sanitizer, the same model rules only within that component's `permits`, like any other implementation. Process errors, timeouts, invalid fields, and values outside the mandate produce no answer: the call is not judged, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 
@@ -181,7 +183,7 @@ hint    = "Use suspicious for customer data from unvetted sources."
 [externals.llm]
 provider       = "anthropic"        # anthropic | openai | gemini | ollama
 model          = "claude-sonnet-4-5"
-token_env      = "APPA_LLM_TOKEN"   # required, except for ollama
+token_env      = "APPA_LLM_TOKEN"   # needed to open, except for ollama
 timeout_ms     = 30000
 max_concurrent = 4
 ```

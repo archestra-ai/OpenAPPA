@@ -1,7 +1,10 @@
 //! The `claude-code` builtin: one isolated, tool-less `claude` process per consult.
 
+use std::sync::Arc;
+
+use crate::config::ClaudeCode;
 use crate::consult::ModelPrompt;
-use crate::external::NoAnswerReason;
+use crate::external::{NoAnswerReason, acquire_within};
 
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
 /// this envelope: `is_error` set and its own message — "Not logged in · Please run
@@ -32,16 +35,51 @@ impl ClaudeResultEnvelope {
 /// The stock `claude-code` model transport: one isolated, tool-less `claude` process per
 /// consult, answering under the consult's own output schema. The deployment may override
 /// the executable (a service environment often has no usable `PATH`), the model, and the
-/// consult's time budget.
+/// consult limits. Its permit pool is the deployment's own, bounded by `max_concurrent`,
+/// so two deployments never share or resize one.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeCodeBackend {
     #[cfg(unix)]
-    pub(crate) command: std::path::PathBuf,
+    command: std::path::PathBuf,
     #[cfg(unix)]
-    pub(crate) model: String,
-    pub(crate) timeout: std::time::Duration,
+    model: String,
+    timeout: std::time::Duration,
     #[cfg(unix)]
-    pub(crate) max_body_bytes: usize,
+    max_body_bytes: usize,
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+impl ClaudeCodeBackend {
+    pub(crate) fn new(config: &ClaudeCode, max_body_bytes: usize) -> ClaudeCodeBackend {
+        #[cfg(not(unix))]
+        let _ = max_body_bytes;
+        ClaudeCodeBackend {
+            #[cfg(unix)]
+            command: config.command.clone(),
+            #[cfg(unix)]
+            model: config.model.clone(),
+            timeout: config.limits.timeout,
+            #[cfg(unix)]
+            max_body_bytes,
+            gate: Arc::new(tokio::sync::Semaphore::new(config.limits.max_concurrent)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.gate.available_permits()
+    }
+
+    /// One consult. The deadline covers the permit wait and the subprocess: queueing behind
+    /// the pool spends the same budget the consult itself would, so a saturated pool cannot
+    /// stack timeout waves.
+    pub(crate) async fn consult(&self, prompt: &ModelPrompt, name: &str) -> Result<serde_json::Value, NoAnswerReason> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let permit = acquire_within(&self.gate, deadline, "claude", name).await?;
+        let answered = run_claude_code(self, prompt, deadline).await;
+        drop(permit);
+        answered
+    }
 }
 
 #[cfg(unix)]
@@ -206,12 +244,17 @@ mod tests {
     async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
         let dir = tempfile::tempdir().expect("a temp dir");
         let fake = crate::test_support::fake_claude(dir.path(), &format!("cat > /dev/null\n{script}\nexit 1"));
-        let backend = ClaudeCodeBackend {
-            command: fake,
-            model: "m".to_string(),
-            timeout: std::time::Duration::from_secs(5),
-            max_body_bytes: 65_536,
-        };
+        let backend = ClaudeCodeBackend::new(
+            &ClaudeCode {
+                command: fake,
+                model: "m".to_string(),
+                limits: crate::config::ModelLimits {
+                    timeout: std::time::Duration::from_secs(5),
+                    max_concurrent: 1,
+                },
+            },
+            65_536,
+        );
         let prompt = ModelPrompt {
             system: "rule".to_string(),
             input: "{}".to_string(),
@@ -274,12 +317,17 @@ mod tests {
                 pid_file.display()
             ),
         );
-        let backend = ClaudeCodeBackend {
-            command: fake,
-            model: "m".to_string(),
-            timeout: std::time::Duration::from_secs(5),
-            max_body_bytes: 65_536,
-        };
+        let backend = ClaudeCodeBackend::new(
+            &ClaudeCode {
+                command: fake,
+                model: "m".to_string(),
+                limits: crate::config::ModelLimits {
+                    timeout: std::time::Duration::from_secs(5),
+                    max_concurrent: 1,
+                },
+            },
+            65_536,
+        );
         let prompt = ModelPrompt {
             system: "rule".to_string(),
             input: "{}".to_string(),

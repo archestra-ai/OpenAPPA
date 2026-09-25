@@ -16,7 +16,7 @@ use rig_core::completion::{CompletionError, CompletionModel};
 
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
-use crate::config::{LlmProfile, LlmProvider};
+use crate::config::{LlmProfile, LlmProvider, ProfileKey};
 use crate::consult::ModelPrompt;
 use crate::external::{NoAnswerReason, acquire_within};
 
@@ -88,18 +88,18 @@ pub struct LlmClientError {
 }
 
 impl LlmBackend {
-    /// Build the provider client once. `shared_timeout` is the deployment's machine-consult
-    /// budget, used when the profile declares none of its own; `max_body_bytes` is the
-    /// deployment's cap on any answer, model answers included.
-    pub(crate) fn new(
-        profile: &LlmProfile,
-        shared_timeout: Duration,
-        max_body_bytes: usize,
-    ) -> Result<LlmBackend, LlmClientError> {
+    /// Build the provider client once. `max_body_bytes` is the deployment's cap on any
+    /// answer, model answers included.
+    pub(crate) fn new(profile: &LlmProfile, max_body_bytes: usize) -> Result<LlmBackend, LlmClientError> {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
-        let token = profile.token.as_ref().map(|token| token.reveal()).unwrap_or("");
+        let token = profile
+            .key
+            .as_ref()
+            .and_then(ProfileKey::token)
+            .map(|token| token.reveal())
+            .unwrap_or("");
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
             detail: error.to_string(),
@@ -137,9 +137,9 @@ impl LlmBackend {
         Ok(LlmBackend {
             client,
             model: profile.model.clone(),
-            timeout: profile.timeout.unwrap_or(shared_timeout),
+            timeout: profile.limits.timeout,
             max_body_bytes,
-            gate: Arc::new(tokio::sync::Semaphore::new(profile.max_concurrent)),
+            gate: Arc::new(tokio::sync::Semaphore::new(profile.limits.max_concurrent)),
         })
     }
 
@@ -319,9 +319,11 @@ mod tests {
             provider,
             model: "test-model".to_string(),
             url,
-            token: token.map(|token| Token::new(token.to_string())),
-            timeout: Some(Duration::from_millis(1500)),
-            max_concurrent,
+            key: token.map(|token| ProfileKey::Set(Token::new(token.to_string()))),
+            limits: crate::config::ModelLimits {
+                timeout: Duration::from_millis(1500),
+                max_concurrent,
+            },
         }
     }
 
@@ -332,7 +334,6 @@ mod tests {
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
-            Duration::from_secs(5),
             max_body_bytes,
         )
         .expect("the backend builds")
@@ -433,11 +434,11 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&gemini, 65_536).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&ollama, 65_536).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&pinned, 65_536).is_ok());
     }
 
     #[tokio::test]

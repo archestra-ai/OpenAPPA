@@ -21,7 +21,7 @@ use crate::config::{
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
-use crate::model::claude_code::{ClaudeCodeBackend, run_claude_code};
+use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
 use crate::recorder::ConsultBackend;
@@ -231,19 +231,9 @@ pub struct ExternalServices {
     gates: ConsultGates,
 }
 
-/// How many claude-code consults may run at once across a runtime — a subprocess whose
-/// cost is a full model call, so the gate is fixed and small.
-const CLAUDE_CONSULT_PERMITS: usize = 4;
-
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
-
-/// How many jev consults may run at once across a runtime. A consult is one small HTTPS
-/// request of about 0.3 s, so the gate admits two command batches' worth; it bounds the
-/// requests a burst sends TypeSafe (a hedge or retry adds at most two per consult) and the
-/// connections it opens.
-const JEV_CONSULT_PERMITS: usize = 16;
 
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
@@ -258,46 +248,43 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
         .await
 }
 
-/// The per-runtime gates on consults that cost a process, shared by every deployment the
-/// runtime serves or pins: a reload's old and new snapshots, and every pinned view, contend
-/// on the same permits. The jev clients live here too, keyed by endpoint, so a reload keeps
-/// the connections that answer promptly. The `llm` pool is each deployment's own; see
-/// [`LlmBackend`].
+/// What every deployment the runtime serves or pins shares: a reload's old and new
+/// snapshots, and every pinned view. The `command` gate bounds the processes the runtime
+/// runs at once, and the jev clients keep the connections that answer promptly across a
+/// reload. Each model builtin's permit pool is the deployment's own, sized by its table's
+/// `max_concurrent`.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
-    claude: Arc<tokio::sync::Semaphore>,
     command: Arc<tokio::sync::Semaphore>,
     jev: Arc<JevClients>,
 }
 
 impl ConsultGates {
     pub(crate) fn per_runtime() -> ConsultGates {
-        ConsultGates::of(CLAUDE_CONSULT_PERMITS, COMMAND_CONSULT_PERMITS)
+        ConsultGates::of(COMMAND_CONSULT_PERMITS)
     }
 
-    fn of(claude: usize, command: usize) -> ConsultGates {
+    fn of(command: usize) -> ConsultGates {
         ConsultGates {
-            claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
-            jev: Arc::new(JevClients::new(JEV_CONSULT_PERMITS)),
+            jev: Arc::default(),
         }
     }
 }
 
 impl ExternalServices {
+    /// The permits the backend of `builtin` has free, `None` where no entry is served by it.
     #[cfg(test)]
-    pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
-        &self.gates.claude
-    }
-
-    /// The permits the `llm` backend has free, `None` without one.
-    #[cfg(test)]
-    pub(crate) fn llm_permits(&self) -> Option<usize> {
+    pub(crate) fn model_permits(&self, builtin: AnnotatorBuiltin) -> Option<usize> {
         self.backends
             .values()
             .flat_map(BTreeMap::values)
-            .find_map(|backend| match backend {
-                Backend::Model(PromptModel::Llm(llm)) => Some(llm.available_permits()),
+            .find_map(|backend| match (backend, builtin) {
+                (Backend::Model(PromptModel::Llm(llm)), AnnotatorBuiltin::Llm) => Some(llm.available_permits()),
+                (Backend::Model(PromptModel::ClaudeCode(claude)), AnnotatorBuiltin::ClaudeCode) => {
+                    Some(claude.available_permits())
+                }
+                (Backend::Jev(jev), AnnotatorBuiltin::Jev) => Some(jev.available_permits()),
                 _ => None,
             })
     }
@@ -330,25 +317,19 @@ impl ExternalServices {
             .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
-        let claude = ClaudeCodeBackend {
-            #[cfg(unix)]
-            command: config.claude_code.command.clone(),
-            #[cfg(unix)]
-            model: config.claude_code.model.clone(),
-            timeout: config.claude_code.timeout,
-            #[cfg(unix)]
-            max_body_bytes: config.max_body_bytes,
-        };
+        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes);
+        // A profile without the key it needs serves nothing: a deployment that consults it
+        // refuses to open, so an entry naming it never reaches here.
         let llm = config
             .llm
             .as_ref()
-            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes))
+            .filter(|profile| profile.missing_key().is_none())
+            .map(|profile| LlmBackend::new(profile, config.max_body_bytes))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
-        let jev = config.jev.as_ref().map(|profile| {
+        let jev = config.jev.as_ref().and_then(|profile| {
             JevBackend::new(
                 profile,
-                config.timeout,
                 config.max_body_bytes,
                 Arc::clone(&gates.jev),
                 JevTiming::STANDARD,
@@ -593,16 +574,7 @@ impl ExternalServices {
         let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
         match model {
             PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name).await,
-            PromptModel::ClaudeCode(claude) => {
-                // One deadline covers the permit wait and the subprocess: queueing behind the
-                // gate spends the same budget the consult itself would, so a saturated pool
-                // cannot stack timeout waves.
-                let deadline = tokio::time::Instant::now() + claude.timeout;
-                let permit = acquire_within(&self.gates.claude, deadline, "claude", &consult.name).await?;
-                let answered = run_claude_code(claude, &prompt, deadline).await;
-                drop(permit);
-                answered
-            }
+            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name).await,
         }
     }
 
@@ -1191,6 +1163,8 @@ fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use crate::model::claude_code::run_claude_code;
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::sync::OnceLock;
@@ -1285,6 +1259,29 @@ mod tests {
         }
     }
 
+    const MODEL_LIMITS: crate::config::ModelLimits = crate::config::ModelLimits {
+        timeout: Duration::from_secs(2),
+        max_concurrent: 2,
+    };
+
+    fn llm_profile(url: String) -> crate::config::LlmProfile {
+        crate::config::LlmProfile {
+            provider: crate::config::LlmProvider::Anthropic,
+            model: "m".to_string(),
+            url: Some(url),
+            key: Some(crate::config::ProfileKey::Set(Token::new("sekret".to_string()))),
+            limits: MODEL_LIMITS,
+        }
+    }
+
+    fn jev_profile(url: String) -> crate::config::JevProfile {
+        crate::config::JevProfile {
+            url,
+            key: crate::config::ProfileKey::Set(Token::new("sekret".to_string())),
+            limits: MODEL_LIMITS,
+        }
+    }
+
     fn services_over(config: Externals) -> ExternalServices {
         services_declaring(config, BTreeMap::new())
     }
@@ -1298,7 +1295,7 @@ mod tests {
             config,
             &ModuleRegistry::empty(),
             annotator_builtins,
-            ConsultGates::of(4, 8),
+            ConsultGates::of(8),
         )
         .expect("no builtin references are configured")
     }
@@ -1394,12 +1391,17 @@ mod tests {
 
     #[cfg(unix)]
     fn claude_backend(command: std::path::PathBuf, timeout_ms: u64, cap: usize) -> ClaudeCodeBackend {
-        ClaudeCodeBackend {
-            command,
-            model: "sonnet".to_string(),
-            timeout: Duration::from_millis(timeout_ms),
-            max_body_bytes: cap,
-        }
+        ClaudeCodeBackend::new(
+            &crate::config::ClaudeCode {
+                command,
+                model: "sonnet".to_string(),
+                limits: crate::config::ModelLimits {
+                    timeout: Duration::from_millis(timeout_ms),
+                    max_concurrent: 4,
+                },
+            },
+            cap,
+        )
     }
 
     #[tokio::test]
@@ -1534,7 +1536,7 @@ mod tests {
                 command_config(dir.path(), script, 5000, 1024),
                 &ModuleRegistry::empty(),
                 BTreeMap::new(),
-                ConsultGates::of(4, command_permits),
+                ConsultGates::of(command_permits),
             )
             .expect("no builtin references are configured");
             let started = std::time::Instant::now();
@@ -2050,14 +2052,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             }),
         ))
         .await;
-        let profile = crate::config::LlmProfile {
-            provider: crate::config::LlmProvider::Anthropic,
-            model: "m".to_string(),
-            url: Some(url),
-            token: Some(Token::new("sekret".to_string())),
-            timeout: None,
-            max_concurrent: 2,
-        };
+        let profile = llm_profile(url);
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile.clone());
         for section in [&mut config.authorities, &mut config.sanitizers] {
@@ -2087,10 +2082,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn the_jev_builtin_serves_annotators_only() {
         for section in [Section::Authorities, Section::Sanitizers] {
             let mut config = externals(None, 2000, 65_536);
-            config.jev = Some(crate::config::JevProfile {
-                url: "https://jev.invalid/v1/systemone".to_string(),
-                key: crate::config::JevKey::Set(Token::new("sekret".to_string())),
-            });
+            config.jev = Some(jev_profile("https://jev.invalid/v1/systemone".to_string()));
             match section {
                 Section::Authorities => &mut config.authorities,
                 _ => &mut config.sanitizers,
@@ -2100,7 +2092,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 config,
                 &ModuleRegistry::empty(),
                 declared("classify", AnnotatorBuiltin::Jev),
-                ConsultGates::of(4, 8),
+                ConsultGates::of(8),
             ) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section.name()),
                 Err(other) => panic!("{} jev must refuse as unknown, got {other}", section.name()),
@@ -2122,18 +2114,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         }))
         .await;
         let mut config = externals(None, 2000, 65_536);
-        config.llm = Some(crate::config::LlmProfile {
-            provider: crate::config::LlmProvider::Anthropic,
-            model: "m".to_string(),
-            url: Some(url.clone()),
-            token: Some(Token::new("sekret".to_string())),
-            timeout: None,
-            max_concurrent: 2,
-        });
-        config.jev = Some(crate::config::JevProfile {
-            url,
-            key: crate::config::JevKey::Set(Token::new("sekret".to_string())),
-        });
+        config.llm = Some(llm_profile(url.clone()));
+        config.jev = Some(jev_profile(url));
         let mut builtins = BTreeMap::from([
             ("llm".to_string(), AnnotatorBuiltin::Llm),
             ("jev".to_string(), AnnotatorBuiltin::Jev),
@@ -2459,12 +2441,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            BTreeMap::new(),
-            ConsultGates::of(4, 8),
-        ) {
+        match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -2485,12 +2462,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 _ => &mut config.authorities,
             };
             table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
-            match ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                BTreeMap::new(),
-                ConsultGates::of(4, 8),
-            ) {
+            match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section),
                 Err(other) => panic!("{section}/{builtin} must refuse as unknown, got {other}"),
                 Ok(_) => panic!("{section}/{builtin} must refuse"),
@@ -2556,7 +2528,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(4, 8))
+        let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(8))
             .expect("the module reference resolves");
         (services, dir)
     }

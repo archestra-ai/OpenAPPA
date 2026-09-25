@@ -20,12 +20,14 @@ that flow is acceptable.
 ## Install
 
 ```sh
-appa battery install jev
 export APPA_PROVIDER_JEV_API_KEY=<TypeSafe API key>
+appa battery install jev
 ```
 
-The runtime reads the key when the deployment opens or reloads. While it
-is unset, every Jev consult is no answer and the runtime refuses the call.
+The runtime reads the key when the deployment opens or reloads. A
+deployment that declares a `jev` Annotator refuses to open while the
+variable is unset, and a refused reload leaves the running deployment
+serving. A profile that no Annotator consults loads without its key.
 
 Route a tool to the Annotator in the root config:
 
@@ -95,8 +97,11 @@ With no answer after 0.8 s on a connection that has answered before, or
 after 2 s on a new one, a second request goes out on a new connection and
 the first answer wins; a connection that answered that slowly is not
 reused. A 5xx answer or a connection failure is retried; a 4xx answer and
-an unreadable body are not. Every attempt ends inside the deployment's
-`externals.timeout_ms`.
+an unreadable body are not. Every attempt ends inside the profile's
+`timeout_ms`, which defaults to the deployment's `externals.timeout_ms`.
+At most `max_concurrent` consults, 16 by default, run at once in one
+deployment. The battery's profile keeps both defaults; a root config
+that declares `[externals.jev]` itself can set them.
 
 The consult record carries one JSON object under `jev_diagnostics`, also
 logged at debug level: each label's probabilities and decision, the
