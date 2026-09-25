@@ -123,13 +123,13 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_comments"
-delta = { trust = "suspicious", audience = ["internal"] }
+name = "mcp/linear/list_comments(issueId:*)"
+delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_comments(issueId:*)"
-delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
+name = "mcp/linear/list_comments"
+delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -143,13 +143,13 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_documents"
-delta = { trust = "suspicious", audience = ["internal"] }
+name = "mcp/linear/list_documents(teamId:*)"
+delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_documents(teamId:*)"
-delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
+name = "mcp/linear/list_documents"
+delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -163,13 +163,13 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_issues"
-delta = { trust = "suspicious", audience = ["internal"] }
+name = "mcp/linear/list_issues(team:*)"
+delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_issues(team:*)"
-delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
+name = "mcp/linear/list_issues"
+delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
