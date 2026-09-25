@@ -1603,11 +1603,7 @@ impl Session {
                         };
                         match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
                             ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
-                                .ok_or_else(|| {
-                                    crate::external::NoAnswerReason::MalformedAnswer(
-                                        "detail=invalid_fields_or_value_types".to_string(),
-                                    )
-                                }),
+                                .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                             ConsultOutcome::NoAnswer(reason) => Err(reason),
                         }
                     }

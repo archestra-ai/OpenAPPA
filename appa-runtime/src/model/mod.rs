@@ -10,6 +10,11 @@ pub(crate) mod llm;
 use claude_code::ClaudeCodeBackend;
 use llm::LlmBackend;
 
+/// No retry or hedge starts with less of the consult's budget left than this.
+pub(crate) const MIN_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(300);
+/// The most attempts one consult starts, hedges and retries together.
+pub(crate) const MAX_ATTEMPTS: usize = 3;
+
 /// The transports that answer a rendered [`ModelPrompt`](crate::consult::ModelPrompt).
 #[derive(Clone)]
 pub(crate) enum PromptModel {

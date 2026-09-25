@@ -9,11 +9,12 @@ declares no tool. A deployment routes its own tools to
 the Annotator.
 
 **Every annotated call's name, description, and arguments are sent to the
-TypeSafe API.** The runtime first redacts what it recognizes as a secret:
-well-known token and key shapes, private-key blocks, `Authorization` header
-values, and the value of any field named for a secret, such as `password`,
-`token`, or `auth`. It then cuts each string at 4,000 characters. Redaction
-is best effort, not a proof that no secret remains. Internal paths,
+TypeSafe API.** The runtime first redacts what it recognizes as a secret,
+as it does for every model provider: each string goes through the
+`redact-secrets` detector, and the whole value of any field named for a
+secret, such as `password`, `token`, or `auth`, is replaced. Each secret
+becomes `[redacted-secret]`; the tool name is not redacted. Redaction is
+best effort, not a proof that no secret remains. Internal paths,
 hostnames, and message text still leave. Install the battery only where
 that flow is acceptable.
 

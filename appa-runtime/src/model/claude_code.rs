@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::config::ClaudeCode;
 use crate::consult::ModelPrompt;
-use crate::external::{NoAnswerReason, acquire_within};
+use crate::external::{NoAnswerReason, Transcript, acquire_within};
 
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
 /// this envelope: `is_error` set and its own message — "Not logged in · Please run
@@ -73,10 +73,15 @@ impl ClaudeCodeBackend {
     /// One consult. The deadline covers the permit wait and the subprocess: queueing behind
     /// the pool spends the same budget the consult itself would, so a saturated pool cannot
     /// stack timeout waves.
-    pub(crate) async fn consult(&self, prompt: &ModelPrompt, name: &str) -> Result<serde_json::Value, NoAnswerReason> {
+    pub(crate) async fn consult(
+        &self,
+        prompt: &ModelPrompt,
+        name: &str,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gate, deadline, "claude", name).await?;
-        let answered = run_claude_code(self, prompt, deadline).await;
+        let answered = run_claude_code(self, prompt, deadline, seen).await;
         drop(permit);
         answered
     }
@@ -87,6 +92,7 @@ pub(crate) async fn run_claude_code(
     backend: &ClaudeCodeBackend,
     prompt: &ModelPrompt,
     deadline: tokio::time::Instant,
+    seen: Option<&mut Transcript>,
 ) -> Result<serde_json::Value, NoAnswerReason> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
@@ -156,6 +162,9 @@ pub(crate) async fn run_claude_code(
             return Err(NoAnswerReason::Timeout);
         }
     };
+    if let Some(seen) = seen {
+        seen.raw_response = Some(output.clone());
+    }
     let status = process.terminate_and_reap().await?;
     if !status.success() {
         let stderr = match tail {
@@ -210,6 +219,7 @@ pub(crate) async fn run_claude_code(
     _backend: &ClaudeCodeBackend,
     _prompt: &ModelPrompt,
     _deadline: tokio::time::Instant,
+    _seen: Option<&mut Transcript>,
 ) -> Result<serde_json::Value, NoAnswerReason> {
     Err(NoAnswerReason::Unregistered)
 }
@@ -264,6 +274,7 @@ mod tests {
             &backend,
             &prompt,
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            None,
         )
         .await
     }
@@ -339,6 +350,7 @@ mod tests {
             &backend,
             &prompt,
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            None,
         )
         .await;
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));

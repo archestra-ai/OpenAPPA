@@ -792,7 +792,7 @@ The response uses `emits` for effects and `requires.history` for history checks.
 - JSON audience values use `"public"` or a list of permitted audiences. Do not put `public` inside a JSON audience list.
 - A restricted list cannot repeat entries or contain both `self` and `internal`.
 
-OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
+OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. For a value outside the permits, the refusal names the field, the value, and the declaration list that does not contain it, such as `field=delta.audience value="secret" allowed=declaration.audiences`. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
 OpenAPPA uses the annotation only for the call it classified. Changing the call requires a new annotation. Rechecking or replaying the same recorded call reuses its annotation and membership responses.
 
@@ -1307,6 +1307,8 @@ OpenAPPA rejects a response if the HTTP service reports an error, the program ex
 
 The `claude-code` and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. For an annotator, the fixed instructions include the label guide: the criteria for each trust and audience leaf, and worked example calls, each with the annotation it gets under the annotator's permits. An example whose labels the permits exclude is left out. OpenAPPA sends `artifact` as the user message, to be processed as data.
 
+Before an annotator request leaves for a model provider, OpenAPPA redacts what it recognizes as a secret in `artifact.args`. This applies to `claude-code`, `llm`, and `jev`. Each string goes through the detector of `builtin = "redact-secrets"`. The whole value of a field whose name contains `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `private_key`, `access_key`, `authorization`, `cookie`, or `credential`, or is `auth`, is replaced. Each secret becomes `[redacted-secret]`. The tool name is not redacted. Redaction is best effort, not a proof that no secret remains. Authority and sanitizer requests are not redacted, because a sanitizer must see the value it cleans. The consult record keeps the request before redaction.
+
 OpenAPPA builds the expected response format from the declaration. The model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
 OpenAPPA checks authority and annotator answers against their permits and assigns sanitized data the declared audience or trust rank. The model is responsible for making the correct judgment or removing the required content.
@@ -1339,6 +1341,8 @@ Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_en
 
 A deployment in which any component uses `builtin = "llm"` opens only when the section's key is available: `token_env` names a variable that is set, or the provider is `ollama` and the section names no `token_env`. A section that no component uses loads without its key.
 
+An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. All attempts use one slot.
+
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
 
 ### Jev
@@ -1363,4 +1367,4 @@ A battery that ships this section declares `token_env` only. OpenAPPA sends the 
 
 A deployment that declares a `jev` annotator opens only when the key's variable is set. A reload that OpenAPPA refuses leaves the running deployment serving. A section that no annotator uses loads without its key.
 
-Each consult sends the tool's name, description, and arguments to that endpoint. OpenAPPA first redacts, on a best-effort basis, what it recognizes as a secret: well-known token and key shapes, private-key blocks, `Authorization` header values, and the value of any field named for a secret, such as `password`, `token`, or `auth`. It then cuts each string at 4,000 characters. Redaction is not a proof that no secret remains. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.
+Each consult sends the tool's name, description, and arguments to that endpoint, with secrets redacted as for every model provider; see [Model implementations](#model-implementations). A consult larger than 64 KiB is not sent and gets no answer. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.

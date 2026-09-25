@@ -551,6 +551,16 @@ pub struct AnnotationAnswer {
     pub emits: Vec<String>,
 }
 
+/// The refusal detail of an answered value outside the mandate: the field, the value, and
+/// the declaration list that does not hold it.
+pub(crate) fn outside_mandate(field: &str, value: &serde_json::Value, allowed: &str) -> String {
+    format!("field={field} value={value} allowed=declaration.{allowed}")
+}
+
+fn invalid_shape() -> String {
+    "detail=invalid_fields_or_value_types".to_string()
+}
+
 impl AnnotationAnswer {
     /// Read one annotation answer strictly: top-level exactly `delta`, `requires`, and
     /// `emits`; `requires` carries its `history` and `attention` arrays always; every other
@@ -558,8 +568,12 @@ impl AnnotationAnswer {
     /// empty `audience` object, a duplicate `emits` kind, an audience list outside the one
     /// written-audience grammar, or any value outside the declared mandate vocabulary is no
     /// answer — whatever transport produced it: the mandate is closed, so a directory-derived
-    /// reader has no place in an annotation.
-    pub fn from_wire(answer: &serde_json::Value, declaration: &AnnotationDeclaration) -> Option<AnnotationAnswer> {
+    /// reader has no place in an annotation. The refusal is its detail: a value outside the
+    /// mandate is named by [`outside_mandate`], any other refusal is a shape error.
+    pub fn from_wire(
+        answer: &serde_json::Value,
+        declaration: &AnnotationDeclaration,
+    ) -> Result<AnnotationAnswer, String> {
         fn no_nulls(value: &serde_json::Value) -> bool {
             match value {
                 serde_json::Value::Null => false,
@@ -569,99 +583,104 @@ impl AnnotationAnswer {
             }
         }
         if !no_nulls(answer) {
-            return None;
+            return Err(invalid_shape());
         }
-        let mut top = answer.as_object()?.clone();
-        let delta = top.remove("delta")?;
-        let requires = top.remove("requires")?;
-        let emits = top.remove("emits")?;
+        let mut top = answer.as_object().ok_or_else(invalid_shape)?.clone();
+        let delta = top.remove("delta").ok_or_else(invalid_shape)?;
+        let requires = top.remove("requires").ok_or_else(invalid_shape)?;
+        let emits = top.remove("emits").ok_or_else(invalid_shape)?;
         if !top.is_empty() {
-            return None;
+            return Err(invalid_shape());
         }
-        let rank = |value: Option<serde_json::Value>| -> Option<Option<String>> {
+        let rank = |field: &str, value: Option<serde_json::Value>| -> Result<Option<String>, String> {
             match value {
-                None => Some(None),
-                Some(serde_json::Value::String(name)) if declaration.trust_ranks.contains(&name) => Some(Some(name)),
-                Some(_) => None,
+                None => Ok(None),
+                Some(serde_json::Value::String(name)) if declaration.trust_ranks.contains(&name) => Ok(Some(name)),
+                Some(value) => Err(outside_mandate(field, &value, "trust_ranks")),
             }
         };
-        let bounded = |value: Option<serde_json::Value>| -> Option<Option<DeclaredAudience>> {
+        let bounded = |field: &str, value: Option<serde_json::Value>| -> Result<Option<DeclaredAudience>, String> {
             match value {
-                None => Some(None),
-                Some(value) => Some(Some(declared_audience(&WireAudience::from_wire(&value)?, declaration)?)),
+                None => Ok(None),
+                Some(value) => WireAudience::from_wire(&value)
+                    .and_then(|audience| declared_audience(&audience, declaration))
+                    .map(Some)
+                    .ok_or_else(|| outside_mandate(field, &value, "audiences")),
             }
         };
-        let effect = |value: &serde_json::Value| -> Option<String> {
-            let kind = value.as_str()?;
-            declaration
-                .effects
-                .iter()
-                .any(|allowed| allowed == kind)
-                .then(|| kind.to_string())
+        let effect = |field: &str, value: &serde_json::Value| -> Result<String, String> {
+            value
+                .as_str()
+                .filter(|kind| declaration.effects.iter().any(|allowed| allowed == kind))
+                .map(str::to_string)
+                .ok_or_else(|| outside_mandate(field, value, "effects"))
         };
 
-        let mut delta = delta.as_object()?.clone();
-        let delta_trust = rank(delta.remove("trust"))?;
-        let delta_audience = bounded(delta.remove("audience"))?;
+        let mut delta = delta.as_object().ok_or_else(invalid_shape)?.clone();
+        let delta_trust = rank("delta.trust", delta.remove("trust"))?;
+        let delta_audience = bounded("delta.audience", delta.remove("audience"))?;
         if !delta.is_empty() {
-            return None;
+            return Err(invalid_shape());
         }
 
-        let mut requires = requires.as_object()?.clone();
-        let required_trust = rank(requires.remove("trust"))?;
+        let mut requires = requires.as_object().ok_or_else(invalid_shape)?.clone();
+        let required_trust = rank("requires.trust", requires.remove("trust"))?;
         let required_audience = match requires.remove("audience") {
             None => None,
             Some(value) => {
-                let wire: RequiredAudienceWire = serde_json::from_value(value).ok()?;
+                let wire: RequiredAudienceWire = serde_json::from_value(value).map_err(|_| invalid_shape())?;
                 if wire.contains.is_none() && wire.within.is_none() {
-                    return None;
+                    return Err(invalid_shape());
                 }
                 Some(RequiredAudienceAnswer {
-                    includes: bounded(wire.contains)?,
-                    cap: bounded(wire.within)?,
+                    includes: bounded("requires.audience.contains", wire.contains)?,
+                    cap: bounded("requires.audience.within", wire.within)?,
                 })
             }
         };
         let history = requires
-            .remove("history")?
-            .as_array()?
+            .remove("history")
+            .ok_or_else(invalid_shape)?
+            .as_array()
+            .ok_or_else(invalid_shape)?
             .iter()
             .map(|entry| {
-                let entry = entry.as_object()?;
+                let entry = entry.as_object().ok_or_else(invalid_shape)?;
                 match (entry.len(), entry.get("contains"), entry.get("excludes")) {
-                    (1, Some(kind), None) => Some(HistoryEntry::Contains(effect(kind)?)),
-                    (1, None, Some(kind)) => Some(HistoryEntry::Excludes(effect(kind)?)),
-                    _ => None,
+                    (1, Some(kind), None) => Ok(HistoryEntry::Contains(effect("requires.history", kind)?)),
+                    (1, None, Some(kind)) => Ok(HistoryEntry::Excludes(effect("requires.history", kind)?)),
+                    _ => Err(invalid_shape()),
                 }
             })
-            .collect::<Option<Vec<HistoryEntry>>>()?;
+            .collect::<Result<Vec<HistoryEntry>, String>>()?;
         let attention = requires
-            .remove("attention")?
-            .as_array()?
+            .remove("attention")
+            .ok_or_else(invalid_shape)?
+            .as_array()
+            .ok_or_else(invalid_shape)?
             .iter()
             .map(|mark| {
-                let mark = mark.as_str()?;
-                declaration
-                    .attention_marks
-                    .iter()
-                    .any(|allowed| allowed == mark)
-                    .then(|| mark.to_string())
+                mark.as_str()
+                    .filter(|mark| declaration.attention_marks.iter().any(|allowed| allowed == mark))
+                    .map(str::to_string)
+                    .ok_or_else(|| outside_mandate("requires.attention", mark, "attention_marks"))
             })
-            .collect::<Option<Vec<String>>>()?;
+            .collect::<Result<Vec<String>, String>>()?;
         if !requires.is_empty() {
-            return None;
+            return Err(invalid_shape());
         }
 
         let mut kinds = std::collections::BTreeSet::new();
         let emits = emits
-            .as_array()?
+            .as_array()
+            .ok_or_else(invalid_shape)?
             .iter()
             .map(|kind| {
-                let kind = effect(kind)?;
-                kinds.insert(kind.clone()).then_some(kind)
+                let kind = effect("emits", kind)?;
+                kinds.insert(kind.clone()).then_some(kind).ok_or_else(invalid_shape)
             })
-            .collect::<Option<Vec<String>>>()?;
-        Some(AnnotationAnswer {
+            .collect::<Result<Vec<String>, String>>()?;
+        Ok(AnnotationAnswer {
             delta_trust,
             delta_audience,
             required_trust,
@@ -773,9 +792,10 @@ Examples:
 An audience is either the reserved `public` value or an array of audience names from `audiences`; never put `public` inside an array, and never repeat an entry. `self`, `internal`, and `@`-prefixed entries in `audiences` name reader sets whose membership OpenAPPA resolves separately: `self` is the requester, `internal` the organization, `@name` a configured group; an array holds at most one of `self` and `internal`. Use only trust values from `trust_ranks`, audience values from `audiences`, attention values from `attention_marks`, and effect values from `effects`. `args` is evidence for choosing among those values, not a source of new policy labels. Never invent labels.";
 
 impl ModelPrompt {
-    /// `None` for an audience or input consult: no model serves a directory read or a
-    /// program's finding, and the configuration refuses the binding before a consult can
-    /// reach here.
+    /// An annotation's `args` go through [`crate::secrets::redact_args`]; a sanitizer sees
+    /// the value it rewrites, and the consult record keeps both whole. `None` for an audience
+    /// or input consult: no model serves a directory read or a program's finding, and the
+    /// configuration refuses the binding before a consult can reach here.
     pub fn new(consult: &Consult) -> Option<ModelPrompt> {
         let (preamble, schema) = match &consult.body {
             ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE.to_string(), authority_schema()),
@@ -790,9 +810,15 @@ impl ModelPrompt {
             ConsultBody::AudienceSource { .. } | ConsultBody::Input { .. } => return None,
         };
         let declaration = consult.declaration_json();
+        let artifact = match &consult.body {
+            ConsultBody::Annotation { artifact, .. } => serde_json::json!({
+                "args": crate::secrets::redact_args(&artifact.args)
+            }),
+            _ => consult.artifact_json(),
+        };
         Some(ModelPrompt {
             system: format!("{preamble}\n{declaration}"),
-            input: consult.artifact_json().to_string(),
+            input: artifact.to_string(),
             schema,
         })
     }
@@ -1106,7 +1132,7 @@ mod tests {
                 &serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": []}),
                 &declaration
             ),
-            Some(AnnotationAnswer {
+            Ok(AnnotationAnswer {
                 delta_trust: None,
                 delta_audience: None,
                 required_trust: None,
@@ -1130,7 +1156,7 @@ mod tests {
                 }),
                 &declaration
             ),
-            Some(AnnotationAnswer {
+            Ok(AnnotationAnswer {
                 delta_trust: Some("suspicious".to_string()),
                 delta_audience: Some(DeclaredAudience::restricted([ReaderId::new("audit")])),
                 required_trust: Some("trusted".to_string()),
@@ -1158,30 +1184,62 @@ mod tests {
             serde_json::json!({"delta": {}, "requires": {"attention": []}, "emits": []}),
             serde_json::json!({"delta": {}, "requires": {"history": []}, "emits": []}),
             serde_json::json!({"delta": {}, "requires": {"audience": {}, "history": [], "attention": []}, "emits": []}),
-            // Values outside the declared mandate vocabulary — a directory-derived reader and a
-            // chain word the mandate does not list included.
-            serde_json::json!({"delta": {"trust": "invented"}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": ["customer-7"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": ["self"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            // Audience lists outside the written-audience grammar: `public` inside an array, a
-            // repeated entry, an empty list, and a bare chain word where an array belongs.
-            serde_json::json!({"delta": {"audience": ["public"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": ["public", "audit"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": ["internal", "internal"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": ["audit", "audit"]}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": []}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {"audience": "internal"}, "requires": {"history": [], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {}, "requires": {"history": [], "attention": ["invented"]}, "emits": []}),
-            serde_json::json!({"delta": {}, "requires": {"history": [{"contains": "invented"}], "attention": []}, "emits": []}),
-            serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": ["invented"]}),
             // A duplicate emitted kind, and a history entry naming both operators.
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": ["network", "network"]}),
             serde_json::json!({"delta": {}, "requires": {"history": [{"contains": "network", "excludes": "network"}], "attention": []}, "emits": []}),
         ] {
             assert_eq!(
                 AnnotationAnswer::from_wire(&malformed, &declaration),
-                None,
+                Err(invalid_shape()),
                 "{malformed}"
+            );
+        }
+        // Audiences outside the declared mandate vocabulary — a directory-derived reader and a
+        // chain word the mandate does not list included — and lists outside the
+        // written-audience grammar: `public` inside an array, a repeated entry, an empty list,
+        // and a bare chain word where an array belongs.
+        for audience in [
+            serde_json::json!(["customer-7"]),
+            serde_json::json!(["self"]),
+            serde_json::json!(["public"]),
+            serde_json::json!(["public", "audit"]),
+            serde_json::json!(["internal", "internal"]),
+            serde_json::json!(["audit", "audit"]),
+            serde_json::json!([]),
+            serde_json::json!("internal"),
+        ] {
+            assert_eq!(
+                AnnotationAnswer::from_wire(
+                    &neutral(serde_json::json!({"delta": {"audience": audience}})),
+                    &declaration
+                ),
+                Err(outside_mandate("delta.audience", &audience, "audiences")),
+                "{audience}"
+            );
+        }
+        let invented = serde_json::json!("invented");
+        for (answer, field, allowed) in [
+            (
+                serde_json::json!({"delta": {"trust": "invented"}}),
+                "delta.trust",
+                "trust_ranks",
+            ),
+            (
+                serde_json::json!({"attention": ["invented"]}),
+                "requires.attention",
+                "attention_marks",
+            ),
+            (
+                serde_json::json!({"history": [{"contains": "invented"}]}),
+                "requires.history",
+                "effects",
+            ),
+            (serde_json::json!({"emits": ["invented"]}), "emits", "effects"),
+        ] {
+            assert_eq!(
+                AnnotationAnswer::from_wire(&neutral(answer), &declaration),
+                Err(outside_mandate(field, &invented, allowed)),
+                "{field}"
             );
         }
     }
@@ -1308,7 +1366,7 @@ mod tests {
                 &with_reader
             )
             .map(|answer| answer.delta_audience),
-            Some(Some(DeclaredAudience::restricted([ReaderId::new(
+            Ok(Some(DeclaredAudience::restricted([ReaderId::new(
                 "alice@corp.example"
             )]))),
             "a reader is one identity under every spelling of its domain"
@@ -1318,12 +1376,12 @@ mod tests {
             audiences: vocabulary(&["self", "internal"]),
             ..annotation_declaration()
         };
-        assert_eq!(
+        assert!(
             AnnotationAnswer::from_wire(
                 &neutral(serde_json::json!({"delta": {"audience": ["self", "internal"]}})),
                 &both_chain_words
-            ),
-            None,
+            )
+            .is_err(),
             "two chain words in one list is the written-audience grammar's refusal, mandate or not"
         );
     }
@@ -1359,9 +1417,8 @@ mod tests {
         }
         let repeated = with_audience(serde_json::json!(["audit", "audit"]));
         assert!(jsonschema::is_valid(&schema, &repeated));
-        assert_eq!(
-            AnnotationAnswer::from_wire(&repeated, &declaration),
-            None,
+        assert!(
+            AnnotationAnswer::from_wire(&repeated, &declaration).is_err(),
             "a repeated entry passes the schema and is the decoder's refusal"
         );
 
@@ -1391,7 +1448,7 @@ mod tests {
             body: ConsultBody::Annotation {
                 declaration: declaration.clone(),
                 artifact: AnnotationArtifact {
-                    args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd"}}),
+                    args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd", "token": "t0k3n"}}),
                 },
             },
         };
@@ -1403,7 +1460,31 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&prompt.input).expect("the input is JSON"),
-            serde_json::json!({"args": {"name": "Bash", "arguments": {"command": "pwd"}}})
+            serde_json::json!({"args": {"name": "Bash", "arguments": {"command": "pwd", "token": "[redacted-secret]"}}}),
+            "an annotation's call leaves redacted"
+        );
+        let sanitizer = Consult {
+            name: "scrub".to_string(),
+            body: ConsultBody::Sanitizer {
+                declaration: SanitizerDeclaration {
+                    hint: None,
+                    on: SanitizerPoint::ToolOutput,
+                    permits: DeclaredSanitizerTransition::Trust {
+                        from: "suspicious".to_string(),
+                        to: "trusted".to_string(),
+                    },
+                    parameters: None,
+                },
+                artifact: SanitizerArtifact {
+                    tool: None,
+                    body: "token=t0k3n".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            ModelPrompt::new(&sanitizer).expect("a sanitizer consult renders").input,
+            serde_json::json!({"body": "token=t0k3n"}).to_string(),
+            "a sanitizer sees the value it rewrites"
         );
         assert_eq!(
             prompt.schema["required"],
@@ -1543,16 +1624,15 @@ mod tests {
                     ),
                     ("emits", neutral(serde_json::json!({"emits": [stand_in]}))),
                 ] {
-                    assert_eq!(
-                        AnnotationAnswer::from_wire(&answer, declaration),
-                        None,
+                    assert!(
+                        AnnotationAnswer::from_wire(&answer, declaration).is_err(),
                         "{name}: the stand-in is admitted at {leaf}"
                     );
                 }
             }
             assert_eq!(
                 AnnotationAnswer::from_wire(&neutral(serde_json::json!({})), declaration).map(|answer| answer.emits),
-                Some(vec![]),
+                Ok(vec![]),
                 "{name}: the neutral annotation decodes"
             );
         }

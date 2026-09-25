@@ -4,9 +4,8 @@
 //! annotation: `delta.audience`, `delta.trust`, `requires.audience` and `requires.trust`. It
 //! never answers an effect, a `history` entry or an attention mark.
 //!
-//! The call's name, description and arguments leave for the TypeSafe API. Redaction first
-//! is best effort: well-known token and key shapes, private-key blocks, `Authorization`
-//! header values, and the values of fields named for a secret; long text is then cut. Each
+//! The call's name, description and arguments leave for the TypeSafe API, after the
+//! best-effort redaction every model provider gets ([`crate::secrets::redact_args`]). Each
 //! label is Jev's likeliest option, and a tie goes to the safer one: the narrower result
 //! audience, the lower trust rank, the wider required audience. A label the mandate does not
 //! admit, a consult that is not a complete call, and every provider failure are no answer.
@@ -29,6 +28,7 @@ use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use tokio::time::Instant;
 
+use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, Token};
 use crate::consult::{Consult, ConsultBody};
 use crate::external::{NoAnswerReason, acquire_within};
@@ -38,15 +38,11 @@ use questions::Questions;
 const MODEL: &str = "jev-1.13.0";
 const DIAGNOSTICS_VERSION: u32 = 1;
 
-/// Each argument string is cut to this many characters before it leaves.
-const MAX_VALUE_CHARS: usize = 4000;
 /// At or above this probability the call requires the highest trust rank.
 const REQUIRES_TRUSTED_CUTOFF: f64 = 0.5;
 
 /// A consult larger than this, as a command annotator would read it, is no answer.
 const MAX_CONSULT_BYTES: usize = 64 * 1024;
-/// The most attempts one consult starts, hedges and retries together.
-const MAX_ATTEMPTS: usize = 3;
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// How one consult spends its budget.
@@ -71,7 +67,7 @@ impl JevTiming {
         hedge_delay: Duration::from_millis(800),
         cold_hedge_delay: Duration::from_secs(2),
         budget_margin: Duration::from_millis(250),
-        min_attempt: Duration::from_millis(300),
+        min_attempt: super::MIN_ATTEMPT,
         pool_idle_timeout: Duration::from_secs(90),
     };
 }
@@ -162,6 +158,11 @@ impl JevBackend {
         let consult_bytes =
             serde_json::to_vec(consult).map_err(|_| (JevFailure::UnsupportedConsult, NoAnswerReason::Malformed))?;
         if consult_bytes.len() > MAX_CONSULT_BYTES {
+            tracing::debug!(
+                bytes = consult_bytes.len(),
+                limit = MAX_CONSULT_BYTES,
+                "the jev consult is too large to send"
+            );
             return Err((JevFailure::ConsultTooLarge, NoAnswerReason::Oversized));
         }
         let unsupported = (JevFailure::UnsupportedConsult, NoAnswerReason::Unregistered);
@@ -171,7 +172,8 @@ impl JevBackend {
         if !declaration.inputs.is_empty() {
             return Err(unsupported);
         }
-        let state = State::of(&artifact.args).ok_or(unsupported)?;
+        let args = crate::secrets::redact_args(&artifact.args);
+        let state = State::of(&args).ok_or(unsupported)?;
         let key = self.key.reveal();
         let request = JevRequest {
             state,
@@ -452,96 +454,24 @@ struct JevRequest<'a> {
     questions: Questions,
 }
 
-/// The call as Jev reads it: its name, its arguments as they leave, and its description
-/// when the policy declares one.
+/// The call as Jev reads it: its name, its redacted arguments, and its description when
+/// the policy declares one.
 #[derive(Serialize)]
 struct State<'a> {
     tool: &'a str,
-    arguments: serde_json::Value,
+    arguments: &'a serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    description: Option<&'a str>,
 }
 
 impl<'a> State<'a> {
     /// The complete call an annotation consult carries, or nothing for any other artifact.
     fn of(args: &'a serde_json::Value) -> Option<State<'a>> {
-        let tool = args.get("name")?.as_str()?;
-        let arguments = args.get("arguments").filter(|arguments| arguments.is_object())?;
         Some(State {
-            tool,
-            arguments: outbound(arguments),
-            description: args
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-                .map(redacted),
+            tool: args.get("name")?.as_str()?,
+            arguments: args.get("arguments").filter(|arguments| arguments.is_object())?,
+            description: args.get("description").and_then(serde_json::Value::as_str),
         })
-    }
-}
-
-/// The known secret shapes, in the order they are redacted, with their replacements.
-static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 9]> = std::sync::LazyLock::new(|| {
-    let pattern = |source: &str| regex::Regex::new(source).expect("the secret patterns compile");
-    [
-        (
-            pattern(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"),
-            "<REDACTED_PRIVATE_KEY>",
-        ),
-        (pattern(r"sk-[A-Za-z0-9_\-]{16,}"), "<REDACTED_KEY>"),
-        (pattern(r"gh[pousr]_[A-Za-z0-9]{16,}"), "<REDACTED_KEY>"),
-        (pattern(r"xox[baprs]-[A-Za-z0-9\-]{10,}"), "<REDACTED_KEY>"),
-        (pattern(r"AKIA[0-9A-Z]{16}"), "<REDACTED_KEY>"),
-        (
-            pattern(r#"(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s"'`]+"#),
-            "${1}<REDACTED_KEY>",
-        ),
-        (
-            pattern(r#"(?i)\b(api[_-]?key|secret|token|password)\b(\s*[:=]\s*)["']?[A-Za-z0-9._\-]{12,}["']?"#),
-            "${1}${2}<REDACTED>",
-        ),
-        (
-            pattern(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
-            "<REDACTED_JWT>",
-        ),
-        (pattern(r"(?is)^(bearer|basic)(\s+)\S.*$"), "${1}${2}<REDACTED_KEY>"),
-    ]
-});
-
-/// A field whose name contains one of these words, or is `auth`, holds a secret, whatever
-/// its value.
-static SECRET_FIELD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?i)api[_-]?key|secret|token|password|passwd|passphrase|authorization|cookie|credential|private[_-]?key|access[_-]?key|^auth$",
-    )
-        .expect("the secret field pattern compiles")
-});
-
-/// One argument value as it leaves for the provider: secrets redacted, long text cut.
-fn outbound(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(text) => serde_json::Value::String(redacted(text)),
-        serde_json::Value::Object(fields) => serde_json::Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| match SECRET_FIELD.is_match(key) {
-                    true => (key.clone(), serde_json::Value::String("<REDACTED>".to_string())),
-                    false => (key.clone(), outbound(value)),
-                })
-                .collect(),
-        ),
-        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(outbound).collect()),
-        other => other.clone(),
-    }
-}
-
-fn redacted(text: &str) -> String {
-    let mut text = text.to_string();
-    for (pattern, replacement) in SECRET_PATTERNS.iter() {
-        text = pattern.replace_all(&text, *replacement).into_owned();
-    }
-    let length = text.chars().count();
-    match text.char_indices().nth(MAX_VALUE_CHARS) {
-        Some((cut, _)) => format!("{}…[truncated, {length} chars total]", &text[..cut]),
-        None => text,
     }
 }
 
@@ -1235,107 +1165,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_secret_shape_is_redacted() {
-        for (text, expected) in [
-            ("key sk-abcdefghijklmnopqrstuvwxyz end", "key <REDACTED_KEY> end"),
-            ("gho_abcdefghijklmnopqrst", "<REDACTED_KEY>"),
-            ("slack xoxb-1234567890-abc", "slack <REDACTED_KEY>"),
-            ("AKIAABCDEFGHIJKLMNOP", "<REDACTED_KEY>"),
-            (
-                "Authorization: Bearer abcdefghijklmnop.qrs",
-                "Authorization: Bearer <REDACTED_KEY>",
-            ),
-            ("api_key = 'abcdefghijklmnop'", "api_key = <REDACTED>"),
-            ("PASSWORD:\"hunter2hunter2hunter2\"", "PASSWORD:<REDACTED>"),
-            ("mytoken=abcdefghijklmnop", "mytoken=abcdefghijklmnop"),
-            ("secret: short", "secret: short"),
-            ("Bearer abc", "Bearer <REDACTED_KEY>"),
-            (
-                "curl -H 'Authorization: Basic dXNlcjpwYXNz' https://example.org",
-                "curl -H 'Authorization: Basic <REDACTED_KEY>' https://example.org",
-            ),
-            (
-                "key: -----BEGIN RSA PRIVATE KEY-----\nMIIEow\nIBAAK==\n-----END RSA PRIVATE KEY----- done",
-                "key: <REDACTED_PRIVATE_KEY> done",
-            ),
-            (
-                "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----",
-                "<REDACTED_PRIVATE_KEY>",
-            ),
-            ("basic dXNlcjpwYXNz", "basic <REDACTED_KEY>"),
-            ("use Bearer tokens", "use Bearer tokens"),
-            (
-                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-                "jwt <REDACTED_JWT>",
-            ),
-        ] {
-            assert_eq!(redacted(text), expected, "{text}");
-        }
-        assert_eq!(
-            outbound(&json!({"list": [SECRET, {"deep": SECRET}], "n": 7, "flag": true, "none": null})),
-            json!({"list": ["<REDACTED_KEY>", {"deep": "<REDACTED_KEY>"}], "n": 7, "flag": true, "none": null})
-        );
-    }
-
-    #[test]
-    fn a_field_named_for_a_secret_is_redacted_whatever_it_holds() {
-        assert_eq!(
-            outbound(&json!({
-                "password": "hunter2",
-                "api_key": 12345,
-                "headers": {"Authorization": "Bearer abc", "X-Forward": "Basic dXNlcjpwYXNz", "Accept": "*/*"},
-                "hosts": [{"name": "db", "Client-Secret": {"v": "s"}}, {"sessionCookie": "c", "port": 5432}],
-                "user": "me",
-                "db_passwd": "p",
-                "passphrase": "p",
-                "AWS_ACCESS_KEY": "k",
-                "Auth": "a",
-                "author": "Ada",
-                "oauth_scope": "read",
-            })),
-            json!({
-                "password": "<REDACTED>",
-                "api_key": "<REDACTED>",
-                "headers": {"Authorization": "<REDACTED>", "X-Forward": "Basic <REDACTED_KEY>", "Accept": "*/*"},
-                "hosts": [{"name": "db", "Client-Secret": "<REDACTED>"}, {"sessionCookie": "<REDACTED>", "port": 5432}],
-                "user": "me",
-                "db_passwd": "<REDACTED>",
-                "passphrase": "<REDACTED>",
-                "AWS_ACCESS_KEY": "<REDACTED>",
-                "Auth": "<REDACTED>",
-                "author": "Ada",
-                "oauth_scope": "read",
-            })
-        );
-    }
-
-    #[test]
-    fn the_description_leaves_redacted_and_cut_like_an_argument() {
-        let long = "d".repeat(MAX_VALUE_CHARS + 5);
-        let args = json!({"name": "Bash", "arguments": {}, "description": format!("uses {SECRET} {long}")});
-        let state = State::of(&args).expect("a complete call");
-        assert_eq!(state.description, Some(redacted(&format!("uses {SECRET} {long}"))));
-        let description = state.description.expect("a description");
-        assert!(description.starts_with("uses <REDACTED_KEY> ddd"), "{description}");
-        assert_eq!(description.chars().take_while(|c| *c != '…').count(), MAX_VALUE_CHARS);
-    }
-
-    #[test]
-    fn a_long_value_is_cut_by_characters_not_bytes() {
-        let exact = "é".repeat(MAX_VALUE_CHARS);
-        assert_eq!(redacted(&exact), exact);
-        let long = format!("{}漢😀", "é".repeat(MAX_VALUE_CHARS - 1));
-        assert_eq!(
-            redacted(&long),
-            format!(
-                "{}漢…[truncated, {} chars total]",
-                "é".repeat(MAX_VALUE_CHARS - 1),
-                MAX_VALUE_CHARS + 1
-            )
-        );
-    }
-
     #[tokio::test]
     async fn a_first_answer_is_used_as_is_and_carries_the_key_and_the_redacted_call() {
         let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
@@ -1353,7 +1182,7 @@ mod tests {
             request["state"],
             json!({
                 "tool": "Bash",
-                "arguments": {"command": "curl -H 'x: <REDACTED_KEY>' https://example.org"},
+                "arguments": {"command": "curl -H 'x: [redacted-secret]' https://example.org"},
                 "description": "Runs a shell command.",
             })
         );

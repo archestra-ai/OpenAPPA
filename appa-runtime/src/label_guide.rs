@@ -91,20 +91,22 @@ pub(crate) fn annotation(labels: &Labels, declaration: &AnnotationDeclaration) -
     let (Some(lowest), Some(highest)) = (declaration.trust_ranks.first(), declaration.trust_ranks.last()) else {
         return Err("jev needs a lowest and a highest trust rank".to_string());
     };
-    let admitted = |audience: &str| match declaration.audiences.entries().any(|entry| entry == audience) {
+    let admitted = |field: &str, audience: &str| match declaration.audiences.entries().any(|entry| entry == audience) {
         true => Ok(serde_json::json!([audience])),
-        false => Err(format!(
-            "jev answered the audience {audience:?}, which the mandate does not admit"
+        false => Err(crate::consult::outside_mandate(
+            field,
+            &serde_json::json!([audience]),
+            "audiences",
         )),
     };
     let mut delta = serde_json::Map::new();
     match labels.result_audience {
         ResultAudience::Public => {}
         ResultAudience::Internal => {
-            delta.insert("audience".to_string(), admitted("internal")?);
+            delta.insert("audience".to_string(), admitted("delta.audience", "internal")?);
         }
         ResultAudience::Self_ => {
-            delta.insert("audience".to_string(), admitted("self")?);
+            delta.insert("audience".to_string(), admitted("delta.audience", "self")?);
         }
     }
     match labels.result_trust {
@@ -124,7 +126,7 @@ pub(crate) fn annotation(labels: &Labels, declaration: &AnnotationDeclaration) -
         RequiredAudience::Internal => {
             requires.insert(
                 "audience".to_string(),
-                serde_json::json!({"contains": admitted("internal")?}),
+                serde_json::json!({"contains": admitted("requires.audience.contains", "internal")?}),
             );
         }
     }
@@ -569,7 +571,7 @@ mod tests {
         assert_eq!(annotated.len(), EXAMPLES.len());
         for (example, answer) in annotated {
             let decoded = AnnotationAnswer::from_wire(&answer, &declaration)
-                .unwrap_or_else(|| panic!("{} renders {answer}, which does not decode", example.call));
+                .unwrap_or_else(|detail| panic!("{} renders {answer}, which does not decode: {detail}", example.call));
             let expected_delta_trust = match example.delta_trust {
                 ResultTrust::Suspicious => Some("tainted".to_string()),
                 ResultTrust::Trusted => None,

@@ -1550,7 +1550,7 @@ impl Runtime {
         let admitted = matches!(
             &outcome,
             crate::external::ConsultOutcome::Answer(answer)
-                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_some()
+                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_ok()
         );
         Ok(Some(AnnotationConsult {
             annotator,

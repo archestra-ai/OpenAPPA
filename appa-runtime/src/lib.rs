@@ -54,6 +54,7 @@ mod external;
 mod label_guide;
 mod model;
 mod recorder;
+mod secrets;
 mod telemetry;
 #[cfg(test)]
 mod test_support;

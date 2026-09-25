@@ -498,7 +498,7 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::Model(model) => self.consult_model(model, consult).await,
+            Backend::Model(model) => self.consult_model(model, consult, seen).await,
             Backend::Jev(jev) => {
                 let (answered, record) = Box::pin(jev.consult(consult)).await;
                 if let Some(seen) = seen {
@@ -570,11 +570,16 @@ impl ExternalServices {
         read_answer(&output?)
     }
 
-    async fn consult_model(&self, model: &PromptModel, consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
+    async fn consult_model(
+        &self,
+        model: &PromptModel,
+        consult: &Consult,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
         let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
         match model {
-            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name).await,
-            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name).await,
+            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
+            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
         }
     }
 
@@ -1850,7 +1855,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let prompt = ModelPrompt::new(&annotation_consult("review", serde_json::json!({}))).expect("renders");
         let consult = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            run_claude_code(&backend, &prompt, deadline).await
+            run_claude_code(&backend, &prompt, deadline, None).await
         });
         let pid = recorded_pid(&pid_file).await;
         consult.abort();
@@ -1915,6 +1920,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             &claude_backend(command, 2000, 65_536),
             &prompt,
             tokio::time::Instant::now() + Duration::from_millis(2000),
+            None,
         )
         .await
         .expect("the fake Claude process returns structured output");
@@ -1968,7 +1974,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             let prompt = &prompt;
             async move {
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-                run_claude_code(&claude_backend(command, timeout_ms, cap), prompt, deadline).await
+                run_claude_code(&claude_backend(command, timeout_ms, cap), prompt, deadline, None).await
             }
         };
         assert_eq!(
@@ -2019,12 +2025,20 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             );
         }
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+        let (answered, transcript) = services
+            .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
+            .await;
         assert_eq!(
-            services
-                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
-                .await,
+            answered,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
+        let transcript = transcript.expect("a claude consult is recorded");
+        assert_eq!(transcript.backend, ConsultBackend::ClaudeCode);
+        assert_eq!(
+            transcript.raw_response.as_deref(),
+            Some(&br#"{"type":"result","structured_output":{"ruling":"approve","reason":"fine"}}"#[..])
+        );
+        assert_eq!(transcript.http_status, None);
         assert!(matches!(
             services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)
@@ -2059,12 +2073,20 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         }
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Llm));
+        let (answered, transcript) = services
+            .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
+            .await;
         assert_eq!(
-            services
-                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
-                .await,
+            answered,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
+        let transcript = transcript.expect("an llm consult is recorded");
+        assert_eq!(transcript.backend, ConsultBackend::Llm);
+        assert_eq!(
+            transcript.raw_response.as_deref(),
+            Some(&br#"{"ruling":"approve","reason":"fine"}"#[..])
+        );
+        assert_eq!(transcript.http_status, None);
         assert!(matches!(
             services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)

@@ -16,15 +16,17 @@ use rig_core::completion::{CompletionError, CompletionModel};
 
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
+use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
 use crate::config::{LlmProfile, LlmProvider, ProfileKey};
 use crate::consult::ModelPrompt;
-use crate::external::{NoAnswerReason, acquire_within};
+use crate::external::{NoAnswerReason, Transcript, acquire_within};
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
 /// body) plus the schema's own overhead, and never less than a short ruling needs.
 const MIN_ANSWER_TOKENS: u64 = 4096;
 const MAX_ANSWER_TOKENS: u64 = 32_768;
 const ANSWER_OVERHEAD_TOKENS: u64 = 1024;
+const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// The output tokens one consult may spend: sized from the input, and never more than
 /// the deployment accepts as an answer body — a token is at least one byte, so an answer
@@ -148,22 +150,72 @@ impl LlmBackend {
         self.gate.available_permits()
     }
 
-    /// One consult. The deadline covers the permit wait and the request: queueing behind
-    /// the pool spends the same budget the consult itself would.
-    pub async fn consult(&self, prompt: &ModelPrompt, name: &str) -> Result<serde_json::Value, NoAnswerReason> {
+    /// One consult. The deadline covers the permit wait and every attempt: queueing behind
+    /// the pool spends the same budget the consult itself would. A transport failure, a
+    /// 429 or a 5xx is retried after [`RETRY_BACKOFF`] while the budget leaves room for
+    /// another attempt; the permit is held across them.
+    pub(crate) async fn consult(
+        &self,
+        prompt: &ModelPrompt,
+        name: &str,
+        mut seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = acquire_within(&self.gate, deadline, "llm", name).await?;
-        let answered = tokio::time::timeout_at(deadline, self.prompt(prompt)).await;
-        drop(permit);
-        match answered {
+        let _permit = acquire_within(&self.gate, deadline, "llm", name).await?;
+        let mut attempts = 1;
+        loop {
+            let answered = self.attempt(prompt, deadline, seen.as_deref_mut()).await;
+            let retryable = matches!(
+                answered,
+                Err(NoAnswerReason::Transport
+                    | NoAnswerReason::NonSuccess {
+                        status: 429 | 500..,
+                        ..
+                    })
+            );
+            if !retryable
+                || attempts == MAX_ATTEMPTS
+                || tokio::time::Instant::now() + RETRY_BACKOFF + MIN_ATTEMPT > deadline
+            {
+                return answered;
+            }
+            attempts += 1;
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
+    }
+
+    /// One request; `seen` keeps the model's answer text, capped, or the provider's status.
+    async fn attempt(
+        &self,
+        prompt: &ModelPrompt,
+        deadline: tokio::time::Instant,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let mut raw_response = None;
+        let answered = match tokio::time::timeout_at(deadline, self.prompt(prompt)).await {
             Err(_) => Err(NoAnswerReason::Timeout),
             Ok(Err(error)) => {
                 tracing::debug!(%error, "the llm consult failed");
                 Err(no_answer(error))
             }
-            Ok(Ok(text)) if text.len() > self.max_body_bytes => Err(NoAnswerReason::Oversized),
-            Ok(Ok(text)) => serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed),
+            Ok(Ok(text)) if text.len() > self.max_body_bytes => {
+                raw_response = Some(text.as_bytes()[..self.max_body_bytes].to_vec());
+                Err(NoAnswerReason::Oversized)
+            }
+            Ok(Ok(text)) => {
+                let answered = serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed);
+                raw_response = Some(text.into_bytes());
+                answered
+            }
+        };
+        if let Some(seen) = seen {
+            seen.raw_response = raw_response;
+            seen.http_status = match answered {
+                Err(NoAnswerReason::NonSuccess { status, .. }) => Some(status),
+                _ => None,
+            };
         }
+        answered
     }
 
     async fn prompt(&self, prompt: &ModelPrompt) -> Result<String, PromptError> {
@@ -238,6 +290,8 @@ mod tests {
     #[derive(Clone)]
     struct Stub {
         answer: Arc<Mutex<StubAnswer>>,
+        /// Answered first, one per request, before `answer`.
+        script: Arc<Mutex<std::collections::VecDeque<StubAnswer>>>,
         requests: Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>,
         in_flight: Arc<AtomicUsize>,
         max_in_flight: Arc<AtomicUsize>,
@@ -278,6 +332,7 @@ mod tests {
     async fn serve(path: &'static str, reply: fn(&str) -> String, delay: Duration) -> (SocketAddr, Stub) {
         let stub = Stub {
             answer: Arc::new(Mutex::new(StubAnswer::Text(String::new()))),
+            script: Arc::default(),
             requests: Arc::new(Mutex::new(Vec::new())),
             in_flight: Arc::new(AtomicUsize::new(0)),
             max_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -293,7 +348,8 @@ mod tests {
                         let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
                         stub.requests.lock().unwrap().push((headers, request));
                         tokio::time::sleep(stub.delay).await;
-                        let answer = stub.answer.lock().unwrap().clone();
+                        let scripted = stub.script.lock().unwrap().pop_front();
+                        let answer = scripted.unwrap_or_else(|| stub.answer.lock().unwrap().clone());
                         let response = match answer {
                             StubAnswer::Text(text) => (axum::http::StatusCode::OK, reply(&text)),
                             StubAnswer::Status(status) => (
@@ -380,7 +436,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         let backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 4);
 
-        let answer = backend.consult(&prompt(), "judge").await;
+        let answer = backend.consult(&prompt(), "judge", None).await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "approve" })));
 
         let requests = stub.requests();
@@ -410,7 +466,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"deny\"}".to_string()));
         let backend = built(LlmProvider::OpenAi, format!("http://{addr}/v1"), 4);
 
-        let answer = backend.consult(&prompt(), "judge").await;
+        let answer = backend.consult(&prompt(), "judge", None).await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "deny" })));
 
         let requests = stub.requests();
@@ -448,7 +504,7 @@ mod tests {
 
         stub.answering(StubAnswer::Status(500));
         assert_eq!(
-            backend.consult(&prompt(), "judge").await,
+            backend.consult(&prompt(), "judge", None).await,
             Err(NoAnswerReason::NonSuccess {
                 status: 500,
                 detail: None
@@ -457,13 +513,16 @@ mod tests {
 
         stub.answering(StubAnswer::Text("not json".to_string()));
         assert_eq!(
-            backend.consult(&prompt(), "judge").await,
+            backend.consult(&prompt(), "judge", None).await,
             Err(NoAnswerReason::Malformed)
         );
 
         stub.answering(StubAnswer::Stall);
         let started = std::time::Instant::now();
-        assert_eq!(backend.consult(&prompt(), "judge").await, Err(NoAnswerReason::Timeout));
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::Timeout)
+        );
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "the profile's own budget bounds the consult"
@@ -473,7 +532,7 @@ mod tests {
         let unreachable = format!("http://{}", closed.local_addr().expect("the address reads"));
         drop(closed);
         let backend = built(LlmProvider::Anthropic, unreachable, 4);
-        assert!(backend.consult(&prompt(), "judge").await.is_err());
+        assert!(backend.consult(&prompt(), "judge", None).await.is_err());
     }
 
     #[tokio::test]
@@ -483,7 +542,7 @@ mod tests {
 
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         assert_eq!(
-            backend.consult(&prompt(), "judge").await,
+            backend.consult(&prompt(), "judge", None).await,
             Ok(serde_json::json!({ "ruling": "approve" }))
         );
         assert_eq!(stub.requests()[0].1["max_tokens"], 48, "a token is at least a byte");
@@ -491,7 +550,7 @@ mod tests {
         let long = format!("{{\"ruling\":\"approve\",\"reason\":\"{}\"}}", "x".repeat(64));
         stub.answering(StubAnswer::Text(long));
         assert_eq!(
-            backend.consult(&prompt(), "judge").await,
+            backend.consult(&prompt(), "judge", None).await,
             Err(NoAnswerReason::Oversized)
         );
     }
@@ -510,16 +569,80 @@ mod tests {
 
         let ask = prompt();
         let answers = futures_util::future::join_all([
-            narrow.consult(&ask, "judge"),
-            wide.consult(&ask, "judge"),
-            narrow.consult(&ask, "judge"),
-            wide.consult(&ask, "judge"),
-            narrow.consult(&ask, "judge"),
-            wide.consult(&ask, "judge"),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
         ])
         .await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
         assert_eq!(narrow_stub.max_in_flight.load(Ordering::SeqCst), 1);
         assert_eq!(wide_stub.max_in_flight.load(Ordering::SeqCst), 2);
+    }
+
+    const APPROVE: &str = "{\"ruling\":\"approve\"}";
+
+    /// A backend over a fresh stub that answers `script` in order, then approves.
+    async fn scripted(script: Vec<StubAnswer>, timeout: Duration) -> (LlmBackend, Stub) {
+        let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::ZERO).await;
+        stub.answering(StubAnswer::Text(APPROVE.to_string()));
+        stub.script.lock().unwrap().extend(script);
+        let mut backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 1);
+        backend.timeout = timeout;
+        (backend, stub)
+    }
+
+    #[tokio::test]
+    async fn a_server_error_or_a_rate_limit_is_retried() {
+        for status in [503, 429] {
+            let (backend, stub) = scripted(vec![StubAnswer::Status(status)], Duration::from_secs(5)).await;
+            assert_eq!(
+                backend.consult(&prompt(), "judge", None).await,
+                Ok(serde_json::json!({ "ruling": "approve" })),
+                "{status}"
+            );
+            assert_eq!(stub.requests().len(), 2, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_error_is_not_retried() {
+        let (backend, stub) = scripted(vec![StubAnswer::Status(400)], Duration::from_secs(5)).await;
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 400,
+                detail: None
+            })
+        );
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_persistent_server_error_ends_after_the_last_attempt() {
+        let (backend, stub) = scripted(vec![StubAnswer::Status(502); 4], Duration::from_secs(5)).await;
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 502,
+                detail: None
+            })
+        );
+        assert_eq!(stub.requests().len(), MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn no_retry_starts_without_the_budget_for_one() {
+        let (backend, stub) = scripted(vec![StubAnswer::Status(503)], RETRY_BACKOFF + MIN_ATTEMPT / 2).await;
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(stub.requests().len(), 1);
     }
 }
