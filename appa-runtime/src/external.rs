@@ -1223,7 +1223,7 @@ mod tests {
         MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
     #[cfg(unix)]
-    use crate::test_support::fake_claude;
+    use crate::test_support::{PROCESS_BUDGET, assert_process_gone, fake_claude, recorded_pid};
     use appa_engine::audience::DeclaredTemplate;
     use appa_engine::label::ChainAudience;
 
@@ -1532,6 +1532,12 @@ mod tests {
         }
     }
 
+    /// [`PROCESS_BUDGET`] as a consult's `timeout_ms`.
+    #[cfg(unix)]
+    fn budget_ms() -> u64 {
+        u64::try_from(PROCESS_BUDGET.as_millis()).expect("the budget fits in milliseconds")
+    }
+
     #[cfg(unix)]
     fn command_services(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> ExternalServices {
         services_over(command_config(dir, script, timeout_ms, cap))
@@ -1559,35 +1565,42 @@ mod tests {
         config
     }
 
-    /// Three commands that each sleep 200ms: behind a one-permit gate they run one after
-    /// another; behind the runtime's gate they run together.
+    /// Three commands: behind a one-permit gate none starts while another runs; behind the
+    /// runtime's gate all three run at once, each waiting until the other two have arrived.
     #[cfg(unix)]
     #[tokio::test]
     async fn command_consults_queue_behind_the_runtime_gate() {
-        let dir = tempfile::tempdir().expect("a fixture directory is created");
-        let script = "sleep 0.2\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'";
-        for (command_permits, at_least, at_most) in [(1, 600, 5000), (8, 0, 600)] {
+        const ANSWER: &str = "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'";
+        let alone = format!(
+            "mkdir running.$$\nls -d running.* | wc -l | tr -d ' ' >> overlap\nsleep 0.2\nrmdir running.$$\n{ANSWER}"
+        );
+        // Under a gate that serialized them the first never sees the others and times out.
+        let together =
+            format!("touch arrived.$$\nwhile [ $(ls arrived.* | wc -l) -lt 3 ]; do sleep 0.01; done\n{ANSWER}");
+        for (command_permits, script, overlap) in [(1, alone, Some("1\n1\n1\n")), (8, together, None)] {
+            let dir = tempfile::tempdir().expect("a fixture directory is created");
             let services = ExternalServices::new(
-                command_config(dir.path(), script, 5000, 1024),
+                command_config(dir.path(), &script, budget_ms(), 1024),
                 &ModuleRegistry::empty(),
                 BTreeMap::new(),
                 ConsultGates::of(command_permits),
             )
             .expect("no builtin references are configured");
-            let started = std::time::Instant::now();
             let outcomes = tokio::join!(
                 resolve_command(&services),
                 resolve_command(&services),
                 resolve_command(&services)
             );
-            let elapsed = started.elapsed();
             for outcome in [outcomes.0, outcomes.1, outcomes.2] {
-                assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
+                assert!(
+                    matches!(outcome, ConsultOutcome::Answer(_)),
+                    "{command_permits} permits: {outcome:?}"
+                );
             }
-            assert!(
-                elapsed >= Duration::from_millis(at_least) && elapsed < Duration::from_millis(at_most),
-                "{command_permits} permits took {elapsed:?}"
-            );
+            if let Some(expected) = overlap {
+                let counted = std::fs::read_to_string(dir.path().join("overlap")).expect("each command counted");
+                assert_eq!(counted, expected, "one permit runs one command at a time");
+            }
         }
     }
 
@@ -1683,26 +1696,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             "printf '%s' '{{\"version\":1,\"answer\":{{\"delta.trust\":\"trusted\"}}}}'\nsleep 30 &\necho $! > {}\n",
             pid_file.display()
         );
-        let services = command_services(dir.path(), &script, 3000, 1024);
+        // The deadline is under the helper's `sleep 30`: a consult that waited on the
+        // helper's end of the pipe times out instead of answering.
+        let services = command_services(dir.path(), &script, budget_ms(), 1024);
 
-        let started = std::time::Instant::now();
         let outcome = resolve_command(&services).await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the answer is read as soon as the command exits"
-        );
-
-        let helper: i32 = std::fs::read_to_string(&pid_file)
-            .expect("the command recorded its helper")
-            .trim()
-            .parse()
-            .expect("a pid");
-        let gone_by = std::time::Instant::now() + Duration::from_secs(3);
-        while unsafe { libc::kill(helper, 0) } == 0 {
-            assert!(std::time::Instant::now() < gone_by, "the helper outlived the consult");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        assert_process_gone(recorded_pid(&pid_file).await).await;
     }
 
     #[cfg(unix)]
@@ -1712,7 +1712,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = command_services(
             dir.path(),
             "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'\n",
-            3000,
+            budget_ms(),
             1024,
         );
         // Far past any pipe buffer: the write can finish only once the child reads, and it never does.
@@ -1729,15 +1729,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let script = "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\",\"pad\":\"'\n\
                       head -c 200000 /dev/zero | tr '\\0' x\nprintf '%s' '\"}}'\ncat > /dev/null\n";
-        let services = command_services(dir.path(), script, 3000, 1 << 20);
+        // An exchange that waits on itself never finishes, so it times out instead of answering.
+        let services = command_services(dir.path(), script, budget_ms(), 1 << 20);
         let consult = annotation_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
-        let started = std::time::Instant::now();
         let outcome = services.consult(&consult, None, None).await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the exchange never waited on itself"
-        );
     }
 
     #[cfg(unix)]
@@ -1759,25 +1755,25 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
 
         for (script, timeout_ms, cap, expected) in [
-            ("exit 7", 1000, 1024, NoAnswerReason::Transport),
+            ("exit 7", budget_ms(), 1024, NoAnswerReason::Transport),
             ("sleep 5", 20, 1024, NoAnswerReason::Timeout),
-            ("printf 'xxxxxxxx'", 1000, 4, NoAnswerReason::Oversized),
-            ("printf 'not-json'", 1000, 1024, NoAnswerReason::Malformed),
+            ("printf 'xxxxxxxx'", budget_ms(), 4, NoAnswerReason::Oversized),
+            ("printf 'not-json'", budget_ms(), 1024, NoAnswerReason::Malformed),
             (
                 "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"},\"extra\":1}'",
-                1000,
+                budget_ms(),
                 1024,
                 NoAnswerReason::Malformed,
             ),
             (
                 "printf '%s' '{\"version\":2,\"answer\":{\"delta.trust\":\"trusted\"}}'",
-                1000,
+                budget_ms(),
                 1024,
                 NoAnswerReason::UnsupportedVersion,
             ),
             (
                 "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'; exit 7",
-                1000,
+                budget_ms(),
                 1024,
                 NoAnswerReason::Transport,
             ),
@@ -1790,49 +1786,6 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         }
     }
 
-    /// How long a freshly written fixture script may take to start and act. Under a loaded
-    /// parallel suite its cold execs take seconds on macOS; this bounds a hang, not the
-    /// latency under test. Recording a pid and awaiting its end together stay under the
-    /// fixtures' `sleep 30`, so a descendant cannot pass by exiting on its own.
-    #[cfg(unix)]
-    const PROCESS_BUDGET: Duration = Duration::from_secs(10);
-
-    /// Poll `probe` every 10ms until it yields a value or `deadline` passes.
-    #[cfg(unix)]
-    async fn wait_until<T>(deadline: tokio::time::Instant, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
-        while tokio::time::Instant::now() < deadline {
-            if let Some(value) = probe() {
-                return Some(value);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        None
-    }
-
-    #[cfg(unix)]
-    async fn recorded_pid(path: &std::path::Path) -> i32 {
-        wait_until(tokio::time::Instant::now() + PROCESS_BUDGET, || {
-            std::fs::read_to_string(path).ok()?.trim().parse().ok()
-        })
-        .await
-        .expect("the resolver did not record its descendant pid")
-    }
-
-    #[cfg(unix)]
-    fn process_exists(pid: i32) -> bool {
-        let result = unsafe { libc::kill(pid, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-
-    #[cfg(unix)]
-    async fn assert_process_gone(pid: i32) {
-        wait_until(tokio::time::Instant::now() + PROCESS_BUDGET, || {
-            (!process_exists(pid)).then_some(())
-        })
-        .await
-        .unwrap_or_else(|| panic!("resolver descendant {pid} survived process-group cleanup"));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn command_descendants_are_terminated_after_success_timeout_and_cancellation() {
@@ -1841,27 +1794,29 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let outcome = resolve_command(&command_services(
             success.path(),
             "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'",
-            2000,
+            budget_ms(),
             65_536,
         ))
         .await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)));
         assert_process_gone(recorded_pid(&success_pid).await).await;
 
+        // The deadline leaves the script time to record its descendant before the timeout
+        // takes the group down; the descendant's `sleep 30` outlasts twice that deadline.
         let timeout = tempfile::tempdir().expect("timeout fixture directory");
         let timeout_pid = timeout.path().join("descendant.pid");
         let started = std::time::Instant::now();
         let outcome = resolve_command(&command_services(
             timeout.path(),
             "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nwait",
-            30,
+            budget_ms(),
             65_536,
         ))
         .await;
         assert_eq!(outcome, ConsultOutcome::NoAnswer(NoAnswerReason::Timeout));
         assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "process reaping must not extend the resolver deadline"
+            started.elapsed() < 2 * PROCESS_BUDGET,
+            "process reaping must not wait for the descendant"
         );
         assert_process_gone(recorded_pid(&timeout_pid).await).await;
 
@@ -1897,7 +1852,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let backend = claude_backend(command, 65_536);
         let prompt = ModelPrompt::new(&annotation_consult("review", serde_json::json!({}))).expect("renders");
         let consult = tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let deadline = tokio::time::Instant::now() + PROCESS_BUDGET;
             run_claude_code(&backend, &prompt, deadline, None).await
         });
         let pid = recorded_pid(&pid_file).await;
@@ -2832,17 +2787,17 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let pid_file = dir.path().join("helper.pid");
         let script = format!(
             "cat >/dev/null\nprintf 'warming up\\n' >&2\n\
-             perl -MPOSIX -e 'setsid(); sleep 10' &\necho $! > {}\n\
+             perl -MPOSIX -e 'setsid(); sleep 30' &\necho $! > {}\n\
              printf '%s' '{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}'",
             pid_file.display()
         );
-        let services = command_services(dir.path(), &script, 5000, 1024);
+        let services = command_services(dir.path(), &script, budget_ms(), 1024);
 
         let started = std::time::Instant::now();
         let (outcome, transcript) = services
             .consult_transcribed(&authority_consult("security", serde_json::json!({})), None, None)
             .await;
-        let elapsed = started.elapsed();
+        let finished = std::time::Instant::now();
         let helper: i32 = std::fs::read_to_string(&pid_file)
             .expect("the command recorded its helper")
             .trim()
@@ -2856,10 +2811,6 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             outcome,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
         );
-        assert!(
-            elapsed < RECORD_READ_GRACE + Duration::from_millis(600),
-            "the helper stretched the consult to {elapsed:?}"
-        );
         let transcript = transcript.expect("a command consult is transcribed");
         assert_eq!(
             transcript.diagnostics,
@@ -2869,7 +2820,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             })
         );
         let settled = transcript.settled.expect("the answer's time is taken before the grace");
-        assert!(settled.saturating_duration_since(started) < elapsed);
+        assert!(started < settled && settled < finished);
+        // Measured from the answer, not the spawn: a loaded host's slow exec is not the helper's.
+        let stretched = finished.duration_since(settled);
+        assert!(
+            stretched < RECORD_READ_GRACE + Duration::from_millis(600),
+            "the helper stretched the consult by {stretched:?} past its answer"
+        );
     }
 
     /// A reader still pending when the wait runs out is aborted rather than left holding

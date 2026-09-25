@@ -210,6 +210,7 @@ pub(crate) async fn run_claude_code(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::test_support::{PROCESS_BUDGET, assert_process_gone, recorded_pid};
 
     #[test]
     fn a_claude_consult_clears_the_parent_session_marker() {
@@ -244,7 +245,7 @@ mod tests {
             input: "{}".to_string(),
             schema: serde_json::json!({"type": "object"}),
         };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + PROCESS_BUDGET;
         run_claude_code(&backend, &prompt, deadline, None).await
     }
 
@@ -297,27 +298,10 @@ mod tests {
             "printf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}",
             pid_file.display()
         );
-        let started = std::time::Instant::now();
+        // The deadline is under the helper's `sleep 30`: a consult that waited on the
+        // helper's end of the pipe times out instead of answering.
         let answer = fake_consult(dir.path(), &script).await;
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "the answer is read as soon as the CLI exits"
-        );
-
-        let helper: i32 = std::fs::read_to_string(&pid_file)
-            .expect("the fake recorded its helper")
-            .trim()
-            .parse()
-            .expect("a pid");
-        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            let alive = unsafe { libc::kill(helper, 0) } == 0;
-            if !alive {
-                break;
-            }
-            assert!(std::time::Instant::now() < gone_by, "the helper outlived the consult");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        assert_process_gone(recorded_pid(&pid_file).await).await;
     }
 }
