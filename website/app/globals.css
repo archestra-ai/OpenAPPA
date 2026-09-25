@@ -152,6 +152,8 @@ html {
 body {
   background: var(--bg);
   color: var(--text);
+  /* Room for the fixed header; see .site-header. */
+  padding-top: var(--header-h);
   font-size: 14px;
   line-height: 1.7;
 }
@@ -241,9 +243,15 @@ samp {
 /* ————————————————————————————————————————————————
    Header
    ———————————————————————————————————————————————— */
+/* Fixed rather than sticky: iOS Safari repaints a sticky bar late while the
+   toolbar collapses and the page coasts, and the content shows above it for a
+   frame at a time. A fixed bar never moves, so it never lags. The body pads
+   by the bar's height, which every other offset already reads. */
 .site-header {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -458,14 +466,23 @@ samp {
 }
 
 @media (max-width: 1023px) {
+  /* The drawer and its scrim run past the bottom of the screen rather than
+     ending at it: iOS Safari resizes the viewport as its toolbar collapses
+     (the page behind still scrolls; iOS ignores overflow: hidden on body),
+     and a panel pinned to the bottom edge lags and shows the page under it.
+     A panel a full large-viewport tall is clipped by the screen instead.
+     The list pads its end by the part that can sit under the toolbar, so
+     the last link is reachable while the toolbar is shown. */
   .sidebar-inner {
     position: fixed;
     top: var(--header-h);
     left: 0;
     bottom: 0;
+    height: 100lvh;
     z-index: 30;
     width: min(20rem, 84vw);
     padding: 20px 0 32px;
+    padding-bottom: calc(100lvh - 100svh + var(--header-h) + 32px);
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
@@ -489,6 +506,7 @@ samp {
     top: var(--header-h);
     inset-inline: 0;
     bottom: 0;
+    height: 100lvh;
     z-index: 29;
     background: rgba(0, 0, 0, 0.4);
   }
