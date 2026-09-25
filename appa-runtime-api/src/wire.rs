@@ -944,6 +944,10 @@ pub enum DecisionName {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireOffer {
     pub offer_id: String,
+    #[serde(default)]
+    pub narrowing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<WireReturn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -969,6 +973,17 @@ pub enum WireReturn {
 #[serde(rename_all = "snake_case")]
 pub enum AsSpoken {
     AsSpoken,
+}
+
+impl From<&OfferedReturn> for WireReturn {
+    fn from(returns: &OfferedReturn) -> Self {
+        match returns {
+            OfferedReturn::AsSpoken => WireReturn::AsSpoken(AsSpoken::AsSpoken),
+            OfferedReturn::Sanitized { sanitizer } => WireReturn::Sanitized {
+                sanitizer: sanitizer.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1038,12 +1053,9 @@ impl WireDecision {
                         .iter()
                         .map(|offer| WireOffer {
                             offer_id: offer.id.clone(),
-                            returns: offer.returns.as_ref().map(|returns| match returns {
-                                OfferedReturn::AsSpoken => WireReturn::AsSpoken(AsSpoken::AsSpoken),
-                                OfferedReturn::Sanitized { sanitizer } => WireReturn::Sanitized {
-                                    sanitizer: sanitizer.clone(),
-                                },
-                            }),
+                            narrowing: offer.narrowing,
+                            authorities: offer.authorities.clone(),
+                            returns: offer.returns.as_ref().map(WireReturn::from),
                             input_sanitizer: offer.input_sanitizer.as_ref().map(|sanitizer| WireInputSanitizer {
                                 name: sanitizer.name.clone(),
                                 target: sanitizer.target.clone(),
@@ -1117,6 +1129,8 @@ impl WireDecision {
                     .into_iter()
                     .map(|offer| OfferedRemedy {
                         id: offer.offer_id,
+                        narrowing: offer.narrowing,
+                        authorities: offer.authorities,
                         returns: offer.returns.map(|returns| match returns {
                             WireReturn::AsSpoken(_) => OfferedReturn::AsSpoken,
                             WireReturn::Sanitized { sanitizer } => OfferedReturn::Sanitized { sanitizer },
@@ -1996,6 +2010,8 @@ mod tests {
                 offers: vec![
                     OfferedRemedy {
                         id: "o1".to_string(),
+                        narrowing: false,
+                        authorities: vec!["operator".to_string()],
                         returns: None,
                         input_sanitizer: Some(OfferedInputSanitizer {
                             name: "redact-command".to_string(),
@@ -2005,11 +2021,15 @@ mod tests {
                     },
                     OfferedRemedy {
                         id: "o2".to_string(),
+                        narrowing: true,
+                        authorities: Vec::new(),
                         returns: Some(OfferedReturn::AsSpoken),
                         input_sanitizer: None,
                     },
                     OfferedRemedy {
                         id: "o3".to_string(),
+                        narrowing: false,
+                        authorities: Vec::new(),
                         returns: Some(OfferedReturn::Sanitized {
                             sanitizer: "s".to_string(),
                         }),
@@ -2044,6 +2064,8 @@ mod tests {
             feedback: "no".to_string(),
             offers: vec![OfferedRemedy {
                 id: "o2".to_string(),
+                narrowing: true,
+                authorities: Vec::new(),
                 returns: Some(OfferedReturn::AsSpoken),
                 input_sanitizer: None,
             }],
@@ -2051,6 +2073,7 @@ mod tests {
         }))
         .expect("serializes");
         assert_eq!(offers["offers"][0]["returns"], "as_spoken");
+        assert_eq!(offers["offers"][0]["narrowing"], true);
         let missing: WireDecision = serde_json::from_str(r#"{"protocol":1,"decision":"block"}"#).expect("reads");
         assert!(matches!(missing.into_decision(), Err(ParseRefusal::Malformed { .. })));
         let valueless: WireDecision =

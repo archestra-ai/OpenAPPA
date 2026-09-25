@@ -1067,6 +1067,8 @@ mod tests {
                     .expect("the block surfaced the return declaration");
                 let offers = vec![appa_runtime_api::OfferedRemedy {
                     id: quoted.0,
+                    narrowing: false,
+                    authorities: Vec::new(),
                     returns: Some(appa_runtime_api::OfferedReturn::AsSpoken),
                     input_sanitizer: None,
                 }];
