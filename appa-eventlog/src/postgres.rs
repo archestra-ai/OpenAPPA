@@ -563,43 +563,37 @@ impl PostgresStore {
         &self,
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
-        let lock = result_lock(&request.key.scope.session_id, &request.key.tool_call_id);
+        let lock = result_lock(&request.key.session_id, &request.key.tool_call_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
-                "SELECT organization_id, caller_id, session_id, root, status, approved_output, decision \
+                "SELECT organization_id, session_id, root, status, approved_output, decision \
                  FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
-                &[&request.key.scope.session_id, &request.key.tool_call_id],
+                &[&request.key.session_id, &request.key.tool_call_id],
             )?;
             let Some(row) = existing else {
                 client.execute(
                     "INSERT INTO openappa_processed_results (organization_id, caller_id, session_id, tool_call_id, root, status) \
                      VALUES ($1,$2,$3,$4,$5,'pending')",
                     &[
-                        &request.key.scope.organization_id,
-                        &request.key.scope.caller_id,
-                        &request.key.scope.session_id,
+                        &request.key.organization_id,
+                        &request.key.caller_id,
+                        &request.key.session_id,
                         &request.key.tool_call_id,
                         &request.root,
                     ],
                 )?;
                 return Ok(ProcessedResultClaim::Claimed);
             };
-            let scope = ReceiptScope {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
-                binding: ReceiptBinding::Session,
-            };
-            if !scope_matches(&scope, &request.key.scope) || row.get::<_, String>(3) != request.root {
+            if !request.key.owns(row.get(0), row.get(1)) || row.get::<_, String>(2) != request.root {
                 return Err(ReceiptMutationError::ScopeMismatch);
             }
-            match row.get::<_, String>(4).as_str() {
+            match row.get::<_, String>(3).as_str() {
                 "complete" => Ok(ProcessedResultClaim::Complete {
                     approved_output: row
-                        .get::<_, Option<String>>(5)
+                        .get::<_, Option<String>>(4)
                         .ok_or_else(|| ReceiptMutationError::Storage(PostgresError("complete result lacks approved output".into())))?,
                     decision: row
-                        .get::<_, Option<Value>>(6)
+                        .get::<_, Option<Value>>(5)
                         .ok_or_else(|| ReceiptMutationError::Storage(PostgresError("complete result lacks a decision".into())))?,
                 }),
                 "pending" => Err(ReceiptMutationError::Pending),
@@ -616,37 +610,31 @@ impl PostgresStore {
         approved_output: String,
         decision: Value,
     ) -> Result<(), ReceiptError> {
-        let lock = result_lock(&key.scope.session_id, &key.tool_call_id);
+        let lock = result_lock(&key.session_id, &key.tool_call_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
-                "SELECT organization_id, caller_id, session_id, status, approved_output, decision \
+                "SELECT organization_id, session_id, status, approved_output, decision \
                  FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
-                &[&key.scope.session_id, &key.tool_call_id],
+                &[&key.session_id, &key.tool_call_id],
             )?;
             let Some(row) = existing else {
                 return Err(ReceiptMutationError::NotPending);
             };
-            let scope = ReceiptScope {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
-                binding: ReceiptBinding::Session,
-            };
-            if !scope_matches(&scope, &key.scope) {
+            if !key.owns(row.get(0), row.get(1)) {
                 return Err(ReceiptMutationError::ScopeMismatch);
             }
-            match row.get::<_, String>(3).as_str() {
+            match row.get::<_, String>(2).as_str() {
                 "pending" => {
                     client.execute(
                         "UPDATE openappa_processed_results SET status='complete', approved_output=$3, decision=$4 \
                          WHERE session_id=$1 AND tool_call_id=$2",
-                        &[&key.scope.session_id, &key.tool_call_id, &approved_output, &decision],
+                        &[&key.session_id, &key.tool_call_id, &approved_output, &decision],
                     )?;
                     Ok(())
                 }
                 "complete"
-                    if row.get::<_, Option<String>>(4).as_ref() == Some(&approved_output)
-                        && row.get::<_, Option<Value>>(5).as_ref() == Some(&decision) =>
+                    if row.get::<_, Option<String>>(3).as_ref() == Some(&approved_output)
+                        && row.get::<_, Option<Value>>(4).as_ref() == Some(&decision) =>
                 {
                     Ok(())
                 }

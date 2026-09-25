@@ -1786,10 +1786,9 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope: ReceiptScope {
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: owner.root.clone(),
@@ -2163,10 +2162,9 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope: ReceiptScope {
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: owner.root.clone(),
@@ -2585,10 +2583,9 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope: ReceiptScope {
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: owner.root.clone(),

@@ -101,11 +101,20 @@ pub enum OperationClaim {
     Complete { decision: Value },
 }
 
-/// The durable key for a processed tool result receipt.
+/// The durable key for a processed tool result receipt. It is always session-bound: the
+/// caller is recorded but never compared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedResultKey {
-    pub scope: ReceiptScope,
+    pub organization_id: String,
+    pub caller_id: Option<String>,
+    pub session_id: String,
     pub tool_call_id: String,
+}
+
+impl ProcessedResultKey {
+    pub(crate) fn owns(&self, organization_id: &str, session_id: &str) -> bool {
+        self.organization_id == organization_id && self.session_id == session_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,43 +520,36 @@ fn sqlite_claim_processed_result(
 ) -> Result<ProcessedResultClaim, ReceiptError> {
     let existing = connection
         .query_row(
-            "SELECT organization_id, caller_id, session_id, root, status, approved_output, decision
+            "SELECT organization_id, session_id, root, status, approved_output, decision
              FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![request.key.scope.session_id, request.key.tool_call_id],
+            params![request.key.session_id, request.key.tool_call_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((organization_id, caller_id, session_id, root, status, approved_output, decision)) = existing else {
+    let Some((organization_id, session_id, root, status, approved_output, decision)) = existing else {
         connection.execute(
             "INSERT INTO processed_results (organization_id, caller_id, session_id, tool_call_id, root, status)
              VALUES (?1,?2,?3,?4,?5,'pending')",
             params![
-                request.key.scope.organization_id,
-                request.key.scope.caller_id,
-                request.key.scope.session_id,
+                request.key.organization_id,
+                request.key.caller_id,
+                request.key.session_id,
                 request.key.tool_call_id,
                 request.root,
             ],
         )?;
         return Ok(ProcessedResultClaim::Claimed);
     };
-    let scope = ReceiptScope {
-        organization_id,
-        caller_id,
-        session_id,
-        binding: ReceiptBinding::Session,
-    };
-    if !scope_matches(&scope, &request.key.scope) || root != request.root {
+    if !request.key.owns(&organization_id, &session_id) || root != request.root {
         return Err(ReceiptError::ScopeMismatch);
     }
     match status.as_str() {
@@ -573,31 +575,24 @@ fn sqlite_complete_processed_result(
 ) -> Result<(), ReceiptError> {
     let existing = connection
         .query_row(
-            "SELECT organization_id, caller_id, session_id, status, approved_output, decision
+            "SELECT organization_id, session_id, status, approved_output, decision
              FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![key.scope.session_id, key.tool_call_id],
+            params![key.session_id, key.tool_call_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((organization_id, caller_id, session_id, status, stored_output, stored_decision)) = existing else {
+    let Some((organization_id, session_id, status, stored_output, stored_decision)) = existing else {
         return Err(ReceiptError::NotPending);
     };
-    let scope = ReceiptScope {
-        organization_id,
-        caller_id,
-        session_id,
-        binding: ReceiptBinding::Session,
-    };
-    if !scope_matches(&scope, &key.scope) {
+    if !key.owns(&organization_id, &session_id) {
         return Err(ReceiptError::ScopeMismatch);
     }
     match status.as_str() {
@@ -606,7 +601,7 @@ fn sqlite_complete_processed_result(
             connection.execute(
                 "UPDATE processed_results SET status='complete', approved_output=?3, decision=?4
                  WHERE session_id=?1 AND tool_call_id=?2",
-                params![key.scope.session_id, key.tool_call_id, approved_output, encoded],
+                params![key.session_id, key.tool_call_id, approved_output, encoded],
             )?;
             Ok(())
         }
@@ -679,10 +674,12 @@ mod tests {
         }
     }
 
-    fn result(scope: ReceiptScope) -> ProcessedResultRequest {
+    fn result(caller: &str) -> ProcessedResultRequest {
         ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope,
+                organization_id: "org".to_owned(),
+                caller_id: Some(caller.to_owned()),
+                session_id: "session".to_owned(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: "root".to_owned(),
@@ -820,11 +817,11 @@ mod tests {
     #[test]
     fn processed_results_refuse_another_scope_without_writing() {
         for (store, _dir) in stores() {
-            let owned = result(scope(ReceiptBinding::Session, "caller"));
+            let owned = result("caller");
             store.claim_processed_result(owned.clone()).expect("the result claims");
 
             let mut other_organization = owned.clone();
-            other_organization.key.scope.organization_id = "other-org".to_owned();
+            other_organization.key.organization_id = "other-org".to_owned();
             let mut other_root = owned.clone();
             other_root.root = "other-root".to_owned();
             for request in [&other_organization, &other_root] {
@@ -842,7 +839,7 @@ mod tests {
                 Err(ReceiptError::ScopeMismatch)
             ));
             assert!(matches!(
-                store.claim_processed_result(result(scope(ReceiptBinding::Session, "other"))),
+                store.claim_processed_result(result("other")),
                 Err(ReceiptError::Pending)
             ));
             store
@@ -852,6 +849,32 @@ mod tests {
                     serde_json::json!({"decision": "allow"}),
                 )
                 .expect("the owning scope completes");
+        }
+    }
+
+    #[test]
+    fn a_completed_processed_result_replays() {
+        for (store, _dir) in stores() {
+            let request = result("caller");
+            let decision = serde_json::json!({"decision": "allow"});
+            assert_eq!(
+                store
+                    .claim_processed_result(request.clone())
+                    .expect("the result claims"),
+                ProcessedResultClaim::Claimed
+            );
+            store
+                .complete_processed_result(request.key.clone(), "approved".to_owned(), decision.clone())
+                .expect("the result completes");
+            assert_eq!(
+                store
+                    .claim_processed_result(request)
+                    .expect("the completed result replays"),
+                ProcessedResultClaim::Complete {
+                    approved_output: "approved".to_owned(),
+                    decision,
+                }
+            );
         }
     }
 
@@ -905,7 +928,7 @@ mod tests {
             ));
             assert!(matches!(store.claim_operation(request), Err(ReceiptError::Pending)));
 
-            let request = result(scope(ReceiptBinding::Session, "caller"));
+            let request = result("caller");
             store
                 .claim_processed_result(request.clone())
                 .expect("the result claims");
@@ -927,11 +950,7 @@ mod tests {
                 Err(ReceiptError::NotPending)
             ));
             assert!(matches!(
-                store.complete_processed_result(
-                    result(scope(ReceiptBinding::Session, "caller")).key,
-                    "approved".to_owned(),
-                    serde_json::json!({})
-                ),
+                store.complete_processed_result(result("caller").key, "approved".to_owned(), serde_json::json!({})),
                 Err(ReceiptError::NotPending)
             ));
         }
@@ -956,7 +975,7 @@ mod tests {
                 Err(ReceiptError::CompletionMismatch)
             ));
 
-            let request = result(scope(ReceiptBinding::Session, "caller"));
+            let request = result("caller");
             store
                 .claim_processed_result(request.clone())
                 .expect("the result claims");
@@ -1014,7 +1033,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_processed_result_row_is_a_storage_failure() {
-        let request = || result(scope(ReceiptBinding::Session, "caller"));
+        let request = || result("caller");
         let decision = serde_json::json!({"decision": "allow"});
         for corruption in [
             "UPDATE processed_results SET status='bogus'",
