@@ -31,7 +31,10 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
-use crate::receipts::{StoredOperationInput, binding_name, parse_binding, scope_matches};
+use crate::receipts::{
+    Completion, StoredOperation, StoredOperationInput, StoredResult, binding_name, parse_binding, resolve_offer_owner,
+    resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
+};
 
 pub use crate::receipts::{
     OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
@@ -418,7 +421,7 @@ impl PostgresStore {
     /// Stores an offer owner record. Repeated writes with identical data are idempotent.
     pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
         let lock = offer_owner_lock(&record.scope.organization_id, &record.offer_id);
-        self.mutate_receipt(lock, move |client| {
+        self.serialized(lock, move |client| {
             let binding = binding_name(record.scope.binding).to_owned();
             let inserted = client
                 .query_opt(
@@ -446,15 +449,9 @@ impl PostgresStore {
             let existing = read_offer_owner(client, &OfferOwnerKey {
                 organization_id: record.scope.organization_id.clone(),
                 offer_id: record.offer_id.clone(),
-            })?
-            .ok_or_else(|| PostgresError("offer owner disappeared after a conflict".into()))?;
-            if existing == record {
-                Ok(())
-            } else {
-                Err(ReceiptMutationError::Collision)
-            }
+            })?;
+            resolve_offer_owner(existing, &record)
         })
-        .map_err(ReceiptError::from)
     }
 
     /// Reads an offer owner record by key.
@@ -465,30 +462,22 @@ impl PostgresStore {
     /// Deletes stored offer owner records for a session scope.
     pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, PostgresError> {
         let lock = session_lock(&scope);
-        self.mutate_receipt(lock, move |client| {
+        self.serialized(lock, move |client| {
             Ok(client.execute(
                 "DELETE FROM openappa_offer_owners WHERE organization_id=$1 AND caller_id IS NOT DISTINCT FROM $2 AND session_id=$3",
                 &[&scope.organization_id, &scope.caller_id, &scope.session_id],
             )?)
-        })
-        .map_err(|error| match error {
-            ReceiptMutationError::Storage(error) => error,
-            other => PostgresError(other.to_string()),
         })
     }
 
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
     pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
         let lock = operation_lock(&request.key.scope.session_id, &request.key.operation_id);
-        self.mutate_receipt(lock, move |client| {
-            let existing = client.query_opt(
-                "SELECT organization_id, caller_id, session_id, root, input, status, decision \
-                 FROM openappa_operations WHERE session_id=$1 AND operation_id=$2 FOR UPDATE",
-                &[&request.key.scope.session_id, &request.key.operation_id],
-            )?;
-            let Some(row) = existing else {
+        self.serialized(lock, move |client| {
+            let claim = resolve_operation_claim(read_operation(client, &request.key)?, &request)?;
+            if claim == OperationClaim::Claimed {
                 let stored = serde_json::to_value(StoredOperationInput::from_request(&request))
-                    .map_err(|error| ReceiptMutationError::Storage(PostgresError(error.to_string())))?;
+                    .map_err(|error| ReceiptError::storage(error.to_string()))?;
                 client.execute(
                     "INSERT INTO openappa_operations (organization_id, caller_id, session_id, operation_id, root, input, status) \
                      VALUES ($1,$2,$3,$4,$5,$6,'pending')",
@@ -501,74 +490,24 @@ impl PostgresStore {
                         &stored,
                     ],
                 )?;
-                return Ok(OperationClaim::Claimed);
-            };
-            let stored = StoredOperationInput::decode(row.get(4))
-                .map_err(|error| ReceiptMutationError::Storage(PostgresError(error)))?;
-            if !scope_matches(
-                &ReceiptScope {
-                    organization_id: row.get(0),
-                    caller_id: row.get(1),
-                    session_id: row.get(2),
-                    binding: stored.binding,
-                },
-                &request.key.scope,
-            ) || row.get::<_, String>(3) != request.root {
-                return Err(ReceiptMutationError::ScopeMismatch);
             }
-            if stored.semantic != request.input {
-                return Err(ReceiptMutationError::InputMismatch);
-            }
-            match row.get::<_, String>(5).as_str() {
-                "complete" => Ok(OperationClaim::Complete {
-                    decision: row
-                        .get::<_, Option<Value>>(6)
-                        .ok_or_else(|| ReceiptMutationError::Storage(PostgresError("complete operation lacks a decision".into())))?,
-                }),
-                "pending" => Err(ReceiptMutationError::Pending),
-                _ => Err(ReceiptMutationError::Storage(PostgresError("operation receipt has an invalid status".into()))),
-            }
+            Ok(claim)
         })
-        .map_err(ReceiptError::from)
     }
 
     /// Completes a claimed operation receipt with its final decision.
     pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
         let lock = operation_lock(&key.scope.session_id, &key.operation_id);
-        self.mutate_receipt(lock, move |client| {
-            let existing = client.query_opt(
-                "SELECT organization_id, caller_id, session_id, input, status, decision \
-                 FROM openappa_operations WHERE session_id=$1 AND operation_id=$2 FOR UPDATE",
-                &[&key.scope.session_id, &key.operation_id],
-            )?;
-            let Some(row) = existing else {
-                return Err(ReceiptMutationError::NotPending);
-            };
-            let stored = StoredOperationInput::decode(row.get(3))
-                .map_err(|error| ReceiptMutationError::Storage(PostgresError(error)))?;
-            let scope = ReceiptScope {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
-                binding: stored.binding,
-            };
-            if !scope_matches(&scope, &key.scope) {
-                return Err(ReceiptMutationError::ScopeMismatch);
+        self.serialized(lock, move |client| {
+            let existing = read_operation(client, &key)?;
+            if let Completion::Write = resolve_operation_completion(existing, &key, &decision)? {
+                client.execute(
+                    "UPDATE openappa_operations SET status='complete', decision=$3 WHERE session_id=$1 AND operation_id=$2",
+                    &[&key.scope.session_id, &key.operation_id, &decision],
+                )?;
             }
-            match row.get::<_, String>(4).as_str() {
-                "pending" => {
-                    client.execute(
-                        "UPDATE openappa_operations SET status='complete', decision=$3 WHERE session_id=$1 AND operation_id=$2",
-                        &[&key.scope.session_id, &key.operation_id, &decision],
-                    )?;
-                    Ok(())
-                }
-                "complete" if row.get::<_, Option<Value>>(5).as_ref() == Some(&decision) => Ok(()),
-                "complete" => Err(ReceiptMutationError::CompletionMismatch),
-                _ => Err(ReceiptMutationError::Storage(PostgresError("operation receipt has an invalid status".into()))),
-            }
+            Ok(())
         })
-        .map_err(ReceiptError::from)
     }
 
     /// Claims a durable processed-result receipt before result processing.
@@ -577,13 +516,9 @@ impl PostgresStore {
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
         let lock = result_lock(&request.key.session_id, &request.key.tool_call_id);
-        self.mutate_receipt(lock, move |client| {
-            let existing = client.query_opt(
-                "SELECT organization_id, session_id, root, status, approved_output, decision \
-                 FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
-                &[&request.key.session_id, &request.key.tool_call_id],
-            )?;
-            let Some(row) = existing else {
+        self.serialized(lock, move |client| {
+            let claim = resolve_result_claim(read_result(client, &request.key)?, &request)?;
+            if claim == ProcessedResultClaim::Claimed {
                 client.execute(
                     "INSERT INTO openappa_processed_results (organization_id, caller_id, session_id, tool_call_id, root, status) \
                      VALUES ($1,$2,$3,$4,$5,'pending')",
@@ -595,25 +530,9 @@ impl PostgresStore {
                         &request.root,
                     ],
                 )?;
-                return Ok(ProcessedResultClaim::Claimed);
-            };
-            if !request.key.owns(row.get(0), row.get(1)) || row.get::<_, String>(2) != request.root {
-                return Err(ReceiptMutationError::ScopeMismatch);
             }
-            match row.get::<_, String>(3).as_str() {
-                "complete" => Ok(ProcessedResultClaim::Complete {
-                    approved_output: row
-                        .get::<_, Option<String>>(4)
-                        .ok_or_else(|| ReceiptMutationError::Storage(PostgresError("complete result lacks approved output".into())))?,
-                    decision: row
-                        .get::<_, Option<Value>>(5)
-                        .ok_or_else(|| ReceiptMutationError::Storage(PostgresError("complete result lacks a decision".into())))?,
-                }),
-                "pending" => Err(ReceiptMutationError::Pending),
-                _ => Err(ReceiptMutationError::Storage(PostgresError("processed result has an invalid status".into()))),
-            }
+            Ok(claim)
         })
-        .map_err(ReceiptError::from)
     }
 
     /// Completes a processed-result receipt with its approved output and decision.
@@ -624,40 +543,17 @@ impl PostgresStore {
         decision: Value,
     ) -> Result<(), ReceiptError> {
         let lock = result_lock(&key.session_id, &key.tool_call_id);
-        self.mutate_receipt(lock, move |client| {
-            let existing = client.query_opt(
-                "SELECT organization_id, session_id, status, approved_output, decision \
-                 FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
-                &[&key.session_id, &key.tool_call_id],
-            )?;
-            let Some(row) = existing else {
-                return Err(ReceiptMutationError::NotPending);
-            };
-            if !key.owns(row.get(0), row.get(1)) {
-                return Err(ReceiptMutationError::ScopeMismatch);
+        self.serialized(lock, move |client| {
+            let existing = read_result(client, &key)?;
+            if let Completion::Write = resolve_result_completion(existing, &key, &approved_output, &decision)? {
+                client.execute(
+                    "UPDATE openappa_processed_results SET status='complete', approved_output=$3, decision=$4 \
+                     WHERE session_id=$1 AND tool_call_id=$2",
+                    &[&key.session_id, &key.tool_call_id, &approved_output, &decision],
+                )?;
             }
-            match row.get::<_, String>(2).as_str() {
-                "pending" => {
-                    client.execute(
-                        "UPDATE openappa_processed_results SET status='complete', approved_output=$3, decision=$4 \
-                         WHERE session_id=$1 AND tool_call_id=$2",
-                        &[&key.session_id, &key.tool_call_id, &approved_output, &decision],
-                    )?;
-                    Ok(())
-                }
-                "complete"
-                    if row.get::<_, Option<String>>(3).as_ref() == Some(&approved_output)
-                        && row.get::<_, Option<Value>>(4).as_ref() == Some(&decision) =>
-                {
-                    Ok(())
-                }
-                "complete" => Err(ReceiptMutationError::CompletionMismatch),
-                _ => Err(ReceiptMutationError::Storage(PostgresError(
-                    "processed result has an invalid status".into(),
-                ))),
-            }
+            Ok(())
         })
-        .map_err(ReceiptError::from)
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
@@ -695,61 +591,37 @@ impl PostgresStore {
         })
     }
 
-    /// Run `operation` in a transaction, serialized against other writers of `lock_root`
-    /// where one is named. The host's own transaction is the one used when it holds one: a
-    /// transaction opened inside that one would end the host's on the way out.
-    fn with_tx<T: Send + 'static>(
+    /// Run `operation` in a transaction, serialized against other writers of `lock`. The host's
+    /// own transaction is the one used when it holds one: a transaction opened inside that one
+    /// would end the host's on the way out.
+    fn serialized<T, E>(
         &self,
-        lock_root: Option<String>,
-        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
-    ) -> Result<T, PostgresError> {
+        lock: String,
+        operation: impl FnOnce(&mut Client) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<PostgresError> + Send + 'static,
+    {
         self.run(move |state| {
             let outer = state.transaction;
             if !outer {
                 state.client.batch_execute("BEGIN")?;
             }
-            let result = (|| {
-                if let Some(root) = lock_root {
-                    state
-                        .client
-                        .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&root])?;
-                }
-                operation(&mut state.client)
-            })();
+            let result = match state
+                .client
+                .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&lock])
+            {
+                Ok(_) => operation(&mut state.client),
+                Err(error) => Err(PostgresError::from(error).into()),
+            };
             if !outer {
                 state
                     .client
                     .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
             }
-            result
-        })
-    }
-
-    fn mutate_receipt<T: Send + 'static>(
-        &self,
-        lock: String,
-        operation: impl FnOnce(&mut Client) -> Result<T, ReceiptMutationError> + Send + 'static,
-    ) -> Result<T, ReceiptMutationError> {
-        self.run(move |state| {
-            let outer = state.transaction;
-            if !outer && let Err(error) = state.client.batch_execute("BEGIN") {
-                return Ok(Err(ReceiptMutationError::Storage(error.into())));
-            }
-            let result = state
-                .client
-                .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&lock])
-                .map_err(PostgresError::from)
-                .map_err(ReceiptMutationError::Storage)
-                .and_then(|_| operation(&mut state.client));
-            if !outer {
-                let end = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
-                if let Err(error) = state.client.batch_execute(end) {
-                    return Ok(Err(ReceiptMutationError::Storage(error.into())));
-                }
-            }
             Ok(result)
-        })
-        .map_err(ReceiptMutationError::Storage)?
+        })?
     }
 
     pub(super) fn has_root(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
@@ -771,7 +643,7 @@ impl PostgresStore {
         let id = root.as_str().to_owned();
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
-        let created = self.with_tx(Some(id.clone()), move |client| {
+        let created = self.serialized::<_, PostgresError>(id.clone(), move |client| {
             if client
                 .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
                 .is_some()
@@ -854,7 +726,7 @@ impl PostgresStore {
     ) -> Result<(), AppendError> {
         let root = root.as_str().to_owned();
         let key = key.map(str::to_owned);
-        let conflict = self.with_tx(Some(root.clone()), move |client| {
+        let conflict = self.serialized::<_, PostgresError>(root.clone(), move |client| {
             let current = client
                 .query_one(
                     "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
@@ -883,42 +755,54 @@ impl PostgresStore {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ReceiptMutationError {
-    #[error("receipt storage failed: {0}")]
-    Storage(#[from] PostgresError),
-    #[error("a different owner record already exists for this offer")]
-    Collision,
-    #[error("receipt belongs to another authenticated scope")]
-    ScopeMismatch,
-    #[error("receipt key was reused with different input")]
-    InputMismatch,
-    #[error("receipt is pending recovery")]
-    Pending,
-    #[error("receipt is absent or no longer pending")]
-    NotPending,
-    #[error("receipt was completed with a different value")]
-    CompletionMismatch,
-}
-
-impl From<::postgres::Error> for ReceiptMutationError {
-    fn from(error: ::postgres::Error) -> Self {
+impl From<PostgresError> for ReceiptError {
+    fn from(error: PostgresError) -> Self {
         Self::Storage(error.into())
     }
 }
 
-impl From<ReceiptMutationError> for ReceiptError {
-    fn from(error: ReceiptMutationError) -> Self {
-        match error {
-            ReceiptMutationError::Storage(error) => Self::Storage(error.into()),
-            ReceiptMutationError::Collision => Self::Collision,
-            ReceiptMutationError::ScopeMismatch => Self::ScopeMismatch,
-            ReceiptMutationError::InputMismatch => Self::InputMismatch,
-            ReceiptMutationError::Pending => Self::Pending,
-            ReceiptMutationError::NotPending => Self::NotPending,
-            ReceiptMutationError::CompletionMismatch => Self::CompletionMismatch,
-        }
+impl From<::postgres::Error> for ReceiptError {
+    fn from(error: ::postgres::Error) -> Self {
+        PostgresError::from(error).into()
     }
+}
+
+fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
+    client
+        .query_opt(
+            "SELECT organization_id, caller_id, session_id, root, input, status, decision \
+             FROM openappa_operations WHERE session_id=$1 AND operation_id=$2 FOR UPDATE",
+            &[&key.scope.session_id, &key.operation_id],
+        )?
+        .map(|row| {
+            Ok(StoredOperation {
+                organization_id: row.get(0),
+                caller_id: row.get(1),
+                session_id: row.get(2),
+                root: row.get(3),
+                input: StoredOperationInput::decode(row.get(4))?,
+                status: row.get(5),
+                decision: row.get::<_, Option<Value>>(6).map(Ok),
+            })
+        })
+        .transpose()
+}
+
+fn read_result(client: &mut Client, key: &ProcessedResultKey) -> Result<Option<StoredResult>, ReceiptError> {
+    Ok(client
+        .query_opt(
+            "SELECT organization_id, session_id, root, status, approved_output, decision \
+             FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
+            &[&key.session_id, &key.tool_call_id],
+        )?
+        .map(|row| StoredResult {
+            organization_id: row.get(0),
+            session_id: row.get(1),
+            root: row.get(2),
+            status: row.get(3),
+            approved_output: row.get(4),
+            decision: row.get::<_, Option<Value>>(5).map(Ok),
+        }))
 }
 
 fn read_offer_owner(client: &mut Client, key: &OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, PostgresError> {

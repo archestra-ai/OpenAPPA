@@ -149,19 +149,64 @@ impl StoredOperationInput {
         }
     }
 
-    pub(crate) fn decode(value: Value) -> Result<Self, String> {
+    pub(crate) fn decode(value: Value) -> Result<Self, ReceiptStorageError> {
         match serde_json::from_value::<Self>(value) {
             Ok(stored) if stored.version == 1 => Ok(stored),
-            Ok(stored) => Err(format!("operation receipt has unsupported version {}", stored.version)),
-            Err(error) => Err(format!("operation receipt input is not a v1 envelope: {error}")),
+            Ok(stored) => Err(ReceiptStorageError(format!(
+                "operation receipt has unsupported version {}",
+                stored.version
+            ))),
+            Err(error) => Err(ReceiptStorageError(format!(
+                "operation receipt input is not a v1 envelope: {error}"
+            ))),
         }
     }
 }
 
-impl From<rusqlite::Error> for ReceiptError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
+/// A stored JSON column, decoded when read but refused only where a check reaches it.
+pub(crate) type StoredJson = Result<Value, ReceiptStorageError>;
+
+/// One operation receipt row, its input envelope decoded.
+pub(crate) struct StoredOperation {
+    pub(crate) organization_id: String,
+    pub(crate) caller_id: Option<String>,
+    pub(crate) session_id: String,
+    pub(crate) root: String,
+    pub(crate) input: StoredOperationInput,
+    pub(crate) status: String,
+    pub(crate) decision: Option<StoredJson>,
+}
+
+impl StoredOperation {
+    fn owned_by(&self, requested: &ReceiptScope) -> bool {
+        scope_matches(
+            &ReceiptScope {
+                organization_id: self.organization_id.clone(),
+                caller_id: self.caller_id.clone(),
+                session_id: self.session_id.clone(),
+                binding: self.input.binding,
+            },
+            requested,
+        )
     }
+}
+
+/// One processed-result receipt row.
+pub(crate) struct StoredResult {
+    pub(crate) organization_id: String,
+    pub(crate) session_id: String,
+    pub(crate) root: String,
+    pub(crate) status: String,
+    pub(crate) approved_output: Option<String>,
+    pub(crate) decision: Option<StoredJson>,
+}
+
+/// What a completion does to the row it found.
+pub(crate) enum Completion {
+    /// The receipt was pending: record the completion.
+    Write,
+    /// The receipt already holds this very completion.
+    Unchanged,
 }
 
 pub(crate) fn binding_name(binding: ReceiptBinding) -> &'static str {
@@ -179,7 +224,7 @@ pub(crate) fn parse_binding(value: &str) -> Result<ReceiptBinding, String> {
     }
 }
 
-pub(crate) fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> bool {
+fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> bool {
     if saved.organization_id != requested.organization_id
         || saved.session_id != requested.session_id
         || saved.binding != requested.binding
@@ -189,6 +234,132 @@ pub(crate) fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> b
     match saved.binding {
         ReceiptBinding::Session => true,
         ReceiptBinding::Caller => saved.caller_id == requested.caller_id,
+    }
+}
+
+/// An owner write that met a stored row: an identical record is a replay, any other collides.
+pub(crate) fn resolve_offer_owner(
+    existing: Option<OfferOwnerRecord>,
+    record: &OfferOwnerRecord,
+) -> Result<(), ReceiptError> {
+    match existing {
+        None => Err(ReceiptError::storage("offer owner disappeared after a conflict")),
+        Some(existing) if existing == *record => Ok(()),
+        Some(_) => Err(ReceiptError::Collision),
+    }
+}
+
+/// A claim on an absent receipt takes it: [`OperationClaim::Claimed`] tells the backend to
+/// write the pending row. A completed one replays its decision.
+pub(crate) fn resolve_operation_claim(
+    existing: Option<StoredOperation>,
+    request: &OperationRequest,
+) -> Result<OperationClaim, ReceiptError> {
+    let Some(stored) = existing else {
+        return Ok(OperationClaim::Claimed);
+    };
+    if !stored.owned_by(&request.key.scope) || stored.root != request.root {
+        return Err(ReceiptError::ScopeMismatch);
+    }
+    if stored.input.semantic != request.input {
+        return Err(ReceiptError::InputMismatch);
+    }
+    match stored.status.as_str() {
+        "complete" => Ok(OperationClaim::Complete {
+            decision: stored
+                .decision
+                .ok_or_else(|| ReceiptError::storage("complete operation lacks a decision"))??,
+        }),
+        "pending" => Err(ReceiptError::Pending),
+        _ => Err(ReceiptError::storage("operation receipt has an invalid status")),
+    }
+}
+
+pub(crate) fn resolve_operation_completion(
+    existing: Option<StoredOperation>,
+    key: &OperationKey,
+    decision: &Value,
+) -> Result<Completion, ReceiptError> {
+    let Some(stored) = existing else {
+        return Err(ReceiptError::NotPending);
+    };
+    if !stored.owned_by(&key.scope) {
+        return Err(ReceiptError::ScopeMismatch);
+    }
+    match stored.status.as_str() {
+        "pending" => Ok(Completion::Write),
+        "complete" => match stored.decision.transpose()?.as_ref() == Some(decision) {
+            true => Ok(Completion::Unchanged),
+            false => Err(ReceiptError::CompletionMismatch),
+        },
+        _ => Err(ReceiptError::storage("operation receipt has an invalid status")),
+    }
+}
+
+/// A claim on an absent result takes it, as [`resolve_operation_claim`] does.
+pub(crate) fn resolve_result_claim(
+    existing: Option<StoredResult>,
+    request: &ProcessedResultRequest,
+) -> Result<ProcessedResultClaim, ReceiptError> {
+    let Some(stored) = existing else {
+        return Ok(ProcessedResultClaim::Claimed);
+    };
+    if !request.key.owns(&stored.organization_id, &stored.session_id) || stored.root != request.root {
+        return Err(ReceiptError::ScopeMismatch);
+    }
+    match stored.status.as_str() {
+        "complete" => Ok(ProcessedResultClaim::Complete {
+            approved_output: stored
+                .approved_output
+                .ok_or_else(|| ReceiptError::storage("complete result lacks approved output"))?,
+            decision: stored
+                .decision
+                .ok_or_else(|| ReceiptError::storage("complete result lacks a decision"))??,
+        }),
+        "pending" => Err(ReceiptError::Pending),
+        _ => Err(ReceiptError::storage("processed result has an invalid status")),
+    }
+}
+
+pub(crate) fn resolve_result_completion(
+    existing: Option<StoredResult>,
+    key: &ProcessedResultKey,
+    approved_output: &str,
+    decision: &Value,
+) -> Result<Completion, ReceiptError> {
+    let Some(stored) = existing else {
+        return Err(ReceiptError::NotPending);
+    };
+    if !key.owns(&stored.organization_id, &stored.session_id) {
+        return Err(ReceiptError::ScopeMismatch);
+    }
+    match stored.status.as_str() {
+        "pending" => Ok(Completion::Write),
+        "complete" => match stored.approved_output.as_deref() == Some(approved_output)
+            && stored.decision.transpose()?.as_ref() == Some(decision)
+        {
+            true => Ok(Completion::Unchanged),
+            false => Err(ReceiptError::CompletionMismatch),
+        },
+        _ => Err(ReceiptError::storage("processed result has an invalid status")),
+    }
+}
+
+impl ReceiptError {
+    pub(crate) fn storage(detail: impl Into<String>) -> Self {
+        Self::Storage(ReceiptStorageError(detail.into()))
+    }
+}
+
+impl From<ReceiptStorageError> for ReceiptError {
+    fn from(error: ReceiptStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<rusqlite::Error> for ReceiptError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
     }
 }
 
@@ -328,13 +499,8 @@ fn sqlite_store_offer_owner(connection: &Connection, record: &OfferOwnerRecord) 
             organization_id: record.scope.organization_id.clone(),
             offer_id: record.offer_id.clone(),
         },
-    )?
-    .ok_or_else(|| ReceiptStorageError("offer owner disappeared after a conflict".into()))?;
-    if existing == *record {
-        Ok(())
-    } else {
-        Err(ReceiptError::Collision)
-    }
+    )?;
+    resolve_offer_owner(existing, record)
 }
 
 fn sqlite_read_offer_owner(
@@ -379,28 +545,46 @@ fn sqlite_read_offer_owner(
     }))
 }
 
-fn sqlite_claim_operation(connection: &Connection, request: &OperationRequest) -> Result<OperationClaim, ReceiptError> {
-    let existing = connection
+fn sqlite_read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
+    connection
         .query_row(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision
              FROM operations WHERE session_id=?1 AND operation_id=?2",
-            params![request.key.scope.session_id, request.key.operation_id],
+            params![key.scope.session_id, key.operation_id],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get(5)?,
                     row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
-        .optional()?;
-    let Some((organization_id, caller_id, session_id, root, input, status, decision)) = existing else {
+        .optional()?
+        .map(
+            |(organization_id, caller_id, session_id, root, input, status, decision)| {
+                Ok(StoredOperation {
+                    organization_id,
+                    caller_id,
+                    session_id,
+                    root,
+                    input: StoredOperationInput::decode(json(&input)?)?,
+                    status,
+                    decision: decision.as_deref().map(json),
+                })
+            },
+        )
+        .transpose()
+}
+
+fn sqlite_claim_operation(connection: &Connection, request: &OperationRequest) -> Result<OperationClaim, ReceiptError> {
+    let claim = resolve_operation_claim(sqlite_read_operation(connection, &request.key)?, request)?;
+    if claim == OperationClaim::Claimed {
         let stored = serde_json::to_string(&StoredOperationInput::from_request(request))
-            .map_err(|error| ReceiptStorageError(error.to_string()))?;
+            .map_err(|error| ReceiptError::storage(error.to_string()))?;
         connection.execute(
             "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
              VALUES (?1,?2,?3,?4,?5,?6,'pending')",
@@ -413,35 +597,8 @@ fn sqlite_claim_operation(connection: &Connection, request: &OperationRequest) -
                 stored,
             ],
         )?;
-        return Ok(OperationClaim::Claimed);
-    };
-    let stored = decode_stored_input(&input)?;
-    if !scope_matches(
-        &ReceiptScope {
-            organization_id,
-            caller_id,
-            session_id,
-            binding: stored.binding,
-        },
-        &request.key.scope,
-    ) || root != request.root
-    {
-        return Err(ReceiptError::ScopeMismatch);
     }
-    if stored.semantic != request.input {
-        return Err(ReceiptError::InputMismatch);
-    }
-    match status.as_str() {
-        "complete" => Ok(OperationClaim::Complete {
-            decision: parse_json_object(
-                decision.ok_or_else(|| ReceiptStorageError("complete operation lacks a decision".into()))?,
-            )?,
-        }),
-        "pending" => Err(ReceiptError::Pending),
-        _ => Err(ReceiptError::Storage(ReceiptStorageError(
-            "operation receipt has an invalid status".into(),
-        ))),
-    }
+    Ok(claim)
 }
 
 fn sqlite_complete_operation(
@@ -449,77 +606,43 @@ fn sqlite_complete_operation(
     key: &OperationKey,
     decision: &Value,
 ) -> Result<(), ReceiptError> {
-    let existing = connection
+    let existing = sqlite_read_operation(connection, key)?;
+    if let Completion::Write = resolve_operation_completion(existing, key, decision)? {
+        let encoded = serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
+        connection.execute(
+            "UPDATE operations SET status='complete', decision=?3 WHERE session_id=?1 AND operation_id=?2",
+            params![key.scope.session_id, key.operation_id, encoded],
+        )?;
+    }
+    Ok(())
+}
+
+fn sqlite_read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Option<StoredResult>, ReceiptError> {
+    Ok(connection
         .query_row(
-            "SELECT organization_id, caller_id, session_id, input, status, decision
-             FROM operations WHERE session_id=?1 AND operation_id=?2",
-            params![key.scope.session_id, key.operation_id],
+            "SELECT organization_id, session_id, root, status, approved_output, decision
+             FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
+            params![key.session_id, key.tool_call_id],
             |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
+                Ok(StoredResult {
+                    organization_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    root: row.get(2)?,
+                    status: row.get(3)?,
+                    approved_output: row.get(4)?,
+                    decision: row.get::<_, Option<String>>(5)?.as_deref().map(json),
+                })
             },
         )
-        .optional()?;
-    let Some((organization_id, caller_id, session_id, input, status, stored_decision)) = existing else {
-        return Err(ReceiptError::NotPending);
-    };
-    let stored = decode_stored_input(&input)?;
-    let scope = ReceiptScope {
-        organization_id,
-        caller_id,
-        session_id,
-        binding: stored.binding,
-    };
-    if !scope_matches(&scope, &key.scope) {
-        return Err(ReceiptError::ScopeMismatch);
-    }
-    match status.as_str() {
-        "pending" => {
-            let encoded = serde_json::to_string(decision).map_err(|error| ReceiptStorageError(error.to_string()))?;
-            connection.execute(
-                "UPDATE operations SET status='complete', decision=?3 WHERE session_id=?1 AND operation_id=?2",
-                params![key.scope.session_id, key.operation_id, encoded],
-            )?;
-            Ok(())
-        }
-        "complete" if stored_decision.as_deref().map(parse_json_value).transpose()?.as_ref() == Some(decision) => {
-            Ok(())
-        }
-        "complete" => Err(ReceiptError::CompletionMismatch),
-        _ => Err(ReceiptError::Storage(ReceiptStorageError(
-            "operation receipt has an invalid status".into(),
-        ))),
-    }
+        .optional()?)
 }
 
 fn sqlite_claim_processed_result(
     connection: &Connection,
     request: &ProcessedResultRequest,
 ) -> Result<ProcessedResultClaim, ReceiptError> {
-    let existing = connection
-        .query_row(
-            "SELECT organization_id, session_id, root, status, approved_output, decision
-             FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![request.key.session_id, request.key.tool_call_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((organization_id, session_id, root, status, approved_output, decision)) = existing else {
+    let claim = resolve_result_claim(sqlite_read_result(connection, &request.key)?, request)?;
+    if claim == ProcessedResultClaim::Claimed {
         connection.execute(
             "INSERT INTO processed_results (organization_id, caller_id, session_id, tool_call_id, root, status)
              VALUES (?1,?2,?3,?4,?5,'pending')",
@@ -531,24 +654,8 @@ fn sqlite_claim_processed_result(
                 request.root,
             ],
         )?;
-        return Ok(ProcessedResultClaim::Claimed);
-    };
-    if !request.key.owns(&organization_id, &session_id) || root != request.root {
-        return Err(ReceiptError::ScopeMismatch);
     }
-    match status.as_str() {
-        "complete" => Ok(ProcessedResultClaim::Complete {
-            approved_output: approved_output
-                .ok_or_else(|| ReceiptStorageError("complete result lacks approved output".into()))?,
-            decision: parse_json_object(
-                decision.ok_or_else(|| ReceiptStorageError("complete result lacks a decision".into()))?,
-            )?,
-        }),
-        "pending" => Err(ReceiptError::Pending),
-        _ => Err(ReceiptError::Storage(ReceiptStorageError(
-            "processed result has an invalid status".into(),
-        ))),
-    }
+    Ok(claim)
 }
 
 fn sqlite_complete_processed_result(
@@ -557,68 +664,20 @@ fn sqlite_complete_processed_result(
     approved_output: &str,
     decision: &Value,
 ) -> Result<(), ReceiptError> {
-    let existing = connection
-        .query_row(
-            "SELECT organization_id, session_id, status, approved_output, decision
-             FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![key.session_id, key.tool_call_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((organization_id, session_id, status, stored_output, stored_decision)) = existing else {
-        return Err(ReceiptError::NotPending);
-    };
-    if !key.owns(&organization_id, &session_id) {
-        return Err(ReceiptError::ScopeMismatch);
+    let existing = sqlite_read_result(connection, key)?;
+    if let Completion::Write = resolve_result_completion(existing, key, approved_output, decision)? {
+        let encoded = serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
+        connection.execute(
+            "UPDATE processed_results SET status='complete', approved_output=?3, decision=?4
+             WHERE session_id=?1 AND tool_call_id=?2",
+            params![key.session_id, key.tool_call_id, approved_output, encoded],
+        )?;
     }
-    match status.as_str() {
-        "pending" => {
-            let encoded = serde_json::to_string(decision).map_err(|error| ReceiptStorageError(error.to_string()))?;
-            connection.execute(
-                "UPDATE processed_results SET status='complete', approved_output=?3, decision=?4
-                 WHERE session_id=?1 AND tool_call_id=?2",
-                params![key.session_id, key.tool_call_id, approved_output, encoded],
-            )?;
-            Ok(())
-        }
-        "complete"
-            if stored_output.as_deref() == Some(approved_output)
-                && stored_decision.as_deref().map(parse_json_value).transpose()?.as_ref() == Some(decision) =>
-        {
-            Ok(())
-        }
-        "complete" => Err(ReceiptError::CompletionMismatch),
-        _ => Err(ReceiptError::Storage(ReceiptStorageError(
-            "processed result has an invalid status".into(),
-        ))),
-    }
+    Ok(())
 }
 
-fn decode_stored_input(input: &str) -> Result<StoredOperationInput, ReceiptError> {
-    let value = parse_json_value(input)?;
-    StoredOperationInput::decode(value).map_err(|error| ReceiptError::Storage(ReceiptStorageError(error)))
-}
-
-fn parse_json_object(raw: String) -> Result<Value, ReceiptError> {
-    parse_json_value(&raw)
-}
-
-fn parse_json_value(raw: &str) -> Result<Value, ReceiptError> {
-    serde_json::from_str(raw).map_err(|error| ReceiptError::Storage(ReceiptStorageError(error.to_string())))
-}
-
-impl From<ReceiptStorageError> for ReceiptError {
-    fn from(error: ReceiptStorageError) -> Self {
-        Self::Storage(error)
-    }
+fn json(raw: &str) -> StoredJson {
+    serde_json::from_str(raw).map_err(|error| ReceiptStorageError(error.to_string()))
 }
 
 #[cfg(test)]
