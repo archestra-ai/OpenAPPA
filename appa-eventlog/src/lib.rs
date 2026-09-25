@@ -58,9 +58,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-#[cfg(feature = "fault-injection")]
-use rusqlite::params;
-
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
@@ -465,16 +462,17 @@ impl LogStore {
         }
         let bytes = encode(&opening, None);
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite::immediate(&mut sqlite.connection(), |transaction| {
-                sqlite::create(transaction, &root, &key, policy_file, &bytes)?;
-                #[cfg(feature = "fault-injection")]
-                if self.failure_fires() {
-                    // Dropping the transaction rolls it back, exactly as a process kill before
+            Store::Sqlite(sqlite) => sqlite
+                .create(&root, &key, policy_file, &bytes, || {
+                    // A refusal here rolls the transaction back, exactly as a process kill before
                     // the commit would leave the file.
-                    return Err(CreateError::Injected);
-                }
-                Ok(root)
-            }),
+                    #[cfg(feature = "fault-injection")]
+                    if self.failure_fires() {
+                        return Err(CreateError::Injected);
+                    }
+                    Ok(())
+                })
+                .map(|()| root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.create(&root, &key, policy_file, bytes),
         }
@@ -547,13 +545,13 @@ impl LogStore {
     fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
         match &self.store {
             Store::Sqlite(sqlite) => {
-                let mut connection = sqlite.connection();
+                #[allow(unused_mut, reason = "only the fault-injection build races the append")]
+                let mut appender = sqlite.appender();
                 #[cfg(feature = "fault-injection")]
                 if self.contention_fires() {
-                    self.contend(&mut connection, root)?;
+                    self.contend(&mut appender, root)?;
                 }
-                sqlite::immediate(&mut connection, |transaction| {
-                    sqlite::append(transaction, root, basis, &bytes, key)?;
+                appender.append(root, basis, &bytes, key, || {
                     #[cfg(feature = "fault-injection")]
                     if self.failure_fires() {
                         return Err(AppendError::Injected);
@@ -658,7 +656,7 @@ impl LogStore {
     /// names another family it records there and still takes this one's position: a foreign
     /// writer that changed a sibling's log is the race a reader of several families has to
     /// survive.
-    fn contend(&self, connection: &mut rusqlite::Connection, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
+    fn contend(&self, appender: &mut sqlite::Appender<'_>, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
         let armed = self
             .faults
             .contending_record
@@ -666,22 +664,13 @@ impl LogStore {
             .expect("the injection mutex is never poisoned")
             .take()
             .filter(|(racing, _, _)| racing == root);
-        sqlite::immediate(connection, |transaction| {
-            let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
-                let at = sqlite::position(transaction, into)?;
-                sqlite::insert_batch(transaction, into, at, &bytes, key)
-            };
-            match &armed {
-                Some((_, recorded_in, observation)) => {
-                    write(recorded_in, encode(&[], Some(observation)), observation.key())?;
-                    if recorded_in != root {
-                        write(root, encode(&[], None), None)?;
-                    }
-                }
-                None => write(root, encode(&[], None), None)?,
+        match &armed {
+            Some((_, recorded_in, observation)) if recorded_in != root => {
+                appender.foreign(&[(recorded_in, Some(observation)), (root, None)])
             }
-            Ok(())
-        })
+            Some((_, recorded_in, observation)) => appender.foreign(&[(recorded_in, Some(observation))]),
+            None => appender.foreign(&[(root, None)]),
+        }
     }
 
     /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
@@ -733,29 +722,26 @@ impl LogStore {
     /// crate's own vocabulary, so a caller can pin how it refuses without
     /// learning the schema. SQLite only.
     pub fn forget_policy_files(&self) {
-        self.damage("DELETE FROM policy_files", []);
+        self.sqlite_only().forget_policy_files();
     }
 
     /// Replace the bytes of every stored policy file, so each stops hashing to
     /// the key its roots' openings name. SQLite only.
     pub fn corrupt_policy_files(&self, bytes: &[u8]) {
-        self.damage("UPDATE policy_files SET bytes = ?1", params![bytes]);
+        self.sqlite_only().corrupt_policy_files(bytes);
     }
 
     /// Replace what one batch of a root's log holds. The bytes are stored as
     /// given, so a caller can leave records that do not decode, or records
     /// that decode but are not the history they claim to be. SQLite only.
     pub fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) {
-        let changed = self.damage(
-            "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
-            params![root.as_str(), seq as i64, bytes],
-        );
+        let changed = self.sqlite_only().corrupt_batch(root, seq, bytes);
         assert_eq!(changed, 1, "the batch to corrupt exists");
     }
 
-    fn damage(&self, sql: &str, params: impl rusqlite::Params) -> usize {
+    fn sqlite_only(&self) -> &Sqlite {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.connection().execute(sql, params).expect("the damage lands"),
+            Store::Sqlite(sqlite) => sqlite,
             #[cfg(feature = "postgres")]
             Store::Postgres(_) => panic!("SQLite-only operation"),
         }

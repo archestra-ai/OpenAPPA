@@ -10,6 +10,10 @@ use appa_engine::value::TrajectoryId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 
+#[cfg(feature = "fault-injection")]
+use crate::HostObservation;
+#[cfg(feature = "fault-injection")]
+use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
     Completion, OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
@@ -130,6 +134,42 @@ impl Sqlite {
         self.0
             .lock()
             .expect("the log store mutex is never poisoned: no panics under the lock")
+    }
+
+    /// Store a root's opening batch and the policy file it opens under, in one transaction.
+    /// `before_commit` runs last inside it, and an error from it rolls the opening back.
+    pub(crate) fn create(
+        &self,
+        root: &TrajectoryId,
+        key: &PolicyFileKey,
+        policy_file: &[u8],
+        bytes: &[u8],
+        before_commit: impl FnOnce() -> Result<(), CreateError>,
+    ) -> Result<(), CreateError> {
+        immediate(&mut self.connection(), |transaction| {
+            transaction.execute(
+                "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+                params![key.as_str(), policy_file],
+            )?;
+            match transaction.execute(
+                "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
+                params![root.as_str(), bytes],
+            ) {
+                Ok(_) => {}
+                Err(error) if is_taken(&error) => {
+                    return Err(CreateError::AlreadyExists {
+                        root: root.as_str().to_string(),
+                    });
+                }
+                Err(error) => return Err(CreateError::Storage(error)),
+            }
+            before_commit()
+        })
+    }
+
+    /// The connection an append runs on, held until the append is done.
+    pub(crate) fn appender(&self) -> Appender<'_> {
+        Appender(self.connection())
     }
 
     pub(crate) fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
@@ -325,6 +365,74 @@ impl Sqlite {
     }
 }
 
+/// A held connection that one append runs on.
+pub(crate) struct Appender<'a>(MutexGuard<'a, Connection>);
+
+impl Appender<'_> {
+    /// Append one batch at `basis`, or refuse because the log has moved past it. `before_commit`
+    /// runs last inside the transaction, and an error from it writes nothing.
+    pub(crate) fn append(
+        mut self,
+        root: &TrajectoryId,
+        basis: u64,
+        bytes: &[u8],
+        key: Option<&str>,
+        before_commit: impl FnOnce() -> Result<(), AppendError>,
+    ) -> Result<(), AppendError> {
+        immediate(&mut self.0, |transaction| {
+            let current = position(transaction, root)?;
+            if current != basis {
+                return Err(AppendError::Conflict { current });
+            }
+            insert_batch(transaction, root, current, bytes, key)?;
+            before_commit()
+        })
+    }
+
+    /// Commit `records` at the head of their logs in one transaction of their own, as another
+    /// writer racing this append would. `None` records nothing and only takes the position.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn foreign(
+        &mut self,
+        records: &[(&TrajectoryId, Option<&HostObservation>)],
+    ) -> Result<(), rusqlite::Error> {
+        immediate(&mut self.0, |transaction| {
+            for (root, observation) in records {
+                let at = position(transaction, root)?;
+                let key = observation.and_then(HostObservation::key);
+                insert_batch(transaction, root, at, &encode(&[], *observation), key)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Damage stated in the log's own vocabulary, for callers that pin how a read refuses it.
+#[cfg(feature = "fault-injection")]
+impl Sqlite {
+    pub(crate) fn forget_policy_files(&self) {
+        self.connection()
+            .execute("DELETE FROM policy_files", [])
+            .expect("the damage lands");
+    }
+
+    pub(crate) fn corrupt_policy_files(&self, bytes: &[u8]) {
+        self.connection()
+            .execute("UPDATE policy_files SET bytes = ?1", params![bytes])
+            .expect("the damage lands");
+    }
+
+    /// How many batches now hold `bytes`: one where the batch exists.
+    pub(crate) fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) -> usize {
+        self.connection()
+            .execute(
+                "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
+                params![root.as_str(), seq as i64, bytes],
+            )
+            .expect("the damage lands")
+    }
+}
+
 impl From<rusqlite::Error> for ReceiptStorageError {
     fn from(error: rusqlite::Error) -> Self {
         Self(error.to_string())
@@ -338,7 +446,7 @@ impl From<rusqlite::Error> for ReceiptError {
 }
 
 /// Run `operation` in an immediate transaction, committed only when it succeeds.
-pub(crate) fn immediate<T, E: From<rusqlite::Error>>(
+fn immediate<T, E: From<rusqlite::Error>>(
     connection: &mut Connection,
     operation: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
 ) -> Result<T, E> {
@@ -348,46 +456,7 @@ pub(crate) fn immediate<T, E: From<rusqlite::Error>>(
     Ok(result)
 }
 
-/// Store a root's opening batch and the policy file it opens under.
-pub(crate) fn create(
-    connection: &Connection,
-    root: &TrajectoryId,
-    key: &PolicyFileKey,
-    policy_file: &[u8],
-    bytes: &[u8],
-) -> Result<(), CreateError> {
-    connection.execute(
-        "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-        params![key.as_str(), policy_file],
-    )?;
-    match connection.execute(
-        "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
-        params![root.as_str(), bytes],
-    ) {
-        Ok(_) => Ok(()),
-        Err(error) if is_taken(&error) => Err(CreateError::AlreadyExists {
-            root: root.as_str().to_string(),
-        }),
-        Err(error) => Err(CreateError::Storage(error)),
-    }
-}
-
-/// Append one batch at `basis`, or refuse because the log has moved past it.
-pub(crate) fn append(
-    connection: &Connection,
-    root: &TrajectoryId,
-    basis: u64,
-    bytes: &[u8],
-    key: Option<&str>,
-) -> Result<(), AppendError> {
-    let current = position(connection, root)?;
-    if current != basis {
-        return Err(AppendError::Conflict { current });
-    }
-    Ok(insert_batch(connection, root, current, bytes, key)?)
-}
-
-pub(crate) fn insert_batch(
+fn insert_batch(
     connection: &Connection,
     root: &TrajectoryId,
     at: u64,
@@ -407,7 +476,7 @@ pub(crate) fn insert_batch(
     Ok(())
 }
 
-pub(crate) fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
+fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
     let next: i64 = connection.query_row(
         "SELECT COALESCE(MAX(seq) + 1, 0) FROM logs WHERE root = ?1",
         params![root.as_str()],
