@@ -14947,7 +14947,7 @@ mod tests {
         use proptest::prelude::*;
 
         const EXPOSED: [&str; 2] = ["seen", "suspicious"];
-        const PROPOSED: [&str; 8] = [
+        const PROPOSED: [&str; 10] = [
             "quiet",
             "emit",
             "wire",
@@ -14956,7 +14956,19 @@ mod tests {
             "get_ticket",
             "taint",
             "spawn",
+            "read_file",
+            "strict_read",
         ];
+        /// Proposed with a host-pinned file basis, so their failures carry a body.
+        const FILE_TOOLS: [&str; 2] = ["read_file", "strict_read"];
+
+        fn file_basis() -> crate::value::FileBasis {
+            crate::value::FileBasis::Read(crate::value::FileSource {
+                version: "v1".into(),
+                digest: "content".into(),
+                label: Label::new(SUSPICIOUS, Audience::public()),
+            })
+        }
 
         #[derive(Clone, Debug)]
         enum Step {
@@ -14996,7 +15008,7 @@ mod tests {
                 )
                     .prop_map(|(on, exposed, proposed)| Step::Propose { on, exposed, proposed }),
                 2 => index().prop_map(|on| Step::Spawn { on }),
-                3 => (index(), 0usize..5).prop_map(|(pick, outcome)| Step::Outcome { pick, outcome }),
+                3 => (index(), 0usize..6).prop_map(|(pick, outcome)| Step::Outcome { pick, outcome }),
                 3 => (index(), any::<bool>()).prop_map(|(pick, approve)| Step::Offer { pick, approve }),
                 2 => index().prop_map(|pick| Step::Bind { pick }),
                 2 => (index(), any::<bool>()).prop_map(|(pick, value)| Step::Return { pick, value }),
@@ -15027,6 +15039,8 @@ mod tests {
             strict.requires.label.trust_floor = Some(TRUSTED);
             let mut taint = plain_tool("taint");
             taint.delta = lowering;
+            let mut strict_read = plain_tool("strict_read");
+            strict_read.requires.label.trust_floor = Some(TRUSTED);
             let officer = crate::authority::Authority {
                 name: AuthorityName::new("officer"),
                 mandate: crate::authority::Mandate {
@@ -15052,6 +15066,8 @@ mod tests {
                         crm_tool(),
                         taint,
                         plain_tool("spawn"),
+                        plain_tool("read_file"),
+                        strict_read,
                     ]),
                     authorities: vec![officer],
                     sanitizers: vec![],
@@ -15070,6 +15086,7 @@ mod tests {
             held: EngineView,
             trajectories: Vec<TrajectoryId>,
             dispatches: Vec<DispatchId>,
+            file_dispatches: Vec<DispatchId>,
             offers: Vec<(TrajectoryId, OfferId)>,
             forks: Vec<ForkId>,
             children: Vec<(TrajectoryId, ForkId)>,
@@ -15091,6 +15108,7 @@ mod tests {
                     held,
                     trajectories: vec![traj()],
                     dispatches: Vec::new(),
+                    file_dispatches: Vec::new(),
                     offers: Vec::new(),
                     forks: Vec::new(),
                     children: Vec::new(),
@@ -15121,11 +15139,29 @@ mod tests {
                             .iter()
                             .map(|tool| super::exposed(EXPOSED[*tool], "body"))
                             .collect();
+                        let evidence = proposed
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tool)| FILE_TOOLS.contains(&PROPOSED[**tool]))
+                            .map(|(position, _)| Evidence::File {
+                                position,
+                                basis: file_basis(),
+                            })
+                            .collect();
                         let proposed = proposed
                             .iter()
                             .map(|tool| raw(&call(PROPOSED[*tool], json!({}))))
                             .collect();
-                        Some(batch_on(&on, &id, exposed, proposed, None))
+                        Some(EngineEvent::Proposals(ProposalBatch {
+                            id: crate::transition::ProposalBatchId::new(id),
+                            trajectory: on,
+                            provider_results: exposed,
+                            proposals: proposed,
+                            spawn: None,
+                            offer_nonce: nonce(),
+                            evidence,
+                            audience: crate::audience::AudienceEvidence::default(),
+                        }))
                     }
                     Step::Spawn { on } => {
                         let on = self.trajectories[on % self.trajectories.len()].clone();
@@ -15134,7 +15170,12 @@ mod tests {
                         Some(batch_on(&on, &id, Vec::new(), vec![spawn], Some(SpawnMark::at(0))))
                     }
                     Step::Outcome { pick: at, outcome } => {
-                        let dispatch = self.dispatches[pick(self.dispatches.len(), *at)?].clone();
+                        // A failure body on a file call is admitted; on any other call it is refused.
+                        let from = match (outcome, self.file_dispatches.is_empty()) {
+                            (3, false) => &self.file_dispatches,
+                            _ => &self.dispatches,
+                        };
+                        let dispatch = from[pick(from.len(), *at)?].clone();
                         let outcome = match outcome {
                             0 => ToolOutcome::Success {
                                 body: OutcomeBody::Available(ValueBody::new("result")),
@@ -15143,7 +15184,7 @@ mod tests {
                                 body: OutcomeBody::Unavailable,
                             },
                             2 => ToolOutcome::Failure,
-                            3 => ToolOutcome::FailureWithBody {
+                            3 | 4 => ToolOutcome::FailureWithBody {
                                 body: ValueBody::new("error"),
                             },
                             _ => ToolOutcome::Indeterminate,
@@ -15217,7 +15258,12 @@ mod tests {
                 prop_assert_eq!(&self.held, &self.cold());
                 for fact in batch.facts() {
                     match fact {
-                        Fact::DispatchOpened { dispatch, .. } => self.dispatches.push(dispatch.clone()),
+                        Fact::DispatchOpened { dispatch, tool, .. } => {
+                            self.dispatches.push(dispatch.clone());
+                            if FILE_TOOLS.contains(&tool.as_str()) {
+                                self.file_dispatches.push(dispatch.clone());
+                            }
+                        }
                         Fact::OfferOpened { trajectory, offer, .. } => self.offers.push((trajectory.clone(), *offer)),
                         Fact::ForkPrepared { fork, .. } => self.forks.push(fork.clone()),
                         Fact::ForkOpened { trajectory, fork } => {
@@ -15233,7 +15279,11 @@ mod tests {
             fn take(&mut self, step: &Step) -> Result<(), TestCaseError> {
                 if let Step::HostOnly = step {
                     let before = self.held.revision();
-                    self.append(&ValidatedFactBatch::empty(&self.held))?;
+                    let empty = self
+                        .engine
+                        .seal(&self.held, Vec::new())
+                        .expect("no facts pass the validator at an opened view");
+                    self.append(&empty)?;
                     prop_assert_eq!(self.held.revision(), before + 1);
                     return Ok(());
                 }
@@ -15288,6 +15338,27 @@ mod tests {
                 Step::Spawn { on: 0 },
                 Step::Bind { pick: 0 },
                 Step::Return { pick: 0, value: true },
+                Step::Propose {
+                    on: 0,
+                    exposed: vec![],
+                    proposed: vec![9],
+                },
+                Step::Offer { pick: 0, approve: true },
+                Step::Propose {
+                    on: 0,
+                    exposed: vec![],
+                    proposed: vec![9],
+                },
+                Step::Outcome { pick: 0, outcome: 3 },
+                Step::Propose {
+                    on: 0,
+                    exposed: vec![],
+                    proposed: vec![4],
+                },
+                Step::Offer {
+                    pick: 0,
+                    approve: false,
+                },
             ];
             let mut walk = Walk::open();
             for step in &script {
@@ -15299,6 +15370,14 @@ mod tests {
             assert!(reached(|fact| matches!(fact, Fact::DispatchClosed { .. })));
             assert!(reached(|fact| matches!(fact, Fact::ForkOpened { .. })));
             assert!(reached(|fact| matches!(fact, Fact::ChildReturn { .. })));
+            assert!(reached(|fact| matches!(
+                fact,
+                Fact::DispatchClosed {
+                    outcome: crate::fact::CloseOutcome::FailureWithBody { .. },
+                    ..
+                }
+            )));
+            assert!(reached(|fact| matches!(fact, Fact::OfferDenied { .. })));
         }
     }
 }

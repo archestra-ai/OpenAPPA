@@ -550,13 +550,6 @@ impl ValidatedFactBatch {
         &self.facts
     }
 
-    /// The batch that appends no facts at `view`'s position: what a store append carrying only
-    /// host records moves. It passes the validator trivially, so advancing by it moves the
-    /// revision and nothing else.
-    pub fn empty(view: &EngineView) -> ValidatedFactBatch {
-        ValidatedFactBatch::seal(Vec::new(), view.revision(), view.policy(), view.family().clone())
-    }
-
     /// Serialization removes the seal: what crosses to storage is the plain records,
     /// and what comes back is untrusted until it passes the validator again.
     pub fn into_unsealed(self) -> Vec<Fact> {
