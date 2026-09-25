@@ -6988,13 +6988,10 @@ delta = {}
              [externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
         )
         .expect("the fixture writes");
-        let config = Config::load_resolving(
-            &path,
-            &[],
-            |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| "jev-test-key".to_string()),
-            Some(url),
-        )
-        .expect("the fixture validates");
+        let mut config = Config::load(&path).expect("the fixture validates");
+        let jev = config.externals.jev.as_mut().expect("the profile is declared");
+        jev.url = url;
+        jev.key = crate::config::ProfileKey::Set(crate::config::Token::new("jev-test-key".to_string()));
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let recorder = Arc::new(Collected::default());
         let session = runtime

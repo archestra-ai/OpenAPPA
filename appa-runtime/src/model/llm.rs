@@ -5,7 +5,6 @@
 //! the two transports sees the same question. Every failure the provider returns is no
 //! answer; nothing about the trajectory reaches the model.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use rig_agent::AgentBuilder;
@@ -17,9 +16,9 @@ use rig_core::completion::{CompletionError, CompletionModel};
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
 use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
-use crate::config::{LlmProfile, LlmProvider, ProfileKey};
+use crate::config::{LlmProfile, LlmProvider, Token};
 use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, ModelGates, NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 use appa_policy::AnnotatorBuiltin;
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
@@ -46,18 +45,7 @@ pub struct LlmBackend {
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
-    gates: Arc<ModelGates>,
-}
-
-impl std::fmt::Debug for LlmBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LlmBackend")
-            .field("provider", &self.client.provider())
-            .field("model", &self.model)
-            .field("timeout", &self.timeout)
-            .field("max_body_bytes", &self.max_body_bytes)
-            .finish()
-    }
+    gates: ConsultGates,
 }
 
 /// The providers the builtin speaks to, closed: each is compiled in and dispatched by
@@ -69,17 +57,6 @@ enum LlmClient {
     OpenAi(openai::CompletionsClient),
     Gemini(gemini::Client),
     Ollama(ollama::Client),
-}
-
-impl LlmClient {
-    fn provider(&self) -> LlmProvider {
-        match self {
-            LlmClient::Anthropic(_) => LlmProvider::Anthropic,
-            LlmClient::OpenAi(_) => LlmProvider::OpenAi,
-            LlmClient::Gemini(_) => LlmProvider::Gemini,
-            LlmClient::Ollama(_) => LlmProvider::Ollama,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,64 +77,42 @@ impl LlmBackend {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
-        let token = profile
-            .key
-            .as_ref()
-            .and_then(ProfileKey::token)
-            .map(|token| token.reveal())
-            .unwrap_or("");
+        let token = match &profile.key {
+            Some(key) => key.token().map(Token::reveal).unwrap_or_default(),
+            None => "",
+        };
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
             detail: error.to_string(),
         };
+        macro_rules! client {
+            ($provider:ident) => {{
+                let mut builder = $provider::Client::builder().api_key(token);
+                if let Some(url) = &profile.url {
+                    builder = builder.base_url(url);
+                }
+                builder.build().map_err(failed)?
+            }};
+        }
         let client = match profile.provider {
-            LlmProvider::Anthropic => {
-                let mut builder = anthropic::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Anthropic(builder.build().map_err(failed)?)
-            }
-            LlmProvider::OpenAi => {
-                let mut builder = openai::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::OpenAi(builder.build().map_err(failed)?.completions_api())
-            }
-            LlmProvider::Gemini => {
-                let mut builder = gemini::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Gemini(builder.build().map_err(failed)?)
-            }
-            LlmProvider::Ollama => {
-                let mut builder = ollama::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Ollama(builder.build().map_err(failed)?)
-            }
+            LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic)),
+            LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai).completions_api()),
+            LlmProvider::Gemini => LlmClient::Gemini(client!(gemini)),
+            LlmProvider::Ollama => LlmClient::Ollama(client!(ollama)),
         };
         Ok(LlmBackend {
             client,
             model: profile.model.clone(),
             timeout: profile.limits.timeout,
             max_body_bytes,
-            gates: gates.models(),
+            gates: gates.clone(),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        self.gates.current(AnnotatorBuiltin::Llm).available_permits()
-    }
-
-    /// One consult. The deadline covers the permit wait and every attempt: queueing behind
-    /// the pool spends the same budget the consult itself would. A transport failure, a
+    /// One consult. The deadline covers every permit wait and every attempt: queueing behind
+    /// the gate spends the same budget the consult itself would. A transport failure, a
     /// 429 or a 5xx is retried after [`RETRY_BACKOFF`] while the budget leaves room for
-    /// another attempt; the permit is held across them.
+    /// another attempt; each attempt holds a permit, the backoff none.
     pub(crate) async fn consult(
         &self,
         prompt: &ModelPrompt,
@@ -165,11 +120,12 @@ impl LlmBackend {
         mut seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let gate = self.gates.current(AnnotatorBuiltin::Llm);
-        let _permit = acquire_within(&gate, deadline, "llm", name).await?;
+        let gate = self.gates.model(AnnotatorBuiltin::Llm);
         let mut attempts = 1;
         loop {
+            let permit = acquire_within(&gate, deadline, "llm", name).await?;
             let answered = self.attempt(prompt, deadline, seen.as_deref_mut()).await;
+            drop(permit);
             let retryable = matches!(
                 answered,
                 Err(NoAnswerReason::Transport
@@ -283,7 +239,7 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    use crate::config::Token;
+    use crate::config::ProfileKey;
 
     #[derive(Clone)]
     enum StubAnswer {
@@ -394,7 +350,7 @@ mod tests {
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
         let gates = ConsultGates::per_runtime();
-        gates.models().resize(AnnotatorBuiltin::Llm, max_concurrent);
+        gates.resize(AnnotatorBuiltin::Llm, max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             max_body_bytes,
@@ -602,55 +558,60 @@ mod tests {
         (backend, stub)
     }
 
+    /// A 429 or a 5xx is retried, at most [`MAX_ATTEMPTS`] attempts in all, and
+    /// only while the budget leaves room for another attempt; any other failure is not.
     #[tokio::test]
-    async fn a_server_error_or_a_rate_limit_is_retried() {
-        for status in [503, 429] {
-            let (backend, stub) = scripted(vec![StubAnswer::Status(status)], Duration::from_secs(5)).await;
+    async fn only_a_transient_failure_is_retried_within_the_budget() {
+        let failed = |status| Err(NoAnswerReason::NonSuccess { status, detail: None });
+        let ample = Duration::from_secs(5);
+        for (script, timeout, answered, requests) in [
+            (
+                vec![StubAnswer::Status(503)],
+                ample,
+                Ok(serde_json::json!({ "ruling": "approve" })),
+                2,
+            ),
+            (
+                vec![StubAnswer::Status(429)],
+                ample,
+                Ok(serde_json::json!({ "ruling": "approve" })),
+                2,
+            ),
+            (vec![StubAnswer::Status(400)], ample, failed(400), 1),
+            (vec![StubAnswer::Status(502); 4], ample, failed(502), MAX_ATTEMPTS),
+            (
+                vec![StubAnswer::Status(503)],
+                RETRY_BACKOFF + MIN_ATTEMPT / 2,
+                failed(503),
+                1,
+            ),
+        ] {
+            let (backend, stub) = scripted(script, timeout).await;
             assert_eq!(
                 backend.consult(&prompt(), "judge", None).await,
-                Ok(serde_json::json!({ "ruling": "approve" })),
-                "{status}"
+                answered,
+                "{answered:?}"
             );
-            assert_eq!(stub.requests().len(), 2, "{status}");
+            assert_eq!(stub.requests().len(), requests, "{answered:?}");
         }
     }
 
+    /// With one permit, a consult waiting out its backoff does not hold it: another consult
+    /// answers before the retry starts.
     #[tokio::test]
-    async fn a_client_error_is_not_retried() {
-        let (backend, stub) = scripted(vec![StubAnswer::Status(400)], Duration::from_secs(5)).await;
-        assert_eq!(
-            backend.consult(&prompt(), "judge", None).await,
-            Err(NoAnswerReason::NonSuccess {
-                status: 400,
-                detail: None
-            })
-        );
-        assert_eq!(stub.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_persistent_server_error_ends_after_the_last_attempt() {
-        let (backend, stub) = scripted(vec![StubAnswer::Status(502); 4], Duration::from_secs(5)).await;
-        assert_eq!(
-            backend.consult(&prompt(), "judge", None).await,
-            Err(NoAnswerReason::NonSuccess {
-                status: 502,
-                detail: None
-            })
-        );
-        assert_eq!(stub.requests().len(), MAX_ATTEMPTS);
-    }
-
-    #[tokio::test]
-    async fn no_retry_starts_without_the_budget_for_one() {
-        let (backend, stub) = scripted(vec![StubAnswer::Status(503)], RETRY_BACKOFF + MIN_ATTEMPT / 2).await;
-        assert_eq!(
-            backend.consult(&prompt(), "judge", None).await,
-            Err(NoAnswerReason::NonSuccess {
-                status: 503,
-                detail: None
-            })
-        );
-        assert_eq!(stub.requests().len(), 1);
+    async fn the_backoff_holds_no_permit() {
+        let (backend, stub) = scripted(vec![StubAnswer::Status(503)], Duration::from_secs(5)).await;
+        let ask = prompt();
+        let other = async {
+            tokio::time::sleep(RETRY_BACKOFF / 5).await;
+            let started = tokio::time::Instant::now();
+            let answered = backend.consult(&ask, "judge", None).await;
+            (answered, started.elapsed())
+        };
+        let (retried, (answered, waited)) = tokio::join!(backend.consult(&ask, "judge", None), other);
+        assert_eq!(retried, Ok(serde_json::json!({ "ruling": "approve" })));
+        assert_eq!(answered, Ok(serde_json::json!({ "ruling": "approve" })));
+        assert!(waited < RETRY_BACKOFF / 2, "{waited:?}");
+        assert_eq!(stub.requests().len(), 3);
     }
 }

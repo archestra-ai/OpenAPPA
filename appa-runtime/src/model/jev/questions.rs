@@ -6,9 +6,8 @@ use serde::Serialize;
 
 use crate::label_guide::{
     CALL_RULES, DELTA_AUDIENCE_CRITERIA, DELTA_AUDIENCE_RULE, DELTA_TRUST_CRITERIA, DELTA_TRUST_RULE,
-    DeltaAudienceCriteria, DeltaTrustCriteria, EXAMPLES, Example, Leaf, REQUIRES_AUDIENCE_CRITERIA,
-    REQUIRES_AUDIENCE_RULE, REQUIRES_TRUST_CRITERIA, REQUIRES_TRUST_RULE, RequiresAudienceCriteria,
-    RequiresTrustCriteria,
+    DeltaAudienceCriteria, DeltaTrustCriteria, EXAMPLES, Leaf, REQUIRES_AUDIENCE_CRITERIA, REQUIRES_AUDIENCE_RULE,
+    REQUIRES_TRUST_CRITERIA, REQUIRES_TRUST_RULE, RequiresAudienceCriteria, RequiresTrustCriteria,
 };
 
 const CONTEXT: &str = concat!(
@@ -20,61 +19,41 @@ const CONTEXT: &str = concat!(
     "its contract that concern audience and trust."
 );
 
-/// The four questions, in the order the request asks them.
-#[derive(Clone, Copy)]
-enum Question {
-    DeltaAudience,
-    DeltaTrust,
-    RequiresAudience,
-    RequiresTrusted,
+/// The question as jev frames it, then the guide's rule that decides it.
+fn instructions(leaf: Leaf) -> [&'static str; 2] {
+    match leaf {
+        Leaf::DeltaAudience => ["Decide `delta.audience`.", DELTA_AUDIENCE_RULE],
+        Leaf::DeltaTrust => [
+            "Decide `delta.trust`. The chain is `suspicious` < `trusted`.",
+            DELTA_TRUST_RULE,
+        ],
+        Leaf::RequiresAudience => ["Decide `requires.audience.contains`.", REQUIRES_AUDIENCE_RULE],
+        Leaf::RequiresTrust => [
+            "Decide whether this call needs `requires.trust = \"trusted\"`.",
+            REQUIRES_TRUST_RULE,
+        ],
+    }
 }
 
-impl Question {
-    /// The question as jev frames it, then the guide's rule that decides it.
-    fn instructions(self) -> [&'static str; 2] {
-        match self {
-            Question::DeltaAudience => ["Decide `delta.audience`.", DELTA_AUDIENCE_RULE],
-            Question::DeltaTrust => [
-                "Decide `delta.trust`. The chain is `suspicious` < `trusted`.",
-                DELTA_TRUST_RULE,
-            ],
-            Question::RequiresAudience => ["Decide `requires.audience.contains`.", REQUIRES_AUDIENCE_RULE],
-            Question::RequiresTrusted => [
-                "Decide whether this call needs `requires.trust = \"trusted\"`.",
-                REQUIRES_TRUST_RULE,
-            ],
-        }
+/// The context, the call rules and the question, the deployer's hint when the policy
+/// declares one, then the worked examples for this question.
+fn rendered(leaf: Leaf, hint: Option<&str>) -> String {
+    let [question, rule] = instructions(leaf);
+    let mut parts = [CONTEXT, CALL_RULES, question, rule].map(str::to_string).to_vec();
+    if let Some(hint) = hint.filter(|hint| !hint.is_empty()) {
+        parts.push(format!("The deployer's instruction for this tool: {hint}"));
     }
-
-    fn answer(self, example: &Example) -> &'static str {
-        let leaf = match self {
-            Question::DeltaAudience => Leaf::DeltaAudience,
-            Question::DeltaTrust => Leaf::DeltaTrust,
-            Question::RequiresAudience => Leaf::RequiresAudience,
-            Question::RequiresTrusted => Leaf::RequiresTrust,
-        };
-        leaf.name(&example.labels())
-    }
-
-    /// The context, the call rules and the question, the deployer's hint when the policy
-    /// declares one, then the worked examples for this question.
-    fn rendered(self, hint: Option<&str>) -> String {
-        let [question, rule] = self.instructions();
-        let mut parts = [CONTEXT, CALL_RULES, question, rule].map(str::to_string).to_vec();
-        if let Some(hint) = hint.filter(|hint| !hint.is_empty()) {
-            parts.push(format!("The deployer's instruction for this tool: {hint}"));
-        }
-        let examples = EXAMPLES
-            .iter()
-            .map(|example| format!("- {}\n  -> {}  ({})", example.call, self.answer(example), example.why));
-        parts.push(
-            std::iter::once("Worked examples:".to_string())
-                .chain(examples)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-        parts.join("\n\n")
-    }
+    let examples = EXAMPLES.iter().map(|example| {
+        let answer = leaf.name(&example.labels());
+        format!("- {}\n  -> {answer}  ({})", example.call, example.why)
+    });
+    parts.push(
+        std::iter::once("Worked examples:".to_string())
+            .chain(examples)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    parts.join("\n\n")
 }
 
 #[derive(Serialize)]
@@ -93,16 +72,16 @@ struct Asked<C: 'static> {
 }
 
 impl<C> Asked<C> {
-    fn of(question: Question, kind: QuestionType, criteria: &'static C, hint: Option<&str>) -> Asked<C> {
+    fn of(leaf: Leaf, kind: QuestionType, criteria: &'static C, hint: Option<&str>) -> Asked<C> {
         Asked {
             kind,
-            instructions: question.rendered(hint),
+            instructions: rendered(leaf, hint),
             criteria,
         }
     }
 }
 
-/// The request's `questions`, in wire order.
+/// The request's `questions`: the field order is the wire order.
 #[derive(Serialize)]
 pub(crate) struct Questions {
     delta_audience: Asked<DeltaAudienceCriteria>,
@@ -113,26 +92,12 @@ pub(crate) struct Questions {
 
 impl Questions {
     pub(crate) fn new(hint: Option<&str>) -> Questions {
+        use QuestionType::{Choice, Noul};
         Questions {
-            delta_audience: Asked::of(
-                Question::DeltaAudience,
-                QuestionType::Choice,
-                &DELTA_AUDIENCE_CRITERIA,
-                hint,
-            ),
-            delta_trust: Asked::of(Question::DeltaTrust, QuestionType::Choice, &DELTA_TRUST_CRITERIA, hint),
-            requires_audience: Asked::of(
-                Question::RequiresAudience,
-                QuestionType::Choice,
-                &REQUIRES_AUDIENCE_CRITERIA,
-                hint,
-            ),
-            requires_trusted: Asked::of(
-                Question::RequiresTrusted,
-                QuestionType::Noul,
-                &REQUIRES_TRUST_CRITERIA,
-                hint,
-            ),
+            delta_audience: Asked::of(Leaf::DeltaAudience, Choice, &DELTA_AUDIENCE_CRITERIA, hint),
+            delta_trust: Asked::of(Leaf::DeltaTrust, Choice, &DELTA_TRUST_CRITERIA, hint),
+            requires_audience: Asked::of(Leaf::RequiresAudience, Choice, &REQUIRES_AUDIENCE_CRITERIA, hint),
+            requires_trusted: Asked::of(Leaf::RequiresTrust, Noul, &REQUIRES_TRUST_CRITERIA, hint),
         }
     }
 }

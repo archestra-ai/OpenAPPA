@@ -255,53 +255,14 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
-    models: Arc<ModelGates>,
-    jev: Arc<JevClients>,
+    /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
+    /// deployment sizes them; a consult takes its permits from the gate current when it
+    /// starts, so a resize reaches every deployment's later consults.
+    models: Arc<Mutex<[ModelGate; 3]>>,
+    pub(crate) jev: Arc<JevClients>,
 }
 
-/// One gate per model builtin with the `max_concurrent` it was sized by. Only the serving
-/// deployment sizes them, at open and when a reload installs it; a consult takes a permit of
-/// the gate current when it starts, so a resize reaches every deployment's later consults
-/// while consults under the old gate finish under it.
-#[derive(Debug)]
-pub(crate) struct ModelGates {
-    claude_code: ModelGate,
-    llm: ModelGate,
-    jev: ModelGate,
-}
-
-type ModelGate = Mutex<(usize, Arc<tokio::sync::Semaphore>)>;
-
-fn model_gate(max_concurrent: usize) -> ModelGate {
-    Mutex::new((max_concurrent, Arc::new(tokio::sync::Semaphore::new(max_concurrent))))
-}
-
-impl ModelGates {
-    fn slot(&self, builtin: AnnotatorBuiltin) -> &ModelGate {
-        match builtin {
-            AnnotatorBuiltin::ClaudeCode => &self.claude_code,
-            AnnotatorBuiltin::Llm => &self.llm,
-            AnnotatorBuiltin::Jev => &self.jev,
-        }
-    }
-
-    fn lock(&self, builtin: AnnotatorBuiltin) -> std::sync::MutexGuard<'_, (usize, Arc<tokio::sync::Semaphore>)> {
-        self.slot(builtin)
-            .lock()
-            .expect("a model gate mutex is never poisoned: no panic runs while it is held")
-    }
-
-    pub(crate) fn current(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
-        Arc::clone(&self.lock(builtin).1)
-    }
-
-    pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
-        let mut slot = self.lock(builtin);
-        if slot.0 != max_concurrent {
-            *slot = (max_concurrent, Arc::new(tokio::sync::Semaphore::new(max_concurrent)));
-        }
-    }
-}
+type ModelGate = (AnnotatorBuiltin, usize, Arc<tokio::sync::Semaphore>);
 
 impl ConsultGates {
     pub(crate) fn per_runtime() -> ConsultGates {
@@ -309,56 +270,64 @@ impl ConsultGates {
     }
 
     fn of(command: usize) -> ConsultGates {
+        let gate = |builtin| {
+            let size = match builtin {
+                AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Llm => {
+                    crate::config::ModelLimits::MODEL_CALL.max_concurrent
+                }
+                AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
+            };
+            (builtin, size, Arc::new(tokio::sync::Semaphore::new(size)))
+        };
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
-            models: Arc::new(ModelGates {
-                claude_code: model_gate(crate::config::ModelLimits::CLAUDE_CODE.max_concurrent),
-                llm: model_gate(crate::config::ModelLimits::LLM.max_concurrent),
-                jev: model_gate(crate::config::DEFAULT_JEV_CONCURRENCY),
-            }),
+            models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
             jev: Arc::default(),
         }
+    }
+
+    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; 3]> {
+        self.models
+            .lock()
+            .expect("the model gates mutex is never poisoned: no panic runs while it is held")
+    }
+
+    pub(crate) fn model(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
+        let models = self.models();
+        let (_, _, gate) = models
+            .iter()
+            .find(|(of, ..)| *of == builtin)
+            .expect("every builtin has a gate");
+        Arc::clone(gate)
     }
 
     /// Size the model gates by the serving deployment's tables. A table the deployment does
     /// not declare leaves its gate as it is: no backend of that deployment consults it.
     pub(crate) fn size_by(&self, externals: &Externals) {
-        self.models.resize(
-            AnnotatorBuiltin::ClaudeCode,
-            externals.claude_code.limits.max_concurrent,
-        );
-        if let Some(llm) = &externals.llm {
-            self.models.resize(AnnotatorBuiltin::Llm, llm.limits.max_concurrent);
-        }
-        if let Some(jev) = &externals.jev {
-            self.models.resize(AnnotatorBuiltin::Jev, jev.limits.max_concurrent);
+        for builtin in AnnotatorBuiltin::ALL {
+            if let Some(limits) = externals.model_limits(builtin) {
+                self.resize(builtin, limits.max_concurrent);
+            }
         }
     }
 
-    pub(crate) fn models(&self) -> Arc<ModelGates> {
-        Arc::clone(&self.models)
-    }
-
-    pub(crate) fn jev_clients(&self) -> Arc<JevClients> {
-        Arc::clone(&self.jev)
+    pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
+        let mut models = self.models();
+        let (_, size, gate) = models
+            .iter_mut()
+            .find(|(of, ..)| *of == builtin)
+            .expect("every builtin has a gate");
+        if *size != max_concurrent {
+            *size = max_concurrent;
+            *gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        }
     }
 }
 
 impl ExternalServices {
-    /// The permits the backend of `builtin` has free, `None` where no entry is served by it.
     #[cfg(test)]
-    pub(crate) fn model_permits(&self, builtin: AnnotatorBuiltin) -> Option<usize> {
-        self.backends
-            .values()
-            .flat_map(BTreeMap::values)
-            .find_map(|backend| match (backend, builtin) {
-                (Backend::Model(PromptModel::Llm(llm)), AnnotatorBuiltin::Llm) => Some(llm.available_permits()),
-                (Backend::Model(PromptModel::ClaudeCode(claude)), AnnotatorBuiltin::ClaudeCode) => {
-                    Some(claude.available_permits())
-                }
-                (Backend::Jev(jev), AnnotatorBuiltin::Jev) => Some(jev.available_permits()),
-                _ => None,
-            })
+    pub(crate) fn model_permits(&self, builtin: AnnotatorBuiltin) -> usize {
+        self.gates.model(builtin).available_permits()
     }
 
     /// Resolves every configured `builtin` reference against the stock
@@ -1463,19 +1432,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn claude_backend(command: std::path::PathBuf, timeout_ms: u64, cap: usize) -> ClaudeCodeBackend {
-        ClaudeCodeBackend::new(
-            &crate::config::ClaudeCode {
-                command,
-                model: "sonnet".to_string(),
-                limits: crate::config::ModelLimits {
-                    timeout: Duration::from_millis(timeout_ms),
-                    max_concurrent: 4,
-                },
-            },
-            cap,
-            &ConsultGates::per_runtime(),
-        )
+    fn claude_backend(command: std::path::PathBuf, cap: usize) -> ClaudeCodeBackend {
+        let config = crate::config::ClaudeCode {
+            command,
+            ..Default::default()
+        };
+        ClaudeCodeBackend::new(&config, cap, &ConsultGates::per_runtime())
     }
 
     #[tokio::test]
@@ -1920,7 +1882,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 pid_file.display()
             ),
         );
-        let backend = claude_backend(command, 10_000, 65_536);
+        let backend = claude_backend(command, 65_536);
         let prompt = ModelPrompt::new(&annotation_consult("review", serde_json::json!({}))).expect("renders");
         let consult = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1986,7 +1948,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         // Not even the credential a `command` external inherits: this consult reads none.
         unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "leaky") };
         let raw = run_claude_code(
-            &claude_backend(command, 2000, 65_536),
+            &claude_backend(command, 65_536),
             &prompt,
             tokio::time::Instant::now() + Duration::from_millis(2000),
             None,
@@ -2043,7 +2005,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             let prompt = &prompt;
             async move {
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-                run_claude_code(&claude_backend(command, timeout_ms, cap), prompt, deadline, None).await
+                run_claude_code(&claude_backend(command, cap), prompt, deadline, None).await
             }
         };
         assert_eq!(
@@ -2223,42 +2185,34 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let names: Vec<String> = builtins.keys().cloned().collect();
         let mut services = services_declaring(config, builtins);
 
-        let models = services
-            .backends
-            .remove(&ConsultKind::Annotation)
-            .expect("the builtin annotators are bound");
-        services.backends.insert(ConsultKind::AudienceSource, models);
-        for name in &names {
-            let (outcome, transcript) = services
-                .consult_transcribed(&Consult::audience_selector(name, "user-group/eng", vec![]), None, None)
-                .await;
-            assert_eq!(
-                outcome,
-                ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
-                "{name}"
-            );
-            assert!(transcript.is_some(), "{name} reached its model backend");
-        }
-        let models = services
-            .backends
-            .remove(&ConsultKind::AudienceSource)
-            .expect("the models were moved here");
-        services.backends.insert(ConsultKind::Input, models);
-        for name in &names {
-            let artifact = InputArtifact {
-                tool: "fetch".to_string(),
-                arguments: serde_json::json!({}),
-                cwd: None,
-            };
-            let (outcome, transcript) = services
-                .consult_transcribed(&Consult::input(name, artifact), None, None)
-                .await;
-            assert_eq!(
-                outcome,
-                ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
-                "{name}"
-            );
-            assert!(transcript.is_some(), "{name} reached its model backend");
+        let consults: [fn(&str) -> Consult; 2] = [
+            |name| Consult::audience_selector(name, "user-group/eng", vec![]),
+            |name| {
+                let input = InputArtifact {
+                    tool: "fetch".to_string(),
+                    arguments: serde_json::json!({}),
+                    cwd: None,
+                };
+                Consult::input(name, input)
+            },
+        ];
+        let mut bound = ConsultKind::Annotation;
+        for consult_of in consults {
+            let models = services
+                .backends
+                .remove(&bound)
+                .expect("the builtin annotators are bound");
+            bound = consult_of("any").kind();
+            services.backends.insert(bound, models);
+            for name in &names {
+                let (outcome, transcript) = services.consult_transcribed(&consult_of(name), None, None).await;
+                assert_eq!(
+                    outcome,
+                    ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
+                    "{name} {bound:?}"
+                );
+                assert!(transcript.is_some(), "{name} reached its model backend");
+            }
         }
         assert_eq!(
             asked.load(std::sync::atomic::Ordering::SeqCst),

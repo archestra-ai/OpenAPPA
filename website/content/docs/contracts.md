@@ -1341,7 +1341,7 @@ Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_en
 
 A deployment in which any component uses `builtin = "llm"` opens only when the section's key is available: `token_env` names a variable that is set, or the provider is `ollama` and the section names no `token_env`. A section that no component uses loads without its key.
 
-An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. All attempts use one slot.
+An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. Each attempt takes a free slot, and the wait before a retry holds none.
 
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
 
@@ -1360,7 +1360,7 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
 | Field | Purpose |
 |---|---|
 | `token_env` | Names the variable that holds the TypeSafe API key. Required. Must start with `APPA_`. |
-| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. Minimum: 550; OpenAPPA rejects a smaller value, inherited or declared. |
 | `max_concurrent` | Sets how many requests the runtime runs at once. Default: 16. |
 
 A battery that ships this section declares `token_env` only. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).

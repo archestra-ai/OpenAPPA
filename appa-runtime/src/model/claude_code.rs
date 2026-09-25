@@ -1,10 +1,8 @@
 //! The `claude-code` builtin: one isolated, tool-less `claude` process per consult.
 
-use std::sync::Arc;
-
 use crate::config::ClaudeCode;
 use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, ModelGates, NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 use appa_policy::AnnotatorBuiltin;
 
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
@@ -37,37 +35,21 @@ impl ClaudeResultEnvelope {
 /// consult, answering under the consult's own output schema. The deployment may override
 /// the executable (a service environment often has no usable `PATH`), the model, and the
 /// consult limits. Its permit pool is the runtime's `claude-code` gate.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ClaudeCodeBackend {
-    #[cfg(unix)]
-    command: std::path::PathBuf,
-    #[cfg(unix)]
-    model: String,
-    timeout: std::time::Duration,
-    #[cfg(unix)]
+    config: ClaudeCode,
+    #[cfg_attr(not(unix), allow(dead_code))]
     max_body_bytes: usize,
-    gates: Arc<ModelGates>,
+    gates: ConsultGates,
 }
 
 impl ClaudeCodeBackend {
     pub(crate) fn new(config: &ClaudeCode, max_body_bytes: usize, gates: &ConsultGates) -> ClaudeCodeBackend {
-        #[cfg(not(unix))]
-        let _ = max_body_bytes;
         ClaudeCodeBackend {
-            #[cfg(unix)]
-            command: config.command.clone(),
-            #[cfg(unix)]
-            model: config.model.clone(),
-            timeout: config.limits.timeout,
-            #[cfg(unix)]
+            config: config.clone(),
             max_body_bytes,
-            gates: gates.models(),
+            gates: gates.clone(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        self.gates.current(AnnotatorBuiltin::ClaudeCode).available_permits()
     }
 
     /// One consult. The deadline covers the permit wait and the subprocess: queueing behind
@@ -79,8 +61,8 @@ impl ClaudeCodeBackend {
         name: &str,
         seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        let gate = self.gates.current(AnnotatorBuiltin::ClaudeCode);
+        let deadline = tokio::time::Instant::now() + self.config.limits.timeout;
+        let gate = self.gates.model(AnnotatorBuiltin::ClaudeCode);
         let permit = acquire_within(&gate, deadline, "claude", name).await?;
         let answered = run_claude_code(self, prompt, deadline, seen).await;
         drop(permit);
@@ -102,11 +84,11 @@ pub(crate) async fn run_claude_code(
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
-    let mut command = tokio::process::Command::new(&backend.command);
+    let mut command = tokio::process::Command::new(&backend.config.command);
     command
         .arg("-p")
         .arg("--model")
-        .arg(&backend.model)
+        .arg(&backend.config.model)
         .arg("--safe-mode")
         .arg("--setting-sources")
         .arg("")
@@ -131,7 +113,7 @@ pub(crate) async fn run_claude_code(
     isolate_claude_environment(&mut command);
     tracing::debug!("claude consult starts");
     let mut child = command.spawn().map_err(|_| {
-        tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
+        tracing::warn!(command = %backend.config.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
     // The CLI's own error — a bad model name — is the one line an operator needs when
@@ -250,35 +232,28 @@ mod tests {
         );
     }
 
-    /// A fake `claude` that reads its input and exits 1 after `script`.
+    /// One consult of a fake `claude` in `dir` that reads its input, then runs `script`.
     #[cfg(unix)]
-    async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let fake = crate::test_support::fake_claude(dir.path(), &format!("cat > /dev/null\n{script}\nexit 1"));
-        let backend = ClaudeCodeBackend::new(
-            &ClaudeCode {
-                command: fake,
-                model: "m".to_string(),
-                limits: crate::config::ModelLimits {
-                    timeout: std::time::Duration::from_secs(5),
-                    max_concurrent: 1,
-                },
-            },
-            65_536,
-            &crate::external::ConsultGates::per_runtime(),
-        );
+    async fn fake_consult(dir: &std::path::Path, script: &str) -> Result<serde_json::Value, NoAnswerReason> {
+        let command = crate::test_support::fake_claude(dir, &format!("cat > /dev/null\n{script}"));
+        let config = ClaudeCode {
+            command,
+            ..ClaudeCode::default()
+        };
+        let backend = ClaudeCodeBackend::new(&config, 65_536, &crate::external::ConsultGates::per_runtime());
         let prompt = ModelPrompt {
             system: "rule".to_string(),
             input: "{}".to_string(),
             schema: serde_json::json!({"type": "object"}),
         };
-        run_claude_code(
-            &backend,
-            &prompt,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-            None,
-        )
-        .await
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        run_claude_code(&backend, &prompt, deadline, None).await
+    }
+
+    #[cfg(unix)]
+    async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        fake_consult(dir.path(), &format!("{script}\nexit 1")).await
     }
 
     /// A CLI that exits without an answer names its own error, so a failed consult is
@@ -323,39 +298,12 @@ mod tests {
     async fn a_claude_consult_takes_its_helpers_down_with_it() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let pid_file = dir.path().join("helper.pid");
-        let fake = crate::test_support::fake_claude(
-            dir.path(),
-            &format!(
-                "cat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}",
-                pid_file.display()
-            ),
+        let script = format!(
+            "printf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}",
+            pid_file.display()
         );
-        let backend = ClaudeCodeBackend::new(
-            &ClaudeCode {
-                command: fake,
-                model: "m".to_string(),
-                limits: crate::config::ModelLimits {
-                    timeout: std::time::Duration::from_secs(5),
-                    max_concurrent: 1,
-                },
-            },
-            65_536,
-            &crate::external::ConsultGates::per_runtime(),
-        );
-        let prompt = ModelPrompt {
-            system: "rule".to_string(),
-            input: "{}".to_string(),
-            schema: serde_json::json!({"type": "object"}),
-        };
-
         let started = std::time::Instant::now();
-        let answer = run_claude_code(
-            &backend,
-            &prompt,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-            None,
-        )
-        .await;
+        let answer = fake_consult(dir.path(), &script).await;
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(3),

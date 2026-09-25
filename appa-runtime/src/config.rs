@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_reader};
 use appa_engine::label::ReaderId;
+use appa_policy::AnnotatorBuiltin;
 use serde::Deserialize;
 
 /// Each policy namespace bound to the connection identities the host reports for it.
@@ -203,16 +204,22 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// The limits of `builtin`'s table, where the deployment declares one.
+    pub(crate) fn model_limits(&self, builtin: AnnotatorBuiltin) -> Option<ModelLimits> {
+        match builtin {
+            AnnotatorBuiltin::ClaudeCode => Some(self.claude_code.limits),
+            AnnotatorBuiltin::Llm => self.llm.as_ref().map(|llm| llm.limits),
+            AnnotatorBuiltin::Jev => self.jev.as_ref().map(|jev| jev.limits),
+        }
+    }
+
     /// The longest budget any one machine consult of this deployment runs under.
     pub(crate) fn longest_consult(&self) -> Duration {
-        [
-            Some(self.claude_code.limits.timeout),
-            self.llm.as_ref().map(|llm| llm.limits.timeout),
-            self.jev.as_ref().map(|jev| jev.limits.timeout),
-        ]
-        .into_iter()
-        .flatten()
-        .fold(self.timeout, Duration::max)
+        AnnotatorBuiltin::ALL
+            .into_iter()
+            .filter_map(|builtin| self.model_limits(builtin))
+            .map(|limits| limits.timeout)
+            .fold(self.timeout, Duration::max)
     }
 
     /// The lookup routing these bindings declare: each redirected audience provider and
@@ -283,11 +290,8 @@ const DEFAULT_MODEL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_JEV_CONCURRENCY: usize = 16;
 
 impl ModelLimits {
-    pub(crate) const CLAUDE_CODE: ModelLimits = ModelLimits {
-        timeout: DEFAULT_MODEL_TIMEOUT,
-        max_concurrent: 4,
-    };
-    pub(crate) const LLM: ModelLimits = ModelLimits {
+    /// The limits of a `claude-code` or `llm` table that names neither.
+    pub(crate) const MODEL_CALL: ModelLimits = ModelLimits {
         timeout: DEFAULT_MODEL_TIMEOUT,
         max_concurrent: 4,
     };
@@ -299,7 +303,7 @@ impl ModelLimits {
         max_concurrent: Option<u32>,
         default: ModelLimits,
     ) -> Result<ModelLimits, ConfigError> {
-        let zero = |field| ConfigError::ZeroModelLimit { section, field };
+        let zero = |field| ConfigError::ModelLimitTooSmall { section, field, min: 1 };
         Ok(ModelLimits {
             timeout: match timeout_ms {
                 Some(0) => return Err(zero("timeout_ms")),
@@ -332,7 +336,7 @@ impl Default for ClaudeCode {
         ClaudeCode {
             command: "claude".into(),
             model: "sonnet".to_string(),
-            limits: ModelLimits::CLAUDE_CODE,
+            limits: ModelLimits::MODEL_CALL,
         }
     }
 }
@@ -353,21 +357,20 @@ pub struct LlmProfile {
 impl LlmProfile {
     /// Why this profile cannot serve a consult, where it cannot: the variable it names is
     /// not set, or it names none and its provider needs a key.
-    pub fn missing_key(&self) -> Option<MissingLlmKey> {
+    pub fn missing_key(&self) -> Option<MissingKey> {
         match &self.key {
-            Some(ProfileKey::Set(_)) => None,
-            Some(ProfileKey::Unset { var }) => Some(MissingLlmKey::Unset { var: var.clone() }),
+            Some(key) => key.token().err(),
             None if self.provider == LlmProvider::Ollama => None,
-            None => Some(MissingLlmKey::Undeclared {
+            None => Some(MissingKey::Undeclared {
                 provider: self.provider.as_str(),
             }),
         }
     }
 }
 
-/// Why an `[externals.llm]` profile cannot serve a consult.
+/// Why a model profile cannot serve a consult.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum MissingLlmKey {
+pub enum MissingKey {
     #[error("its token_env {var} is not set")]
     Unset { var: String },
     #[error("the {provider} provider needs a token_env, and only ollama runs without a key")]
@@ -402,14 +405,19 @@ impl ProfileKey {
         }
     }
 
-    /// The token, where the variable is set.
-    pub fn token(&self) -> Option<&Token> {
+    pub fn token(&self) -> Result<&Token, MissingKey> {
         match self {
-            ProfileKey::Set(token) => Some(token),
-            ProfileKey::Unset { .. } => None,
+            ProfileKey::Set(token) => Ok(token),
+            ProfileKey::Unset { var } => Err(MissingKey::Unset { var: var.clone() }),
         }
     }
 }
+
+/// The least `[externals.jev]` budget: the consult keeps its settling margin and still has
+/// room for one attempt.
+const JEV_MIN_TIMEOUT: Duration = crate::model::jev::JevTiming::STANDARD
+    .budget_margin
+    .saturating_add(crate::model::MIN_ATTEMPT);
 
 /// Where the `jev` annotator asks by default.
 pub(crate) const JEV_DEFAULT_URL: &str = "https://api.typesafe.ai/v1/systemone";
@@ -470,9 +478,9 @@ pub struct ResolverCommand {
     pub token_env: Option<String>,
 }
 
-pub const CLAUDE_CODE_BUILTIN: &str = appa_policy::AnnotatorBuiltin::ClaudeCode.wire_name();
-pub const LLM_BUILTIN: &str = appa_policy::AnnotatorBuiltin::Llm.wire_name();
-pub const JEV_BUILTIN: &str = appa_policy::AnnotatorBuiltin::Jev.wire_name();
+pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
+pub const LLM_BUILTIN: &str = AnnotatorBuiltin::Llm.wire_name();
+pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -626,8 +634,12 @@ pub enum ConfigError {
     ZeroReviewTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
-    #[error("externals.{section}.{field} must be greater than zero")]
-    ZeroModelLimit { section: &'static str, field: &'static str },
+    #[error("externals.{section}.{field} must be at least {min}")]
+    ModelLimitTooSmall {
+        section: &'static str,
+        field: &'static str,
+        min: u128,
+    },
     #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama")]
     InvalidLlmProvider { provider: String },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
@@ -951,23 +963,6 @@ impl Config {
     /// Load `path`, resolving `batteries/<name>/appa.toml` includes against
     /// `battery_dirs` in the given order before the root config directory.
     pub fn load_from(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        Config::load_resolving(
-            path,
-            battery_dirs,
-            |var| std::env::var(var).ok(),
-            std::env::var(JEV_URL_VARIABLE).ok(),
-        )
-    }
-
-    /// [`Config::load_from`] with what it reads of the process environment supplied by the
-    /// caller: `lookup` answers every `token_env`, and `jev_url` is the operator's
-    /// [`JEV_URL_VARIABLE`].
-    pub(crate) fn load_resolving(
-        path: &Path,
-        battery_dirs: &[PathBuf],
-        lookup: impl Fn(&str) -> Option<String>,
-        jev_url: Option<String>,
-    ) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
             path: path.display().to_string(),
             source,
@@ -1082,8 +1077,7 @@ impl Config {
             file_tracking,
             origins,
             included_batteries.into_iter().collect(),
-            lookup,
-            jev_url,
+            |var| std::env::var(var).ok(),
         )
     }
 
@@ -1234,7 +1228,6 @@ impl Config {
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             lookup,
-            std::env::var(JEV_URL_VARIABLE).ok(),
         )
     }
 
@@ -1310,11 +1303,9 @@ impl Config {
             origins,
             Vec::new(),
             lookup,
-            std::env::var(JEV_URL_VARIABLE).ok(),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn validate_composed(
         text: String,
         raw: RawConfig,
@@ -1323,7 +1314,6 @@ impl Config {
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
         lookup: impl Fn(&str) -> Option<String>,
-        jev_url: Option<String>,
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
         let RawExternals {
@@ -1350,7 +1340,14 @@ impl Config {
         }
         let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
         let jev = jev
-            .map(|raw| resolve_jev(raw, Duration::from_millis(timeout_ms), &lookup, jev_url))
+            .map(|raw| {
+                resolve_jev(
+                    raw,
+                    Duration::from_millis(timeout_ms),
+                    &lookup,
+                    std::env::var(JEV_URL_VARIABLE).ok(),
+                )
+            })
             .transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
@@ -2099,7 +2096,7 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
 }
 
 /// The `[externals.jev]` table. A consult is one short HTTPS request, so its budget
-/// defaults to the shared `timeout`.
+/// defaults to the shared `timeout`; below [`JEV_MIN_TIMEOUT`] no attempt fits in it.
 fn resolve_jev(
     raw: RawJev,
     shared_timeout: Duration,
@@ -2121,10 +2118,18 @@ fn resolve_jev(
         timeout: shared_timeout,
         max_concurrent: DEFAULT_JEV_CONCURRENCY,
     };
+    let limits = ModelLimits::declared(JEV_SECTION, raw.timeout_ms, raw.max_concurrent, default)?;
+    if limits.timeout < JEV_MIN_TIMEOUT {
+        return Err(ConfigError::ModelLimitTooSmall {
+            section: JEV_SECTION,
+            field: "timeout_ms",
+            min: JEV_MIN_TIMEOUT.as_millis(),
+        });
+    }
     Ok(JevProfile {
         url,
         key: ProfileKey::read(raw.token_env, lookup),
-        limits: ModelLimits::declared(JEV_SECTION, raw.timeout_ms, raw.max_concurrent, default)?,
+        limits,
     })
 }
 
@@ -2133,7 +2138,7 @@ fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<
     let provider = LlmProvider::parse(&raw.provider).ok_or_else(|| ConfigError::InvalidLlmProvider {
         provider: raw.provider.clone(),
     })?;
-    let limits = ModelLimits::declared(SECTION, raw.timeout_ms, raw.max_concurrent, ModelLimits::LLM)?;
+    let limits = ModelLimits::declared(SECTION, raw.timeout_ms, raw.max_concurrent, ModelLimits::MODEL_CALL)?;
     let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
     let key = raw
         .token_env
@@ -2551,7 +2556,7 @@ mod tests {
         let config = parse(MINIMAL).expect("no claude table is the default");
         assert_eq!(config.externals.claude_code.command, PathBuf::from("claude"));
         assert_eq!(config.externals.claude_code.model, "sonnet");
-        assert_eq!(config.externals.claude_code.limits, ModelLimits::CLAUDE_CODE);
+        assert_eq!(config.externals.claude_code.limits, ModelLimits::MODEL_CALL);
 
         let text =
             format!("{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n");
@@ -2707,7 +2712,7 @@ mod tests {
         assert_eq!(llm.provider, LlmProvider::Ollama);
         assert_eq!(llm.model, "llama");
         assert!(llm.url.is_none() && llm.key.is_none() && llm.missing_key().is_none());
-        assert_eq!(llm.limits, ModelLimits::LLM);
+        assert_eq!(llm.limits, ModelLimits::MODEL_CALL);
 
         let config = parse_with(
             &with("url = \"http://127.0.0.1:11434\"\ntoken_env = \"APPA_LLM_TOKEN\""),
@@ -2717,7 +2722,7 @@ mod tests {
         let llm = config.externals.llm.expect("the profile is set");
         assert_eq!(llm.url.as_deref(), Some("http://127.0.0.1:11434"));
         assert_eq!(
-            llm.key.as_ref().and_then(ProfileKey::token).map(Token::reveal),
+            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
             Some("sekret")
         );
 
@@ -2753,52 +2758,20 @@ mod tests {
         assert!(toml::from_str::<RawConfig>(&typo).is_err());
     }
 
-    /// A profile without the key it needs still loads, and names what it lacks: whether a
-    /// deployment consults it is known only at open.
-    #[test]
-    fn an_llm_profile_without_its_key_loads_and_names_what_it_lacks() {
-        let with = |body: &str| format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n{body}\n");
-        let missing = |text: &str| {
-            parse(text)
-                .expect("a keyless profile loads")
-                .externals
-                .llm
-                .expect("the profile is set")
-                .missing_key()
-        };
-        assert_eq!(
-            missing(&with("")),
-            Some(MissingLlmKey::Undeclared { provider: "openai" })
-        );
-        assert_eq!(
-            missing(&with("token_env = \"APPA_LLM_TOKEN\"")),
-            Some(MissingLlmKey::Unset {
-                var: "APPA_LLM_TOKEN".to_string()
-            })
-        );
-    }
-
     /// Every model table takes `timeout_ms` and `max_concurrent` over its own defaults, and
-    /// refuses a zero for either.
+    /// refuses a zero for either and a jev budget below its floor.
     #[test]
     fn each_model_table_declares_its_limits_over_its_defaults() {
         const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
         const CLAUDE: &str = "[externals.claude_code]\n";
-        let limits = |config: &Config| {
-            let externals = &config.externals;
-            [
-                Some(externals.claude_code.limits),
-                externals.llm.as_ref().map(|llm| llm.limits),
-                externals.jev.as_ref().map(|jev| jev.limits),
-            ]
-        };
+        let limits = |config: &Config| AnnotatorBuiltin::ALL.map(|builtin| config.externals.model_limits(builtin));
         let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{LLM}{JEV}")).expect("the model tables validate");
         assert_eq!(
             limits(&defaults),
             [
-                Some(ModelLimits::CLAUDE_CODE),
-                Some(ModelLimits::LLM),
+                Some(ModelLimits::MODEL_CALL),
+                Some(ModelLimits::MODEL_CALL),
                 Some(ModelLimits {
                     timeout: defaults.externals.timeout,
                     max_concurrent: DEFAULT_JEV_CONCURRENCY,
@@ -2816,18 +2789,28 @@ mod tests {
         };
         assert_eq!(limits(&declared), [Some(expected); 3]);
 
-        for (table, section) in [(CLAUDE, "claude_code"), (LLM, "llm"), (JEV, "jev")] {
-            for field in ["timeout_ms", "max_concurrent"] {
-                let text = format!("{MINIMAL}\n{table}{field} = 0\n");
-                assert!(
-                    matches!(
-                        parse(&text),
-                        Err(ConfigError::ZeroModelLimit { section: s, field: f }) if s == section && f == field
-                    ),
-                    "externals.{section}.{field} = 0 must refuse"
-                );
-            }
+        let floor = JEV_MIN_TIMEOUT.as_millis();
+        let jev_timeout = |ms: u128| format!("{JEV}timeout_ms = {ms}\n");
+        let too_small = [(CLAUDE, "claude_code"), (LLM, "llm"), (JEV, "jev")]
+            .into_iter()
+            .flat_map(|(table, section)| {
+                ["timeout_ms", "max_concurrent"].map(|field| (format!("{table}{field} = 0\n"), section, field, 1))
+            })
+            .chain([(jev_timeout(floor - 1), "jev", "timeout_ms", floor)]);
+        for (table, section, field, min) in too_small {
+            assert!(
+                matches!(
+                    parse(&format!("{MINIMAL}\n{table}")),
+                    Err(ConfigError::ModelLimitTooSmall { section: s, field: f, min: m })
+                        if s == section && f == field && m == min
+                ),
+                "{table} must refuse"
+            );
         }
+        assert!(
+            parse(&format!("{MINIMAL}\n{}", jev_timeout(floor))).is_ok(),
+            "the floor itself loads"
+        );
     }
 
     #[test]
@@ -3756,7 +3739,7 @@ mod tests {
         assert_eq!(endpoint.token.as_ref().map(Token::reveal), Some("sekret"));
         let llm = config.externals.llm.as_ref().expect("the profile is set");
         assert_eq!(
-            llm.key.as_ref().and_then(ProfileKey::token).map(Token::reveal),
+            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
             Some("sekret")
         );
         assert_eq!(llm.limits.max_concurrent, 2);

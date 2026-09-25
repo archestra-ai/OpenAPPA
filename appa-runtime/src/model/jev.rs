@@ -31,7 +31,7 @@ use tokio::time::Instant;
 use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, Token};
 use crate::consult::{Consult, ConsultBody};
-use crate::external::{ConsultGates, ModelGates, NoAnswerReason, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use appa_policy::AnnotatorBuiltin;
 use questions::Questions;
@@ -82,8 +82,7 @@ pub(crate) struct JevBackend {
     budget: Duration,
     max_body_bytes: usize,
     timing: JevTiming,
-    gates: Arc<ModelGates>,
-    clients: Arc<JevClients>,
+    gates: ConsultGates,
 }
 
 /// What one consult left for a consult record: the winning or last attempt's status and
@@ -105,18 +104,12 @@ impl JevBackend {
     ) -> Option<JevBackend> {
         Some(JevBackend {
             url: profile.url.clone(),
-            key: profile.key.token()?.clone(),
+            key: profile.key.token().ok()?.clone(),
             budget: profile.limits.timeout.saturating_sub(timing.budget_margin),
             max_body_bytes,
             timing,
-            gates: gates.models(),
-            clients: gates.jev_clients(),
+            gates: gates.clone(),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        self.gates.current(AnnotatorBuiltin::Jev).available_permits()
     }
 
     /// One annotation consult: the answer, and what a consult record keeps of it.
@@ -183,7 +176,7 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let gate = self.gates.current(AnnotatorBuiltin::Jev);
+        let gate = self.gates.model(AnnotatorBuiltin::Jev);
         let permit = acquire_within(&gate, deadline, "jev", &consult.name)
             .await
             .map_err(|reason| (JevFailure::NoAnswer, reason))?;
@@ -203,7 +196,7 @@ impl JevBackend {
         deadline: Instant,
         exchange: &mut Exchange,
     ) -> Result<Labels, (JevFailure, NoAnswerReason)> {
-        let pool = &self.clients;
+        let pool = &self.gates.jev;
         let mut launched: Vec<(Arc<ClientSlot>, Instant, Duration)> = Vec::new();
         let mut in_flight = FuturesUnordered::new();
         macro_rules! launch {
@@ -799,7 +792,7 @@ mod tests {
             },
         };
         let gates = crate::external::ConsultGates::per_runtime();
-        gates.models().resize(AnnotatorBuiltin::Jev, max_concurrent);
+        gates.resize(AnnotatorBuiltin::Jev, max_concurrent);
         JevBackend::new(&profile, 65_536, &gates, timing).expect("the key is set")
     }
 

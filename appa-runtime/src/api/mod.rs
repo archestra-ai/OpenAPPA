@@ -428,19 +428,16 @@ pub enum OpenError {
     #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured(String),
     #[error(
-        "{kind} {name} names the builtin \"llm\", but [externals.llm] cannot serve it: {missing}; set the key and reload"
+        "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
     )]
-    LlmKeyMissing {
+    ModelKeyMissing {
         kind: &'static str,
         name: String,
-        missing: crate::config::MissingLlmKey,
+        builtin: &'static str,
+        missing: crate::config::MissingKey,
     },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
-    #[error(
-        "annotator {annotator} names the builtin \"jev\", but {var}, the [externals.jev] token_env, is not set; set it to a TypeSafe API key and reload"
-    )]
-    JevKeyUnset { annotator: String, var: String },
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
@@ -1053,8 +1050,8 @@ impl Runtime {
     ///
     /// The `command` gate, each model builtin's gate and the `jev` connection pool are the
     /// runtime's, shared by every deployment it serves or pins. The serving deployment's
-    /// `max_concurrent` sizes each model gate; a pinned one's does not. The jev pool is keyed by endpoint and each request carries its own
-    /// deployment's key.
+    /// `max_concurrent` sizes each model gate; a pinned one's does not. The jev pool is keyed
+    /// by endpoint and each request carries its own deployment's key.
     ///
     /// # Panics
     ///
@@ -3056,49 +3053,44 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             {
                 return Err(OpenError::JevTrustRanks(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::Jev => {
-                if let Some(crate::config::JevProfile {
-                    key: crate::config::ProfileKey::Unset { var },
-                    ..
-                }) = &externals.jev
-                {
-                    return Err(OpenError::JevKeyUnset {
-                        annotator: name.to_string(),
-                        var: var.clone(),
-                    });
-                }
-            }
-            appa_policy::AnnotatorBuiltin::Llm | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
+            appa_policy::AnnotatorBuiltin::Jev
+            | appa_policy::AnnotatorBuiltin::Llm
+            | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     // A model profile loads without its key, so a battery installs before the key is
     // exported; a deployment that consults the profile needs the key to open.
-    if let Some(missing) = externals.llm.as_ref().and_then(crate::config::LlmProfile::missing_key) {
-        use crate::config::{Implementation, LLM_BUILTIN};
-        let is_llm = |implementation: &Implementation| match implementation {
-            Implementation::Builtin(builtin) => builtin == LLM_BUILTIN,
-            Implementation::Resolver(_) | Implementation::Command(_) => false,
-        };
+    use crate::config::Implementation;
+    use appa_policy::AnnotatorBuiltin;
+    for (builtin, missing) in [
+        (
+            AnnotatorBuiltin::Llm,
+            externals.llm.as_ref().and_then(crate::config::LlmProfile::missing_key),
+        ),
+        (
+            AnnotatorBuiltin::Jev,
+            externals.jev.as_ref().and_then(|jev| jev.key.token().err()),
+        ),
+    ] {
+        let Some(missing) = missing else { continue };
         let annotators = policy
             .annotators()
-            .filter(|(_, binding)| binding.builtin == Some(appa_policy::AnnotatorBuiltin::Llm))
+            .filter(|(_, binding)| binding.builtin == Some(builtin))
             .map(|(name, _)| ("annotator", name.as_str()));
         let bindings = [
             ("authority", &externals.authorities),
             ("sanitizer", &externals.sanitizers),
         ]
         .into_iter()
-        .flat_map(|(kind, table)| {
-            table
-                .iter()
-                .filter(|(_, implementation)| is_llm(implementation))
-                .map(move |(name, _)| (kind, name.as_str()))
-        });
+        .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
+        .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
+        .map(|(kind, name, _)| (kind, name));
         if let Some((kind, name)) = annotators.chain(bindings).next() {
-            return Err(OpenError::LlmKeyMissing {
+            return Err(OpenError::ModelKeyMissing {
                 kind,
                 name: name.to_string(),
+                builtin: builtin.wire_name(),
                 missing,
             });
         }
@@ -3374,13 +3366,18 @@ mod deployment_tests {
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(document: &str) -> Config {
+        hosted_with_keys(document, &[])
+    }
+
+    /// A hosted document whose host sets each of `keys`.
+    fn hosted_with_keys(document: &str, keys: &[&str]) -> Config {
         Config::hosted(
             document,
             HostDefaults {
                 consult_timeout: Duration::from_secs(30),
                 max_body_bytes: 65_536,
             },
-            |_| None,
+            |var| keys.contains(&var).then(|| "sekret".to_string()),
         )
         .expect("the hosted document validates")
     }
@@ -3629,17 +3626,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
     }
 
-    /// A hosted document whose host answers the model profiles' keys.
     fn keyed_config(document: &str) -> Config {
-        Config::hosted(
-            document,
-            HostDefaults {
-                consult_timeout: Duration::from_secs(30),
-                max_body_bytes: 65_536,
-            },
-            |var| matches!(var, "APPA_PROVIDER_JEV_API_KEY" | "APPA_LLM_TOKEN").then(|| "sekret".to_string()),
-        )
-        .expect("the hosted document validates")
+        hosted_with_keys(document, &["APPA_PROVIDER_JEV_API_KEY", "APPA_LLM_TOKEN"])
     }
 
     /// A declared `jev` Annotator opens only over a deployment that declares its profile,
@@ -3673,55 +3661,63 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     /// consults it; one that consults it refuses to open, naming the consumer and the key.
     #[test]
     fn a_model_builtin_in_use_needs_its_key_at_open() {
-        const TOOL: &str = "[[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\n";
-        let jev = |policy: &str| {
-            claude_config(&format!(
-                "[policy]\nversion = 2\n{policy}{TOOL}\n[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n"
-            ))
-        };
-        assert!(load(jev("")).is_ok(), "an unused profile without its key opens");
-        assert!(matches!(
-            load(jev(
-                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"jev\"\nranks = [\"suspicious\", \"trusted\"]\n"
-            )),
-            Err(OpenError::JevKeyUnset { annotator, var })
-                if annotator == "classifier" && var == "APPA_PROVIDER_JEV_API_KEY"
-        ));
-
+        use crate::config::MissingKey;
+        const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n";
-        let llm = |policy: &str, externals: &str| {
-            claude_config(&format!("[policy]\nversion = 2\n{TOOL}{policy}\n{LLM}{externals}"))
+        const LLM_KEYED: &str =
+            "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n";
+        let annotator = |builtin: &str| {
+            format!(
+                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{builtin}\"\nranks = [\"suspicious\", \"trusted\"]\n"
+            )
         };
-        assert!(load(llm("", "")).is_ok(), "an unused profile without its key opens");
-        let annotator = "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"llm\"\n";
-        assert!(matches!(
-            load(llm(annotator, "")),
-            Err(OpenError::LlmKeyMissing {
-                kind: "annotator",
-                name,
-                missing: crate::config::MissingLlmKey::Undeclared { provider: "openai" },
-            }) if name == "classifier"
-        ));
-        let authority =
-            "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n";
-        assert!(matches!(
-            load(llm(
-                authority,
-                "token_env = \"APPA_LLM_TOKEN\"\n[externals.authorities.judge]\nbuiltin = \"llm\"\n"
-            )),
-            Err(OpenError::LlmKeyMissing {
-                kind: "authority",
-                name,
-                missing: crate::config::MissingLlmKey::Unset { var },
-            }) if name == "judge" && var == "APPA_LLM_TOKEN"
-        ));
-        assert!(
-            load(keyed_config(&format!(
-                "[policy]\nversion = 2\n{TOOL}{annotator}\n{LLM}token_env = \"APPA_LLM_TOKEN\"\n"
-            )))
-            .is_ok(),
-            "a used profile with its key opens"
-        );
+        let authority = "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
+                         [externals.authorities.judge]\nbuiltin = \"llm\"\n";
+        let unset = |var: &str| MissingKey::Unset { var: var.to_string() };
+        for (policy, externals, keys, refused) in [
+            (String::new(), JEV, &[][..], None),
+            (String::new(), LLM, &[], None),
+            (annotator("llm"), LLM_KEYED, &["APPA_LLM_TOKEN"], None),
+            (
+                annotator("jev"),
+                JEV,
+                &[],
+                Some(("annotator", "classifier", "jev", unset("APPA_PROVIDER_JEV_API_KEY"))),
+            ),
+            (
+                annotator("llm"),
+                LLM,
+                &[],
+                Some((
+                    "annotator",
+                    "classifier",
+                    "llm",
+                    MissingKey::Undeclared { provider: "openai" },
+                )),
+            ),
+            (
+                authority.to_string(),
+                LLM_KEYED,
+                &[],
+                Some(("authority", "judge", "llm", unset("APPA_LLM_TOKEN"))),
+            ),
+        ] {
+            let document = format!(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\n{policy}\n{externals}"
+            );
+            let opened = match load(hosted_with_keys(&document, keys)) {
+                Ok(_) => None,
+                Err(OpenError::ModelKeyMissing {
+                    kind,
+                    name,
+                    builtin,
+                    missing,
+                }) => Some((kind, name, builtin, missing)),
+                Err(other) => panic!("{document}: {other}"),
+            };
+            let refused = refused.map(|(kind, name, builtin, missing)| (kind, name.to_string(), builtin, missing));
+            assert_eq!(opened, refused, "{document}");
+        }
     }
 
     /// A runtime bounds each model builtin's consults by one gate, sized by the serving
@@ -3774,18 +3770,17 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 .inner
                 .shared
                 .gates
-                .models()
-                .current(builtin)
+                .model(builtin)
                 .try_acquire_many_owned(2)
                 .expect("the gate is free");
             for deployment in [&*runtime.inner.deployment(), first.deployment(), second.deployment()] {
-                assert_eq!(permits(deployment), Some(0), "{builtin:?}");
+                assert_eq!(permits(deployment), 0, "{builtin:?}");
             }
             drop(held);
 
             let pinned = runtime.pinned(&runtime.prepare_deployment(with_pool(5)).expect("loads"));
             assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{builtin:?}");
-            assert_eq!(permits(&pinned.inner.deployment()), Some(2), "{builtin:?}");
+            assert_eq!(permits(&pinned.inner.deployment()), 2, "{builtin:?}");
 
             runtime.reload(with_pool(3)).expect("reloads");
             for deployment in [
@@ -3793,7 +3788,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 first.deployment(),
                 &*pinned.inner.deployment(),
             ] {
-                assert_eq!(permits(deployment), Some(3), "{builtin:?}");
+                assert_eq!(permits(deployment), 3, "{builtin:?}");
             }
         }
     }
