@@ -9,10 +9,12 @@ REQUIRED = {"appa-package.toml", "appa.toml"}
 def unreachable_rules(policy: Path) -> list[str]:
     """Rules for one tool are tried in order and the first match wins, so a
     rule without an argument selector hides every later rule for its tool."""
+    if not policy.is_file():
+        return []
     try:
         rules = tomllib.loads(policy.read_text(encoding="utf-8")).get("policy", {}).get("tool", [])
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
-        return []
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        return [f"{policy}: cannot read policy: {error}"]
     errors = []
     unconditional = set()
     for rule in rules:
