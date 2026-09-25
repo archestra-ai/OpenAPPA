@@ -24,7 +24,7 @@ action with a required `context_type` enum. No other discrepancy.
 ## How the server exposes its tools
 
 Every tool takes one required argument, `request`, an object whose
-`oneOf` variants each carry the operation as a `const` `action`. Nine
+`oneOf` variants each carry the operation as a `const` `action`. Eleven
 `browse_*` tools carry `readOnlyHint: true`; seven `manage_*` tools
 carry `readOnlyHint: false` and `destructiveHint: true`.
 
@@ -48,10 +48,6 @@ carry `readOnlyHint: false` and `destructiveHint: true`.
 | `manage_event_orchestrations` | `update_router`, `append_router_rule` |
 | `manage_alert_grouping` | `create`, `update`, `delete` |
 | `manage_status_pages` | `create_post`, `create_post_update` |
-
-The capture lists 11 `browse_*` tools, not nine: `browse_escalation_policies`,
-`browse_users`, `browse_change_events`, and `browse_activity` carry the
-same read-only annotations as the other seven.
 
 ## Rules
 

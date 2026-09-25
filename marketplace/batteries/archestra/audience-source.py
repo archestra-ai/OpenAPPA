@@ -13,7 +13,7 @@ Every member is reported as the email address Archestra holds for the
 account — the address the identity provider signs the user in with — so
 an Archestra reader compares with the readers any other email-keyed
 source reports. A collection larger than MAX_MEMBERS is refused rather
-than transferred whole.
+than answered in part.
 
 The API base comes from ARCHESTRA_BASE_URL, and credentials from
 APPA_PROVIDER_ARCHESTRA_TOKEN: an Archestra API key allowed to read the

@@ -3,7 +3,7 @@
 #
 # The server lists 18 tools. Each takes one required argument, `request`,
 # an object whose `oneOf` variants carry the operation as a `const`
-# `action`. Nine `browse_*` tools read; seven `manage_*` tools write. The
+# `action`. Eleven `browse_*` tools read; seven `manage_*` tools write. The
 # server marks every `manage_*` tool `readOnlyHint: false,
 # destructiveHint: true`.
 #
