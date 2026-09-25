@@ -149,17 +149,11 @@ impl StoredOperationInput {
         }
     }
 
-    /// Decodes stored input, maintaining backwards compatibility with raw JSON inputs.
     pub(crate) fn decode(value: Value) -> Result<Self, String> {
-        match serde_json::from_value::<Self>(value.clone()) {
+        match serde_json::from_value::<Self>(value) {
             Ok(stored) if stored.version == 1 => Ok(stored),
-            Ok(_) => Err("operation receipt has an unsupported version".into()),
-            Err(_) => Ok(Self {
-                version: 0,
-                binding: ReceiptBinding::Session,
-                semantic: value,
-                context: None,
-            }),
+            Ok(stored) => Err(format!("operation receipt has unsupported version {}", stored.version)),
+            Err(error) => Err(format!("operation receipt input is not a v1 envelope: {error}")),
         }
     }
 }
@@ -733,33 +727,38 @@ mod tests {
         }
     }
 
-    /// A stored input that is not the v1 envelope reads as the raw semantic input of a
-    /// session-bound receipt; an envelope at another version refuses.
+    /// Only the v1 envelope decodes: raw semantic input, a misspelled envelope, or another
+    /// version is a storage failure.
     #[test]
-    fn operation_input_outside_the_v1_envelope_decodes_as_legacy_or_refuses() {
-        for (store, _dir) in stores() {
-            execute(
-                &store,
-                r#"INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
-                   VALUES ('org', 'caller', 'session', 'op-1', 'root', '{"offer_id":"0123456789abcdef"}', 'pending')"#,
-            );
-            assert!(matches!(
-                store.claim_operation(operation(scope(ReceiptBinding::Session, "caller"))),
-                Err(ReceiptError::Pending)
-            ));
-            assert!(matches!(
-                store.claim_operation(operation(scope(ReceiptBinding::Caller, "caller"))),
-                Err(ReceiptError::ScopeMismatch)
-            ));
-
-            execute(
-                &store,
-                r#"UPDATE operations SET input='{"version":2,"binding":"session","semantic":{"offer_id":"0123456789abcdef"}}'"#,
-            );
-            assert!(matches!(
-                store.claim_operation(operation(scope(ReceiptBinding::Session, "caller"))),
-                Err(ReceiptError::Storage(_))
-            ));
+    fn operation_input_outside_the_v1_envelope_is_a_storage_failure() {
+        for input in [
+            r#"{"offer_id":"0123456789abcdef"}"#,
+            r#"{"version":1,"bindng":"session","semantic":{"offer_id":"0123456789abcdef"}}"#,
+            r#"{"version":1,"binding":"session","semantic":{"offer_id":"0123456789abcdef"},"extra":1}"#,
+            r#"{"version":2,"binding":"session","semantic":{"offer_id":"0123456789abcdef"}}"#,
+        ] {
+            for (store, _dir) in stores() {
+                store
+                    .lock()
+                    .execute(
+                        "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
+                         VALUES ('org', 'caller', 'session', 'op-1', 'root', ?1, 'pending')",
+                        [input],
+                    )
+                    .expect("the fixture row inserts");
+                let request = operation(scope(ReceiptBinding::Session, "caller"));
+                assert!(
+                    matches!(store.claim_operation(request.clone()), Err(ReceiptError::Storage(_))),
+                    "{input}"
+                );
+                assert!(
+                    matches!(
+                        store.complete_operation(request.key, serde_json::json!({"decision": "allow_call"})),
+                        Err(ReceiptError::Storage(_))
+                    ),
+                    "{input}"
+                );
+            }
         }
     }
 
