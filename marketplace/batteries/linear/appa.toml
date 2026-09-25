@@ -131,13 +131,13 @@ delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_comments"
-delta = { audience = ["internal"] }
+name = "mcp/linear/list_comments(issueId:*)"
+delta = { audience = ["@linear:issue/$issueId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_comments(issueId:*)"
-delta = { audience = ["@linear:issue/$issueId/readers"] }
+name = "mcp/linear/list_comments"
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -151,13 +151,13 @@ delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_documents"
-delta = { audience = ["internal"] }
+name = "mcp/linear/list_documents(teamId:*)"
+delta = { audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_documents(teamId:*)"
-delta = { audience = ["@linear:team/$teamId/readers"] }
+name = "mcp/linear/list_documents"
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -171,13 +171,13 @@ delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_issues"
-delta = { audience = ["internal"] }
+name = "mcp/linear/list_issues(team:*)"
+delta = { audience = ["@linear:team/$team/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/linear/list_issues(team:*)"
-delta = { audience = ["@linear:team/$team/readers"] }
+name = "mcp/linear/list_issues"
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]

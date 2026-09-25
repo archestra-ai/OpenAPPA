@@ -6,6 +6,29 @@ BATTERIES = Path(__file__).resolve().parents[1] / "marketplace" / "batteries"
 REQUIRED = {"appa-package.toml", "appa.toml"}
 
 
+def unreachable_rules(policy: Path) -> list[str]:
+    """Rules for one tool are tried in order and the first match wins, so a
+    rule without an argument selector hides every later rule for its tool."""
+    if not policy.is_file():
+        return []
+    try:
+        rules = tomllib.loads(policy.read_text(encoding="utf-8")).get("policy", {}).get("tool", [])
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        return [f"{policy}: cannot read policy: {error}"]
+    errors = []
+    unconditional = set()
+    for rule in rules:
+        name = rule.get("name") if isinstance(rule, dict) else None
+        if not isinstance(name, str):
+            continue
+        tool, selector, _ = name.partition("(")
+        if tool in unconditional:
+            errors.append(f"{policy}: rule {name!r} is unreachable: an earlier rule for {tool} matches every call")
+        if not selector:
+            unconditional.add(tool)
+    return errors
+
+
 def lint(root: Path) -> list[str]:
     if not root.is_dir():
         return [f"{root}: battery directory is missing"]
@@ -29,6 +52,7 @@ def lint(root: Path) -> list[str]:
                 battery_config = package.get("battery")
                 if not isinstance(battery_config, dict) or battery_config.get("policy") != "appa.toml":
                     errors.append(f"{manifest}: battery.policy must name appa.toml")
+        errors.extend(unreachable_rules(battery / "appa.toml"))
 
     allowed = {battery / name for battery in batteries for name in REQUIRED}
     for path in sorted(root.rglob("*")):

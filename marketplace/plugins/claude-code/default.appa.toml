@@ -355,6 +355,12 @@ name = "host/claude-code/Bash(command:*git push*)"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-repository-requirements"
 
+# Options between `git` and `push`, such as `git -C sub push`.
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*git -* push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*gh pr *)"
 description = "Runs one shell command and returns its output."
