@@ -152,10 +152,12 @@ def gh_targets(words, environment, directory):
             raise Unfollowable("gh --hostname reaches a host other than github.com")
         if ("$" in word or "`" in word) and (words[0] == "repo" or "/" in word):
             raise Unfollowable(f"{word} is computed when the command runs")
+        # After another flag, `--repo` may be that flag's value, so the checkout counts too.
+        named_by = mentioned if index and words[index - 1].startswith("-") else chosen
         if word in ("--repo", "-R") and index + 1 < len(words):
-            chosen.append(words[index + 1])
+            named_by.append(words[index + 1])
         elif word.startswith(("--repo=", "-R")) and word not in ("--repo", "-R"):
-            chosen.append(word.removeprefix("--repo=").removeprefix("-R").removeprefix("="))
+            named_by.append(word.removeprefix("--repo=").removeprefix("-R").removeprefix("="))
         elif match := API_PATH.match(word):
             mentioned.append(f"{match.group(1)}/{match.group(2)}")
         elif GITHUB_URL.match(word) or words[0] == "repo" and SLUG.match(word):

@@ -49,6 +49,12 @@ class RepositoryTargets(unittest.TestCase):
         ):
             self.assertEqual(INPUT.repository_targets(command, None), slugs("acme/api"), command)
 
+    def test_a_repo_flag_after_another_flag_keeps_the_checkout(self):
+        self.assertEqual(
+            INPUT.repository_targets("gh pr create --title --repo acme/api", "/w"),
+            [("slug", "acme/api", "/w"), ("default", None, "/w")],
+        )
+
     def test_an_api_path_or_url_counts_beside_the_checkout(self):
         for command in (
             "gh api repos/acme/api/issues -f title=x",
