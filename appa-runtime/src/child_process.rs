@@ -18,7 +18,7 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 
 /// [`tokio::process::Command::spawn`], alone. Tokio spawns through std's
 /// [`Command::spawn`], synchronously inside this call, so the same lock covers it.
-pub fn spawn_async(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
+pub(crate) fn spawn_async(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     alone(|| command.spawn())
 }
 
@@ -34,7 +34,7 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 }
 
 /// [`Command::status`], alone: stdio inherited unless `command` sets it.
-pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
+pub(crate) fn status(command: &mut Command) -> io::Result<ExitStatus> {
     spawn(command)?.wait()
 }
 
