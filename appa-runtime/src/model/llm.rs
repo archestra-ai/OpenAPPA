@@ -5,7 +5,6 @@
 //! the two transports sees the same question. Every failure the provider returns is no
 //! answer; nothing about the trajectory reaches the model.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use rig_agent::AgentBuilder;
@@ -16,15 +15,18 @@ use rig_core::completion::{CompletionError, CompletionModel};
 
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
-use crate::config::{LlmProfile, LlmProvider};
+use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
+use crate::config::{LlmProfile, LlmProvider, Token};
 use crate::consult::ModelPrompt;
-use crate::external::NoAnswerReason;
+use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
+use appa_policy::AnnotatorBuiltin;
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
 /// body) plus the schema's own overhead, and never less than a short ruling needs.
 const MIN_ANSWER_TOKENS: u64 = 4096;
 const MAX_ANSWER_TOKENS: u64 = 32_768;
 const ANSWER_OVERHEAD_TOKENS: u64 = 1024;
+const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// The output tokens one consult may spend: sized from the input, and never more than
 /// the deployment accepts as an answer body — a token is at least one byte, so an answer
@@ -36,26 +38,14 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
-/// `builtin = "llm"` entry of the deployment. Its permit pool is the deployment's own,
-/// bounded by the profile's `max_concurrent`, so two deployments never share or resize one.
+/// `builtin = "llm"` entry of the deployment. Its permit pool is the runtime's `llm` gate.
 #[derive(Clone)]
 pub struct LlmBackend {
     client: LlmClient,
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
-    gate: Arc<tokio::sync::Semaphore>,
-}
-
-impl std::fmt::Debug for LlmBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LlmBackend")
-            .field("provider", &self.client.provider())
-            .field("model", &self.model)
-            .field("timeout", &self.timeout)
-            .field("max_body_bytes", &self.max_body_bytes)
-            .finish()
-    }
+    gates: ConsultGates,
 }
 
 /// The providers the builtin speaks to, closed: each is compiled in and dispatched by
@@ -69,17 +59,6 @@ enum LlmClient {
     Ollama(ollama::Client),
 }
 
-impl LlmClient {
-    fn provider(&self) -> LlmProvider {
-        match self {
-            LlmClient::Anthropic(_) => LlmProvider::Anthropic,
-            LlmClient::OpenAi(_) => LlmProvider::OpenAi,
-            LlmClient::Gemini(_) => LlmProvider::Gemini,
-            LlmClient::Ollama(_) => LlmProvider::Ollama,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("the [externals.llm] {provider} client cannot be built: {detail}")]
 pub struct LlmClientError {
@@ -88,88 +67,116 @@ pub struct LlmClientError {
 }
 
 impl LlmBackend {
-    /// Build the provider client once. `shared_timeout` is the deployment's machine-consult
-    /// budget, used when the profile declares none of its own; `max_body_bytes` is the
-    /// deployment's cap on any answer, model answers included.
+    /// Build the provider client once. `max_body_bytes` is the deployment's cap on any
+    /// answer, model answers included.
     pub(crate) fn new(
         profile: &LlmProfile,
-        shared_timeout: Duration,
         max_body_bytes: usize,
+        gates: &ConsultGates,
     ) -> Result<LlmBackend, LlmClientError> {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
-        let token = profile.token.as_ref().map(|token| token.reveal()).unwrap_or("");
+        let token = match &profile.key {
+            Some(key) => key.token().map(Token::reveal).unwrap_or_default(),
+            None => "",
+        };
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
             detail: error.to_string(),
         };
+        macro_rules! client {
+            ($provider:ident) => {{
+                let mut builder = $provider::Client::builder().api_key(token);
+                if let Some(url) = &profile.url {
+                    builder = builder.base_url(url);
+                }
+                builder.build().map_err(failed)?
+            }};
+        }
         let client = match profile.provider {
-            LlmProvider::Anthropic => {
-                let mut builder = anthropic::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Anthropic(builder.build().map_err(failed)?)
-            }
-            LlmProvider::OpenAi => {
-                let mut builder = openai::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::OpenAi(builder.build().map_err(failed)?.completions_api())
-            }
-            LlmProvider::Gemini => {
-                let mut builder = gemini::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Gemini(builder.build().map_err(failed)?)
-            }
-            LlmProvider::Ollama => {
-                let mut builder = ollama::Client::builder().api_key(token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                LlmClient::Ollama(builder.build().map_err(failed)?)
-            }
+            LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic)),
+            LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai).completions_api()),
+            LlmProvider::Gemini => LlmClient::Gemini(client!(gemini)),
+            LlmProvider::Ollama => LlmClient::Ollama(client!(ollama)),
         };
         Ok(LlmBackend {
             client,
             model: profile.model.clone(),
-            timeout: profile.timeout.unwrap_or(shared_timeout),
+            timeout: profile.limits.timeout,
             max_body_bytes,
-            gate: Arc::new(tokio::sync::Semaphore::new(profile.max_concurrent)),
+            gates: gates.clone(),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        self.gate.available_permits()
+    /// One consult. The deadline covers every permit wait and every attempt: queueing behind
+    /// the gate spends the same budget the consult itself would. A transport failure, a
+    /// 429 or a 5xx is retried after [`RETRY_BACKOFF`] while the budget leaves room for
+    /// another attempt; each attempt holds a permit, the backoff none.
+    pub(crate) async fn consult(
+        &self,
+        prompt: &ModelPrompt,
+        name: &str,
+        mut seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let gate = self.gates.model(AnnotatorBuiltin::Llm);
+        let mut attempts = 1;
+        loop {
+            let permit = acquire_within(&gate, deadline, "llm", name).await?;
+            let answered = self.attempt(prompt, deadline, seen.as_deref_mut()).await;
+            drop(permit);
+            let retryable = matches!(
+                answered,
+                Err(NoAnswerReason::Transport
+                    | NoAnswerReason::NonSuccess {
+                        status: 429 | 500..,
+                        ..
+                    })
+            );
+            if !retryable
+                || attempts == MAX_ATTEMPTS
+                || tokio::time::Instant::now() + RETRY_BACKOFF + MIN_ATTEMPT > deadline
+            {
+                return answered;
+            }
+            attempts += 1;
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
     }
 
-    /// One consult. The deadline covers the permit wait and the request: queueing behind
-    /// the pool spends the same budget the consult itself would.
-    pub async fn consult(&self, prompt: &ModelPrompt) -> Result<serde_json::Value, NoAnswerReason> {
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gate.acquire()).await {
-            Ok(permit) => permit.expect("the llm consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!("the llm consult gate stayed saturated for the whole budget");
-                return Err(NoAnswerReason::Timeout);
-            }
-        };
-        let answered = tokio::time::timeout_at(deadline, self.prompt(prompt)).await;
-        drop(permit);
-        match answered {
+    /// One request; `seen` keeps the model's answer text, capped, or the provider's status.
+    async fn attempt(
+        &self,
+        prompt: &ModelPrompt,
+        deadline: tokio::time::Instant,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let mut raw_response = None;
+        let answered = match tokio::time::timeout_at(deadline, self.prompt(prompt)).await {
             Err(_) => Err(NoAnswerReason::Timeout),
             Ok(Err(error)) => {
                 tracing::debug!(%error, "the llm consult failed");
                 Err(no_answer(error))
             }
-            Ok(Ok(text)) if text.len() > self.max_body_bytes => Err(NoAnswerReason::Oversized),
-            Ok(Ok(text)) => serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed),
+            Ok(Ok(text)) if text.len() > self.max_body_bytes => {
+                raw_response = Some(text.as_bytes()[..self.max_body_bytes].to_vec());
+                Err(NoAnswerReason::Oversized)
+            }
+            Ok(Ok(text)) => {
+                let answered = serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed);
+                raw_response = Some(text.into_bytes());
+                answered
+            }
+        };
+        if let Some(seen) = seen {
+            seen.raw_response = raw_response;
+            seen.http_status = match answered {
+                Err(NoAnswerReason::NonSuccess { status, .. }) => Some(status),
+                _ => None,
+            };
         }
+        answered
     }
 
     async fn prompt(&self, prompt: &ModelPrompt) -> Result<String, PromptError> {
@@ -232,7 +239,7 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    use crate::config::Token;
+    use crate::config::ProfileKey;
 
     #[derive(Clone)]
     enum StubAnswer {
@@ -244,6 +251,8 @@ mod tests {
     #[derive(Clone)]
     struct Stub {
         answer: Arc<Mutex<StubAnswer>>,
+        /// Answered first, one per request, before `answer`.
+        script: Arc<Mutex<std::collections::VecDeque<StubAnswer>>>,
         requests: Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>,
         in_flight: Arc<AtomicUsize>,
         max_in_flight: Arc<AtomicUsize>,
@@ -284,6 +293,7 @@ mod tests {
     async fn serve(path: &'static str, reply: fn(&str) -> String, delay: Duration) -> (SocketAddr, Stub) {
         let stub = Stub {
             answer: Arc::new(Mutex::new(StubAnswer::Text(String::new()))),
+            script: Arc::default(),
             requests: Arc::new(Mutex::new(Vec::new())),
             in_flight: Arc::new(AtomicUsize::new(0)),
             max_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -299,7 +309,8 @@ mod tests {
                         let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
                         stub.requests.lock().unwrap().push((headers, request));
                         tokio::time::sleep(stub.delay).await;
-                        let answer = stub.answer.lock().unwrap().clone();
+                        let scripted = stub.script.lock().unwrap().pop_front();
+                        let answer = scripted.unwrap_or_else(|| stub.answer.lock().unwrap().clone());
                         let response = match answer {
                             StubAnswer::Text(text) => (axum::http::StatusCode::OK, reply(&text)),
                             StubAnswer::Status(status) => (
@@ -317,14 +328,7 @@ mod tests {
                 ),
             )
             .with_state(stub.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral loopback port binds");
-        let addr = listener.local_addr().expect("the bound address is readable");
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("the stub serves");
-        });
-        (addr, stub)
+        (crate::test_support::serve(router).await, stub)
     }
 
     fn profile(provider: LlmProvider, url: Option<String>, token: Option<&str>, max_concurrent: usize) -> LlmProfile {
@@ -332,9 +336,11 @@ mod tests {
             provider,
             model: "test-model".to_string(),
             url,
-            token: token.map(|token| Token::new(token.to_string())),
-            timeout: Some(Duration::from_millis(1500)),
-            max_concurrent,
+            key: token.map(|token| ProfileKey::Set(Token::new(token.to_string()))),
+            limits: crate::config::ModelLimits {
+                timeout: Duration::from_millis(1500),
+                max_concurrent,
+            },
         }
     }
 
@@ -343,10 +349,12 @@ mod tests {
     }
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
+        let gates = ConsultGates::per_runtime();
+        gates.resize(AnnotatorBuiltin::Llm, max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
-            Duration::from_secs(5),
             max_body_bytes,
+            &gates,
         )
         .expect("the backend builds")
     }
@@ -392,7 +400,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         let backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 4);
 
-        let answer = backend.consult(&prompt()).await;
+        let answer = backend.consult(&prompt(), "judge", None).await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "approve" })));
 
         let requests = stub.requests();
@@ -422,7 +430,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"deny\"}".to_string()));
         let backend = built(LlmProvider::OpenAi, format!("http://{addr}/v1"), 4);
 
-        let answer = backend.consult(&prompt()).await;
+        let answer = backend.consult(&prompt(), "judge", None).await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "deny" })));
 
         let requests = stub.requests();
@@ -446,11 +454,11 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&gemini, 65_536, &ConsultGates::per_runtime()).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&ollama, 65_536, &ConsultGates::per_runtime()).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&pinned, 65_536, &ConsultGates::per_runtime()).is_ok());
     }
 
     #[tokio::test]
@@ -460,7 +468,7 @@ mod tests {
 
         stub.answering(StubAnswer::Status(500));
         assert_eq!(
-            backend.consult(&prompt()).await,
+            backend.consult(&prompt(), "judge", None).await,
             Err(NoAnswerReason::NonSuccess {
                 status: 500,
                 detail: None
@@ -468,11 +476,17 @@ mod tests {
         );
 
         stub.answering(StubAnswer::Text("not json".to_string()));
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Malformed));
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::Malformed)
+        );
 
         stub.answering(StubAnswer::Stall);
         let started = std::time::Instant::now();
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Timeout));
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::Timeout)
+        );
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "the profile's own budget bounds the consult"
@@ -482,7 +496,7 @@ mod tests {
         let unreachable = format!("http://{}", closed.local_addr().expect("the address reads"));
         drop(closed);
         let backend = built(LlmProvider::Anthropic, unreachable, 4);
-        assert!(backend.consult(&prompt()).await.is_err());
+        assert!(backend.consult(&prompt(), "judge", None).await.is_err());
     }
 
     #[tokio::test]
@@ -492,20 +506,23 @@ mod tests {
 
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         assert_eq!(
-            backend.consult(&prompt()).await,
+            backend.consult(&prompt(), "judge", None).await,
             Ok(serde_json::json!({ "ruling": "approve" }))
         );
         assert_eq!(stub.requests()[0].1["max_tokens"], 48, "a token is at least a byte");
 
         let long = format!("{{\"ruling\":\"approve\",\"reason\":\"{}\"}}", "x".repeat(64));
         stub.answering(StubAnswer::Text(long));
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Oversized));
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::Oversized)
+        );
     }
 
-    /// Each deployment's backend bounds its own consults by its own profile: a deployment
-    /// allowing one consult at a time is not widened by another allowing two, nor narrows it.
+    /// Each runtime's `llm` gate bounds its backend's consults: a runtime allowing one consult
+    /// at a time is not widened by another allowing two, nor narrows it.
     #[tokio::test]
-    async fn each_backend_bounds_its_consults_by_its_own_profile() {
+    async fn each_runtime_bounds_its_llm_consults_by_its_own_gate() {
         let (narrow_addr, narrow_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
         let (wide_addr, wide_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
         for stub in [&narrow_stub, &wide_stub] {
@@ -516,16 +533,85 @@ mod tests {
 
         let ask = prompt();
         let answers = futures_util::future::join_all([
-            narrow.consult(&ask),
-            wide.consult(&ask),
-            narrow.consult(&ask),
-            wide.consult(&ask),
-            narrow.consult(&ask),
-            wide.consult(&ask),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
+            narrow.consult(&ask, "judge", None),
+            wide.consult(&ask, "judge", None),
         ])
         .await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
         assert_eq!(narrow_stub.max_in_flight.load(Ordering::SeqCst), 1);
         assert_eq!(wide_stub.max_in_flight.load(Ordering::SeqCst), 2);
+    }
+
+    const APPROVE: &str = "{\"ruling\":\"approve\"}";
+
+    /// A backend over a fresh stub that answers `script` in order, then approves.
+    async fn scripted(script: Vec<StubAnswer>, timeout: Duration) -> (LlmBackend, Stub) {
+        let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::ZERO).await;
+        stub.answering(StubAnswer::Text(APPROVE.to_string()));
+        stub.script.lock().unwrap().extend(script);
+        let mut backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 1);
+        backend.timeout = timeout;
+        (backend, stub)
+    }
+
+    /// A 429 or a 5xx is retried, at most [`MAX_ATTEMPTS`] attempts in all, and
+    /// only while the budget leaves room for another attempt; any other failure is not.
+    #[tokio::test]
+    async fn only_a_transient_failure_is_retried_within_the_budget() {
+        let failed = |status| Err(NoAnswerReason::NonSuccess { status, detail: None });
+        let ample = Duration::from_secs(5);
+        for (script, timeout, answered, requests) in [
+            (
+                vec![StubAnswer::Status(503)],
+                ample,
+                Ok(serde_json::json!({ "ruling": "approve" })),
+                2,
+            ),
+            (
+                vec![StubAnswer::Status(429)],
+                ample,
+                Ok(serde_json::json!({ "ruling": "approve" })),
+                2,
+            ),
+            (vec![StubAnswer::Status(400)], ample, failed(400), 1),
+            (vec![StubAnswer::Status(502); 4], ample, failed(502), MAX_ATTEMPTS),
+            (
+                vec![StubAnswer::Status(503)],
+                RETRY_BACKOFF + MIN_ATTEMPT / 2,
+                failed(503),
+                1,
+            ),
+        ] {
+            let (backend, stub) = scripted(script, timeout).await;
+            assert_eq!(
+                backend.consult(&prompt(), "judge", None).await,
+                answered,
+                "{answered:?}"
+            );
+            assert_eq!(stub.requests().len(), requests, "{answered:?}");
+        }
+    }
+
+    /// With one permit, a consult waiting out its backoff does not hold it: another consult
+    /// answers before the retry starts.
+    #[tokio::test]
+    async fn the_backoff_holds_no_permit() {
+        let (backend, stub) = scripted(vec![StubAnswer::Status(503)], Duration::from_secs(5)).await;
+        let ask = prompt();
+        let other = async {
+            tokio::time::sleep(RETRY_BACKOFF / 5).await;
+            let started = tokio::time::Instant::now();
+            let answered = backend.consult(&ask, "judge", None).await;
+            (answered, started.elapsed())
+        };
+        let (retried, (answered, waited)) = tokio::join!(backend.consult(&ask, "judge", None), other);
+        assert_eq!(retried, Ok(serde_json::json!({ "ruling": "approve" })));
+        assert_eq!(answered, Ok(serde_json::json!({ "ruling": "approve" })));
+        assert!(waited < RETRY_BACKOFF / 2, "{waited:?}");
+        assert_eq!(stub.requests().len(), 3);
     }
 }

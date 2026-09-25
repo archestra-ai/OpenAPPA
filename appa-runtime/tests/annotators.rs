@@ -818,6 +818,62 @@ url = "{llm_url}"
     );
 }
 
+/// An `llm` provider that fails is no answer: the hook refuses and the trajectory records
+/// nothing.
+#[tokio::test]
+async fn a_failing_llm_provider_refuses_the_hook_and_appends_nothing() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let asked = Arc::new(Mutex::new(0_usize));
+    let counted = Arc::clone(&asked);
+    let router = Router::new().route(
+        "/api/chat",
+        post(move || {
+            *counted.lock().unwrap() += 1;
+            async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }
+        }),
+    );
+    let llm_url = serve(router).await;
+    let config = format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+builtin = "llm"
+
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+annotator = "classifier"
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.llm]
+provider = "ollama"
+model = "m"
+url = "{llm_url}"
+"#
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    let baseline = audit_len(&runtime);
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(decision, HookDecision::Refuse { .. }),
+        "an llm failure is an operational refusal, got {decision:?}"
+    );
+    assert!(*asked.lock().unwrap() > 0, "the consult reached the provider");
+    assert_eq!(
+        audit_len(&runtime),
+        baseline,
+        "a no-answer appends nothing to the trajectory"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_builtin_annotator_never_touches_an_http_endpoint() {
@@ -1456,41 +1512,74 @@ async fn a_hosted_token_resolves_through_the_host_and_rides_the_consult() {
     assert_eq!(annotator.authorizations(), [Some("Bearer tenant-secret".to_string())]);
 }
 
-/// A hosted `[externals.jev]` key is the host's answer, not this process's environment: the
-/// consult reaches the operator's endpoint carrying the key the host's lookup supplied.
-#[tokio::test]
-async fn a_hosted_jev_key_resolves_through_the_host() {
-    let authorizations = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
-    let router = Router::new()
-        .route(
-            "/v1/systemone",
-            post(
-                |State(seen): State<Arc<Mutex<Vec<Option<String>>>>>, headers: axum::http::HeaderMap| async move {
-                    seen.lock().unwrap().push(
-                        headers
+/// The key a jev test's host lookup supplies for the shared endpoint to answer with a 500.
+const FAILING_JEV_KEY: &str = "failing-key";
+
+/// The one Jev endpoint of this test binary, and every `Authorization` it has seen. The
+/// operator's `APPA_PROVIDER_JEV_API_URL` is process-wide and read at each load, so every
+/// jev test here shares this endpoint and steers it through the key its host lookup
+/// supplies: [`FAILING_JEV_KEY`] fails, any other key is answered. The endpoint runs on a
+/// thread of its own, so it outlives the runtime of the test that started it.
+fn jev_endpoint() -> &'static Mutex<Vec<Option<String>>> {
+    static SEEN: std::sync::OnceLock<Arc<Mutex<Vec<Option<String>>>>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let router = Router::new()
+            .route(
+                "/v1/systemone",
+                post(
+                    |State(seen): State<Arc<Mutex<Vec<Option<String>>>>>, headers: axum::http::HeaderMap| async move {
+                        let authorization = headers
                             .get(axum::http::header::AUTHORIZATION)
                             .and_then(|value| value.to_str().ok())
-                            .map(str::to_string),
-                    );
-                    serde_json::json!({
-                        "answers": {
-                            "delta_audience": {"probabilities": {"self": 0.05, "internal": 0.4, "public": 0.55}},
-                            "delta_trust": {"probabilities": {"suspicious": 0.1, "trusted": 0.9}},
-                            "requires_audience": {"probabilities": {"public": 0.8, "internal": 0.1, "none": 0.1}},
-                            "requires_trusted": {"noul": 0.7},
+                            .map(str::to_string);
+                        let failing = authorization.as_deref() == Some(&format!("Bearer {FAILING_JEV_KEY}"));
+                        seen.lock().unwrap().push(authorization);
+                        match failing {
+                            true => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
+                            false => (
+                                axum::http::StatusCode::OK,
+                                serde_json::json!({
+                                    "answers": {
+                                        "delta_audience": {"probabilities": {"self": 0.05, "internal": 0.4, "public": 0.55}},
+                                        "delta_trust": {"probabilities": {"suspicious": 0.1, "trusted": 0.9}},
+                                        "requires_audience": {"probabilities": {"public": 0.8, "internal": 0.1, "none": 0.1}},
+                                        "requires_trusted": {"noul": 0.7},
+                                    }
+                                })
+                                .to_string(),
+                            ),
                         }
-                    })
-                    .to_string()
-                },
-            ),
-        )
-        .with_state(Arc::clone(&authorizations));
-    let url = format!("{}/v1/systemone", serve(router).await);
-    // SAFETY: only the jev consults of this test binary read these variables.
-    unsafe {
-        std::env::set_var("APPA_PROVIDER_JEV_API_URL", &url);
-        std::env::set_var("APPA_PROVIDER_JEV_API_KEY", "from-the-environment");
-    }
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&seen));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("the endpoint's runtime builds")
+                .block_on(async move {
+                    sender.send(serve(router).await).expect("the url is received");
+                    std::future::pending::<()>().await
+                });
+        });
+        let url = format!("{}/v1/systemone", receiver.recv().expect("the endpoint serves"));
+        // SAFETY: set once, before any jev deployment of this binary loads; nothing else in
+        // this binary writes the environment.
+        unsafe {
+            std::env::set_var("APPA_PROVIDER_JEV_API_URL", &url);
+            std::env::set_var("APPA_PROVIDER_JEV_API_KEY", "from-the-environment");
+        }
+        seen
+    })
+}
+
+/// A hosted deployment whose `classifier` is the `jev` builtin, with `key` as the host's
+/// answer for the profile's `token_env`.
+async fn open_hosted_jev(key: &'static str) -> Arc<Runtime> {
+    jev_endpoint();
     let document = r#"
 [policy]
 version = 2
@@ -1514,16 +1603,52 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
             consult_timeout: Duration::from_secs(5),
             max_body_bytes: 65_536,
         },
-        |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| "host-key".to_string()),
+        move |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| key.to_string()),
     )
     .expect("the hosted document validates");
-    let runtime = open_hosted(config).await;
+    open_hosted(config).await
+}
+
+/// A hosted `[externals.jev]` key is the host's answer, not this process's environment: the
+/// consult reaches the operator's endpoint carrying the key the host's lookup supplied.
+#[tokio::test]
+async fn a_hosted_jev_key_resolves_through_the_host() {
+    let runtime = open_hosted_jev("host-key").await;
 
     propose(&runtime, fetch("https://a.example")).await;
-    let seen = authorizations.lock().unwrap().clone();
-    assert!(!seen.is_empty(), "the consult reached the operator's endpoint");
+    let seen = jev_endpoint().lock().unwrap().clone();
     assert!(
-        seen.iter().all(|seen| seen.as_deref() == Some("Bearer host-key")),
+        seen.contains(&Some("Bearer host-key".to_string())),
+        "the consult reached the operator's endpoint: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&Some("Bearer from-the-environment".to_string())),
         "{seen:?}"
+    );
+}
+
+/// A `jev` provider that fails is no answer: the hook refuses and the trajectory records
+/// nothing.
+#[tokio::test]
+async fn a_failing_jev_provider_refuses_the_hook_and_appends_nothing() {
+    let runtime = open_hosted_jev(FAILING_JEV_KEY).await;
+    let baseline = audit_len(&runtime);
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(decision, HookDecision::Refuse { .. }),
+        "a jev failure is an operational refusal, got {decision:?}"
+    );
+    assert!(
+        jev_endpoint()
+            .lock()
+            .unwrap()
+            .contains(&Some(format!("Bearer {FAILING_JEV_KEY}"))),
+        "the consult reached the failing endpoint"
+    );
+    assert_eq!(
+        audit_len(&runtime),
+        baseline,
+        "a no-answer appends nothing to the trajectory"
     );
 }

@@ -248,7 +248,7 @@ impl AnnotatorBuiltin {
     ];
 
     /// The name a policy writes: `claude-code`, `llm`, or `jev`.
-    pub fn wire_name(self) -> &'static str {
+    pub const fn wire_name(self) -> &'static str {
         match self {
             AnnotatorBuiltin::ClaudeCode => "claude-code",
             AnnotatorBuiltin::Llm => "llm",

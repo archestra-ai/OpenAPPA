@@ -483,13 +483,26 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
     let output = ask_endpoint(
         endpoint,
         "/reload",
-        &["--fail", "--silent", "--show-error", "--max-time", "10", "-X", "POST"],
+        &[
+            "--fail-with-body",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "10",
+            "-X",
+            "POST",
+        ],
     )
     .map_err(|error| refused(error.to_string()))?;
-    if !output.status.success() {
-        return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    // A refused reload answers with the runtime's reason; curl's own line only names the status.
+    let reason = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    match reason.is_empty() {
+        true => Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned())),
+        false => Err(refused(reason)),
+    }
 }
 
 /// The endpoint answers for this deployment: this build, serving this configuration.
@@ -626,6 +639,13 @@ mod tests {
     /// probe's path is part of the contract it has with the runtime, so a test that cares
     /// which endpoint init asks reads them.
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        recorded_statuses(answers.into_iter().map(|answer| ("200 OK", answer)).collect())
+    }
+
+    /// [`recorded_answers`] where each answer carries its own status line.
+    fn recorded_statuses(
+        answers: Vec<(&'static str, String)>,
+    ) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -634,7 +654,7 @@ mod tests {
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = std::sync::Arc::clone(&asked);
         std::thread::spawn(move || {
-            for answer in answers {
+            for (status, answer) in answers {
                 let (mut connection, _) = listener.accept().expect("the health probe connects");
                 let mut request = [0u8; 2048];
                 let read = connection.read(&mut request).unwrap_or(0);
@@ -648,7 +668,7 @@ mod tests {
                     .expect("the request recorder is never poisoned")
                     .push(requested);
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                     answer.len()
                 );
                 connection
@@ -789,6 +809,17 @@ mod tests {
                 .expect("the reconcile completes"),
             RuntimeOutcome::Reloaded
         );
+    }
+
+    #[test]
+    fn a_refused_reload_names_the_runtimes_reason() {
+        let reason = "the jev annotator names APPA_PROVIDER_JEV_API_KEY, which is not set";
+        let endpoint = recorded_statuses(vec![("422 Unprocessable Entity", reason.to_string())]).0;
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert!(matches!(
+            reload_policy(&endpoint, &config),
+            Err(InitError::ReloadRefused { message, .. }) if message == reason
+        ));
     }
 
     #[cfg(unix)]

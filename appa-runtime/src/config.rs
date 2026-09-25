@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_reader};
 use appa_engine::label::ReaderId;
+use appa_policy::AnnotatorBuiltin;
 use serde::Deserialize;
 
 /// Each policy namespace bound to the connection identities the host reports for it.
@@ -203,6 +204,24 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// The limits of `builtin`'s table, where the deployment declares one.
+    pub(crate) fn model_limits(&self, builtin: AnnotatorBuiltin) -> Option<ModelLimits> {
+        match builtin {
+            AnnotatorBuiltin::ClaudeCode => Some(self.claude_code.limits),
+            AnnotatorBuiltin::Llm => self.llm.as_ref().map(|llm| llm.limits),
+            AnnotatorBuiltin::Jev => self.jev.as_ref().map(|jev| jev.limits),
+        }
+    }
+
+    /// The longest budget any one machine consult of this deployment runs under.
+    pub(crate) fn longest_consult(&self) -> Duration {
+        AnnotatorBuiltin::ALL
+            .into_iter()
+            .filter_map(|builtin| self.model_limits(builtin))
+            .map(|limits| limits.timeout)
+            .fold(self.timeout, Duration::max)
+    }
+
     /// The lookup routing these bindings declare: each redirected audience provider and
     /// the entry that answers its member lookups.
     pub(crate) fn lookup_targets(&self) -> BTreeMap<String, String> {
@@ -250,32 +269,74 @@ pub(crate) fn lookup_targets_of(document: &toml::Value) -> BTreeMap<String, Stri
         .unwrap_or_default()
 }
 
+/// One model builtin's consult limits: the budget of one consult, its wait for a permit
+/// included, and how many of its consults the runtime runs at once. Each model builtin
+/// reads its own from its `[externals.*]` table as `timeout_ms` and `max_concurrent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelLimits {
+    pub timeout: Duration,
+    pub max_concurrent: usize,
+}
+
+/// The budget of one `claude-code` or `llm` consult when its table names none. A model call
+/// runs for tens of seconds, so it never inherits `externals.timeout_ms`, which bounds an
+/// HTTP round trip.
+const DEFAULT_MODEL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many jev consults the runtime runs at once when `[externals.jev]` names no
+/// `max_concurrent`. A consult is one small HTTPS request of about 0.3 s, so the default
+/// admits two command batches' worth; it bounds the requests a burst sends TypeSafe (a
+/// hedge or retry adds at most two per consult) and the connections it opens.
+pub(crate) const DEFAULT_JEV_CONCURRENCY: usize = 16;
+
+impl ModelLimits {
+    /// The limits of a `claude-code` or `llm` table that names neither.
+    pub(crate) const MODEL_CALL: ModelLimits = ModelLimits {
+        timeout: DEFAULT_MODEL_TIMEOUT,
+        max_concurrent: 4,
+    };
+
+    /// The limits a table declares over `default`. A zero refuses, as the shared timeout does.
+    fn declared(
+        section: &'static str,
+        timeout_ms: Option<u64>,
+        max_concurrent: Option<u32>,
+        default: ModelLimits,
+    ) -> Result<ModelLimits, ConfigError> {
+        let zero = |field| ConfigError::ModelLimitTooSmall { section, field, min: 1 };
+        Ok(ModelLimits {
+            timeout: match timeout_ms {
+                Some(0) => return Err(zero("timeout_ms")),
+                Some(ms) => Duration::from_millis(ms),
+                None => default.timeout,
+            },
+            max_concurrent: match max_concurrent {
+                Some(0) => return Err(zero("max_concurrent")),
+                Some(count) => count as usize,
+                None => default.max_concurrent,
+            },
+        })
+    }
+}
+
 /// How this deployment runs the stock `claude-code` builtin. `command` overrides the
 /// executable (a service environment often strips `PATH`); `model` pins the model the
-/// consult runs on; `timeout` bounds one consult.
-///
-/// A model consult runs for tens of seconds, so it owns its budget. `externals.timeout_ms`
-/// bounds an HTTP round trip and never applies here: a deployment that names no
-/// `timeout_ms` gets a default sized for a model call, not the shared one.
+/// consult runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
     pub command: PathBuf,
     pub model: String,
-    pub timeout: Duration,
+    pub limits: ModelLimits,
 }
-
-/// The budget one `claude-code` consult gets when the deployment names none.
-const DEFAULT_CLAUDE_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ClaudeCode {
     /// The usable defaults every construction path shares — the `claude` on `PATH`, the
-    /// `sonnet` alias, and the consult budget the file loader fills in, never an empty
-    /// command.
+    /// `sonnet` alias, and the model-consult limits, never an empty command.
     fn default() -> ClaudeCode {
         ClaudeCode {
             command: "claude".into(),
             model: "sonnet".to_string(),
-            timeout: DEFAULT_CLAUDE_CODE_TIMEOUT,
+            limits: ModelLimits::MODEL_CALL,
         }
     }
 }
@@ -283,18 +344,38 @@ impl Default for ClaudeCode {
 /// The `[externals.llm]` profile, validated: its endpoint rules are a `url` binding's
 /// (`https` anywhere, cleartext `http` only to loopback, no credentials in the URL, the
 /// token from an `APPA_*` variable). `url` is `None` where the provider's own API host
-/// serves; `timeout` is the profile's own consult budget, `None` meaning the shared one.
+/// serves; `key` is `None` where the profile names no `token_env`.
 #[derive(Debug, Clone)]
 pub struct LlmProfile {
     pub provider: LlmProvider,
     pub model: String,
     pub url: Option<String>,
-    pub token: Option<Token>,
-    pub timeout: Option<Duration>,
-    pub max_concurrent: usize,
+    pub key: Option<ProfileKey>,
+    pub limits: ModelLimits,
 }
 
-const DEFAULT_LLM_CONCURRENCY: usize = 4;
+impl LlmProfile {
+    /// Why this profile cannot serve a consult, where it cannot: the variable it names is
+    /// not set, or it names none and its provider needs a key.
+    pub fn missing_key(&self) -> Option<MissingKey> {
+        match &self.key {
+            Some(key) => key.token().err(),
+            None if self.provider == LlmProvider::Ollama => None,
+            None => Some(MissingKey::Undeclared {
+                provider: self.provider.as_str(),
+            }),
+        }
+    }
+}
+
+/// Why a model profile cannot serve a consult.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MissingKey {
+    #[error("its token_env {var} is not set")]
+    Unset { var: String },
+    #[error("the {provider} provider needs a token_env, and only ollama runs without a key")]
+    Undeclared { provider: &'static str },
+}
 
 /// The `[externals.jev]` profile, validated. The key goes only to the TypeSafe API, or to
 /// the endpoint the operator's own environment names in [`JEV_URL_VARIABLE`]; no policy or
@@ -303,17 +384,40 @@ const DEFAULT_LLM_CONCURRENCY: usize = 4;
 #[derive(Debug, Clone)]
 pub struct JevProfile {
     pub url: String,
-    pub key: JevKey,
+    pub key: ProfileKey,
+    pub limits: ModelLimits,
 }
 
-/// The TypeSafe API key as the deployment read it at open. A battery installs before its key
-/// is exported, so an unset variable does not refuse the deployment: every consult of the
-/// profile is no answer until a reload reads the key.
+/// A model profile's key as the configuration read it. A profile whose variable is not set
+/// still loads, so a battery installs before its key is exported; a deployment that
+/// consults the profile refuses to open until the variable is set.
 #[derive(Debug, Clone)]
-pub enum JevKey {
+pub enum ProfileKey {
     Set(Token),
     Unset { var: String },
 }
+
+impl ProfileKey {
+    fn read(var: String, lookup: &impl Fn(&str) -> Option<String>) -> ProfileKey {
+        match lookup(&var) {
+            Some(value) if !value.is_empty() => ProfileKey::Set(Token::new(value)),
+            _ => ProfileKey::Unset { var },
+        }
+    }
+
+    pub fn token(&self) -> Result<&Token, MissingKey> {
+        match self {
+            ProfileKey::Set(token) => Ok(token),
+            ProfileKey::Unset { var } => Err(MissingKey::Unset { var: var.clone() }),
+        }
+    }
+}
+
+/// The least `[externals.jev]` budget: the consult keeps its settling margin and still has
+/// room for one attempt.
+const JEV_MIN_TIMEOUT: Duration = crate::model::jev::JevTiming::STANDARD
+    .budget_margin
+    .saturating_add(crate::model::MIN_ATTEMPT);
 
 /// Where the `jev` annotator asks by default.
 pub(crate) const JEV_DEFAULT_URL: &str = "https://api.typesafe.ai/v1/systemone";
@@ -374,9 +478,9 @@ pub struct ResolverCommand {
     pub token_env: Option<String>,
 }
 
-pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
-pub const LLM_BUILTIN: &str = "llm";
-pub const JEV_BUILTIN: &str = "jev";
+pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
+pub const LLM_BUILTIN: &str = AnnotatorBuiltin::Llm.wire_name();
+pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -472,8 +576,10 @@ pub enum ConfigError {
     SelectorDeclaration(Box<appa_policy::ConfigError>),
     #[error("included config {path} uses policy version {found}, but the root uses {root}")]
     IncludedVersion { path: String, root: i64, found: i64 },
-    #[error("included config {path} repeats [externals.jev], which a deployment declares once")]
-    DuplicateJevProfile { path: String },
+    #[error("included config {path} repeats [externals.jev] field {field:?}, which a deployment declares once")]
+    DuplicateJevProfile { path: String, field: String },
+    #[error("[externals.jev] names no token_env: the root config or a battery must name the key")]
+    MissingJevKey,
     #[error("included config {path} repeats [externals.{section}] entry {name:?}")]
     DuplicateExternal {
         path: String,
@@ -530,12 +636,14 @@ pub enum ConfigError {
     ZeroReviewTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
-    #[error("externals.llm.max_concurrent must be greater than zero")]
-    ZeroConcurrency,
+    #[error("externals.{section}.{field} must be at least {min}")]
+    ModelLimitTooSmall {
+        section: &'static str,
+        field: &'static str,
+        min: u128,
+    },
     #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama")]
     InvalidLlmProvider { provider: String },
-    #[error("externals.llm.provider {provider} needs a token_env: only ollama runs without a key")]
-    LlmTokenRequired { provider: &'static str },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
     #[error("the {section} entry {name:?} cannot be builtin")]
@@ -802,6 +910,7 @@ struct RawClaudeCode {
     command: Option<String>,
     model: Option<String>,
     timeout_ms: Option<u64>,
+    max_concurrent: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -818,7 +927,9 @@ struct RawLlm {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawJev {
-    token_env: String,
+    token_env: Option<String>,
+    timeout_ms: Option<u64>,
+    max_concurrent: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1231,7 +1342,14 @@ impl Config {
         }
         let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
         let jev = jev
-            .map(|raw| resolve_jev(raw, &lookup, std::env::var(JEV_URL_VARIABLE).ok()))
+            .map(|raw| {
+                resolve_jev(
+                    raw,
+                    Duration::from_millis(timeout_ms),
+                    &lookup,
+                    std::env::var(JEV_URL_VARIABLE).ok(),
+                )
+            })
             .transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
@@ -1613,13 +1731,28 @@ fn compose_include(
     for (section_name, entries) in included_externals {
         // The one profile a fragment may carry: the `jev` key reaches only the TypeSafe API,
         // so a battery that routes tools to Jev can ship the profile its annotator reads.
+        // The profile composes per field, so the root can tune the limits of a battery's.
         if section_name == JEV_SECTION {
-            if root_externals.contains_key(JEV_SECTION) {
-                return Err(ConfigError::DuplicateJevProfile {
-                    path: include_path.display().to_string(),
-                });
+            let fields = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
+                path: include_path.display().to_string(),
+                field: section_name.clone(),
+            })?;
+            let destination = root_externals
+                .entry(JEV_SECTION.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::RootField {
+                    field: format!("externals.{JEV_SECTION}"),
+                })?;
+            for (field, value) in fields {
+                if destination.contains_key(field) {
+                    return Err(ConfigError::DuplicateJevProfile {
+                        path: include_path.display().to_string(),
+                        field: field.clone(),
+                    });
+                }
+                destination.insert(field.clone(), value.clone());
             }
-            root_externals.insert(JEV_SECTION.to_string(), entries.clone());
             continue;
         }
         let Some(section) = Section::parse(section_name) else {
@@ -1966,53 +2099,56 @@ fn resolve_command(
 }
 
 /// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
-/// the `sonnet` alias, and the model-consult budget. A zero `timeout_ms` is a refusal like
-/// the shared one.
+/// the `sonnet` alias, and the model-consult limits.
 fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigError> {
-    let raw = raw.unwrap_or(RawClaudeCode {
-        command: None,
-        model: None,
-        timeout_ms: None,
-    });
-    if raw.timeout_ms == Some(0) {
-        return Err(ConfigError::ZeroTimeout);
-    }
+    let Some(raw) = raw else {
+        return Ok(ClaudeCode::default());
+    };
+    let defaults = ClaudeCode::default();
     Ok(ClaudeCode {
-        command: raw.command.map(PathBuf::from).unwrap_or_else(|| "claude".into()),
-        model: raw.model.unwrap_or_else(|| "sonnet".to_string()),
-        timeout: raw
-            .timeout_ms
-            .map_or(DEFAULT_CLAUDE_CODE_TIMEOUT, Duration::from_millis),
+        command: raw.command.map(PathBuf::from).unwrap_or(defaults.command),
+        model: raw.model.unwrap_or(defaults.model),
+        limits: ModelLimits::declared("claude_code", raw.timeout_ms, raw.max_concurrent, defaults.limits)?,
     })
 }
 
+/// The `[externals.jev]` table. A consult is one short HTTPS request, so its budget
+/// defaults to the shared `timeout`; below [`JEV_MIN_TIMEOUT`] no attempt fits in it.
 fn resolve_jev(
     raw: RawJev,
+    shared_timeout: Duration,
     lookup: &impl Fn(&str) -> Option<String>,
     operator_url: Option<String>,
 ) -> Result<JevProfile, ConfigError> {
-    if !raw.token_env.starts_with(RUNTIME_VARIABLE_PREFIX) {
+    let token_env = raw.token_env.ok_or(ConfigError::MissingJevKey)?;
+    if !token_env.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section: JEV_SECTION,
             name: JEV_SECTION.to_string(),
-            var: raw.token_env,
+            var: token_env,
         });
     }
     let url = match operator_url {
         Some(url) => validated_url(JEV_SECTION, JEV_URL_VARIABLE, url)?,
         None => JEV_DEFAULT_URL.to_string(),
     };
-    let key = match lookup(&raw.token_env) {
-        Some(value) if !value.is_empty() => JevKey::Set(Token::new(value)),
-        _ => {
-            tracing::warn!(
-                var = raw.token_env,
-                "the [externals.jev] key is not set: every jev consult is no answer until a reload reads it"
-            );
-            JevKey::Unset { var: raw.token_env }
-        }
+    let default = ModelLimits {
+        timeout: shared_timeout,
+        max_concurrent: DEFAULT_JEV_CONCURRENCY,
     };
-    Ok(JevProfile { url, key })
+    let limits = ModelLimits::declared(JEV_SECTION, raw.timeout_ms, raw.max_concurrent, default)?;
+    if limits.timeout < JEV_MIN_TIMEOUT {
+        return Err(ConfigError::ModelLimitTooSmall {
+            section: JEV_SECTION,
+            field: "timeout_ms",
+            min: JEV_MIN_TIMEOUT.as_millis(),
+        });
+    }
+    Ok(JevProfile {
+        url,
+        key: ProfileKey::read(token_env, lookup),
+        limits,
+    })
 }
 
 fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<LlmProfile, ConfigError> {
@@ -2020,29 +2156,19 @@ fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<
     let provider = LlmProvider::parse(&raw.provider).ok_or_else(|| ConfigError::InvalidLlmProvider {
         provider: raw.provider.clone(),
     })?;
-    if raw.timeout_ms == Some(0) {
-        return Err(ConfigError::ZeroTimeout);
-    }
-    if raw.max_concurrent == Some(0) {
-        return Err(ConfigError::ZeroConcurrency);
-    }
+    let limits = ModelLimits::declared(SECTION, raw.timeout_ms, raw.max_concurrent, ModelLimits::MODEL_CALL)?;
     let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
-    let token = resolve_token(SECTION, SECTION, raw.token_env, lookup)?;
-    if token.is_none() && provider != LlmProvider::Ollama {
-        return Err(ConfigError::LlmTokenRequired {
-            provider: provider.as_str(),
-        });
-    }
+    let key = raw
+        .token_env
+        .map(|var| endpoint_token_variable(SECTION, SECTION, var))
+        .transpose()?
+        .map(|var| ProfileKey::read(var, lookup));
     Ok(LlmProfile {
         provider,
         model: raw.model,
         url,
-        token,
-        timeout: raw.timeout_ms.map(Duration::from_millis),
-        max_concurrent: raw
-            .max_concurrent
-            .map(|count| count as usize)
-            .unwrap_or(DEFAULT_LLM_CONCURRENCY),
+        key,
+        limits,
     })
 }
 
@@ -2091,6 +2217,20 @@ fn resolve_token(
     let Some(var) = token_env else {
         return Ok(None);
     };
+    let var = endpoint_token_variable(section, name, var)?;
+    match lookup(&var) {
+        Some(value) if !value.is_empty() => Ok(Some(Token::new(value))),
+        _ => Err(ConfigError::MissingSecret {
+            section,
+            name: name.to_string(),
+            var,
+        }),
+    }
+}
+
+/// A variable a bearer token this runtime sends itself may come from: an `APPA_*` one
+/// outside the provider namespace a command child inherits.
+fn endpoint_token_variable(section: &'static str, name: &str, var: String) -> Result<String, ConfigError> {
     if !var.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section,
@@ -2106,14 +2246,7 @@ fn resolve_token(
             prefix: PROVIDER_CREDENTIAL_PREFIX,
         });
     }
-    match lookup(&var) {
-        Some(value) if !value.is_empty() => Ok(Some(Token::new(value))),
-        _ => Err(ConfigError::MissingSecret {
-            section,
-            name: name.to_string(),
-            var,
-        }),
-    }
+    Ok(var)
 }
 
 fn is_loopback(url: &reqwest::Url) -> bool {
@@ -2441,26 +2574,16 @@ mod tests {
         let config = parse(MINIMAL).expect("no claude table is the default");
         assert_eq!(config.externals.claude_code.command, PathBuf::from("claude"));
         assert_eq!(config.externals.claude_code.model, "sonnet");
-        assert_eq!(config.externals.claude_code.timeout, DEFAULT_CLAUDE_CODE_TIMEOUT);
+        assert_eq!(config.externals.claude_code.limits, ModelLimits::MODEL_CALL);
 
-        let text = format!(
-            "{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\ntimeout_ms = 90000\n"
-        );
+        let text =
+            format!("{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n");
         let config = parse(&text).expect("the claude table validates");
         assert_eq!(
             config.externals.claude_code.command,
             PathBuf::from("/opt/claude/bin/claude")
         );
         assert_eq!(config.externals.claude_code.model, "pinned");
-        let pinned = Duration::from_secs(90);
-        assert_ne!(
-            pinned, DEFAULT_CLAUDE_CODE_TIMEOUT,
-            "the pin must differ from the default"
-        );
-        assert_eq!(config.externals.claude_code.timeout, pinned);
-
-        let text = format!("{MINIMAL}\n[externals.claude_code]\ntimeout_ms = 0\n");
-        assert!(matches!(parse(&text), Err(ConfigError::ZeroTimeout)));
         let text = format!("{MINIMAL}\n[externals.claude_code]\nurl = \"https://x.example\"\n");
         assert!(
             toml::from_str::<RawConfig>(&text).is_err(),
@@ -2606,31 +2729,28 @@ mod tests {
         let llm = config.externals.llm.expect("the profile is set");
         assert_eq!(llm.provider, LlmProvider::Ollama);
         assert_eq!(llm.model, "llama");
-        assert!(llm.url.is_none() && llm.token.is_none() && llm.timeout.is_none());
-        assert_eq!(llm.max_concurrent, DEFAULT_LLM_CONCURRENCY);
-        assert!(matches!(
-            parse(&with("")),
-            Err(ConfigError::LlmTokenRequired { provider: "openai" })
-        ));
+        assert!(llm.url.is_none() && llm.key.is_none() && llm.missing_key().is_none());
+        assert_eq!(llm.limits, ModelLimits::MODEL_CALL);
 
         let config = parse_with(
-            &with("url = \"http://127.0.0.1:11434\"\ntoken_env = \"APPA_LLM_TOKEN\"\ntimeout_ms = 40000\nmax_concurrent = 2"),
+            &with("url = \"http://127.0.0.1:11434\"\ntoken_env = \"APPA_LLM_TOKEN\""),
             |var| (var == "APPA_LLM_TOKEN").then(|| "sekret".to_string()),
         )
         .expect("a full profile validates");
         let llm = config.externals.llm.expect("the profile is set");
         assert_eq!(llm.url.as_deref(), Some("http://127.0.0.1:11434"));
-        assert_eq!(llm.token.as_ref().map(Token::reveal), Some("sekret"));
-        assert_eq!(llm.timeout, Some(Duration::from_secs(40)));
-        assert_eq!(llm.max_concurrent, 2);
+        assert_eq!(
+            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
+            Some("sekret")
+        );
 
         assert!(matches!(
             parse(&with("token_env = \"OPENAI_API_KEY\"")),
             Err(ConfigError::ForeignSecretVariable { section: "llm", .. })
         ));
         assert!(matches!(
-            parse(&with("token_env = \"APPA_LLM_TOKEN\"")),
-            Err(ConfigError::MissingSecret { section: "llm", .. })
+            parse(&with("token_env = \"APPA_PROVIDER_OPENAI\"")),
+            Err(ConfigError::ChildCredentialVariable { section: "llm", .. })
         ));
         assert!(matches!(
             parse(&with("url = \"https://user:pw@gateway.internal/v1\"")),
@@ -2647,11 +2767,6 @@ mod tests {
             parse(&with("url = \"ftp://gateway.internal\"")),
             Err(ConfigError::InvalidEndpoint { section: "llm", .. })
         ));
-        assert!(matches!(parse(&with("timeout_ms = 0")), Err(ConfigError::ZeroTimeout)));
-        assert!(matches!(
-            parse(&with("max_concurrent = 0")),
-            Err(ConfigError::ZeroConcurrency)
-        ));
         let unknown = format!("{MINIMAL}\n[externals.llm]\nprovider = \"cohere\"\nmodel = \"m\"\n");
         assert!(matches!(
             parse(&unknown),
@@ -2659,6 +2774,61 @@ mod tests {
         ));
         let typo = format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"m\"\napi_key = \"x\"\n");
         assert!(toml::from_str::<RawConfig>(&typo).is_err());
+    }
+
+    /// Every model table takes `timeout_ms` and `max_concurrent` over its own defaults, and
+    /// refuses a zero for either and a jev budget below its floor.
+    #[test]
+    fn each_model_table_declares_its_limits_over_its_defaults() {
+        const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
+        const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
+        const CLAUDE: &str = "[externals.claude_code]\n";
+        let limits = |config: &Config| AnnotatorBuiltin::ALL.map(|builtin| config.externals.model_limits(builtin));
+        let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{LLM}{JEV}")).expect("the model tables validate");
+        assert_eq!(
+            limits(&defaults),
+            [
+                Some(ModelLimits::MODEL_CALL),
+                Some(ModelLimits::MODEL_CALL),
+                Some(ModelLimits {
+                    timeout: defaults.externals.timeout,
+                    max_concurrent: DEFAULT_JEV_CONCURRENCY,
+                }),
+            ],
+            "jev answers within the shared timeout; a model call gets its own"
+        );
+
+        let pinned = "timeout_ms = 90000\nmax_concurrent = 2\n";
+        let declared = parse(&format!("{MINIMAL}\n{CLAUDE}{pinned}{LLM}{pinned}{JEV}{pinned}"))
+            .expect("the model tables validate");
+        let expected = ModelLimits {
+            timeout: Duration::from_secs(90),
+            max_concurrent: 2,
+        };
+        assert_eq!(limits(&declared), [Some(expected); 3]);
+
+        let floor = JEV_MIN_TIMEOUT.as_millis();
+        let jev_timeout = |ms: u128| format!("{JEV}timeout_ms = {ms}\n");
+        let too_small = [(CLAUDE, "claude_code"), (LLM, "llm"), (JEV, "jev")]
+            .into_iter()
+            .flat_map(|(table, section)| {
+                ["timeout_ms", "max_concurrent"].map(|field| (format!("{table}{field} = 0\n"), section, field, 1))
+            })
+            .chain([(jev_timeout(floor - 1), "jev", "timeout_ms", floor)]);
+        for (table, section, field, min) in too_small {
+            assert!(
+                matches!(
+                    parse(&format!("{MINIMAL}\n{table}")),
+                    Err(ConfigError::ModelLimitTooSmall { section: s, field: f, min: m })
+                        if s == section && f == field && m == min
+                ),
+                "{table} must refuse"
+            );
+        }
+        assert!(
+            parse(&format!("{MINIMAL}\n{}", jev_timeout(floor))).is_ok(),
+            "the floor itself loads"
+        );
     }
 
     #[test]
@@ -3586,8 +3756,11 @@ mod tests {
         };
         assert_eq!(endpoint.token.as_ref().map(Token::reveal), Some("sekret"));
         let llm = config.externals.llm.as_ref().expect("the profile is set");
-        assert_eq!(llm.token.as_ref().map(Token::reveal), Some("sekret"));
-        assert_eq!(llm.max_concurrent, 2);
+        assert_eq!(
+            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
+            Some("sekret")
+        );
+        assert_eq!(llm.limits.max_concurrent, 2);
         let stored = String::from_utf8_lossy(config.policy_file().bytes()).into_owned();
         assert!(stored.contains(VAR), "the variable name is persisted");
         assert!(!stored.contains("sekret"), "the secret never reaches the stored bytes");
@@ -3945,9 +4118,9 @@ mod tests {
         let profile = |config: Config| config.externals.jev.expect("the profile is declared");
 
         let set = profile(parse_with(&text(JEV_KEY), jev_key).expect("a provider variable is the jev key's own"));
-        assert!(matches!(&set.key, JevKey::Set(token) if token.reveal() == "sekret"));
-        let unset = profile(parse_with(&text(JEV_KEY), |_| None).expect("a deployment opens before its key is set"));
-        assert!(matches!(unset.key, JevKey::Unset { var } if var == JEV_KEY));
+        assert!(matches!(&set.key, ProfileKey::Set(token) if token.reveal() == "sekret"));
+        let unset = profile(parse_with(&text(JEV_KEY), |_| None).expect("a profile loads before its key is set"));
+        assert!(matches!(unset.key, ProfileKey::Unset { var } if var == JEV_KEY));
         assert!(matches!(
             parse_with(&text("TYPESAFE_KEY"), jev_key),
             Err(ConfigError::ForeignSecretVariable { section: "jev", .. })
@@ -3958,21 +4131,30 @@ mod tests {
         }
 
         let raw = || RawJev {
-            token_env: JEV_KEY.to_string(),
+            token_env: Some(JEV_KEY.to_string()),
+            timeout_ms: None,
+            max_concurrent: None,
         };
         assert_eq!(
-            resolve_jev(raw(), &jev_key, None).expect("resolves").url,
+            resolve_jev(raw(), Duration::from_secs(2), &jev_key, None)
+                .expect("resolves")
+                .url,
             JEV_DEFAULT_URL
         );
         let local = "http://127.0.0.1:9/v1/systemone";
         assert_eq!(
-            resolve_jev(raw(), &jev_key, Some(local.to_string()))
+            resolve_jev(raw(), Duration::from_secs(2), &jev_key, Some(local.to_string()))
                 .expect("resolves")
                 .url,
             local
         );
         assert!(matches!(
-            resolve_jev(raw(), &jev_key, Some("http://jev.example/v1".to_string())),
+            resolve_jev(
+                raw(),
+                Duration::from_secs(2),
+                &jev_key,
+                Some("http://jev.example/v1".to_string())
+            ),
             Err(ConfigError::CleartextEndpoint { section: "jev", .. })
         ));
     }
@@ -4009,6 +4191,31 @@ mod tests {
             Config::load(&root),
             Err(ConfigError::DuplicateJevProfile { .. })
         ));
+    }
+
+    #[test]
+    fn the_root_tunes_the_limits_of_a_battery_jev_profile() {
+        let battery = HostedBattery {
+            name: "jev",
+            policy: "[policy]\nversion = 2\n[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
+            token_env: &[JEV_KEY],
+        };
+        let limits = format!("{HOSTED_ROOT}[externals.jev]\ntimeout_ms = 3000\nmax_concurrent = 4\n");
+        let tuned = hosted_composed(&limits, &[battery])
+            .expect("the root's limits compose with the battery's key")
+            .externals
+            .jev
+            .expect("the profile is declared");
+        assert!(matches!(&tuned.key, ProfileKey::Unset { var } if var == JEV_KEY));
+        assert_eq!(tuned.limits.timeout, Duration::from_millis(3000));
+        assert_eq!(tuned.limits.max_concurrent, 4);
+
+        let keyed = format!("{HOSTED_ROOT}[externals.jev]\ntoken_env = \"{JEV_KEY}\"\n");
+        assert!(matches!(
+            hosted_composed(&keyed, &[battery]),
+            Err(ConfigError::DuplicateJevProfile { field, .. }) if field == "token_env"
+        ));
+        assert!(matches!(hosted_composed(&limits, &[]), Err(ConfigError::MissingJevKey)));
     }
 
     #[test]

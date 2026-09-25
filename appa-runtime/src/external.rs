@@ -8,20 +8,22 @@
 //! TypeSafe's classifier its own questions about the call; `hitl` shows it to a person. Every failure is [`ConsultOutcome::NoAnswer`] — never a denial.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
+use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
     AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals,
     Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
-use crate::jev::{JevBackend, JevClients, JevTiming};
-use crate::llm::LlmBackend;
+use crate::model::PromptModel;
+use crate::model::claude_code::ClaudeCodeBackend;
+use crate::model::jev::{JevBackend, JevClients, JevTiming};
+use crate::model::llm::LlmBackend;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
@@ -166,8 +168,7 @@ enum Backend {
     Stock(Stock),
     Module(Arc<LoadedModule>),
     Hitl,
-    ClaudeCode(ClaudeCodeBackend),
-    Llm(LlmBackend),
+    Model(PromptModel),
     Jev(JevBackend),
     /// An inline roster: answers a member lookup from the table, in process, and nothing
     /// else.
@@ -188,8 +189,8 @@ impl Backend {
             Backend::Command(_) => Some(ConsultBackend::Command),
             Backend::Module(_) => Some(ConsultBackend::Module),
             Backend::Hitl => Some(ConsultBackend::Hitl),
-            Backend::ClaudeCode(_) => Some(ConsultBackend::ClaudeCode),
-            Backend::Llm(_) => Some(ConsultBackend::Llm),
+            Backend::Model(PromptModel::ClaudeCode(_)) => Some(ConsultBackend::ClaudeCode),
+            Backend::Model(PromptModel::Llm(_)) => Some(ConsultBackend::Llm),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
             Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
         }
@@ -230,19 +231,9 @@ pub struct ExternalServices {
     gates: ConsultGates,
 }
 
-/// How many claude-code consults may run at once across a runtime — a subprocess whose
-/// cost is a full model call, so the gate is fixed and small.
-const CLAUDE_CONSULT_PERMITS: usize = 4;
-
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
-
-/// How many jev consults may run at once across a runtime. A consult is one small HTTPS
-/// request of about 0.3 s, so the gate admits two command batches' worth; it bounds the
-/// requests a burst sends TypeSafe (a hedge or retry adds at most two per consult) and the
-/// connections it opens.
-const JEV_CONSULT_PERMITS: usize = 16;
 
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
@@ -257,48 +248,86 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
         .await
 }
 
-/// The per-runtime gates on consults that cost a process, shared by every deployment the
-/// runtime serves or pins: a reload's old and new snapshots, and every pinned view, contend
-/// on the same permits. The jev clients live here too, keyed by endpoint, so a reload keeps
-/// the connections that answer promptly. The `llm` pool is each deployment's own; see
-/// [`LlmBackend`].
+/// What every deployment the runtime builds shares: a reload's old and new snapshots, every
+/// pinned view and every inventory session. The `command` gate bounds the processes the
+/// runtime runs at once, each model builtin's gate bounds its consults across the runtime,
+/// and the jev clients keep the connections that answer promptly across a reload.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
-    claude: Arc<tokio::sync::Semaphore>,
     command: Arc<tokio::sync::Semaphore>,
-    jev: Arc<JevClients>,
+    /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
+    /// deployment sizes them; a consult takes its permits from the gate current when it
+    /// starts, so a resize reaches every deployment's later consults.
+    models: Arc<Mutex<[ModelGate; 3]>>,
+    pub(crate) jev: Arc<JevClients>,
 }
+
+type ModelGate = (AnnotatorBuiltin, usize, Arc<tokio::sync::Semaphore>);
 
 impl ConsultGates {
     pub(crate) fn per_runtime() -> ConsultGates {
-        ConsultGates::of(CLAUDE_CONSULT_PERMITS, COMMAND_CONSULT_PERMITS)
+        ConsultGates::of(COMMAND_CONSULT_PERMITS)
     }
 
-    fn of(claude: usize, command: usize) -> ConsultGates {
+    fn of(command: usize) -> ConsultGates {
+        let gate = |builtin| {
+            let size = match builtin {
+                AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Llm => {
+                    crate::config::ModelLimits::MODEL_CALL.max_concurrent
+                }
+                AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
+            };
+            (builtin, size, Arc::new(tokio::sync::Semaphore::new(size)))
+        };
         ConsultGates {
-            claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
-            jev: Arc::new(JevClients::new(JEV_CONSULT_PERMITS)),
+            models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
+            jev: Arc::default(),
+        }
+    }
+
+    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; 3]> {
+        self.models
+            .lock()
+            .expect("the model gates mutex is never poisoned: no panic runs while it is held")
+    }
+
+    pub(crate) fn model(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
+        let models = self.models();
+        let (_, _, gate) = models
+            .iter()
+            .find(|(of, ..)| *of == builtin)
+            .expect("every builtin has a gate");
+        Arc::clone(gate)
+    }
+
+    /// Size the model gates by the serving deployment's tables. A table the deployment does
+    /// not declare leaves its gate as it is: no backend of that deployment consults it.
+    pub(crate) fn size_by(&self, externals: &Externals) {
+        for builtin in AnnotatorBuiltin::ALL {
+            if let Some(limits) = externals.model_limits(builtin) {
+                self.resize(builtin, limits.max_concurrent);
+            }
+        }
+    }
+
+    pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
+        let mut models = self.models();
+        let (_, size, gate) = models
+            .iter_mut()
+            .find(|(of, ..)| *of == builtin)
+            .expect("every builtin has a gate");
+        if *size != max_concurrent {
+            *size = max_concurrent;
+            *gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         }
     }
 }
 
 impl ExternalServices {
     #[cfg(test)]
-    pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
-        &self.gates.claude
-    }
-
-    /// The permits the `llm` backend has free, `None` without one.
-    #[cfg(test)]
-    pub(crate) fn llm_permits(&self) -> Option<usize> {
-        self.backends
-            .values()
-            .flat_map(BTreeMap::values)
-            .find_map(|backend| match backend {
-                Backend::Llm(llm) => Some(llm.available_permits()),
-                _ => None,
-            })
+    pub(crate) fn model_permits(&self, builtin: AnnotatorBuiltin) -> usize {
+        self.gates.model(builtin).available_permits()
     }
 
     /// Resolves every configured `builtin` reference against the stock
@@ -329,30 +358,20 @@ impl ExternalServices {
             .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
-        let claude = ClaudeCodeBackend {
-            #[cfg(unix)]
-            command: config.claude_code.command.clone(),
-            #[cfg(unix)]
-            model: config.claude_code.model.clone(),
-            timeout: config.claude_code.timeout,
-            #[cfg(unix)]
-            max_body_bytes: config.max_body_bytes,
-        };
+        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
+        // A profile without the key it needs serves nothing: a deployment that consults it
+        // refuses to open, so an entry naming it never reaches here.
         let llm = config
             .llm
             .as_ref()
-            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes))
+            .filter(|profile| profile.missing_key().is_none())
+            .map(|profile| LlmBackend::new(profile, config.max_body_bytes, &gates))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
-        let jev = config.jev.as_ref().map(|profile| {
-            JevBackend::new(
-                profile,
-                config.timeout,
-                config.max_body_bytes,
-                Arc::clone(&gates.jev),
-                JevTiming::STANDARD,
-            )
-        });
+        let jev = config
+            .jev
+            .as_ref()
+            .and_then(|profile| JevBackend::new(profile, config.max_body_bytes, &gates, JevTiming::STANDARD));
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -516,11 +535,7 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
-            Backend::Llm(llm) => match ModelPrompt::new(consult) {
-                Some(prompt) => llm.consult(&prompt).await,
-                None => Err(NoAnswerReason::Unregistered),
-            },
+            Backend::Model(model) => self.consult_model(model, consult, seen).await,
             Backend::Jev(jev) => {
                 let (answered, record) = Box::pin(jev.consult(consult)).await;
                 if let Some(seen) = seen {
@@ -582,16 +597,7 @@ impl ExternalServices {
         let input = serde_json::to_vec(consult).map_err(|_| NoAnswerReason::Malformed)?;
         // As for claude: one deadline covers the permit wait and the process.
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gates.command.acquire()).await {
-            Ok(permit) => permit.expect("the command consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!(
-                    name = consult.name,
-                    "the command consult gate stayed saturated for the whole budget"
-                );
-                return Err(NoAnswerReason::Timeout);
-            }
-        };
+        let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
         let (output, transcript) = run_command(command, input, deadline, self.max_body_bytes, transcript).await;
         drop(permit);
@@ -601,31 +607,17 @@ impl ExternalServices {
         read_answer(&output?)
     }
 
-    async fn consult_claude(
+    async fn consult_model(
         &self,
-        claude: &ClaudeCodeBackend,
+        model: &PromptModel,
         consult: &Consult,
+        seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
-        let Some(prompt) = ModelPrompt::new(consult) else {
-            return Err(NoAnswerReason::Unregistered);
-        };
-        // One deadline covers the permit wait and the subprocess: queueing behind the
-        // gate spends the same budget the consult itself would, so a saturated pool
-        // cannot stack timeout waves.
-        let deadline = tokio::time::Instant::now() + claude.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gates.claude.acquire()).await {
-            Ok(permit) => permit.expect("the claude consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!(
-                    name = consult.name,
-                    "the claude consult gate stayed saturated for the whole budget"
-                );
-                return Err(NoAnswerReason::Timeout);
-            }
-        };
-        let answered = claude.consult(&prompt, deadline).await;
-        drop(permit);
-        answered
+        let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
+        match model {
+            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
+            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
+        }
     }
 
     async fn call_module(
@@ -719,6 +711,23 @@ impl ExternalServices {
     }
 }
 
+/// Wait for a permit of a consult gate until `deadline`, the same deadline the consult
+/// itself runs under; a gate saturated for the whole budget is a timeout.
+pub(crate) async fn acquire_within<'gate>(
+    gate: &'gate tokio::sync::Semaphore,
+    deadline: tokio::time::Instant,
+    what: &'static str,
+    name: &str,
+) -> Result<tokio::sync::SemaphorePermit<'gate>, NoAnswerReason> {
+    match tokio::time::timeout_at(deadline, gate.acquire()).await {
+        Ok(permit) => Ok(permit.expect("a consult gate is never closed")),
+        Err(_) => {
+            tracing::warn!(name, "the {what} consult gate stayed saturated for the whole budget");
+            Err(NoAnswerReason::Timeout)
+        }
+    }
+}
+
 /// Read a response body into `body` under the cap, stopping at the first chunk past it.
 pub(crate) async fn read_body(
     response: &mut reqwest::Response,
@@ -759,10 +768,10 @@ fn builtin_backend(
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
         (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
-            Some(Backend::ClaudeCode(claude.clone()))
+            Some(Backend::Model(PromptModel::ClaudeCode(claude.clone())))
         }
         (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
-            llm.cloned().map(Backend::Llm)
+            llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
         }
         (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
         _ => Stock::for_section(section, &builtin)
@@ -1196,6 +1205,8 @@ fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use crate::model::claude_code::run_claude_code;
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::sync::OnceLock;
@@ -1205,14 +1216,14 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    #[cfg(unix)]
-    use crate::builtins::run_claude_code;
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
-        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, MembersAnswer,
-        SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, InputArtifact,
+        MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
+    #[cfg(unix)]
+    use crate::test_support::fake_claude;
     use appa_engine::audience::DeclaredTemplate;
     use appa_engine::label::ChainAudience;
 
@@ -1241,14 +1252,7 @@ mod tests {
     }
 
     async fn stub(router: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral loopback port binds");
-        let addr = listener.local_addr().expect("the bound address is readable");
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("the stub serves");
-        });
-        format!("http://{addr}/")
+        format!("http://{}/", crate::test_support::serve(router).await)
     }
 
     fn endpoint(url: &str) -> Implementation {
@@ -1296,6 +1300,29 @@ mod tests {
         }
     }
 
+    const MODEL_LIMITS: crate::config::ModelLimits = crate::config::ModelLimits {
+        timeout: Duration::from_secs(2),
+        max_concurrent: 2,
+    };
+
+    fn llm_profile(url: String) -> crate::config::LlmProfile {
+        crate::config::LlmProfile {
+            provider: crate::config::LlmProvider::Anthropic,
+            model: "m".to_string(),
+            url: Some(url),
+            key: Some(crate::config::ProfileKey::Set(Token::new("sekret".to_string()))),
+            limits: MODEL_LIMITS,
+        }
+    }
+
+    fn jev_profile(url: String) -> crate::config::JevProfile {
+        crate::config::JevProfile {
+            url,
+            key: crate::config::ProfileKey::Set(Token::new("sekret".to_string())),
+            limits: MODEL_LIMITS,
+        }
+    }
+
     fn services_over(config: Externals) -> ExternalServices {
         services_declaring(config, BTreeMap::new())
     }
@@ -1309,7 +1336,7 @@ mod tests {
             config,
             &ModuleRegistry::empty(),
             annotator_builtins,
-            ConsultGates::of(4, 8),
+            ConsultGates::of(8),
         )
         .expect("no builtin references are configured")
     }
@@ -1403,24 +1430,13 @@ mod tests {
             .await
     }
 
-    /// A fake `claude` executable: a shell script the backend's `command` override runs.
     #[cfg(unix)]
-    fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("fake-claude");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
-        path
-    }
-
-    #[cfg(unix)]
-    fn claude_backend(command: std::path::PathBuf, timeout_ms: u64, cap: usize) -> ClaudeCodeBackend {
-        ClaudeCodeBackend {
+    fn claude_backend(command: std::path::PathBuf, cap: usize) -> ClaudeCodeBackend {
+        let config = crate::config::ClaudeCode {
             command,
-            model: "sonnet".to_string(),
-            timeout: Duration::from_millis(timeout_ms),
-            max_body_bytes: cap,
-        }
+            ..Default::default()
+        };
+        ClaudeCodeBackend::new(&config, cap, &ConsultGates::per_runtime())
     }
 
     #[tokio::test]
@@ -1555,7 +1571,7 @@ mod tests {
                 command_config(dir.path(), script, 5000, 1024),
                 &ModuleRegistry::empty(),
                 BTreeMap::new(),
-                ConsultGates::of(4, command_permits),
+                ConsultGates::of(command_permits),
             )
             .expect("no builtin references are configured");
             let started = std::time::Instant::now();
@@ -1865,11 +1881,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 pid_file.display()
             ),
         );
-        let backend = claude_backend(command, 10_000, 65_536);
+        let backend = claude_backend(command, 65_536);
         let prompt = ModelPrompt::new(&annotation_consult("review", serde_json::json!({}))).expect("renders");
         let consult = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            run_claude_code(&backend, &prompt, deadline).await
+            run_claude_code(&backend, &prompt, deadline, None).await
         });
         let pid = recorded_pid(&pid_file).await;
         consult.abort();
@@ -1931,9 +1947,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         // Not even the credential a `command` external inherits: this consult reads none.
         unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "leaky") };
         let raw = run_claude_code(
-            &claude_backend(command, 2000, 65_536),
+            &claude_backend(command, 65_536),
             &prompt,
             tokio::time::Instant::now() + Duration::from_millis(2000),
+            None,
         )
         .await
         .expect("the fake Claude process returns structured output");
@@ -1987,7 +2004,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             let prompt = &prompt;
             async move {
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-                run_claude_code(&claude_backend(command, timeout_ms, cap), prompt, deadline).await
+                run_claude_code(&claude_backend(command, cap), prompt, deadline, None).await
             }
         };
         assert_eq!(
@@ -2038,12 +2055,20 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             );
         }
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+        let (answered, transcript) = services
+            .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
+            .await;
         assert_eq!(
-            services
-                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
-                .await,
+            answered,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
+        let transcript = transcript.expect("a claude consult is recorded");
+        assert_eq!(transcript.backend, ConsultBackend::ClaudeCode);
+        assert_eq!(
+            transcript.raw_response.as_deref(),
+            Some(&br#"{"type":"result","structured_output":{"ruling":"approve","reason":"fine"}}"#[..])
+        );
+        assert_eq!(transcript.http_status, None);
         assert!(matches!(
             services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)
@@ -2071,26 +2096,27 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             }),
         ))
         .await;
-        let profile = crate::config::LlmProfile {
-            provider: crate::config::LlmProvider::Anthropic,
-            model: "m".to_string(),
-            url: Some(url),
-            token: Some(Token::new("sekret".to_string())),
-            timeout: None,
-            max_concurrent: 2,
-        };
+        let profile = llm_profile(url);
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile.clone());
         for section in [&mut config.authorities, &mut config.sanitizers] {
             section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         }
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Llm));
+        let (answered, transcript) = services
+            .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
+            .await;
         assert_eq!(
-            services
-                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
-                .await,
+            answered,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
+        let transcript = transcript.expect("an llm consult is recorded");
+        assert_eq!(transcript.backend, ConsultBackend::Llm);
+        assert_eq!(
+            transcript.raw_response.as_deref(),
+            Some(&br#"{"ruling":"approve","reason":"fine"}"#[..])
+        );
+        assert_eq!(transcript.http_status, None);
         assert!(matches!(
             services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)
@@ -2108,10 +2134,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn the_jev_builtin_serves_annotators_only() {
         for section in [Section::Authorities, Section::Sanitizers] {
             let mut config = externals(None, 2000, 65_536);
-            config.jev = Some(crate::config::JevProfile {
-                url: "https://jev.invalid/v1/systemone".to_string(),
-                key: crate::config::JevKey::Set(Token::new("sekret".to_string())),
-            });
+            config.jev = Some(jev_profile("https://jev.invalid/v1/systemone".to_string()));
             match section {
                 Section::Authorities => &mut config.authorities,
                 _ => &mut config.sanitizers,
@@ -2121,13 +2144,83 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 config,
                 &ModuleRegistry::empty(),
                 declared("classify", AnnotatorBuiltin::Jev),
-                ConsultGates::of(4, 8),
+                ConsultGates::of(8),
             ) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section.name()),
                 Err(other) => panic!("{} jev must refuse as unknown, got {other}", section.name()),
                 Ok(_) => panic!("{} jev must refuse", section.name()),
             }
         }
+    }
+
+    /// No model answers a directory read or an input program's finding. The configuration
+    /// never binds a model backend for either kind, so the test moves the builtin annotators'
+    /// backends under those kinds: each consult is `Unregistered`, and nothing is asked.
+    #[tokio::test]
+    async fn a_model_backend_asked_what_it_cannot_prompt_is_unregistered() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&asked);
+        let url = stub(Router::new().fallback(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }
+        }))
+        .await;
+        let mut config = externals(None, 2000, 65_536);
+        config.llm = Some(llm_profile(url.clone()));
+        config.jev = Some(jev_profile(url));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builtins = BTreeMap::from([
+            ("llm".to_string(), AnnotatorBuiltin::Llm),
+            ("jev".to_string(), AnnotatorBuiltin::Jev),
+        ]);
+        #[cfg(unix)]
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        #[cfg(unix)]
+        let ran = dir.path().join("ran");
+        #[cfg(unix)]
+        {
+            config.claude_code.command = fake_claude(dir.path(), &format!("touch {}", ran.display()));
+            builtins.insert("claude".to_string(), AnnotatorBuiltin::ClaudeCode);
+        }
+        let names: Vec<String> = builtins.keys().cloned().collect();
+        let mut services = services_declaring(config, builtins);
+
+        let consults: [fn(&str) -> Consult; 2] = [
+            |name| Consult::audience_selector(name, "user-group/eng", vec![]),
+            |name| {
+                let input = InputArtifact {
+                    tool: "fetch".to_string(),
+                    arguments: serde_json::json!({}),
+                    cwd: None,
+                };
+                Consult::input(name, input)
+            },
+        ];
+        let mut bound = ConsultKind::Annotation;
+        for consult_of in consults {
+            let models = services
+                .backends
+                .remove(&bound)
+                .expect("the builtin annotators are bound");
+            bound = consult_of("any").kind();
+            services.backends.insert(bound, models);
+            for name in &names {
+                let (outcome, transcript) = services.consult_transcribed(&consult_of(name), None, None).await;
+                assert_eq!(
+                    outcome,
+                    ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
+                    "{name} {bound:?}"
+                );
+                assert!(transcript.is_some(), "{name} reached its model backend");
+            }
+        }
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no provider was asked"
+        );
+        #[cfg(unix)]
+        assert!(!ran.exists(), "no claude process ran");
     }
 
     /// A roster answers a member lookup in process — the mapped reader, or `null` for a
@@ -2393,12 +2486,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            BTreeMap::new(),
-            ConsultGates::of(4, 8),
-        ) {
+        match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -2419,12 +2507,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 _ => &mut config.authorities,
             };
             table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
-            match ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                BTreeMap::new(),
-                ConsultGates::of(4, 8),
-            ) {
+            match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section),
                 Err(other) => panic!("{section}/{builtin} must refuse as unknown, got {other}"),
                 Ok(_) => panic!("{section}/{builtin} must refuse"),
@@ -2490,7 +2573,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(4, 8))
+        let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(8))
             .expect("the module reference resolves");
         (services, dir)
     }

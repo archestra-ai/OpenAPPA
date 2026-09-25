@@ -27,9 +27,9 @@ const TERMS = {
   sanitizers:
     "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "Determines a tool call's delta, requires (including attention), and effects. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
+    "Can determine a tool call's delta, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
   annotators:
-    "Components that determine each tool call's restrictions, requirements, and effects within their configured permits.",
+    "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. The jev builtin determines audience and trust only.",
   annotation:
     "The restrictions, requirements, and effects for one tool call. These come from a static tool contract or an annotator. Changing an annotated call requires a new annotation; replaying it uses the recorded answer.",
   "[[policy.annotator]]":
@@ -152,11 +152,11 @@ const TERMS = {
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":
-    "Selects the provider, model, authentication, and request limits shared by all builtin = \"llm\" components. This section is required when any component uses that implementation.",
+    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all builtin = \"llm\" components. This section and its key are required when any component uses that implementation.",
   'builtin = "jev"':
-    "Asks TypeSafe's Jev classifier to label an annotator's call with audience and trust. Sends the redacted tool name, description, and arguments to the TypeSafe API. Requires [externals.jev].",
+    "Asks TypeSafe's Jev classifier to label an annotator's call with audience and trust. Sends the tool name and the redacted description and arguments to the TypeSafe API. Requires [externals.jev].",
   "[externals.jev]":
-    "Names the environment variable holding the TypeSafe API key for all builtin = \"jev\" annotators. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
+    "Names the environment variable holding the TypeSafe API key for all builtin = \"jev\" annotators, and optional request limits (timeout_ms, max_concurrent). A deployment that declares a jev annotator opens only when the key is set. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
 
   /* Sanitizers */
   on: "Selects the data a sanitizer can transform: tool_output for a tool result or child agent's answer, or tool_input for a tool call's arguments.",
