@@ -9,16 +9,19 @@ trust. Guests and installed integrations write as the workspace.
 
 Slack answers through `conversations.info` for a conversation id and
 `users.info` for a user id standing for the DM with that user, with the
-scopes the `channel/<id>` audience selector already needs. Where Slack
-cannot answer — no token, an error, a timeout — the conversation keeps
-the session's trust. A malformed consult, or a policy whose mandate does
-not name the conversation's readers, is refused (exit status 2 for the
-mandate).
+scopes the `channel/<id>` audience selector already needs. Without a
+token the battery stays static: every conversation keeps the session's
+trust. With one, a network error or rate limit is retried, and a Slack
+failure that outlasts the retries exits nonzero, so the runtime refuses
+the read rather than guess. A malformed consult, or a policy whose
+mandate does not name the conversation's readers, is refused (exit
+status 2 for the mandate).
 """
 
 import json
 import os
 import sys
+import time
 
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
@@ -28,6 +31,7 @@ from slack_api import TOKEN_VAR, api_ok, conversation_kind, web_api  # noqa: E40
 
 NAME = "slack.conversation-trust"
 MAX_INPUT_BYTES = 64 * 1024
+RETRY_DELAYS_SECONDS = (1, 2)
 
 
 def channel_of(consult):
@@ -69,17 +73,25 @@ def is_external(call, channel_id):
             return bool(conversation.get("is_ext_shared") or conversation.get("is_pending_ext_shared"))
 
 
-def established_external(call, channel_id):
+def is_transient(error):
+    return isinstance(error, OSError) or str(error).endswith("failed: ratelimited")
+
+
+def established_external(call, channel_id, delays=RETRY_DELAYS_SECONDS):
     """Whether Slack reports the conversation as shared outside the
-    workspace; `False` where Slack cannot answer."""
+    workspace. Without a token, `False`; a transient failure is retried,
+    and any failure left afterwards is raised."""
     if call is None:
-        print(f"{NAME}: {TOKEN_VAR} is not set; {channel_id} keeps the session's trust", file=sys.stderr)
         return False
-    try:
-        return is_external(call, channel_id)
-    except (OSError, RuntimeError, ValueError, AttributeError) as error:
-        print(f"{NAME}: {error}; {channel_id} keeps the session's trust", file=sys.stderr)
-        return False
+    for delay in delays:
+        try:
+            return is_external(call, channel_id)
+        except (OSError, RuntimeError) as error:
+            if not is_transient(error):
+                raise
+            print(f"{NAME}: {error}; retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
+    return is_external(call, channel_id)
 
 
 def annotation(channel_id, external):

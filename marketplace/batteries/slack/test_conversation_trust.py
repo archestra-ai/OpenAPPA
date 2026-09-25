@@ -13,10 +13,12 @@ SPEC.loader.exec_module(ANNOTATOR)
 
 
 def fixture_api(responses):
-    """A call answering from recorded Slack Web API payloads by method."""
+    """A call answering from recorded Slack Web API payloads by method, in
+    order; an exception in the list is raised in its turn."""
+    remaining = {method: list(answers) for method, answers in responses.items()}
 
     def call(method, **params):
-        response = responses[method]
+        response = remaining[method].pop(0)
         if isinstance(response, Exception):
             raise response
         return response
@@ -36,24 +38,36 @@ def consult(channel_id="C1", audiences=None, **overrides):
 
 
 class Established(unittest.TestCase):
+    def established(self, method, *answers, channel_id="C1"):
+        return ANNOTATOR.established_external(fixture_api({method: list(answers)}), channel_id, delays=(0, 0))
+
     def test_a_conversation_shared_with_another_organization_is_external(self):
         for channel in ({"is_ext_shared": True}, {"is_pending_ext_shared": True}):
-            call = fixture_api({"conversations.info": {"ok": True, "channel": channel}})
-            self.assertTrue(ANNOTATOR.established_external(call, "C1"), channel)
+            self.assertTrue(self.established("conversations.info", {"ok": True, "channel": channel}), channel)
 
     def test_a_workspace_conversation_is_not_external(self):
         for channel in ({"is_ext_shared": False, "is_shared": True}, {"is_im": True}):
-            call = fixture_api({"conversations.info": {"ok": True, "channel": channel}})
-            self.assertFalse(ANNOTATOR.established_external(call, "C1"), channel)
+            self.assertFalse(self.established("conversations.info", {"ok": True, "channel": channel}), channel)
 
     def test_a_dm_with_a_user_from_another_organization_is_external(self):
-        self.assertTrue(ANNOTATOR.established_external(fixture_api({"users.info": {"ok": True, "user": {"is_stranger": True}}}), "U1"))
-        self.assertFalse(ANNOTATOR.established_external(fixture_api({"users.info": {"ok": True, "user": {"is_restricted": True}}}), "U1"))
+        self.assertTrue(self.established("users.info", {"ok": True, "user": {"is_stranger": True}}, channel_id="U1"))
+        self.assertFalse(self.established("users.info", {"ok": True, "user": {"is_restricted": True}}, channel_id="U1"))
 
-    def test_a_conversation_slack_cannot_answer_for_is_not_external(self):
-        for response in ({"ok": False, "error": "ratelimited"}, OSError("timed out"), ["malformed"]):
-            self.assertFalse(ANNOTATOR.established_external(fixture_api({"conversations.info": response}), "C1"), response)
+    def test_without_a_token_the_battery_stays_static(self):
         self.assertFalse(ANNOTATOR.established_external(None, "C1"))
+
+    def test_a_transient_failure_is_retried(self):
+        shared = {"ok": True, "channel": {"is_ext_shared": True}}
+        self.assertTrue(self.established("conversations.info", OSError("timed out"), {"ok": False, "error": "ratelimited"}, shared))
+
+    def test_a_failure_that_outlasts_the_retries_is_raised(self):
+        with self.assertRaises(OSError):
+            self.established("conversations.info", OSError("timed out"), OSError("timed out"), OSError("timed out"))
+
+    def test_a_definite_slack_error_is_raised_without_retrying(self):
+        for response in ({"ok": False, "error": "channel_not_found"}, ["malformed"]):
+            with self.assertRaises(RuntimeError, msg=response):
+                self.established("conversations.info", response)
 
 
 class Answer(unittest.TestCase):

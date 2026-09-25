@@ -118,9 +118,10 @@ a DM it reads `users.info`: an `is_stranger` user is from another
 organization. A Slack Connect conversation enters `suspicious`; any
 other keeps the session's trust. The script uses the same
 `APPA_PROVIDER_SLACK_TOKEN` and the same scopes the `channel/<id>`
-selector already needs, so it adds no setup. Where Slack cannot answer
-(no token, an error, a rate limit), the conversation keeps the
-session's trust. The script refuses a consult whose mandate does not
+selector already needs, so it adds no setup. Without the token the
+battery stays static: every conversation keeps the session's trust.
+With it, a network error or rate limit is retried twice, and a failure
+left after that exits nonzero, so the runtime refuses the read. The script refuses a consult whose mandate does not
 name `@slack:channel/<id>` (exit status 2). Each conversation read costs
 one extra Slack API call.
 
@@ -133,8 +134,8 @@ Web API payloads for the selectors, id classification and refusals for
 `python3 test_audience_source.py`.
 
 **`test_conversation_trust.py`** — tests without network: recorded
-`conversations.info` and `users.info` payloads, the fall-back when Slack
-cannot answer, and the consult and mandate refusals. Run with
+`conversations.info` and `users.info` payloads, the static answer without a
+token, retries and the refusal when Slack keeps failing, and the consult and mandate refusals. Run with
 `python3 test_conversation_trust.py`.
 
 ## Limits

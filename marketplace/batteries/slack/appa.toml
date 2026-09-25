@@ -19,8 +19,9 @@
 # words an integration relays. A read of one conversation asks Slack,
 # through `conversation-trust.py`, whether it is shared with another
 # organization (Slack Connect); a shared conversation enters
-# `suspicious`, and one Slack cannot answer for keeps the session's
-# trust. Searches, canvases, and files name no conversation, so they keep
+# `suspicious`. Without a token the battery stays static and every
+# conversation keeps the session's trust; with one, a Slack failure that
+# outlasts the script's retries refuses the read. Searches, canvases, and files name no conversation, so they keep
 # the session's trust even when a result came from a shared one.
 #
 # A root rule placed above these can narrow any of them by argument.
