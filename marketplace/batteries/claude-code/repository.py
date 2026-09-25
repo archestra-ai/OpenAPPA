@@ -44,6 +44,7 @@ HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
 API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)")
+URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 CHECKOUT_API_PATH = re.compile(r"^/?repos/\{owner\}/\{repo\}(?:/|$)")
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
@@ -137,8 +138,9 @@ def gh_targets(words, environment, directory):
             endpoint = next((word for word in rest if not word.startswith("-")), "")
             if not (API_PATH.match(endpoint) or CHECKOUT_API_PATH.match(endpoint)):
                 raise Unfollowable(f"gh api {endpoint} names no repository this input can establish")
-        case [_, _, argument, *_] if "://" in argument and not GITHUB_URL.match(argument):
-            raise Unfollowable(f"{argument} is on a host other than github.com")
+    for previous, word in zip(["gh", *words], words):
+        if URL.match(word) and not (GITHUB_URL.match(word) or API_PATH.match(word)) and not previous.startswith("-"):
+            raise Unfollowable(f"{word} is on a host other than github.com")
     for index, word in enumerate(words):
         if word.startswith("--hostname"):
             raise Unfollowable("gh --hostname reaches a host other than github.com")

@@ -115,6 +115,7 @@ class RepositoryTargets(unittest.TestCase):
             "gh api gists --input body.json",
             "gh api graphql -f query=mutation",
             "gh issue view https://ghe.example/acme/api/issues/1",
+            "gh pr view --json title https://ghe.example/acme/secret/pull/1",
             "~/bin/gh pr create",
             "HOME=/tmp/evil git push origin",
             "export XDG_CONFIG_HOME=/tmp/evil; git push origin",
