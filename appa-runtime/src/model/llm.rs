@@ -18,7 +18,7 @@ use rig_core::providers::{anthropic, gemini, ollama, openai};
 
 use crate::config::{LlmProfile, LlmProvider};
 use crate::consult::ModelPrompt;
-use crate::external::NoAnswerReason;
+use crate::external::{NoAnswerReason, acquire_within};
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
 /// body) plus the schema's own overhead, and never less than a short ruling needs.
@@ -150,15 +150,9 @@ impl LlmBackend {
 
     /// One consult. The deadline covers the permit wait and the request: queueing behind
     /// the pool spends the same budget the consult itself would.
-    pub async fn consult(&self, prompt: &ModelPrompt) -> Result<serde_json::Value, NoAnswerReason> {
+    pub async fn consult(&self, prompt: &ModelPrompt, name: &str) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gate.acquire()).await {
-            Ok(permit) => permit.expect("the llm consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!("the llm consult gate stayed saturated for the whole budget");
-                return Err(NoAnswerReason::Timeout);
-            }
-        };
+        let permit = acquire_within(&self.gate, deadline, "llm", name).await?;
         let answered = tokio::time::timeout_at(deadline, self.prompt(prompt)).await;
         drop(permit);
         match answered {
@@ -385,7 +379,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         let backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 4);
 
-        let answer = backend.consult(&prompt()).await;
+        let answer = backend.consult(&prompt(), "judge").await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "approve" })));
 
         let requests = stub.requests();
@@ -415,7 +409,7 @@ mod tests {
         stub.answering(StubAnswer::Text("{\"ruling\":\"deny\"}".to_string()));
         let backend = built(LlmProvider::OpenAi, format!("http://{addr}/v1"), 4);
 
-        let answer = backend.consult(&prompt()).await;
+        let answer = backend.consult(&prompt(), "judge").await;
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "deny" })));
 
         let requests = stub.requests();
@@ -453,7 +447,7 @@ mod tests {
 
         stub.answering(StubAnswer::Status(500));
         assert_eq!(
-            backend.consult(&prompt()).await,
+            backend.consult(&prompt(), "judge").await,
             Err(NoAnswerReason::NonSuccess {
                 status: 500,
                 detail: None
@@ -461,11 +455,14 @@ mod tests {
         );
 
         stub.answering(StubAnswer::Text("not json".to_string()));
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Malformed));
+        assert_eq!(
+            backend.consult(&prompt(), "judge").await,
+            Err(NoAnswerReason::Malformed)
+        );
 
         stub.answering(StubAnswer::Stall);
         let started = std::time::Instant::now();
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Timeout));
+        assert_eq!(backend.consult(&prompt(), "judge").await, Err(NoAnswerReason::Timeout));
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "the profile's own budget bounds the consult"
@@ -475,7 +472,7 @@ mod tests {
         let unreachable = format!("http://{}", closed.local_addr().expect("the address reads"));
         drop(closed);
         let backend = built(LlmProvider::Anthropic, unreachable, 4);
-        assert!(backend.consult(&prompt()).await.is_err());
+        assert!(backend.consult(&prompt(), "judge").await.is_err());
     }
 
     #[tokio::test]
@@ -485,14 +482,17 @@ mod tests {
 
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
         assert_eq!(
-            backend.consult(&prompt()).await,
+            backend.consult(&prompt(), "judge").await,
             Ok(serde_json::json!({ "ruling": "approve" }))
         );
         assert_eq!(stub.requests()[0].1["max_tokens"], 48, "a token is at least a byte");
 
         let long = format!("{{\"ruling\":\"approve\",\"reason\":\"{}\"}}", "x".repeat(64));
         stub.answering(StubAnswer::Text(long));
-        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Oversized));
+        assert_eq!(
+            backend.consult(&prompt(), "judge").await,
+            Err(NoAnswerReason::Oversized)
+        );
     }
 
     /// Each deployment's backend bounds its own consults by its own profile: a deployment
@@ -509,12 +509,12 @@ mod tests {
 
         let ask = prompt();
         let answers = futures_util::future::join_all([
-            narrow.consult(&ask),
-            wide.consult(&ask),
-            narrow.consult(&ask),
-            wide.consult(&ask),
-            narrow.consult(&ask),
-            wide.consult(&ask),
+            narrow.consult(&ask, "judge"),
+            wide.consult(&ask, "judge"),
+            narrow.consult(&ask, "judge"),
+            wide.consult(&ask, "judge"),
+            narrow.consult(&ask, "judge"),
+            wide.consult(&ask, "judge"),
         ])
         .await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");

@@ -51,9 +51,8 @@ mod elicit;
 mod engine;
 mod events;
 mod external;
-mod jev;
 mod label_guide;
-mod llm;
+mod model;
 mod recorder;
 mod telemetry;
 #[cfg(test)]

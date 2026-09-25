@@ -13,15 +13,17 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
+use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
     AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals,
     Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
-use crate::jev::{JevBackend, JevClients, JevTiming};
-use crate::llm::LlmBackend;
+use crate::model::PromptModel;
+use crate::model::claude_code::{ClaudeCodeBackend, run_claude_code};
+use crate::model::jev::{JevBackend, JevClients, JevTiming};
+use crate::model::llm::LlmBackend;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
@@ -166,8 +168,7 @@ enum Backend {
     Stock(Stock),
     Module(Arc<LoadedModule>),
     Hitl,
-    ClaudeCode(ClaudeCodeBackend),
-    Llm(LlmBackend),
+    Model(PromptModel),
     Jev(JevBackend),
     /// An inline roster: answers a member lookup from the table, in process, and nothing
     /// else.
@@ -188,8 +189,8 @@ impl Backend {
             Backend::Command(_) => Some(ConsultBackend::Command),
             Backend::Module(_) => Some(ConsultBackend::Module),
             Backend::Hitl => Some(ConsultBackend::Hitl),
-            Backend::ClaudeCode(_) => Some(ConsultBackend::ClaudeCode),
-            Backend::Llm(_) => Some(ConsultBackend::Llm),
+            Backend::Model(PromptModel::ClaudeCode(_)) => Some(ConsultBackend::ClaudeCode),
+            Backend::Model(PromptModel::Llm(_)) => Some(ConsultBackend::Llm),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
             Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
         }
@@ -296,7 +297,7 @@ impl ExternalServices {
             .values()
             .flat_map(BTreeMap::values)
             .find_map(|backend| match backend {
-                Backend::Llm(llm) => Some(llm.available_permits()),
+                Backend::Model(PromptModel::Llm(llm)) => Some(llm.available_permits()),
                 _ => None,
             })
     }
@@ -516,11 +517,7 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
-            Backend::Llm(llm) => match ModelPrompt::new(consult) {
-                Some(prompt) => llm.consult(&prompt).await,
-                None => Err(NoAnswerReason::Unregistered),
-            },
+            Backend::Model(model) => self.consult_model(model, consult).await,
             Backend::Jev(jev) => {
                 let (answered, record) = Box::pin(jev.consult(consult)).await;
                 if let Some(seen) = seen {
@@ -582,16 +579,7 @@ impl ExternalServices {
         let input = serde_json::to_vec(consult).map_err(|_| NoAnswerReason::Malformed)?;
         // As for claude: one deadline covers the permit wait and the process.
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gates.command.acquire()).await {
-            Ok(permit) => permit.expect("the command consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!(
-                    name = consult.name,
-                    "the command consult gate stayed saturated for the whole budget"
-                );
-                return Err(NoAnswerReason::Timeout);
-            }
-        };
+        let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
         let (output, transcript) = run_command(command, input, deadline, self.max_body_bytes, transcript).await;
         drop(permit);
@@ -601,31 +589,21 @@ impl ExternalServices {
         read_answer(&output?)
     }
 
-    async fn consult_claude(
-        &self,
-        claude: &ClaudeCodeBackend,
-        consult: &Consult,
-    ) -> Result<serde_json::Value, NoAnswerReason> {
-        let Some(prompt) = ModelPrompt::new(consult) else {
-            return Err(NoAnswerReason::Unregistered);
-        };
-        // One deadline covers the permit wait and the subprocess: queueing behind the
-        // gate spends the same budget the consult itself would, so a saturated pool
-        // cannot stack timeout waves.
-        let deadline = tokio::time::Instant::now() + claude.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gates.claude.acquire()).await {
-            Ok(permit) => permit.expect("the claude consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!(
-                    name = consult.name,
-                    "the claude consult gate stayed saturated for the whole budget"
-                );
-                return Err(NoAnswerReason::Timeout);
+    async fn consult_model(&self, model: &PromptModel, consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
+        let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
+        match model {
+            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name).await,
+            PromptModel::ClaudeCode(claude) => {
+                // One deadline covers the permit wait and the subprocess: queueing behind the
+                // gate spends the same budget the consult itself would, so a saturated pool
+                // cannot stack timeout waves.
+                let deadline = tokio::time::Instant::now() + claude.timeout;
+                let permit = acquire_within(&self.gates.claude, deadline, "claude", &consult.name).await?;
+                let answered = run_claude_code(claude, &prompt, deadline).await;
+                drop(permit);
+                answered
             }
-        };
-        let answered = claude.consult(&prompt, deadline).await;
-        drop(permit);
-        answered
+        }
     }
 
     async fn call_module(
@@ -719,6 +697,23 @@ impl ExternalServices {
     }
 }
 
+/// Wait for a permit of a consult gate until `deadline`, the same deadline the consult
+/// itself runs under; a gate saturated for the whole budget is a timeout.
+pub(crate) async fn acquire_within<'gate>(
+    gate: &'gate tokio::sync::Semaphore,
+    deadline: tokio::time::Instant,
+    what: &'static str,
+    name: &str,
+) -> Result<tokio::sync::SemaphorePermit<'gate>, NoAnswerReason> {
+    match tokio::time::timeout_at(deadline, gate.acquire()).await {
+        Ok(permit) => Ok(permit.expect("a consult gate is never closed")),
+        Err(_) => {
+            tracing::warn!(name, "the {what} consult gate stayed saturated for the whole budget");
+            Err(NoAnswerReason::Timeout)
+        }
+    }
+}
+
 /// Read a response body into `body` under the cap, stopping at the first chunk past it.
 pub(crate) async fn read_body(
     response: &mut reqwest::Response,
@@ -759,10 +754,10 @@ fn builtin_backend(
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
         (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
-            Some(Backend::ClaudeCode(claude.clone()))
+            Some(Backend::Model(PromptModel::ClaudeCode(claude.clone())))
         }
         (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
-            llm.cloned().map(Backend::Llm)
+            llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
         }
         (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
         _ => Stock::for_section(section, &builtin)
@@ -1206,7 +1201,6 @@ mod tests {
 
     use super::*;
     #[cfg(unix)]
-    use crate::builtins::run_claude_code;
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,

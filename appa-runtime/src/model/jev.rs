@@ -31,7 +31,7 @@ use tokio::time::Instant;
 
 use crate::config::{Endpoint, EndpointHost, JevKey, JevProfile};
 use crate::consult::{Consult, ConsultBody};
-use crate::external::NoAnswerReason;
+use crate::external::{NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use questions::Questions;
 
@@ -177,16 +177,9 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let permit = match tokio::time::timeout_at(deadline, self.clients.permits.acquire()).await {
-            Ok(permit) => permit.expect("the jev consult gate is never closed"),
-            Err(_) => {
-                tracing::warn!(
-                    name = consult.name,
-                    "the jev consult gate stayed saturated for the whole budget"
-                );
-                return Err((JevFailure::NoAnswer, NoAnswerReason::Timeout));
-            }
-        };
+        let permit = acquire_within(&self.clients.permits, deadline, "jev", &consult.name)
+            .await
+            .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let labels = self.ask(&body, key, deadline, exchange).await;
         drop(permit);
         let labels = labels?;

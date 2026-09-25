@@ -374,9 +374,9 @@ pub struct ResolverCommand {
     pub token_env: Option<String>,
 }
 
-pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
-pub const LLM_BUILTIN: &str = "llm";
-pub const JEV_BUILTIN: &str = "jev";
+pub const CLAUDE_CODE_BUILTIN: &str = appa_policy::AnnotatorBuiltin::ClaudeCode.wire_name();
+pub const LLM_BUILTIN: &str = appa_policy::AnnotatorBuiltin::Llm.wire_name();
+pub const JEV_BUILTIN: &str = appa_policy::AnnotatorBuiltin::Jev.wire_name();
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only

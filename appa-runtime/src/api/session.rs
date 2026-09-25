@@ -10,7 +10,8 @@ use crate::consult::{
 };
 use crate::engine::{
     Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
-    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
+    ForkStatus, InputRequest, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
+    engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -1577,27 +1578,12 @@ impl Session {
             } => {
                 // Every input program answers first, together; one that does not refuses
                 // the annotation exactly as the annotator's own silence would.
-                let mut asked = Vec::with_capacity(inputs.len());
-                for input in inputs {
-                    asked.push(self.timed_consult(&input.consult, None, None, occasion, Some(call)));
-                }
-                let outcomes = crate::external::settle_batch(asked).await;
-                let mut args = args.clone();
-                let mut refused = None;
-                for (input, outcome) in inputs.iter().zip(outcomes) {
-                    match outcome {
-                        ConsultOutcome::Answer(answer) => {
-                            args.as_object_mut()
-                                .expect("an annotation with declared inputs carries an object artifact")
-                                .insert(input.input.clone(), answer);
-                        }
-                        ConsultOutcome::NoAnswer(reason) => {
-                            refused.get_or_insert((input, reason));
-                        }
-                    }
-                }
-                let answer = match refused {
-                    Some((input, reason)) => {
+                let joined = join_input_answers(args.clone(), inputs, |consult| {
+                    self.timed_consult(consult, None, None, occasion, Some(call))
+                })
+                .await;
+                let answer = match joined {
+                    Err((input, reason)) => {
                         tracing::warn!(
                             annotator,
                             input = input.input,
@@ -1607,7 +1593,7 @@ impl Session {
                         );
                         Err(reason)
                     }
-                    None => {
+                    Ok(args) => {
                         let consult = Consult {
                             name: annotator.clone(),
                             body: ConsultBody::Annotation {
@@ -1776,6 +1762,35 @@ impl Decided<'_> {
             _ => Err(EventError::SpawnAmbiguous),
         }
     }
+}
+
+/// An annotation's artifact with each input program's answer joined under its input's name,
+/// the programs asked together; or the first input, in declaration order, that produced no
+/// answer.
+pub(super) async fn join_input_answers<'a, Asked>(
+    mut args: serde_json::Value,
+    inputs: &'a [InputRequest],
+    ask: impl Fn(&'a Consult) -> Asked,
+) -> Result<serde_json::Value, (&'a InputRequest, crate::external::NoAnswerReason)>
+where
+    Asked: std::future::Future<Output = ConsultOutcome>,
+{
+    let mut asked = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        asked.push(ask(&input.consult));
+    }
+    let outcomes = crate::external::settle_batch(asked).await;
+    for (input, outcome) in inputs.iter().zip(outcomes) {
+        match outcome {
+            ConsultOutcome::Answer(answer) => {
+                args.as_object_mut()
+                    .expect("an annotation with declared inputs carries an object artifact")
+                    .insert(input.input.clone(), answer);
+            }
+            ConsultOutcome::NoAnswer(reason) => return Err((input, reason)),
+        }
+    }
+    Ok(args)
 }
 
 fn remedy_presentation(

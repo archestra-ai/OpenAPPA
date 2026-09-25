@@ -1506,34 +1506,27 @@ impl Runtime {
         let Some(crate::engine::ExternalRequest::Annotation {
             annotator,
             declaration,
-            mut args,
+            args,
             inputs,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
             return Ok(None);
         };
-        let mut asked = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            asked.push(deployment.externals.consult(&input.consult, None, None));
-        }
-        let outcomes = crate::external::settle_batch(asked).await;
-        for (input, outcome) in inputs.iter().zip(outcomes) {
-            match outcome {
-                crate::external::ConsultOutcome::Answer(answer) => {
-                    args.as_object_mut()
-                        .expect("an annotation with declared inputs carries an object artifact")
-                        .insert(input.input.clone(), answer);
-                }
-                crate::external::ConsultOutcome::NoAnswer(_) => {
-                    return Ok(Some(AnnotationConsult {
-                        annotator,
-                        outcome,
-                        admitted: false,
-                    }));
-                }
+        let args = match session::join_input_answers(args, &inputs, |consult| {
+            deployment.externals.consult(consult, None, None)
+        })
+        .await
+        {
+            Ok(args) => args,
+            Err((_, reason)) => {
+                return Ok(Some(AnnotationConsult {
+                    annotator,
+                    outcome: crate::external::ConsultOutcome::NoAnswer(reason),
+                    admitted: false,
+                }));
             }
-        }
+        };
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
