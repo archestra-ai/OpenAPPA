@@ -1000,3 +1000,28 @@ impl Drop for PostgresTransaction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The advisory lock keys are shared with every other process writing the same database,
+    /// so their spelling is a wire format.
+    #[test]
+    fn advisory_lock_keys_are_frozen() {
+        assert_eq!(offer_owner_lock("org", "offer"), "openappa-offer-owner:org:offer");
+        assert_eq!(operation_lock("session", "op"), "openappa-operation:session:op");
+        assert_eq!(result_lock("session", "call"), "openappa-result:session:call");
+        let scope = |caller_id: Option<&str>| ReceiptScope {
+            organization_id: "org".to_owned(),
+            caller_id: caller_id.map(str::to_owned),
+            session_id: "session".to_owned(),
+            binding: ReceiptBinding::Caller,
+        };
+        assert_eq!(
+            session_lock(&scope(Some("caller"))),
+            "openappa-offer-session:org:caller:session"
+        );
+        assert_eq!(session_lock(&scope(None)), "openappa-offer-session:org::session");
+    }
+}

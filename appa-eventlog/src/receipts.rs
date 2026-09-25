@@ -641,3 +641,444 @@ impl From<ReceiptStorageError> for ReceiptError {
         Self::Storage(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Backend;
+
+    /// Each test runs on both SQLite-backed stores: the file and the in-memory one.
+    fn stores() -> Vec<(LogStore, Option<tempfile::TempDir>)> {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let file = LogStore::open(Backend::Sqlite {
+            path: dir.path().join("appa.db"),
+        })
+        .expect("a fresh file store opens");
+        let memory = LogStore::open(Backend::Memory).expect("an in-memory store opens");
+        vec![(file, Some(dir)), (memory, None)]
+    }
+
+    fn scope(binding: ReceiptBinding, caller: &str) -> ReceiptScope {
+        ReceiptScope {
+            organization_id: "org".to_owned(),
+            caller_id: Some(caller.to_owned()),
+            session_id: "session".to_owned(),
+            binding,
+        }
+    }
+
+    fn operation(scope: ReceiptScope) -> OperationRequest {
+        OperationRequest {
+            key: OperationKey {
+                scope,
+                operation_id: "op-1".to_owned(),
+            },
+            root: "root".to_owned(),
+            input: serde_json::json!({"offer_id": "0123456789abcdef"}),
+            context: None,
+        }
+    }
+
+    fn result(scope: ReceiptScope) -> ProcessedResultRequest {
+        ProcessedResultRequest {
+            key: ProcessedResultKey {
+                scope,
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: "root".to_owned(),
+        }
+    }
+
+    fn operation_row(store: &LogStore) -> (String, String, Option<String>) {
+        store
+            .lock()
+            .query_row(
+                "SELECT input, status, decision FROM operations WHERE session_id='session' AND operation_id='op-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the operation row reads")
+    }
+
+    fn execute(store: &LogStore, sql: &str) {
+        store.lock().execute(sql, []).expect("the fixture statement runs");
+    }
+
+    #[test]
+    fn operation_receipts_store_the_frozen_v1_input_envelope() {
+        let envelope =
+            r#"{"version":1,"binding":"caller","semantic":{"offer_id":"0123456789abcdef"},"context":{"hook":"pre"}}"#;
+        for (store, _dir) in stores() {
+            let mut request = operation(scope(ReceiptBinding::Caller, "caller"));
+            request.context = Some(serde_json::json!({"hook": "pre"}));
+            store.claim_operation(request.clone()).expect("the operation claims");
+            assert_eq!(operation_row(&store), (envelope.to_owned(), "pending".to_owned(), None));
+            store
+                .complete_operation(request.key.clone(), serde_json::json!({"decision": "allow_call"}))
+                .expect("the operation completes");
+            assert_eq!(
+                operation_row(&store),
+                (
+                    envelope.to_owned(),
+                    "complete".to_owned(),
+                    Some(r#"{"decision":"allow_call"}"#.to_owned())
+                )
+            );
+
+            execute(&store, "DELETE FROM operations");
+            store
+                .claim_operation(operation(scope(ReceiptBinding::Session, "caller")))
+                .expect("the operation claims");
+            assert_eq!(
+                operation_row(&store).0,
+                r#"{"version":1,"binding":"session","semantic":{"offer_id":"0123456789abcdef"}}"#
+            );
+        }
+    }
+
+    /// A stored input that is not the v1 envelope reads as the raw semantic input of a
+    /// session-bound receipt; an envelope at another version refuses.
+    #[test]
+    fn operation_input_outside_the_v1_envelope_decodes_as_legacy_or_refuses() {
+        for (store, _dir) in stores() {
+            execute(
+                &store,
+                r#"INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
+                   VALUES ('org', 'caller', 'session', 'op-1', 'root', '{"offer_id":"0123456789abcdef"}', 'pending')"#,
+            );
+            assert!(matches!(
+                store.claim_operation(operation(scope(ReceiptBinding::Session, "caller"))),
+                Err(ReceiptError::Pending)
+            ));
+            assert!(matches!(
+                store.claim_operation(operation(scope(ReceiptBinding::Caller, "caller"))),
+                Err(ReceiptError::ScopeMismatch)
+            ));
+
+            execute(
+                &store,
+                r#"UPDATE operations SET input='{"version":2,"binding":"session","semantic":{"offer_id":"0123456789abcdef"}}'"#,
+            );
+            assert!(matches!(
+                store.claim_operation(operation(scope(ReceiptBinding::Session, "caller"))),
+                Err(ReceiptError::Storage(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn operation_receipts_refuse_another_scope_without_writing() {
+        for (store, _dir) in stores() {
+            let owned = operation(scope(ReceiptBinding::Caller, "caller"));
+            store.claim_operation(owned.clone()).expect("the operation claims");
+
+            let other_caller = operation(scope(ReceiptBinding::Caller, "other"));
+            let session_bound = operation(scope(ReceiptBinding::Session, "caller"));
+            let mut other_organization = owned.clone();
+            other_organization.key.scope.organization_id = "other-org".to_owned();
+            let mut other_root = owned.clone();
+            other_root.root = "other-root".to_owned();
+            for request in [&other_caller, &session_bound, &other_organization, &other_root] {
+                assert!(matches!(
+                    store.claim_operation(request.clone()),
+                    Err(ReceiptError::ScopeMismatch)
+                ));
+            }
+            for key in [&other_caller.key, &session_bound.key, &other_organization.key] {
+                assert!(matches!(
+                    store.complete_operation(key.clone(), serde_json::json!({"decision": "deny"})),
+                    Err(ReceiptError::ScopeMismatch)
+                ));
+            }
+            assert_eq!(operation_row(&store).1, "pending");
+            store
+                .complete_operation(owned.key.clone(), serde_json::json!({"decision": "allow_call"}))
+                .expect("the owning scope completes");
+        }
+    }
+
+    /// A session-bound receipt does not compare caller identities.
+    #[test]
+    fn a_session_bound_operation_ignores_the_caller() {
+        for (store, _dir) in stores() {
+            store
+                .claim_operation(operation(scope(ReceiptBinding::Session, "caller")))
+                .expect("the operation claims");
+            assert!(matches!(
+                store.claim_operation(operation(scope(ReceiptBinding::Session, "other"))),
+                Err(ReceiptError::Pending)
+            ));
+            store
+                .complete_operation(
+                    operation(scope(ReceiptBinding::Session, "other")).key,
+                    serde_json::json!({"decision": "allow_call"}),
+                )
+                .expect("another caller in the session completes");
+        }
+    }
+
+    #[test]
+    fn processed_results_refuse_another_scope_without_writing() {
+        for (store, _dir) in stores() {
+            let owned = result(scope(ReceiptBinding::Session, "caller"));
+            store.claim_processed_result(owned.clone()).expect("the result claims");
+
+            let mut other_organization = owned.clone();
+            other_organization.key.scope.organization_id = "other-org".to_owned();
+            let mut other_root = owned.clone();
+            other_root.root = "other-root".to_owned();
+            for request in [&other_organization, &other_root] {
+                assert!(matches!(
+                    store.claim_processed_result(request.clone()),
+                    Err(ReceiptError::ScopeMismatch)
+                ));
+            }
+            assert!(matches!(
+                store.complete_processed_result(
+                    other_organization.key.clone(),
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "deny"})
+                ),
+                Err(ReceiptError::ScopeMismatch)
+            ));
+            assert!(matches!(
+                store.claim_processed_result(result(scope(ReceiptBinding::Session, "other"))),
+                Err(ReceiptError::Pending)
+            ));
+            store
+                .complete_processed_result(
+                    owned.key.clone(),
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "allow"}),
+                )
+                .expect("the owning scope completes");
+        }
+    }
+
+    #[test]
+    fn an_offer_owner_with_other_data_collides() {
+        for (store, _dir) in stores() {
+            let record = OfferOwnerRecord {
+                scope: scope(ReceiptBinding::Caller, "caller"),
+                offer_id: "0123456789abcdef".to_owned(),
+                root: "root".to_owned(),
+                parent_id: None,
+                arguments: None,
+                tool: None,
+                spelling: None,
+            };
+            store.store_offer_owner(record.clone()).expect("the owner stores");
+            let mut other_root = record.clone();
+            other_root.root = "other-root".to_owned();
+            let mut other_caller = record.clone();
+            other_caller.scope.caller_id = Some("other".to_owned());
+            let mut other_tool = record.clone();
+            other_tool.tool = Some("wire".to_owned());
+            for colliding in [other_root, other_caller, other_tool] {
+                assert!(matches!(
+                    store.store_offer_owner(colliding),
+                    Err(ReceiptError::Collision)
+                ));
+            }
+            store
+                .store_offer_owner(record)
+                .expect("the stored owner is unchanged, so its replay is idempotent");
+        }
+    }
+
+    #[test]
+    fn a_claimed_receipt_refuses_a_second_claim_and_other_input() {
+        for (store, _dir) in stores() {
+            let request = operation(scope(ReceiptBinding::Caller, "caller"));
+            store.claim_operation(request.clone()).expect("the operation claims");
+            let mut changed = request.clone();
+            changed.input = serde_json::json!({"offer_id": "other"});
+            assert!(matches!(
+                store.claim_operation(changed),
+                Err(ReceiptError::InputMismatch)
+            ));
+            let mut recontextualized = request.clone();
+            recontextualized.context = Some(serde_json::json!({"hook": "post"}));
+            assert!(matches!(
+                store.claim_operation(recontextualized),
+                Err(ReceiptError::Pending)
+            ));
+            assert!(matches!(store.claim_operation(request), Err(ReceiptError::Pending)));
+
+            let request = result(scope(ReceiptBinding::Session, "caller"));
+            store
+                .claim_processed_result(request.clone())
+                .expect("the result claims");
+            assert!(matches!(
+                store.claim_processed_result(request),
+                Err(ReceiptError::Pending)
+            ));
+        }
+    }
+
+    #[test]
+    fn completing_an_absent_receipt_is_not_pending() {
+        for (store, _dir) in stores() {
+            assert!(matches!(
+                store.complete_operation(
+                    operation(scope(ReceiptBinding::Session, "caller")).key,
+                    serde_json::json!({})
+                ),
+                Err(ReceiptError::NotPending)
+            ));
+            assert!(matches!(
+                store.complete_processed_result(
+                    result(scope(ReceiptBinding::Session, "caller")).key,
+                    "approved".to_owned(),
+                    serde_json::json!({})
+                ),
+                Err(ReceiptError::NotPending)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_completed_receipt_accepts_only_its_own_completion_again() {
+        for (store, _dir) in stores() {
+            let decision = serde_json::json!({"decision": "allow_call"});
+            let other = serde_json::json!({"decision": "deny"});
+
+            let request = operation(scope(ReceiptBinding::Caller, "caller"));
+            store.claim_operation(request.clone()).expect("the operation claims");
+            store
+                .complete_operation(request.key.clone(), decision.clone())
+                .expect("the operation completes");
+            store
+                .complete_operation(request.key.clone(), decision.clone())
+                .expect("the same completion is idempotent");
+            assert!(matches!(
+                store.complete_operation(request.key, other.clone()),
+                Err(ReceiptError::CompletionMismatch)
+            ));
+
+            let request = result(scope(ReceiptBinding::Session, "caller"));
+            store
+                .claim_processed_result(request.clone())
+                .expect("the result claims");
+            store
+                .complete_processed_result(request.key.clone(), "approved".to_owned(), decision.clone())
+                .expect("the result completes");
+            store
+                .complete_processed_result(request.key.clone(), "approved".to_owned(), decision.clone())
+                .expect("the same completion is idempotent");
+            assert!(matches!(
+                store.complete_processed_result(request.key.clone(), "changed".to_owned(), decision.clone()),
+                Err(ReceiptError::CompletionMismatch)
+            ));
+            assert!(matches!(
+                store.complete_processed_result(request.key, "approved".to_owned(), other),
+                Err(ReceiptError::CompletionMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_corrupt_operation_row_is_a_storage_failure() {
+        let request = || operation(scope(ReceiptBinding::Session, "caller"));
+        let decision = serde_json::json!({"decision": "allow_call"});
+        for corruption in [
+            "UPDATE operations SET status='bogus'",
+            "UPDATE operations SET input='not json'",
+            "UPDATE operations SET status='complete', decision='not json'",
+        ] {
+            for (store, _dir) in stores() {
+                store.claim_operation(request()).expect("the operation claims");
+                execute(&store, corruption);
+                assert!(
+                    matches!(store.claim_operation(request()), Err(ReceiptError::Storage(_))),
+                    "{corruption}"
+                );
+                assert!(
+                    matches!(
+                        store.complete_operation(request().key, decision.clone()),
+                        Err(ReceiptError::Storage(_))
+                    ),
+                    "{corruption}"
+                );
+            }
+        }
+        for (store, _dir) in stores() {
+            store.claim_operation(request()).expect("the operation claims");
+            execute(&store, "UPDATE operations SET status='complete'");
+            assert!(matches!(
+                store.claim_operation(request()),
+                Err(ReceiptError::Storage(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_corrupt_processed_result_row_is_a_storage_failure() {
+        let request = || result(scope(ReceiptBinding::Session, "caller"));
+        let decision = serde_json::json!({"decision": "allow"});
+        for corruption in [
+            "UPDATE processed_results SET status='bogus'",
+            "UPDATE processed_results SET status='complete', approved_output='approved', decision='not json'",
+        ] {
+            for (store, _dir) in stores() {
+                store.claim_processed_result(request()).expect("the result claims");
+                execute(&store, corruption);
+                assert!(
+                    matches!(store.claim_processed_result(request()), Err(ReceiptError::Storage(_))),
+                    "{corruption}"
+                );
+                assert!(
+                    matches!(
+                        store.complete_processed_result(request().key, "approved".to_owned(), decision.clone()),
+                        Err(ReceiptError::Storage(_))
+                    ),
+                    "{corruption}"
+                );
+            }
+        }
+        for corruption in [
+            "UPDATE processed_results SET status='complete', decision='{}'",
+            "UPDATE processed_results SET status='complete', approved_output='approved'",
+        ] {
+            for (store, _dir) in stores() {
+                store.claim_processed_result(request()).expect("the result claims");
+                execute(&store, corruption);
+                assert!(
+                    matches!(store.claim_processed_result(request()), Err(ReceiptError::Storage(_))),
+                    "{corruption}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_corrupt_offer_owner_binding_is_a_storage_failure() {
+        for (store, _dir) in stores() {
+            let record = OfferOwnerRecord {
+                scope: scope(ReceiptBinding::Caller, "caller"),
+                offer_id: "0123456789abcdef".to_owned(),
+                root: "root".to_owned(),
+                parent_id: None,
+                arguments: None,
+                tool: None,
+                spelling: None,
+            };
+            store.store_offer_owner(record.clone()).expect("the owner stores");
+            let stored: String = store
+                .lock()
+                .query_row("SELECT binding FROM offer_owners", [], |row| row.get(0))
+                .expect("the binding reads");
+            assert_eq!(stored, "caller");
+            execute(&store, "UPDATE offer_owners SET binding='bogus'");
+            assert!(
+                store
+                    .offer_owner(OfferOwnerKey {
+                        organization_id: "org".to_owned(),
+                        offer_id: record.offer_id.clone(),
+                    })
+                    .is_err()
+            );
+            assert!(matches!(store.store_offer_owner(record), Err(ReceiptError::Storage(_))));
+        }
+    }
+}

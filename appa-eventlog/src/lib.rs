@@ -1152,6 +1152,48 @@ mod tests {
         }
     }
 
+    /// One observation of every kind, in declaration order, so a golden covers each wire tag.
+    fn golden_observations() -> Vec<HostObservation> {
+        let actor = HostActor {
+            root: root(),
+            child: Some(TrajectoryId::new("cc:child")),
+        };
+        vec![
+            observed(root().as_str(), "demo"),
+            HostObservation::CallBound {
+                trajectory: root(),
+                call_id: "toolu_1".to_string(),
+                dispatch: DispatchId::new(
+                    root(),
+                    serde_json::from_value(serde_json::json!("ab".repeat(32))).expect("a digest decodes"),
+                    7,
+                ),
+            },
+            HostObservation::Vouched {
+                actor: actor.clone(),
+                key: "offer:one".to_string(),
+                ruling: Some(Ruling::Approve),
+            },
+            HostObservation::Claimed {
+                actor: actor.clone(),
+                key: "offer:one".to_string(),
+                until: SystemTime::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 5),
+            },
+            HostObservation::Released {
+                actor: actor.clone(),
+                key: "offer:one".to_string(),
+            },
+            HostObservation::PromptSeen { actor: actor.clone() },
+            HostObservation::PromptSettled {
+                actor: HostActor {
+                    root: root(),
+                    child: None,
+                },
+            },
+            HostObservation::TurnEnded { actor },
+        ]
+    }
+
     fn observations(log: &Log) -> Vec<HostObservation> {
         log.host_records()
             .iter()
@@ -1234,6 +1276,167 @@ mod tests {
         let object: serde_json::Value = serde_json::from_slice(&encode(&[], Some(&host))).unwrap();
         assert_eq!(object["facts"], serde_json::json!([]));
         assert_eq!(object["host"]["kind"], "inventory");
+    }
+
+    /// The stored batch bytes are a persisted format: every host observation kind, the bare
+    /// fact array, and an observation with no facts, byte for byte.
+    #[test]
+    fn stored_batch_bytes_are_frozen() {
+        let facts = r#"[{"Boundary":{"trajectory":"cc:root","kind":"VoidReturn"}}]"#;
+        let hosts = [
+            r#"{"kind":"inventory","actor":"cc:root","adapter":"kagent","inventory":{"tools":[{"name":"read","tool":"mcp:demo/read"}],"sources":[]}}"#,
+            r#"{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{"trajectory":"cc:root","digest":"abababababababababababababababababababababababababababababababab","occurrence":7}}"#,
+            r#"{"kind":"vouched","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","ruling":"approve"}"#,
+            r#"{"kind":"claimed","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","until":{"secs_since_epoch":1700000000,"nanos_since_epoch":5}}"#,
+            r#"{"kind":"released","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one"}"#,
+            r#"{"kind":"prompt_seen","actor":{"root":"cc:root","child":"cc:child"}}"#,
+            r#"{"kind":"prompt_settled","actor":{"root":"cc:root","child":null}}"#,
+            r#"{"kind":"turn_ended","actor":{"root":"cc:root","child":"cc:child"}}"#,
+        ];
+        let observations = golden_observations();
+        assert_eq!(observations.len(), hosts.len());
+
+        let bare = encode(&punctuation(), None);
+        assert_eq!(String::from_utf8(bare.clone()).unwrap(), facts);
+        assert!(matches!(decode(&bare), Ok(Record { facts, host: None }) if facts == punctuation()));
+
+        for (observation, host) in observations.iter().zip(hosts) {
+            let with_facts = encode(&punctuation(), Some(observation));
+            assert_eq!(
+                String::from_utf8(with_facts.clone()).unwrap(),
+                format!(r#"{{"facts":{facts},"host":{host}}}"#)
+            );
+            assert!(matches!(
+                decode(&with_facts),
+                Ok(Record { facts, host: Some(decoded) }) if facts == punctuation() && &decoded == observation
+            ));
+            let alone = encode(&[], Some(observation));
+            assert_eq!(
+                String::from_utf8(alone.clone()).unwrap(),
+                format!(r#"{{"facts":[],"host":{host}}}"#)
+            );
+            assert!(matches!(
+                decode(&alone),
+                Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && &decoded == observation
+            ));
+        }
+    }
+
+    /// Decode settles the shape on the first non-whitespace byte, and an object may omit
+    /// its facts.
+    #[test]
+    fn decode_dispatches_on_the_first_non_whitespace_byte() {
+        let facts = r#"[{"Boundary":{"trajectory":"cc:root","kind":"VoidReturn"}}]"#;
+        let host = r#"{"kind":"prompt_seen","actor":{"root":"cc:root","child":null}}"#;
+        let seen = HostObservation::PromptSeen {
+            actor: HostActor {
+                root: root(),
+                child: None,
+            },
+        };
+        assert!(matches!(
+            decode(format!(" \n\t{facts}").as_bytes()),
+            Ok(Record { facts, host: None }) if facts == punctuation()
+        ));
+        assert!(matches!(
+            decode(format!("\r\n {{\"host\":{host}}}").as_bytes()),
+            Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && decoded == seen
+        ));
+        for row in [b"".as_slice(), b"   ", br#""text""#, b"42", b"null"] {
+            assert!(
+                matches!(decode(row), Err(ReadError::Undecodable(_))),
+                "{}",
+                String::from_utf8_lossy(row)
+            );
+        }
+    }
+
+    /// The SQLite schema is a persisted format: its version stamp and the DDL of each table,
+    /// compared token for token.
+    #[test]
+    fn a_fresh_sqlite_store_has_the_frozen_schema() {
+        let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected: Vec<(String, String, Option<String>)> = [
+            ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
+            ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
+            ("offer_owners", Some("CREATE TABLE offer_owners ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL, offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT, PRIMARY KEY (organization_id, offer_id) )")),
+            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (session_id, operation_id) )")),
+            ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
+            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (session_id, tool_call_id) )")),
+            ("sqlite_autoindex_host_keys_1", None),
+            ("sqlite_autoindex_logs_1", None),
+            ("sqlite_autoindex_offer_owners_1", None),
+            ("sqlite_autoindex_operations_1", None),
+            ("sqlite_autoindex_policy_files_1", None),
+            ("sqlite_autoindex_processed_results_1", None),
+        ]
+        .into_iter()
+        .map(|(name, sql)| {
+            let kind = if sql.is_some() { "table" } else { "index" };
+            (kind.to_owned(), name.to_owned(), sql.map(str::to_owned))
+        })
+        .collect();
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let backends = [
+            Backend::Sqlite {
+                path: dir.path().join("appa.db"),
+            },
+            Backend::Memory,
+        ];
+        for backend in backends {
+            let store = LogStore::open(backend).expect("a fresh store opens");
+            let connection = store.lock();
+            let version: i64 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("the version reads");
+            assert_eq!(version, 3);
+            let mut statement = connection
+                .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
+                .expect("the schema query prepares");
+            let found = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?.map(|sql| normalize(&sql)),
+                    ))
+                })
+                .expect("the schema reads")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("every schema row reads");
+            assert_eq!(found, expected);
+        }
+    }
+
+    /// The wire names a caller reports a failure class under.
+    #[test]
+    fn store_error_classes_serialize_to_their_frozen_wire_names() {
+        let wire = |class: StoreErrorClass| match class {
+            StoreErrorClass::UnknownRoot => "unknown_root",
+            StoreErrorClass::AlreadyExists => "already_exists",
+            StoreErrorClass::PolicyUnavailable => "policy_unavailable",
+            StoreErrorClass::PolicyMismatch => "policy_mismatch",
+            StoreErrorClass::Undecodable => "undecodable",
+            StoreErrorClass::Malformed => "malformed",
+            StoreErrorClass::Conflict => "conflict",
+            StoreErrorClass::Storage => "storage",
+        };
+        for class in [
+            StoreErrorClass::UnknownRoot,
+            StoreErrorClass::AlreadyExists,
+            StoreErrorClass::PolicyUnavailable,
+            StoreErrorClass::PolicyMismatch,
+            StoreErrorClass::Undecodable,
+            StoreErrorClass::Malformed,
+            StoreErrorClass::Conflict,
+            StoreErrorClass::Storage,
+        ] {
+            assert_eq!(
+                serde_json::to_value(class).expect("a class serializes"),
+                serde_json::Value::String(wire(class).to_owned())
+            );
+        }
     }
 
     /// An object that is not this build's host record refuses the read rather than being
@@ -2244,6 +2447,185 @@ mod tests {
             .expect("the test receipt cleans up");
     }
 
+    /// Every writer serializes on `pg_advisory_xact_lock(hashtextextended(key, 0))` under a
+    /// key other processes share, so the key and its hash are a wire format: a session lock
+    /// held on exactly that key by another connection must stop each write until released.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_writers_serialize_on_their_advisory_lock_keys() {
+        use crate::postgres::{
+            OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
+            ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope,
+        };
+
+        let store = postgres_store(2);
+        let unique = tempfile::tempdir().expect("a unique namespace exists");
+        let suffix = unique.path().display().to_string();
+        // Opened before both connections are leased: an unleased store needs one of its own.
+        let root = postgres_root(&store, "locked");
+        let (holder, writer) = (store.lease().unwrap(), store.lease().unwrap());
+        writer
+            .postgres()
+            .unwrap()
+            .with_client(|client| {
+                client.batch_execute("SET lock_timeout = '200ms'")?;
+                Ok(())
+            })
+            .expect("the writer bounds its lock waits");
+        let hold = |key: &str, held: bool| {
+            let key = key.to_owned();
+            holder
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    let sql = match held {
+                        true => "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                        false => "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                    };
+                    client.query_one(sql, &[&key])?;
+                    Ok(())
+                })
+                .expect("the holder takes or gives up the lock");
+        };
+
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        hold(root.as_str(), true);
+        let before = writer.log(&root).expect("a read takes no lock");
+        assert!(matches!(
+            writer.append(&before, &boundary),
+            Err(AppendError::Postgres(_))
+        ));
+        hold(root.as_str(), false);
+        writer.append(&before, &boundary).expect("the released root appends");
+
+        let created = TrajectoryId::new(format!("pg-test:created:{suffix}"));
+        hold(created.as_str(), true);
+        assert!(matches!(
+            writer.create_root(opening(&created), POLICY.as_bytes()),
+            Err(CreateError::Postgres(_))
+        ));
+        hold(created.as_str(), false);
+        writer
+            .create_root(opening(&created), POLICY.as_bytes())
+            .expect("the released root opens");
+
+        let organization = format!("lock-org:{suffix}");
+        let session = format!("lock-session:{suffix}");
+        let scope = ReceiptScope {
+            organization_id: organization.clone(),
+            caller_id: Some("caller".to_owned()),
+            session_id: session.clone(),
+            binding: ReceiptBinding::Caller,
+        };
+        let pg = writer.postgres().unwrap();
+
+        let owner = OfferOwnerRecord {
+            scope: scope.clone(),
+            offer_id: "0123456789abcdef".to_owned(),
+            root: format!("lock-root:{suffix}"),
+            parent_id: None,
+            arguments: None,
+            tool: None,
+            spelling: None,
+        };
+        let key = format!("openappa-offer-owner:{organization}:0123456789abcdef");
+        hold(&key, true);
+        assert!(matches!(
+            pg.store_offer_owner(owner.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.store_offer_owner(owner.clone()).expect("the released owner stores");
+
+        let key = format!("openappa-offer-session:{organization}:caller:{session}");
+        hold(&key, true);
+        assert!(pg.expire_offer_owners(scope.clone()).is_err());
+        hold(&key, false);
+        assert_eq!(pg.expire_offer_owners(scope.clone()).expect("the owners expire"), 1);
+        let callerless = ReceiptScope {
+            caller_id: None,
+            ..scope.clone()
+        };
+        let key = format!("openappa-offer-session:{organization}::{session}");
+        hold(&key, true);
+        assert!(pg.expire_offer_owners(callerless.clone()).is_err());
+        hold(&key, false);
+        assert_eq!(pg.expire_offer_owners(callerless).expect("nothing expires"), 0);
+
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "op-1".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        let decision = serde_json::json!({"decision": "allow_call"});
+        let key = format!("openappa-operation:{session}:op-1");
+        hold(&key, true);
+        assert!(matches!(
+            pg.claim_operation(request.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        assert_eq!(pg.claim_operation(request.clone()).unwrap(), OperationClaim::Claimed);
+        hold(&key, true);
+        assert!(matches!(
+            pg.complete_operation(request.key.clone(), decision.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.complete_operation(request.key, decision.clone())
+            .expect("the released operation completes");
+
+        let result = ProcessedResultRequest {
+            key: ProcessedResultKey {
+                scope: ReceiptScope {
+                    binding: ReceiptBinding::Session,
+                    ..scope.clone()
+                },
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: owner.root.clone(),
+        };
+        let key = format!("openappa-result:{session}:call-1");
+        hold(&key, true);
+        assert!(matches!(
+            pg.claim_processed_result(result.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        assert_eq!(
+            pg.claim_processed_result(result.clone()).unwrap(),
+            ProcessedResultClaim::Claimed
+        );
+        hold(&key, true);
+        assert!(matches!(
+            pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.complete_processed_result(result.key, "approved".to_owned(), decision)
+            .expect("the released result completes");
+
+        pg.with_client(move |client| {
+            client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+            client.execute(
+                "DELETE FROM openappa_processed_results WHERE session_id=$1",
+                &[&session],
+            )?;
+            Ok(())
+        })
+        .expect("the test receipts clean up");
+        drop((holder, writer));
+        forget_postgres_roots(&store, vec![root, created]);
+    }
+
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
@@ -2293,17 +2675,27 @@ mod tests {
     fn postgres_pool_bounds_its_checkout_and_its_reset() {
         use std::time::Duration;
 
+        // The checkout wait also bounds opening a replacement connection, so it must fit a
+        // real connect; the reset wait only has to stay well under the armed stall.
+        let checkout = Duration::from_secs(5);
+        let reset = Duration::from_millis(200);
         let store = postgres_store(1);
         let pg = store.postgres().unwrap();
-        pg.set_waits(Duration::from_millis(200), Duration::from_millis(200));
+        pg.set_waits(checkout, reset);
         let lease = store.lease().unwrap();
         let pid = backend_pid(&lease);
+        let asked = std::time::Instant::now();
         assert!(
-            matches!(store.lease(), Err(crate::postgres::LeaseError::Exhausted(_))),
+            matches!(store.lease(), Err(crate::postgres::LeaseError::Exhausted(wait)) if wait == checkout),
             "a full pool refuses within its wait instead of hanging"
         );
+        let waited = asked.elapsed();
+        assert!(
+            waited >= checkout && waited < checkout + Duration::from_secs(5),
+            "the refusal comes when the wait runs out: {waited:?}"
+        );
 
-        pg.stall_next_reset(Duration::from_secs(2));
+        pg.stall_next_reset(reset * 10);
         drop(lease);
         assert_ne!(
             backend_pid(&store.lease().expect("a silent connection frees its place")),
