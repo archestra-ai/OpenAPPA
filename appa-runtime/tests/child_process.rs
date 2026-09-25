@@ -1,6 +1,6 @@
 //! Children started at once through `child_process` inherit none of each other's pipes.
 //! A binary of its own: another suite's spawns would add their own moments in flight.
-#![cfg(unix)]
+#![cfg(target_vendor = "apple")]
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
