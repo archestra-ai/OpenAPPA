@@ -3504,17 +3504,18 @@ fn return_instruction(
             let call = remedy_call(
                 control,
                 id,
-                ", label: {trust: \"<rank>\"}",
+                ", label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}",
                 description,
                 include_display_plan,
             );
             format!(
                 "  - Declare the lowest label this session accepts from the subagent's return, then call the subagent \
-             tool again with the same arguments. The subagent starts at this session's label, now {floor}, and can \
-             accept no change below the floor it is given: a subagent that must read below this session's trust needs \
-             the floor at that rank, and its return may then narrow this session that far. An omitted dimension keeps \
-             its current value.\n    {call}, with \
-             <rank> one of {ranks} (lowest first)"
+             tool again with the same arguments. The subagent starts at this session's label, now {floor}. Its floor \
+             must cover every narrowing its task needs. Set `trust` to the lowest rank it may read and `audience` to \
+             the narrowest audience its data may be confined to. Remove either field from the call when that dimension \
+             should keep its current value.\n    {call}, with \
+             <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, \
+             or reader ID from the policy; add audience entries as needed"
             )
         }
         Some(name) if name.is_attest_schema() => {
@@ -4517,7 +4518,7 @@ mod tests {
             &plan,
             &OfferId("0123456789abcdef".to_string()),
             &super::ReturnSpelling {
-                floor: "{trust: \"internal\"}".to_string(),
+                floor: "{trust: \"internal\", audience: [\"public\"]}".to_string(),
                 ranks: "\"internal\"".to_string(),
             },
             "approve_remedy",
@@ -4529,7 +4530,14 @@ mod tests {
         assert!(
             instruction.contains("plan: \"Declare the lowest label this session accepts from the subagent's return\"")
         );
-        assert!(instruction.contains("label: {trust: \"<rank>\"}"));
+        assert!(
+            instruction.contains("label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}"),
+            "the bare return remedy exposes both label dimensions: {instruction}",
+        );
+        assert!(instruction.contains("Set `trust` to the lowest rank it may read"));
+        assert!(instruction.contains("`audience` to the narrowest audience its data may be confined to"));
+        assert!(instruction.contains("Remove either field from the call when that dimension"));
+        assert!(instruction.contains("Each call in a fan-out declares its own"));
     }
 
     #[test]
