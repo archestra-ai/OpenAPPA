@@ -52,12 +52,6 @@ pub enum ConfigError {
     SanitizerMandateShape { name: String, reason: &'static str },
     #[error("{context} permits: `*` must be the only attention entry")]
     MixedAttentionWildcard { context: String },
-    #[error("{kind} {name}: {reason}")]
-    BadImplementation {
-        kind: &'static str,
-        name: String,
-        reason: String,
-    },
     #[error(
         "{kind} {name} binds an implementation inline; this runtime binds implementations outside the policy, so the policy must not carry the binding"
     )]
