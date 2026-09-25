@@ -212,12 +212,12 @@ name = "host/claude-code/Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
-# This root rule runs before the battery's Read rules.
 [[policy.annotator]]
 name = "local.read-sensitivity"
 audiences = []
 marks = ["hitl"]
 
+# This root rule runs before the battery's Read rules.
 [[policy.tool]]
 name = "host/claude-code/Read"
 annotator = "local.read-sensitivity"

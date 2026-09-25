@@ -7,4 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
 helpers = ["audience-source.py", "repository-visibility.py", "github_token.py"]
-setup = "Falls back to your gh login (gh auth login) when the variable is unset; a token needs the repo, read:org, and user:email scopes."
+setup = "Falls back to your gh login (gh auth login) when the variable is unset; a token needs the repo and read:org scopes, and user:email to name the viewer by address."
