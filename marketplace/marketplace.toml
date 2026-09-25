@@ -20,7 +20,7 @@ digest = "sha256:264b2cf3539e18dbb24112376b75afe7adaa2c5ca57a722405f9101ddf51b2b
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:7fe5b15a2b89610ea952ea420a1073bdfb465af67ba8746726c7140350c9d1f4"
+digest = "sha256:11d512421d3841e6f50d260ad7666e1310e8d5cf3aab9a6867bf50e1d97e5fa1"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -32,7 +32,7 @@ digest = "sha256:de05f7e62a2cdd36fcc3d646866e4815030f70fdca8ab03ab2939169060a57b
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:e41b9589610dc76f17b1fdac1dd4d864df809d87a8141ce6415c57f62ec89622"
+digest = "sha256:465831ee32962ca5a6a525e981edc96eb54bc8383680579d3f029502f3f100f5"
 
 [packages.battery.jev]
 path = "batteries/jev"
