@@ -154,7 +154,7 @@ async fn a_confined_result_the_codec_has_no_slot_for_crosses_only_as_the_masker_
         "stderr": "warning: one shell still running",
         "shellId": "bash_1",
         "status": "running",
-        "exitCode": 0,
+        "exitCode": 1,
     });
     let (status, answer) = claude_hook(&runtime, &result("BashOutput", input, response)).await;
     assert_eq!(status, 200, "the result is answered: {answer}");
