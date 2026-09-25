@@ -12,6 +12,8 @@ use appa_engine::label::Label;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod beneath;
+
 const ABSENT: &str = "-";
 /// How many input snapshots one Process call may declare. Every one of them is hashed at
 /// reservation and copied into the job, so the count is a ceiling on both, not a convenience.
@@ -187,7 +189,6 @@ impl FileStore {
             ));
         }
         let relative = validated_relative(&self.workspace, path)?;
-        let absolute = self.workspace.join(&relative);
         let mut state = self.lock()?;
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
@@ -199,9 +200,8 @@ impl FileStore {
             }
             _ => {}
         }
-        if absolute.exists() {
-            check_regular(&absolute)?;
-            let actual = hash(&absolute)?;
+        let actual = state_digest(&self.workspace, &relative)?;
+        if actual != ABSENT {
             let Some(version) = &predecessor else {
                 return Err(FileStoreError::Untracked);
             };
@@ -252,21 +252,18 @@ impl FileStore {
             return Err(FileStoreError::Pending);
         }
         let source_version = current_state(&state, &source).ok_or(FileStoreError::Untracked)?;
-        if !source_absolute.exists() {
+        let source_actual = state_digest(&self.workspace, &source)?;
+        if source_actual == ABSENT {
             return Err(FileStoreError::Untracked);
         }
-        check_regular(&source_absolute)?;
         check_move_filesystem(operation, &source_absolute, &destination_absolute)?;
-        if hash(&source_absolute)? != source_version.digest {
+        if source_actual != source_version.digest {
             return Err(FileStoreError::DigestMismatch);
         }
         let predecessor = current_state(&state, &destination);
-        let destination_actual = state_digest(&destination_absolute)?;
+        let destination_actual = state_digest(&self.workspace, &destination)?;
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
-        }
-        if destination_absolute.exists() {
-            check_regular(&destination_absolute)?;
         }
         let pin = FilePin {
             path: destination,
@@ -314,12 +311,11 @@ impl FileStore {
         let mut pinned = Vec::with_capacity(inputs.len());
         for path in inputs {
             let version = current_state(&state, &path).ok_or(FileStoreError::Untracked)?;
-            let absolute = self.workspace.join(&path);
-            if !absolute.exists() {
+            let actual = state_digest(&self.workspace, &path)?;
+            if actual == ABSENT {
                 return Err(FileStoreError::Untracked);
             }
-            check_regular(&absolute)?;
-            if hash(&absolute)? != version.digest {
+            if actual != version.digest {
                 return Err(FileStoreError::DigestMismatch);
             }
             pinned.push(FileSourcePin {
@@ -330,12 +326,10 @@ impl FileStore {
             });
         }
         let predecessor = current_state(&state, &destination);
-        let destination_absolute = self.workspace.join(&destination);
-        if state_digest(&destination_absolute)? != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
+        if state_digest(&self.workspace, &destination)?
+            != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT)
+        {
             return Err(FileStoreError::DigestMismatch);
-        }
-        if destination_absolute.exists() {
-            check_regular(&destination_absolute)?;
         }
         let pin = FilePin {
             path: destination,
@@ -392,18 +386,17 @@ impl FileStore {
             .output_label
             .clone()
             .ok_or(FileStoreError::UnknownReservation)?;
-        let absolute = self.workspace.join(&pin.path);
-        let actual = state_digest(&absolute)?;
+        let actual = state_digest(&self.workspace, &pin.path)?;
         let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
         let source_actual = pin
             .source
             .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
+            .map(|source| state_digest(&self.workspace, &source.path))
             .transpose()?;
         let input_states = pin
             .inputs
             .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
             .collect::<Result<Vec<_>, FileStoreError>>()?;
         let inputs_unchanged = input_states.iter().all(|unchanged| *unchanged);
         let source_label = if pin.operation == FileOperation::Process {
@@ -471,7 +464,6 @@ impl FileStore {
             if actual == ABSENT {
                 return Err(FileStoreError::DigestMismatch);
             }
-            check_regular(&absolute)?;
             let id = state.next_id;
             state.next_id += 1;
             if pin.operation == FileOperation::Move {
@@ -512,16 +504,16 @@ impl FileStore {
     /// declared input. `finish` and `abandon` answer the same question from values they have
     /// already hashed; diagnostics can ask it here.
     pub fn pin_matches_workspace(&self, pin: &FilePin) -> Result<bool, FileStoreError> {
-        let destination = state_digest(&self.workspace.join(&pin.path))?;
+        let destination = state_digest(&self.workspace, &pin.path)?;
         let source = pin
             .source
             .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
+            .map(|source| state_digest(&self.workspace, &source.path))
             .transpose()?;
         let inputs = pin
             .inputs
             .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
             .collect::<Result<Vec<_>, FileStoreError>>()?;
         Ok(undisturbed(pin, &destination, source.as_deref(), &inputs))
     }
@@ -539,16 +531,16 @@ impl FileStore {
             return Ok(AbandonOutcome::Absent);
         }
         let pin = reservation.pin.clone();
-        let destination = state_digest(&self.workspace.join(&pin.path))?;
+        let destination = state_digest(&self.workspace, &pin.path)?;
         let source = pin
             .source
             .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
+            .map(|source| state_digest(&self.workspace, &source.path))
             .transpose()?;
         let inputs = pin
             .inputs
             .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
             .collect::<Result<Vec<_>, FileStoreError>>()?;
         if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
             return Ok(AbandonOutcome::Quarantined);
@@ -564,7 +556,7 @@ impl FileStore {
         let current = snapshot_state(&state);
         let mut drifted = Vec::new();
         for version in current {
-            if state_digest(&self.workspace.join(&version.path))? != version.digest {
+            if state_digest(&self.workspace, &version.path)? != version.digest {
                 drifted.push(version);
             }
         }
@@ -664,7 +656,9 @@ fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStore
     Ok(stripped.to_string_lossy().into_owned())
 }
 fn check_regular(path: &Path) -> Result<(), FileStoreError> {
-    let m = fs::symlink_metadata(path)?;
+    check_regular_metadata(&fs::symlink_metadata(path)?)
+}
+fn check_regular_metadata(m: &fs::Metadata) -> Result<(), FileStoreError> {
     #[cfg(unix)]
     let singly_linked = m.nlink() == 1;
     #[cfg(not(unix))]
@@ -678,7 +672,9 @@ fn check_regular(path: &Path) -> Result<(), FileStoreError> {
 }
 fn hash(path: &Path) -> Result<String, FileStoreError> {
     check_regular(path)?;
-    let mut f = File::open(path)?;
+    digest(File::open(path)?)
+}
+fn digest(mut f: File) -> Result<String, FileStoreError> {
     let mut h = Sha256::new();
     let mut b = [0; 8192];
     loop {
@@ -690,8 +686,12 @@ fn hash(path: &Path) -> Result<String, FileStoreError> {
     }
     Ok(h.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
-fn state_digest(path: &Path) -> Result<String, FileStoreError> {
-    if path.exists() { hash(path) } else { Ok(ABSENT.into()) }
+fn state_digest(workspace: &Path, relative: &str) -> Result<String, FileStoreError> {
+    let Some(file) = beneath::open(workspace, relative)? else {
+        return Ok(ABSENT.into());
+    };
+    check_regular_metadata(&file.metadata()?)?;
+    digest(file)
 }
 #[cfg(not(unix))]
 fn check_move_filesystem(_: FileOperation, _: &Path, _: &Path) -> Result<(), FileStoreError> {
@@ -970,6 +970,29 @@ mod tests {
             store.prepare("a", "hard", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn a_parent_swapped_for_a_symlink_after_prepare_is_never_followed() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.workspace.join("sub")).unwrap();
+        fs::write(fixture.workspace.join("sub/file.txt"), "old").unwrap();
+        let outside = fixture._root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file.txt"), "old").unwrap();
+        let store = fixture.store(&Label::top());
+        let pinned = store.current("sub/file.txt").unwrap().unwrap();
+
+        store.prepare("a", "edit", FileOperation::Edit, "sub/file.txt").unwrap();
+        store.bind("a", "edit", "dispatch", &Label::top()).unwrap();
+        fs::rename(fixture.workspace.join("sub"), fixture.workspace.join("real")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.workspace.join("sub")).unwrap();
+
+        assert!(store.abandon("a", "edit").is_err());
+        fs::write(outside.join("file.txt"), "escaped").unwrap();
+        assert!(store.finish("a", "edit", true).is_err());
+        assert!(store.snapshot().unwrap().contains(&pinned));
+        assert!(store.drifted().is_err());
     }
 
     #[test]
