@@ -194,7 +194,7 @@ fn names_in(dir: &Path) -> io::Result<Vec<String>> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with('.') || name.is_empty() {
+        if name.starts_with('.') {
             continue;
         }
         if !entry.path().join("appa.toml").is_file() {
@@ -330,7 +330,7 @@ mod tests {
     }
 
     /// The store takes every battery of a version's tree, replaces its own copy
-    /// of a battery the tree carries again, and keeps one it does not.
+    /// of a battery the tree carries again, and drops one it does not.
     #[test]
     fn stocking_replaces_the_store_with_the_versions_batteries() {
         let tree = tempfile::tempdir().expect("tree");

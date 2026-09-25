@@ -1,8 +1,8 @@
 //! Staging the batteries archive from an OpenAPPA repository checkout.
 //!
-//! Separate from [`crate::batteries_layout`] because `build.rs` names this
-//! module by path and stages the archive in every build, while the library
-//! itself needs it only where the installer does.
+//! Separate from [`crate::batteries_layout`] because `build.rs` stages the
+//! archive in every build, while the library itself needs it only where the
+//! installer does.
 
 use std::fs;
 use std::io;
