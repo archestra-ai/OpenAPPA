@@ -2490,7 +2490,19 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         }
     }
 
+    /// Each fixture is built once per test process. A second `cargo build` of the same
+    /// target re-links its output while an earlier test may still be copying that file.
     fn build_fixture(package: &str, features: Option<&str>) -> std::path::PathBuf {
+        type Built = std::sync::Mutex<BTreeMap<(String, Option<String>), std::path::PathBuf>>;
+        static BUILT: Built = std::sync::Mutex::new(BTreeMap::new());
+        let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        built
+            .entry((package.to_string(), features.map(str::to_string)))
+            .or_insert_with(|| cargo_build_fixture(package, features))
+            .clone()
+    }
+
+    fn cargo_build_fixture(package: &str, features: Option<&str>) -> std::path::PathBuf {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .canonicalize()
