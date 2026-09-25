@@ -103,9 +103,10 @@ the first answer wins; a connection that answered that slowly is not
 reused. A 5xx answer or a connection failure is retried; a 4xx answer and
 an unreadable body are not. Every attempt ends inside the profile's
 `timeout_ms`, which defaults to the deployment's `externals.timeout_ms`.
-At most `max_concurrent` consults, 16 by default, run at once in one
-deployment. The battery's profile keeps both defaults; a root config
-that declares `[externals.jev]` itself can set them.
+At most `max_concurrent` consults, 16 by default, run at once across the
+runtime, all sessions included; an accepted reload applies a changed value
+to later consults of every session. The battery's profile keeps both
+defaults; a root config that declares `[externals.jev]` itself can set them.
 
 The consult record carries one JSON object under `jev_diagnostics`, also
 logged at debug level: each label's probabilities and decision, the

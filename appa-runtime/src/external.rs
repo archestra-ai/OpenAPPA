@@ -8,7 +8,7 @@
 //! TypeSafe's classifier its own questions about the call; `hitl` shows it to a person. Every failure is [`ConsultOutcome::NoAnswer`] — never a denial.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -248,15 +248,59 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
         .await
 }
 
-/// What every deployment the runtime serves or pins shares: a reload's old and new
-/// snapshots, and every pinned view. The `command` gate bounds the processes the runtime
-/// runs at once, and the jev clients keep the connections that answer promptly across a
-/// reload. Each model builtin's permit pool is the deployment's own, sized by its table's
-/// `max_concurrent`.
+/// What every deployment the runtime builds shares: a reload's old and new snapshots, every
+/// pinned view and every inventory session. The `command` gate bounds the processes the
+/// runtime runs at once, each model builtin's gate bounds its consults across the runtime,
+/// and the jev clients keep the connections that answer promptly across a reload.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
+    models: Arc<ModelGates>,
     jev: Arc<JevClients>,
+}
+
+/// One gate per model builtin with the `max_concurrent` it was sized by. Only the serving
+/// deployment sizes them, at open and when a reload installs it; a consult takes a permit of
+/// the gate current when it starts, so a resize reaches every deployment's later consults
+/// while consults under the old gate finish under it.
+#[derive(Debug)]
+pub(crate) struct ModelGates {
+    claude_code: ModelGate,
+    llm: ModelGate,
+    jev: ModelGate,
+}
+
+type ModelGate = Mutex<(usize, Arc<tokio::sync::Semaphore>)>;
+
+fn model_gate(max_concurrent: usize) -> ModelGate {
+    Mutex::new((max_concurrent, Arc::new(tokio::sync::Semaphore::new(max_concurrent))))
+}
+
+impl ModelGates {
+    fn slot(&self, builtin: AnnotatorBuiltin) -> &ModelGate {
+        match builtin {
+            AnnotatorBuiltin::ClaudeCode => &self.claude_code,
+            AnnotatorBuiltin::Llm => &self.llm,
+            AnnotatorBuiltin::Jev => &self.jev,
+        }
+    }
+
+    fn lock(&self, builtin: AnnotatorBuiltin) -> std::sync::MutexGuard<'_, (usize, Arc<tokio::sync::Semaphore>)> {
+        self.slot(builtin)
+            .lock()
+            .expect("a model gate mutex is never poisoned: no panic runs while it is held")
+    }
+
+    pub(crate) fn current(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.lock(builtin).1)
+    }
+
+    pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
+        let mut slot = self.lock(builtin);
+        if slot.0 != max_concurrent {
+            *slot = (max_concurrent, Arc::new(tokio::sync::Semaphore::new(max_concurrent)));
+        }
+    }
 }
 
 impl ConsultGates {
@@ -267,8 +311,36 @@ impl ConsultGates {
     fn of(command: usize) -> ConsultGates {
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
+            models: Arc::new(ModelGates {
+                claude_code: model_gate(crate::config::ModelLimits::CLAUDE_CODE.max_concurrent),
+                llm: model_gate(crate::config::ModelLimits::LLM.max_concurrent),
+                jev: model_gate(crate::config::DEFAULT_JEV_CONCURRENCY),
+            }),
             jev: Arc::default(),
         }
+    }
+
+    /// Size the model gates by the serving deployment's tables. A table the deployment does
+    /// not declare leaves its gate as it is: no backend of that deployment consults it.
+    pub(crate) fn size_by(&self, externals: &Externals) {
+        self.models.resize(
+            AnnotatorBuiltin::ClaudeCode,
+            externals.claude_code.limits.max_concurrent,
+        );
+        if let Some(llm) = &externals.llm {
+            self.models.resize(AnnotatorBuiltin::Llm, llm.limits.max_concurrent);
+        }
+        if let Some(jev) = &externals.jev {
+            self.models.resize(AnnotatorBuiltin::Jev, jev.limits.max_concurrent);
+        }
+    }
+
+    pub(crate) fn models(&self) -> Arc<ModelGates> {
+        Arc::clone(&self.models)
+    }
+
+    pub(crate) fn jev_clients(&self) -> Arc<JevClients> {
+        Arc::clone(&self.jev)
     }
 }
 
@@ -317,24 +389,20 @@ impl ExternalServices {
             .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
-        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes);
+        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
         // A profile without the key it needs serves nothing: a deployment that consults it
         // refuses to open, so an entry naming it never reaches here.
         let llm = config
             .llm
             .as_ref()
             .filter(|profile| profile.missing_key().is_none())
-            .map(|profile| LlmBackend::new(profile, config.max_body_bytes))
+            .map(|profile| LlmBackend::new(profile, config.max_body_bytes, &gates))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
-        let jev = config.jev.as_ref().and_then(|profile| {
-            JevBackend::new(
-                profile,
-                config.max_body_bytes,
-                Arc::clone(&gates.jev),
-                JevTiming::STANDARD,
-            )
-        });
+        let jev = config
+            .jev
+            .as_ref()
+            .and_then(|profile| JevBackend::new(profile, config.max_body_bytes, &gates, JevTiming::STANDARD));
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -1406,6 +1474,7 @@ mod tests {
                 },
             },
             cap,
+            &ConsultGates::per_runtime(),
         )
     }
 

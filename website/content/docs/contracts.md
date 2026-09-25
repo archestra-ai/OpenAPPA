@@ -1222,7 +1222,7 @@ url = "https://approver.corp/rule"
 token_env = "APPA_APPROVER_TOKEN"
 ```
 
-`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section.
+`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section. `max_concurrent` limits the requests of one implementation across the whole runtime, all sessions included. A reload that OpenAPPA accepts applies a changed value to later requests of every session. Requests that already run or wait finish under the previous limit.
 
 The available settings depend on the component's role:
 
@@ -1320,7 +1320,7 @@ OpenAPPA checks authority and annotator answers against their permits and assign
 | `command` | Selects the executable. Default: `claude`. |
 | `model` | Selects the model. Default: `sonnet`. |
 | `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: 60,000. |
-| `max_concurrent` | Sets how many requests the deployment runs at once. Default: 4. |
+| `max_concurrent` | Sets how many requests the runtime runs at once. Default: 4. |
 
 Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables.
 
@@ -1361,7 +1361,7 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
 |---|---|
 | `token_env` | Names the variable that holds the TypeSafe API key. Required. Must start with `APPA_`. |
 | `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. |
-| `max_concurrent` | Sets how many requests the deployment runs at once. Default: 16. |
+| `max_concurrent` | Sets how many requests the runtime runs at once. Default: 16. |
 
 A battery that ships this section declares `token_env` only. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).
 

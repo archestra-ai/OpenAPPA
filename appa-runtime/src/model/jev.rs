@@ -31,8 +31,9 @@ use tokio::time::Instant;
 use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, Token};
 use crate::consult::{Consult, ConsultBody};
-use crate::external::{NoAnswerReason, acquire_within};
+use crate::external::{ConsultGates, ModelGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
+use appa_policy::AnnotatorBuiltin;
 use questions::Questions;
 
 const MODEL: &str = "jev-1.13.0";
@@ -72,9 +73,8 @@ impl JevTiming {
     };
 }
 
-/// The `[externals.jev]` profile bound to the runtime's one client pool. Its permit pool is
-/// the deployment's own, bounded by `max_concurrent`: one permit per consult in flight,
-/// held across its hedges and retries.
+/// The `[externals.jev]` profile bound to the runtime's one client pool and its `jev` gate:
+/// one permit per consult in flight, held across its hedges and retries.
 #[derive(Clone)]
 pub(crate) struct JevBackend {
     url: String,
@@ -82,7 +82,7 @@ pub(crate) struct JevBackend {
     budget: Duration,
     max_body_bytes: usize,
     timing: JevTiming,
-    permits: Arc<tokio::sync::Semaphore>,
+    gates: Arc<ModelGates>,
     clients: Arc<JevClients>,
 }
 
@@ -100,7 +100,7 @@ impl JevBackend {
     pub(crate) fn new(
         profile: &JevProfile,
         max_body_bytes: usize,
-        clients: Arc<JevClients>,
+        gates: &ConsultGates,
         timing: JevTiming,
     ) -> Option<JevBackend> {
         Some(JevBackend {
@@ -109,14 +109,14 @@ impl JevBackend {
             budget: profile.limits.timeout.saturating_sub(timing.budget_margin),
             max_body_bytes,
             timing,
-            permits: Arc::new(tokio::sync::Semaphore::new(profile.limits.max_concurrent)),
-            clients,
+            gates: gates.models(),
+            clients: gates.jev_clients(),
         })
     }
 
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
-        self.permits.available_permits()
+        self.gates.current(AnnotatorBuiltin::Jev).available_permits()
     }
 
     /// One annotation consult: the answer, and what a consult record keeps of it.
@@ -183,7 +183,8 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let permit = acquire_within(&self.permits, deadline, "jev", &consult.name)
+        let gate = self.gates.current(AnnotatorBuiltin::Jev);
+        let permit = acquire_within(&gate, deadline, "jev", &consult.name)
             .await
             .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let labels = self.ask(&body, key, deadline, exchange).await;
@@ -797,7 +798,9 @@ mod tests {
                 max_concurrent,
             },
         };
-        JevBackend::new(&profile, 65_536, Arc::default(), timing).expect("the key is set")
+        let gates = crate::external::ConsultGates::per_runtime();
+        gates.models().resize(AnnotatorBuiltin::Jev, max_concurrent);
+        JevBackend::new(&profile, 65_536, &gates, timing).expect("the key is set")
     }
 
     fn diagnostics(record: &JevRecord) -> serde_json::Value {
@@ -1552,7 +1555,13 @@ mod tests {
                 max_concurrent: TEST_PERMITS,
             },
         };
-        let jev = JevBackend::new(&profile, 65_536, Arc::default(), JevTiming::STANDARD).expect("the key is set");
+        let jev = JevBackend::new(
+            &profile,
+            65_536,
+            &crate::external::ConsultGates::per_runtime(),
+            JevTiming::STANDARD,
+        )
+        .expect("the key is set");
         let mut elapsed = Vec::new();
         let mut hedged = 0;
         let mut agreed = 0;

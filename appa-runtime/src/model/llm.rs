@@ -19,7 +19,8 @@ use rig_core::providers::{anthropic, gemini, ollama, openai};
 use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
 use crate::config::{LlmProfile, LlmProvider, ProfileKey};
 use crate::consult::ModelPrompt;
-use crate::external::{NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, ModelGates, NoAnswerReason, Transcript, acquire_within};
+use appa_policy::AnnotatorBuiltin;
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
 /// body) plus the schema's own overhead, and never less than a short ruling needs.
@@ -38,15 +39,14 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
-/// `builtin = "llm"` entry of the deployment. Its permit pool is the deployment's own,
-/// bounded by the profile's `max_concurrent`, so two deployments never share or resize one.
+/// `builtin = "llm"` entry of the deployment. Its permit pool is the runtime's `llm` gate.
 #[derive(Clone)]
 pub struct LlmBackend {
     client: LlmClient,
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
-    gate: Arc<tokio::sync::Semaphore>,
+    gates: Arc<ModelGates>,
 }
 
 impl std::fmt::Debug for LlmBackend {
@@ -92,7 +92,11 @@ pub struct LlmClientError {
 impl LlmBackend {
     /// Build the provider client once. `max_body_bytes` is the deployment's cap on any
     /// answer, model answers included.
-    pub(crate) fn new(profile: &LlmProfile, max_body_bytes: usize) -> Result<LlmBackend, LlmClientError> {
+    pub(crate) fn new(
+        profile: &LlmProfile,
+        max_body_bytes: usize,
+        gates: &ConsultGates,
+    ) -> Result<LlmBackend, LlmClientError> {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
@@ -141,13 +145,13 @@ impl LlmBackend {
             model: profile.model.clone(),
             timeout: profile.limits.timeout,
             max_body_bytes,
-            gate: Arc::new(tokio::sync::Semaphore::new(profile.limits.max_concurrent)),
+            gates: gates.models(),
         })
     }
 
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
-        self.gate.available_permits()
+        self.gates.current(AnnotatorBuiltin::Llm).available_permits()
     }
 
     /// One consult. The deadline covers the permit wait and every attempt: queueing behind
@@ -161,7 +165,8 @@ impl LlmBackend {
         mut seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let _permit = acquire_within(&self.gate, deadline, "llm", name).await?;
+        let gate = self.gates.current(AnnotatorBuiltin::Llm);
+        let _permit = acquire_within(&gate, deadline, "llm", name).await?;
         let mut attempts = 1;
         loop {
             let answered = self.attempt(prompt, deadline, seen.as_deref_mut()).await;
@@ -388,9 +393,12 @@ mod tests {
     }
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
+        let gates = ConsultGates::per_runtime();
+        gates.models().resize(AnnotatorBuiltin::Llm, max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             max_body_bytes,
+            &gates,
         )
         .expect("the backend builds")
     }
@@ -490,11 +498,11 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        assert!(LlmBackend::new(&gemini, 65_536).is_ok());
+        assert!(LlmBackend::new(&gemini, 65_536, &ConsultGates::per_runtime()).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, 65_536).is_ok());
+        assert!(LlmBackend::new(&ollama, 65_536, &ConsultGates::per_runtime()).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, 65_536).is_ok());
+        assert!(LlmBackend::new(&pinned, 65_536, &ConsultGates::per_runtime()).is_ok());
     }
 
     #[tokio::test]
@@ -555,10 +563,10 @@ mod tests {
         );
     }
 
-    /// Each deployment's backend bounds its own consults by its own profile: a deployment
-    /// allowing one consult at a time is not widened by another allowing two, nor narrows it.
+    /// Each runtime's `llm` gate bounds its backend's consults: a runtime allowing one consult
+    /// at a time is not widened by another allowing two, nor narrows it.
     #[tokio::test]
-    async fn each_backend_bounds_its_consults_by_its_own_profile() {
+    async fn each_runtime_bounds_its_llm_consults_by_its_own_gate() {
         let (narrow_addr, narrow_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
         let (wide_addr, wide_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
         for stub in [&narrow_stub, &wide_stub] {

@@ -901,6 +901,7 @@ impl Prepared {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
+        gates.size_by(&deployment.config.externals);
         Ok(Prepared {
             modules,
             gates,
@@ -1050,10 +1051,10 @@ impl Runtime {
     /// alone, and names roots uniquely across the whole runtime: the runtime's in-process
     /// diagnostics and each root's last working directory are keyed by root id alone.
     ///
-    /// The deployment's `llm` pool is its own, bounded by its profile's `max_concurrent`.
-    /// The `command` and `claude-code` permit pools and the `jev` connection pool are the
-    /// runtime's, shared by every deployment it serves or pins; the jev pool is keyed by
-    /// endpoint and each request carries its own deployment's key.
+    /// The `command` gate, each model builtin's gate and the `jev` connection pool are the
+    /// runtime's, shared by every deployment it serves or pins. The serving deployment's
+    /// `max_concurrent` sizes each model gate; a pinned one's does not. The jev pool is keyed by endpoint and each request carries its own
+    /// deployment's key.
     ///
     /// # Panics
     ///
@@ -1644,6 +1645,7 @@ impl Runtime {
                 .expect("the deployment lock is never poisoned: no panic runs while it is held"),
             Arc::clone(&deployment),
         );
+        self.inner.shared.gates.size_by(&deployment.config.externals);
         // Every reload retires at most one more policy, so clearing here bounds the
         // cache by the reloads since the last one instead of by the life of the
         // process. A trajectory still replaying under a dropped entry recompiles it.
@@ -3722,11 +3724,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
-    /// Every deployment bounds each model builtin's consults by its own table: installing
-    /// one or pinning another resizes no other deployment's pool.
+    /// A runtime bounds each model builtin's consults by one gate, sized by the serving
+    /// deployment: every deployment it builds draws on the same permits, and an installed
+    /// reload resizes the gate for every later consult, a session opened before it included.
+    /// A pin and a refused reload leave the size as it is.
     #[test]
-    fn each_deployment_bounds_its_model_consults_by_its_own_table() {
+    fn a_runtime_bounds_each_model_builtins_consults_by_one_gate() {
         use appa_policy::AnnotatorBuiltin;
+        use appa_runtime_api::inventory::ToolInventory;
 
         let mut tables = vec![
             (
@@ -3741,27 +3746,55 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         if cfg!(unix) {
             tables.push((AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"));
         }
+        // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
+        const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\
+                               [[policy.tool]]\nname = \"other\"\ndescription = \"Looks another record up.\"\nannotator = \"refused\"\n";
         for (builtin, table) in tables {
-            let with_pool = |max_concurrent: u32| {
+            let policy = |max_concurrent: u32, extra: &str| {
                 keyed_config(&format!(
                     "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{}\"\n\
                      ranks = [\"suspicious\", \"trusted\"]\n\
                      [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
-                     {table}max_concurrent = {max_concurrent}\n",
+                     {extra}{table}max_concurrent = {max_concurrent}\n",
                     builtin.wire_name()
                 ))
             };
+            let with_pool = |max_concurrent: u32| policy(max_concurrent, "");
             let permits = |deployment: &Deployment| deployment.externals.model_permits(builtin);
             let dir = tempfile::tempdir().expect("a temp dir is creatable");
             let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
-            let narrow = runtime.prepare_deployment(with_pool(1)).expect("loads");
-            let wide = runtime.prepare_deployment(with_pool(3)).expect("loads");
+            let session = |id: &str| {
+                runtime
+                    .create_session_with_inventory(TrajectoryId(id.to_string()), ToolInventory::default())
+                    .expect("the inventory session opens")
+            };
+            let (first, second) = (session("first"), session("second"));
 
-            runtime.install(narrow.clone());
-            let pinned = runtime.pinned(&wide);
-            assert_eq!(permits(&runtime.inner.deployment()), Some(1), "{builtin:?}");
-            assert_eq!(permits(&pinned.inner.deployment()), Some(3), "{builtin:?}");
-            assert_eq!(permits(&narrow.deployment), Some(1), "{builtin:?}");
+            let held = runtime
+                .inner
+                .shared
+                .gates
+                .models()
+                .current(builtin)
+                .try_acquire_many_owned(2)
+                .expect("the gate is free");
+            for deployment in [&*runtime.inner.deployment(), first.deployment(), second.deployment()] {
+                assert_eq!(permits(deployment), Some(0), "{builtin:?}");
+            }
+            drop(held);
+
+            let pinned = runtime.pinned(&runtime.prepare_deployment(with_pool(5)).expect("loads"));
+            assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{builtin:?}");
+            assert_eq!(permits(&pinned.inner.deployment()), Some(2), "{builtin:?}");
+
+            runtime.reload(with_pool(3)).expect("reloads");
+            for deployment in [
+                &*runtime.inner.deployment(),
+                first.deployment(),
+                &*pinned.inner.deployment(),
+            ] {
+                assert_eq!(permits(deployment), Some(3), "{builtin:?}");
+            }
         }
     }
 

@@ -305,6 +305,11 @@ impl Session {
         &self.trajectory
     }
 
+    #[cfg(test)]
+    pub(crate) fn deployment(&self) -> &Deployment {
+        &self.deployment
+    }
+
     /// The actor's turn is over. Calls still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
     /// refused at its permission prompt, and none for a turn the user

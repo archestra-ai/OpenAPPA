@@ -263,7 +263,7 @@ pub(crate) fn lookup_targets_of(document: &toml::Value) -> BTreeMap<String, Stri
 }
 
 /// One model builtin's consult limits: the budget of one consult, its wait for a permit
-/// included, and how many of its consults one deployment runs at once. Each model builtin
+/// included, and how many of its consults the runtime runs at once. Each model builtin
 /// reads its own from its `[externals.*]` table as `timeout_ms` and `max_concurrent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelLimits {
@@ -276,11 +276,11 @@ pub struct ModelLimits {
 /// HTTP round trip.
 const DEFAULT_MODEL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How many jev consults one deployment runs at once when `[externals.jev]` names no
+/// How many jev consults the runtime runs at once when `[externals.jev]` names no
 /// `max_concurrent`. A consult is one small HTTPS request of about 0.3 s, so the default
 /// admits two command batches' worth; it bounds the requests a burst sends TypeSafe (a
 /// hedge or retry adds at most two per consult) and the connections it opens.
-const DEFAULT_JEV_CONCURRENCY: usize = 16;
+pub(crate) const DEFAULT_JEV_CONCURRENCY: usize = 16;
 
 impl ModelLimits {
     pub(crate) const CLAUDE_CODE: ModelLimits = ModelLimits {

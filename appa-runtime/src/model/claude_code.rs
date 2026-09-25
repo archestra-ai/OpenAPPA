@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::config::ClaudeCode;
 use crate::consult::ModelPrompt;
-use crate::external::{NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, ModelGates, NoAnswerReason, Transcript, acquire_within};
+use appa_policy::AnnotatorBuiltin;
 
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
 /// this envelope: `is_error` set and its own message — "Not logged in · Please run
@@ -35,8 +36,7 @@ impl ClaudeResultEnvelope {
 /// The stock `claude-code` model transport: one isolated, tool-less `claude` process per
 /// consult, answering under the consult's own output schema. The deployment may override
 /// the executable (a service environment often has no usable `PATH`), the model, and the
-/// consult limits. Its permit pool is the deployment's own, bounded by `max_concurrent`,
-/// so two deployments never share or resize one.
+/// consult limits. Its permit pool is the runtime's `claude-code` gate.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeCodeBackend {
     #[cfg(unix)]
@@ -46,11 +46,11 @@ pub(crate) struct ClaudeCodeBackend {
     timeout: std::time::Duration,
     #[cfg(unix)]
     max_body_bytes: usize,
-    gate: Arc<tokio::sync::Semaphore>,
+    gates: Arc<ModelGates>,
 }
 
 impl ClaudeCodeBackend {
-    pub(crate) fn new(config: &ClaudeCode, max_body_bytes: usize) -> ClaudeCodeBackend {
+    pub(crate) fn new(config: &ClaudeCode, max_body_bytes: usize, gates: &ConsultGates) -> ClaudeCodeBackend {
         #[cfg(not(unix))]
         let _ = max_body_bytes;
         ClaudeCodeBackend {
@@ -61,13 +61,13 @@ impl ClaudeCodeBackend {
             timeout: config.limits.timeout,
             #[cfg(unix)]
             max_body_bytes,
-            gate: Arc::new(tokio::sync::Semaphore::new(config.limits.max_concurrent)),
+            gates: gates.models(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
-        self.gate.available_permits()
+        self.gates.current(AnnotatorBuiltin::ClaudeCode).available_permits()
     }
 
     /// One consult. The deadline covers the permit wait and the subprocess: queueing behind
@@ -80,7 +80,8 @@ impl ClaudeCodeBackend {
         seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = acquire_within(&self.gate, deadline, "claude", name).await?;
+        let gate = self.gates.current(AnnotatorBuiltin::ClaudeCode);
+        let permit = acquire_within(&gate, deadline, "claude", name).await?;
         let answered = run_claude_code(self, prompt, deadline, seen).await;
         drop(permit);
         answered
@@ -264,6 +265,7 @@ mod tests {
                 },
             },
             65_536,
+            &crate::external::ConsultGates::per_runtime(),
         );
         let prompt = ModelPrompt {
             system: "rule".to_string(),
@@ -338,6 +340,7 @@ mod tests {
                 },
             },
             65_536,
+            &crate::external::ConsultGates::per_runtime(),
         );
         let prompt = ModelPrompt {
             system: "rule".to_string(),
