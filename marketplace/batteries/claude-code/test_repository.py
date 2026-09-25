@@ -110,6 +110,8 @@ class RepositoryTargets(unittest.TestCase):
             'V="git push https://github.com/acme/public.git"; sh -c "$V"',
             "source push.sh; gh pr create",
             "/usr/bin/gi? push https://github.com/acme/public.git",
+            "/tmp/evil/git push origin",
+            "~/bin/gh pr create",
             "HOME=/tmp/evil git push origin",
             "export XDG_CONFIG_HOME=/tmp/evil; git push origin",
             "GIT_COMMON_DIR=/tmp/other.git git push origin",

@@ -147,7 +147,7 @@ inputs = { call = "$tool_call", repository = "$input.claude-code.repository" }
 hint = "`repository` is the deployment's own finding: the GitHub repository the command reaches, with its `visibility`, or `null` with a `reason`. A push, pull request, issue, release, or comment into a public repository, or into one not established, requires audience public; into a private or internal one requires audience internal. A read keeps the session's audience."
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:*git push*)"
+name = "host/claude-code/Bash(command:*git *push*)"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-repository-requirements"
 

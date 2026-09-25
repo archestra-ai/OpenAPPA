@@ -177,6 +177,8 @@ def repository_targets(command, cwd):
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
             continue
         program = os.path.basename(words[0])
+        if program in ("git", "gh") and program != words[0]:
+            raise Unfollowable(f"{words[0]} may not be the {program} this input follows")
         if program in ("git", "gh") and (settings := assigned | environment.keys() - HARMLESS_VARIABLES):
             raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
         match program:
