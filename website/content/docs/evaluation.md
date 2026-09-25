@@ -17,14 +17,16 @@ uses
 to check each action. These benchmarks test the complete integration and show
 whether its policies stop the intended threats without making the agent useless.
 
-## Security: no observed attacks in 1,320 evaluations
+## Security: no observed attacks in 5,628 evaluations
 
-No scored attack succeeded against guarded OpenAPPA in **1,320 evaluations**:
+No scored attack succeeded against guarded OpenAPPA in **5,628 evaluations**:
 600 from
-[Bench‑Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp) and
+[Bench‑Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp),
 720 from
-[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench).
-Both suites tested standard and adversarial prompts.
+[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench),
+and 4,308 from a replay of the Kaggle competition
+[AI Agent Security](https://www.kaggle.com/competitions/ai-agent-security-multi-step-tool-attacks).
+The first two suites tested standard and adversarial prompts.
 
 In Bench-Corp, the evaluated
 [Microsoft FIDES](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/)
@@ -57,6 +59,26 @@ task completion followed by attack success rate (ASR).
 | GPT-5.6 Luna | **88.0% / 0%** | 38.5% / 32.0% | 37.0% / 32.5% |
 | DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
+
+In the [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md), the agent reads one of 319 support emails,
+63 of them malicious, and mails a triage summary. Utility is the share of runs
+that sent the summary. ASR counts runs where the attacker's link went out or
+the competition's scorer flagged an attack.
+
+| Model | Guarded OpenAPPA (Utility / ASR) | No guardrail, subagent reads the email (Utility / ASR) | Organizers' rule guardrail (Utility / ASR) | No guardrail, agent reads the email (Utility / ASR) |
+|---|---:|---:|---:|---:|
+| GPT-6 Luna | **100% / 0%** | 100% / 0% | 89.1% / 2.0% | 88.3% / 2.3% |
+| GPT-OSS 20B | **100% / 0%** | 100% / 0% | 94.1% / 11.7% | 95.2% / 13.3% |
+| Gemma 4 26B | **100% / 0%** | 98.3% / 0% | 84.6% / 14.9% | 91.2% / 26.5% |
+| GLM 5.3 Flash | **98.3% / 0%** | 98.6% / 0.1% | 58.5% / 19.7% | 81.5% / 35.1% |
+
+The two unguarded columns differ only in who reads the email. An agent that
+reads it follows the links the attacker planted, runs out of steps, or copies
+the link into its summary. A [subagent](/how-it-works#subagent-reads) that
+returns four typed fields keeps that text away from the agent that writes the
+summary. Guarded OpenAPPA uses the same subagent and makes its answer a
+[checked shape](/contracts#structured-child-returns) instead of a request. The
+competition's leaderboard guardrails block every summary: 0% utility.
 
 In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
 completion for all three models. In the standard tests, it led with Luna and
@@ -168,3 +190,8 @@ spends, so total costs are not directly comparable.
   comparison covers all 97 `banking_knowledge` tasks, with four trials for each
   agent configuration. Matching tasks and random seeds makes the comparison
   fairer, but separate model sessions can still differ.
+- **[Kaggle AI Agent Security](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)** replays the competition's sandbox
+  and scorer: triage over all 319 organizer emails, and 40 attacks in which the
+  user asks only for ordinary work. It ran GPT-OSS 20B and Gemma 4 26B, the
+  small models the competition used, plus GLM 5.3 Flash and GPT-6 Luna, three
+  times each. The attacks are fixed; none was written against OpenAPPA.
