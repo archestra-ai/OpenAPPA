@@ -8,7 +8,7 @@ MCP connection or enable tools in either host.
 
 ## Files
 
-**`appa.toml`** — the rules, in five groups. Each rule names its tool by
+**`appa.toml`** — the rules, in six groups. Each rule names its tool by
 the canonical tool id `mcp/github/<tool>`.
 
 *Who am I* — `get_me` returns the viewer's own profile, nothing written
