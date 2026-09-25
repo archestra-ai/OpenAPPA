@@ -177,14 +177,16 @@ impl FileStore {
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let predecessor = current_or_adopt(&mut state, &self.workspace, &relative)?;
+        let Touched {
+            version: predecessor,
+            actual,
+        } = touch(&mut state, &self.workspace, &relative)?;
         match operation {
             FileOperation::Read | FileOperation::Edit if predecessor.is_none() => {
                 return Err(FileStoreError::Untracked);
             }
             _ => {}
         }
-        let actual = state_digest(&self.workspace, &relative)?;
         if actual != ABSENT {
             let Some(version) = &predecessor else {
                 return Err(FileStoreError::Untracked);
@@ -235,9 +237,11 @@ impl FileStore {
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let source_version =
-            current_or_adopt(&mut state, &self.workspace, &source)?.ok_or(FileStoreError::Untracked)?;
-        let source_actual = state_digest(&self.workspace, &source)?;
+        let Touched {
+            version: source_version,
+            actual: source_actual,
+        } = touch(&mut state, &self.workspace, &source)?;
+        let source_version = source_version.ok_or(FileStoreError::Untracked)?;
         if source_actual == ABSENT {
             return Err(FileStoreError::Untracked);
         }
@@ -245,8 +249,10 @@ impl FileStore {
         if source_actual != source_version.digest {
             return Err(FileStoreError::DigestMismatch);
         }
-        let predecessor = current_or_adopt(&mut state, &self.workspace, &destination)?;
-        let destination_actual = state_digest(&self.workspace, &destination)?;
+        let Touched {
+            version: predecessor,
+            actual: destination_actual,
+        } = touch(&mut state, &self.workspace, &destination)?;
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
         }
@@ -295,8 +301,8 @@ impl FileStore {
         }
         let mut pinned = Vec::with_capacity(inputs.len());
         for path in inputs {
-            let version = current_or_adopt(&mut state, &self.workspace, &path)?.ok_or(FileStoreError::Untracked)?;
-            let actual = state_digest(&self.workspace, &path)?;
+            let Touched { version, actual } = touch(&mut state, &self.workspace, &path)?;
+            let version = version.ok_or(FileStoreError::Untracked)?;
             if actual == ABSENT {
                 return Err(FileStoreError::Untracked);
             }
@@ -310,10 +316,11 @@ impl FileStore {
                 digest: version.digest,
             });
         }
-        let predecessor = current_or_adopt(&mut state, &self.workspace, &destination)?;
-        if state_digest(&self.workspace, &destination)?
-            != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT)
-        {
+        let Touched {
+            version: predecessor,
+            actual,
+        } = touch(&mut state, &self.workspace, &destination)?;
+        if actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
         }
         let pin = FilePin {
@@ -578,8 +585,8 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let mut state = self.lock()?;
-        current_or_adopt(&mut state, &self.workspace, &relative)
+        let state = self.lock()?;
+        Ok(current_state(&state, &relative))
     }
 
     pub fn history(&self, path: &str) -> Result<Vec<FileVersion>, FileStoreError> {
@@ -766,32 +773,36 @@ fn current_state(state: &State, path: &str) -> Option<FileVersion> {
     state.current.get(path).and_then(|id| state.versions.get(id)).cloned()
 }
 
-/// The path's current version. A path the ledger has never versioned that holds a file on
-/// disk is adopted first, with the operator's initial label.
-fn current_or_adopt(state: &mut State, workspace: &Path, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
-    if let Some(version) = current_state(state, path) {
-        return Ok(Some(version));
-    }
-    if state.versions.values().any(|version| version.path == path) {
-        return Ok(None);
-    }
-    let digest = state_digest(workspace, path)?;
-    if digest == ABSENT {
-        return Ok(None);
-    }
-    let version = FileVersion {
-        id: state.next_id,
-        path: path.into(),
-        digest,
-        label: state.initial.clone(),
-        previous: None,
-        content_dependencies: vec![],
-        dispatch: None,
+/// A path's current version beside the digest of what is on disk now.
+struct Touched {
+    version: Option<FileVersion>,
+    actual: String,
+}
+
+/// Hash the path once and return its current version. A path the ledger has never versioned
+/// that holds a file on disk is adopted first, with the operator's initial label.
+fn touch(state: &mut State, workspace: &Path, path: &str) -> Result<Touched, FileStoreError> {
+    let actual = state_digest(workspace, path)?;
+    let version = match current_state(state, path) {
+        Some(version) => Some(version),
+        None if actual == ABSENT || state.versions.values().any(|version| version.path == path) => None,
+        None => {
+            let version = FileVersion {
+                id: state.next_id,
+                path: path.into(),
+                digest: actual.clone(),
+                label: state.initial.clone(),
+                previous: None,
+                content_dependencies: vec![],
+                dispatch: None,
+            };
+            state.next_id += 1;
+            state.versions.insert(version.id, version.clone());
+            state.current.insert(version.path.clone(), version.id);
+            Some(version)
+        }
     };
-    state.next_id += 1;
-    state.versions.insert(version.id, version.clone());
-    state.current.insert(version.path.clone(), version.id);
-    Ok(Some(version))
+    Ok(Touched { version, actual })
 }
 
 fn snapshot_state(state: &State) -> Vec<FileVersion> {
@@ -975,9 +986,8 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("file.txt"), "old").unwrap();
         let store = fixture.store(&Label::top());
-        let pinned = store.current("sub/file.txt").unwrap().unwrap();
-
         store.prepare("a", "edit", FileOperation::Edit, "sub/file.txt").unwrap();
+        let pinned = store.current("sub/file.txt").unwrap().unwrap();
         store.bind("a", "edit", "dispatch", &Label::top()).unwrap();
         fs::rename(fixture.workspace.join("sub"), fixture.workspace.join("real")).unwrap();
         std::os::unix::fs::symlink(&outside, fixture.workspace.join("sub")).unwrap();
@@ -1030,10 +1040,10 @@ mod tests {
     fn move_marks_source_absent_preserves_history_and_allows_reuse() {
         let fixture = Fixture::new();
         let store = fixture.store(&Label::top());
-        let source_id = store.current("tracked.txt").unwrap().unwrap().id;
         store
             .prepare_transfer("a", "move", FileOperation::Move, "tracked.txt", "moved.txt")
             .unwrap();
+        let source_id = store.current("tracked.txt").unwrap().unwrap().id;
         store.bind("a", "move", "dispatch", &Label::top()).unwrap();
         fs::rename(
             fixture.workspace.join("tracked.txt"),

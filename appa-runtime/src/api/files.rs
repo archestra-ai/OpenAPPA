@@ -48,8 +48,8 @@
 //!
 //! Add `[file_tracking]` with `initial_trust` and `initial_audience` to the APPA
 //! configuration. The table's presence enables file tracking. Each root session binds to
-//! its first file call's working directory,
-//! then classifies and hashes the files that exist there. Its subagents share that workspace
+//! its first file call's working directory and checks it for links without reading content.
+//! Each file gets the initial Label when a call first touches it. Its subagents share that workspace
 //! and ledger; another root session can bind to a different workspace.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
