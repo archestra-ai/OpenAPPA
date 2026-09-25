@@ -23,7 +23,7 @@ use crate::receipts::{
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
@@ -62,7 +62,7 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          input TEXT NOT NULL,
                          status TEXT NOT NULL,
                          decision TEXT,
-                         PRIMARY KEY (session_id, operation_id)
+                         PRIMARY KEY (organization_id, session_id, operation_id)
                      );
                      CREATE TABLE processed_results (
                          organization_id TEXT NOT NULL,
@@ -73,7 +73,7 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          status TEXT NOT NULL,
                          approved_output TEXT,
                          decision TEXT,
-                         PRIMARY KEY (session_id, tool_call_id)
+                         PRIMARY KEY (organization_id, session_id, tool_call_id)
                      );";
 
 pub(crate) struct Sqlite(Mutex<Connection>);
@@ -295,8 +295,14 @@ impl Sqlite {
                 let encoded =
                     serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
                 connection.execute(
-                    "UPDATE operations SET status='complete', decision=?3 WHERE session_id=?1 AND operation_id=?2",
-                    params![key.scope.session_id, key.operation_id, encoded],
+                    "UPDATE operations SET status='complete', decision=?4
+                     WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
+                    params![
+                        key.scope.organization_id,
+                        key.scope.session_id,
+                        key.operation_id,
+                        encoded
+                    ],
                 )?;
             }
             Ok(())
@@ -338,9 +344,15 @@ impl Sqlite {
                 let encoded =
                     serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
                 connection.execute(
-                    "UPDATE processed_results SET status='complete', approved_output=?3, decision=?4
-                     WHERE session_id=?1 AND tool_call_id=?2",
-                    params![key.session_id, key.tool_call_id, approved_output, encoded],
+                    "UPDATE processed_results SET status='complete', approved_output=?4, decision=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
+                    params![
+                        key.organization_id,
+                        key.session_id,
+                        key.tool_call_id,
+                        approved_output,
+                        encoded
+                    ],
                 )?;
             }
             Ok(())
@@ -556,8 +568,8 @@ fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<
     connection
         .query_row(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision
-             FROM operations WHERE session_id=?1 AND operation_id=?2",
-            params![key.scope.session_id, key.operation_id],
+             FROM operations WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
+            params![key.scope.organization_id, key.scope.session_id, key.operation_id],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -591,8 +603,8 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
     Ok(connection
         .query_row(
             "SELECT organization_id, session_id, root, status, approved_output, decision
-             FROM processed_results WHERE session_id=?1 AND tool_call_id=?2",
-            params![key.session_id, key.tool_call_id],
+             FROM processed_results WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
+            params![key.organization_id, key.session_id, key.tool_call_id],
             |row| {
                 Ok(StoredResult {
                     organization_id: row.get(0)?,
@@ -625,9 +637,9 @@ mod tests {
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
             ("offer_owners", Some("CREATE TABLE offer_owners ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL, offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT, PRIMARY KEY (organization_id, offer_id) )")),
-            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (session_id, operation_id) )")),
+            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
-            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (session_id, tool_call_id) )")),
+            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
             ("sqlite_autoindex_offer_owners_1", None),
@@ -655,7 +667,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("the version reads");
-            assert_eq!(version, 3);
+            assert_eq!(version, 4);
             let mut statement = connection
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
                 .expect("the schema query prepares");

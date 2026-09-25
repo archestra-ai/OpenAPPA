@@ -464,7 +464,7 @@ impl PostgresStore {
 
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
     pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
-        let lock = operation_lock(&request.key.scope.session_id, &request.key.operation_id);
+        let lock = operation_lock(&request.key);
         self.serialized(lock, move |client| {
             let claim = resolve_operation_claim(read_operation(client, &request.key)?, &request)?;
             if claim == OperationClaim::Claimed {
@@ -489,13 +489,19 @@ impl PostgresStore {
 
     /// Completes a claimed operation receipt with its final decision.
     pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
-        let lock = operation_lock(&key.scope.session_id, &key.operation_id);
+        let lock = operation_lock(&key);
         self.serialized(lock, move |client| {
             let existing = read_operation(client, &key)?;
             if let Completion::Write = resolve_operation_completion(existing, &key, &decision)? {
                 client.execute(
-                    "UPDATE openappa_operations SET status='complete', decision=$3 WHERE session_id=$1 AND operation_id=$2",
-                    &[&key.scope.session_id, &key.operation_id, &decision],
+                    "UPDATE openappa_operations SET status='complete', decision=$4 \
+                     WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3",
+                    &[
+                        &key.scope.organization_id,
+                        &key.scope.session_id,
+                        &key.operation_id,
+                        &decision,
+                    ],
                 )?;
             }
             Ok(())
@@ -507,7 +513,7 @@ impl PostgresStore {
         &self,
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
-        let lock = result_lock(&request.key.session_id, &request.key.tool_call_id);
+        let lock = result_lock(&request.key);
         self.serialized(lock, move |client| {
             let claim = resolve_result_claim(read_result(client, &request.key)?, &request)?;
             if claim == ProcessedResultClaim::Claimed {
@@ -534,14 +540,20 @@ impl PostgresStore {
         approved_output: String,
         decision: Value,
     ) -> Result<(), ReceiptError> {
-        let lock = result_lock(&key.session_id, &key.tool_call_id);
+        let lock = result_lock(&key);
         self.serialized(lock, move |client| {
             let existing = read_result(client, &key)?;
             if let Completion::Write = resolve_result_completion(existing, &key, &approved_output, &decision)? {
                 client.execute(
-                    "UPDATE openappa_processed_results SET status='complete', approved_output=$3, decision=$4 \
-                     WHERE session_id=$1 AND tool_call_id=$2",
-                    &[&key.session_id, &key.tool_call_id, &approved_output, &decision],
+                    "UPDATE openappa_processed_results SET status='complete', approved_output=$4, decision=$5 \
+                     WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3",
+                    &[
+                        &key.organization_id,
+                        &key.session_id,
+                        &key.tool_call_id,
+                        &approved_output,
+                        &decision,
+                    ],
                 )?;
             }
             Ok(())
@@ -752,8 +764,8 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
     client
         .query_opt(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision \
-             FROM openappa_operations WHERE session_id=$1 AND operation_id=$2 FOR UPDATE",
-            &[&key.scope.session_id, &key.operation_id],
+             FROM openappa_operations WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3 FOR UPDATE",
+            &[&key.scope.organization_id, &key.scope.session_id, &key.operation_id],
         )?
         .map(|row| {
             Ok(StoredOperation {
@@ -773,8 +785,8 @@ fn read_result(client: &mut Client, key: &ProcessedResultKey) -> Result<Option<S
     Ok(client
         .query_opt(
             "SELECT organization_id, session_id, root, status, approved_output, decision \
-             FROM openappa_processed_results WHERE session_id=$1 AND tool_call_id=$2 FOR UPDATE",
-            &[&key.session_id, &key.tool_call_id],
+             FROM openappa_processed_results WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 FOR UPDATE",
+            &[&key.organization_id, &key.session_id, &key.tool_call_id],
         )?
         .map(|row| StoredResult {
             organization_id: row.get(0),
@@ -816,12 +828,18 @@ fn offer_owner_lock(organization_id: &str, offer_id: &str) -> String {
     format!("openappa-offer-owner:{organization_id}:{offer_id}")
 }
 
-fn operation_lock(session_id: &str, operation_id: &str) -> String {
-    format!("openappa-operation:{session_id}:{operation_id}")
+fn operation_lock(key: &OperationKey) -> String {
+    format!(
+        "openappa-operation:{}:{}:{}",
+        key.scope.organization_id, key.scope.session_id, key.operation_id
+    )
 }
 
-fn result_lock(session_id: &str, tool_call_id: &str) -> String {
-    format!("openappa-result:{session_id}:{tool_call_id}")
+fn result_lock(key: &ProcessedResultKey) -> String {
+    format!(
+        "openappa-result:{}:{}:{}",
+        key.organization_id, key.session_id, key.tool_call_id
+    )
 }
 
 fn session_lock(scope: &ReceiptScope) -> String {
@@ -872,15 +890,25 @@ mod tests {
     /// so their spelling is a wire format.
     #[test]
     fn advisory_lock_keys_are_frozen() {
-        assert_eq!(offer_owner_lock("org", "offer"), "openappa-offer-owner:org:offer");
-        assert_eq!(operation_lock("session", "op"), "openappa-operation:session:op");
-        assert_eq!(result_lock("session", "call"), "openappa-result:session:call");
         let scope = |caller_id: Option<&str>| ReceiptScope {
             organization_id: "org".to_owned(),
             caller_id: caller_id.map(str::to_owned),
             session_id: "session".to_owned(),
             binding: ReceiptBinding::Caller,
         };
+        assert_eq!(offer_owner_lock("org", "offer"), "openappa-offer-owner:org:offer");
+        let operation = OperationKey {
+            scope: scope(Some("caller")),
+            operation_id: "op".to_owned(),
+        };
+        assert_eq!(operation_lock(&operation), "openappa-operation:org:session:op");
+        let result = ProcessedResultKey {
+            organization_id: "org".to_owned(),
+            caller_id: Some("caller".to_owned()),
+            session_id: "session".to_owned(),
+            tool_call_id: "call".to_owned(),
+        };
+        assert_eq!(result_lock(&result), "openappa-result:org:session:call");
         assert_eq!(
             session_lock(&scope(Some("caller"))),
             "openappa-offer-session:org:caller:session"
