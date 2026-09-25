@@ -91,13 +91,16 @@ struct Worker {
 impl Worker {
     /// `wait` bounds each connection attempt and the opening as a whole, unless the URL
     /// sets its own `connect_timeout`.
-    fn connect(url: String, wait: Duration) -> Result<Worker, PostgresError> {
+    fn connect(url: String, wait: Duration, stall: Option<Duration>) -> Result<Worker, PostgresError> {
         let (sender, receiver) = mpsc::channel::<Job>();
         let (ready, initialized) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("appa-postgres".into())
             .spawn(move || {
                 let connect = || -> Result<Client, PostgresError> {
+                    if let Some(stall) = stall {
+                        std::thread::sleep(stall);
+                    }
                     let tls = native_tls::TlsConnector::new().map_err(|e| PostgresError(e.to_string()))?;
                     let mut config: ::postgres::Config = url.parse()?;
                     if config.get_connect_timeout().is_none() {
@@ -216,6 +219,8 @@ struct PoolState {
     reset_wait: Duration,
     /// Armed only by the `fault-injection` fail point.
     stall_next_reset: Option<Duration>,
+    /// Armed only by the `fault-injection` fail point.
+    stall_next_connect: Option<Duration>,
 }
 
 impl Pool {
@@ -244,10 +249,15 @@ impl Pool {
                 state = self.state();
                 continue;
             }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(LeaseError::Exhausted(wait));
+            }
             if state.open < self.max_connections.get() {
                 state.open += 1;
+                let stall = state.stall_next_connect.take();
                 drop(state);
-                return match Worker::connect(self.url.clone(), wait) {
+                return match Worker::connect(self.url.clone(), remaining, stall) {
                     Ok(worker) => Ok(Lease {
                         pool: Arc::clone(self),
                         worker: Some(worker),
@@ -257,10 +267,6 @@ impl Pool {
                         Err(LeaseError::Connect(error))
                     }
                 };
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(LeaseError::Exhausted(wait));
             }
             state = self
                 .freed
@@ -331,6 +337,7 @@ impl PostgresStore {
                 checkout_wait: Duration::from_secs(30),
                 reset_wait: Duration::from_secs(5),
                 stall_next_reset: None,
+                stall_next_connect: None,
             }),
             freed: Condvar::new(),
         });
@@ -400,6 +407,12 @@ impl PostgresStore {
     #[cfg(feature = "fault-injection")]
     pub fn stall_next_reset(&self, stall: Duration) {
         self.pool.state().stall_next_reset = Some(stall);
+    }
+
+    /// Arm the fail point: the next connection the pool opens takes `stall` before connecting.
+    #[cfg(feature = "fault-injection")]
+    pub fn stall_next_connect(&self, stall: Duration) {
+        self.pool.state().stall_next_connect = Some(stall);
     }
 
     /// Stores an offer owner record. Repeated writes with identical data are idempotent.

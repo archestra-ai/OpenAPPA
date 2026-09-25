@@ -2817,4 +2817,39 @@ mod tests {
             "a connection that does not answer its reset is never handed out again"
         );
     }
+
+    /// A replacement connection opened late in a checkout gets only what is left of the
+    /// checkout wait, so one checkout never takes much longer than that wait.
+    #[cfg(all(feature = "postgres", feature = "fault-injection"))]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_replacement_connection_gets_only_the_remaining_checkout_wait() {
+        use std::time::{Duration, Instant};
+
+        let checkout = Duration::from_secs(2);
+        let reset = Duration::from_millis(100);
+        let store = postgres_store(1);
+        let pg = store.postgres().unwrap();
+        pg.set_waits(checkout, reset);
+        let lease = store.lease().unwrap();
+        let (leased, waited) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let asked = Instant::now();
+                (store.lease().map(drop), asked.elapsed())
+            });
+            std::thread::sleep(checkout / 2);
+            pg.stall_next_reset(reset * 30);
+            pg.stall_next_connect(checkout * 5);
+            drop(lease);
+            waiter.join().expect("the waiter finishes")
+        });
+        assert!(
+            matches!(leased, Err(crate::postgres::LeaseError::Connect(_))),
+            "{leased:?}"
+        );
+        assert!(
+            waited < checkout + Duration::from_millis(500),
+            "the checkout ends when its wait runs out: {waited:?}"
+        );
+    }
 }
