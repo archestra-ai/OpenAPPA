@@ -1216,7 +1216,6 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    #[cfg(unix)]
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
@@ -2169,6 +2168,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(llm_profile(url.clone()));
         config.jev = Some(jev_profile(url));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builtins = BTreeMap::from([
             ("llm".to_string(), AnnotatorBuiltin::Llm),
             ("jev".to_string(), AnnotatorBuiltin::Jev),

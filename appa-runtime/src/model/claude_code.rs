@@ -207,11 +207,10 @@ pub(crate) async fn run_claude_code(
     Err(NoAnswerReason::Unregistered)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn a_claude_consult_clears_the_parent_session_marker() {
         let mut command = tokio::process::Command::new("claude");
@@ -233,7 +232,6 @@ mod tests {
     }
 
     /// One consult of a fake `claude` in `dir` that reads its input, then runs `script`.
-    #[cfg(unix)]
     async fn fake_consult(dir: &std::path::Path, script: &str) -> Result<serde_json::Value, NoAnswerReason> {
         let command = crate::test_support::fake_claude(dir, &format!("cat > /dev/null\n{script}"));
         let config = ClaudeCode {
@@ -250,7 +248,6 @@ mod tests {
         run_claude_code(&backend, &prompt, deadline, None).await
     }
 
-    #[cfg(unix)]
     async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
         let dir = tempfile::tempdir().expect("a temp dir");
         fake_consult(dir.path(), &format!("{script}\nexit 1")).await
@@ -259,7 +256,6 @@ mod tests {
     /// A CLI that exits without an answer names its own error, so a failed consult is
     /// not just `status=1`: the message of an error envelope on stdout — how the CLI
     /// reports a logged-out session — or else the last stderr line.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_claude_consult_carries_the_clis_own_error() {
         let logged_out = r#"echo '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'"#;
@@ -293,7 +289,6 @@ mod tests {
     /// A helper the CLI leaves running — here a backgrounded `sleep` that keeps the
     /// CLI's stdout open, whose pid the fake records — neither stalls the answer nor
     /// survives the consult that started it.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_consult_takes_its_helpers_down_with_it() {
         let dir = tempfile::tempdir().expect("a temp dir");
