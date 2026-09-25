@@ -112,5 +112,6 @@ Web API payloads for the selectors, id classification and refusals for
 ## Change the behaviour
 
 Put a narrower rule in your root config; root rules run first. The
-comment at the top of `appa.toml` shows one: let thread replies through
-without a question. Nothing in this file needs editing.
+comment at the top of `appa.toml` shows one: messages to one
+announcement channel wait for a person to approve them. Nothing in this
+file needs editing.
