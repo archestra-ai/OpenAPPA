@@ -6,8 +6,9 @@ use serde::Serialize;
 
 use crate::label_guide::{
     CALL_RULES, DELTA_AUDIENCE_CRITERIA, DELTA_AUDIENCE_RULE, DELTA_TRUST_CRITERIA, DELTA_TRUST_RULE,
-    DeltaAudienceCriteria, DeltaTrustCriteria, EXAMPLES, Example, REQUIRES_AUDIENCE_CRITERIA, REQUIRES_AUDIENCE_RULE,
-    REQUIRES_TRUST_CRITERIA, REQUIRES_TRUST_RULE, RequiresAudienceCriteria, RequiresTrustCriteria,
+    DeltaAudienceCriteria, DeltaTrustCriteria, EXAMPLES, Example, Leaf, REQUIRES_AUDIENCE_CRITERIA,
+    REQUIRES_AUDIENCE_RULE, REQUIRES_TRUST_CRITERIA, REQUIRES_TRUST_RULE, RequiresAudienceCriteria,
+    RequiresTrustCriteria,
 };
 
 const CONTEXT: &str = concat!(
@@ -46,7 +47,13 @@ impl Question {
     }
 
     fn answer(self, example: &Example) -> &'static str {
-        example.labels().names()[self as usize]
+        let leaf = match self {
+            Question::DeltaAudience => Leaf::DeltaAudience,
+            Question::DeltaTrust => Leaf::DeltaTrust,
+            Question::RequiresAudience => Leaf::RequiresAudience,
+            Question::RequiresTrusted => Leaf::RequiresTrust,
+        };
+        leaf.name(&example.labels())
     }
 
     /// The context, the call rules and the question, the deployer's hint when the policy

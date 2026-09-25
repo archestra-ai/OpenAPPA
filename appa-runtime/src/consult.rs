@@ -551,10 +551,10 @@ pub struct AnnotationAnswer {
     pub emits: Vec<String>,
 }
 
-/// The refusal detail of an answered value outside the mandate: the field, the value, and
-/// the declaration list that does not hold it.
-pub(crate) fn outside_mandate(field: &str, value: &serde_json::Value, allowed: &str) -> String {
-    format!("field={field} value={value} allowed=declaration.{allowed}")
+/// The refusal detail of an answered value outside the mandate: the field and the
+/// declaration list that does not hold it. The value is model output and never appears.
+pub(crate) fn outside_mandate(field: &str, allowed: &str) -> String {
+    format!("field={field} allowed=declaration.{allowed}")
 }
 
 fn invalid_shape() -> String {
@@ -596,7 +596,7 @@ impl AnnotationAnswer {
             match value {
                 None => Ok(None),
                 Some(serde_json::Value::String(name)) if declaration.trust_ranks.contains(&name) => Ok(Some(name)),
-                Some(value) => Err(outside_mandate(field, &value, "trust_ranks")),
+                Some(_) => Err(outside_mandate(field, "trust_ranks")),
             }
         };
         let bounded = |field: &str, value: Option<serde_json::Value>| -> Result<Option<DeclaredAudience>, String> {
@@ -605,7 +605,7 @@ impl AnnotationAnswer {
                 Some(value) => WireAudience::from_wire(&value)
                     .and_then(|audience| declared_audience(&audience, declaration))
                     .map(Some)
-                    .ok_or_else(|| outside_mandate(field, &value, "audiences")),
+                    .ok_or_else(|| outside_mandate(field, "audiences")),
             }
         };
         let effect = |field: &str, value: &serde_json::Value| -> Result<String, String> {
@@ -613,7 +613,7 @@ impl AnnotationAnswer {
                 .as_str()
                 .filter(|kind| declaration.effects.iter().any(|allowed| allowed == kind))
                 .map(str::to_string)
-                .ok_or_else(|| outside_mandate(field, value, "effects"))
+                .ok_or_else(|| outside_mandate(field, "effects"))
         };
 
         let mut delta = delta.as_object().ok_or_else(invalid_shape)?.clone();
@@ -663,7 +663,7 @@ impl AnnotationAnswer {
                 mark.as_str()
                     .filter(|mark| declaration.attention_marks.iter().any(|allowed| allowed == mark))
                     .map(str::to_string)
-                    .ok_or_else(|| outside_mandate("requires.attention", mark, "attention_marks"))
+                    .ok_or_else(|| outside_mandate("requires.attention", "attention_marks"))
             })
             .collect::<Result<Vec<String>, String>>()?;
         if !requires.is_empty() {
@@ -1211,11 +1211,10 @@ mod tests {
                     &neutral(serde_json::json!({"delta": {"audience": audience}})),
                     &declaration
                 ),
-                Err(outside_mandate("delta.audience", &audience, "audiences")),
+                Err("field=delta.audience allowed=declaration.audiences".to_string()),
                 "{audience}"
             );
         }
-        let invented = serde_json::json!("invented");
         for (answer, field, allowed) in [
             (
                 serde_json::json!({"delta": {"trust": "invented"}}),
@@ -1236,7 +1235,7 @@ mod tests {
         ] {
             assert_eq!(
                 AnnotationAnswer::from_wire(&neutral(answer), &declaration),
-                Err(outside_mandate(field, &invented, allowed)),
+                Err(outside_mandate(field, allowed)),
                 "{field}"
             );
         }

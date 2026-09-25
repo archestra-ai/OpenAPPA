@@ -85,19 +85,29 @@ impl Labels {
         required_audience: RequiredAudience::None,
         requires_trusted: false,
     };
+}
 
-    /// Each answer by the name the rules give it, in question order.
-    pub(crate) fn names(&self) -> [&'static str; 4] {
-        let requires_trusted = match self.requires_trusted {
-            true => "true",
-            false => "false",
-        };
-        [
-            self.result_audience.name(),
-            self.result_trust.name(),
-            self.required_audience.name(),
-            requires_trusted,
-        ]
+/// One of the four questions; each reads its own answer out of [`Labels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leaf {
+    DeltaAudience,
+    DeltaTrust,
+    RequiresAudience,
+    RequiresTrust,
+}
+
+impl Leaf {
+    /// This question's answer in `labels`, by the name the rules give it.
+    pub(crate) const fn name(self, labels: &Labels) -> &'static str {
+        match self {
+            Leaf::DeltaAudience => labels.result_audience.name(),
+            Leaf::DeltaTrust => labels.result_trust.name(),
+            Leaf::RequiresAudience => labels.required_audience.name(),
+            Leaf::RequiresTrust => match labels.requires_trusted {
+                true => "true",
+                false => "false",
+            },
+        }
     }
 }
 
@@ -108,11 +118,7 @@ pub(crate) fn annotation(labels: &Labels, declaration: &AnnotationDeclaration) -
     };
     let admitted = |field: &str, audience: &str| match declaration.audiences.entries().any(|entry| entry == audience) {
         true => Ok(serde_json::json!([audience])),
-        false => Err(crate::consult::outside_mandate(
-            field,
-            &serde_json::json!([audience]),
-            "audiences",
-        )),
+        false => Err(crate::consult::outside_mandate(field, "audiences")),
     };
     let mut delta = serde_json::Map::new();
     match labels.result_audience {
@@ -500,6 +506,7 @@ fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
     };
     let leaves = [
         (
+            Leaf::DeltaAudience,
             "delta",
             "audience",
             DELTA_AUDIENCE_RULE,
@@ -510,6 +517,7 @@ fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
             ],
         ),
         (
+            Leaf::DeltaTrust,
             "delta",
             "trust",
             DELTA_TRUST_RULE,
@@ -519,6 +527,7 @@ fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
             ],
         ),
         (
+            Leaf::RequiresAudience,
             "requires",
             "audience",
             REQUIRES_AUDIENCE_RULE,
@@ -535,6 +544,7 @@ fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
             ],
         ),
         (
+            Leaf::RequiresTrust,
             "requires",
             "trust",
             REQUIRES_TRUST_RULE,
@@ -546,14 +556,13 @@ fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
     ];
     leaves
         .into_iter()
-        .enumerate()
-        .map(|(question, (part, leaf, rule, criteria))| LeafCriteria {
+        .map(|(question, part, leaf, rule, criteria)| LeafCriteria {
             rule,
             criteria: criteria
                 .into_iter()
                 .filter_map(|(labels, criterion)| {
                     let answer = annotation(&labels, declaration).ok()?;
-                    Some((labels.names()[question], answer[part].get(leaf).cloned(), criterion))
+                    Some((question.name(&labels), answer[part].get(leaf).cloned(), criterion))
                 })
                 .collect(),
         })

@@ -792,7 +792,7 @@ The response uses `emits` for effects and `requires.history` for history checks.
 - JSON audience values use `"public"` or a list of permitted audiences. Do not put `public` inside a JSON audience list.
 - A restricted list cannot repeat entries or contain both `self` and `internal`.
 
-OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. For a value outside the permits, the refusal names the field, the value, and the declaration list that does not contain it, such as `field=delta.audience value="secret" allowed=declaration.audiences`. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
+OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. For a value outside the permits, the refusal names the field and the declaration list that does not contain it, such as `field=delta.audience allowed=declaration.audiences`. It never repeats the answered value. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
 OpenAPPA uses the annotation only for the call it classified. Changing the call requires a new annotation. Rechecking or replaying the same recorded call reuses its annotation and membership responses.
 
