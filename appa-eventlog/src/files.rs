@@ -371,19 +371,8 @@ impl FileStore {
             .output_label
             .clone()
             .ok_or(FileStoreError::UnknownReservation)?;
-        let actual = state_digest(&self.workspace, &pin.path)?;
+        let observed = Observed::of(&self.workspace, &pin)?;
         let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
-        let source_actual = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace, &source.path))
-            .transpose()?;
-        let input_states = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        let inputs_unchanged = input_states.iter().all(|unchanged| *unchanged);
         let source_label = if pin.operation == FileOperation::Process {
             pin.inputs
                 .iter()
@@ -396,7 +385,7 @@ impl FileStore {
                 .or_else(|| pin.predecessor_label.clone())
         };
         let receipt = if !success {
-            if !undisturbed(&pin, &actual, source_actual.as_deref(), &input_states) {
+            if !observed.undisturbed(&pin) {
                 return Err(FileStoreError::Quarantined);
             }
             FileReceipt {
@@ -408,7 +397,7 @@ impl FileStore {
                 dispatch: Some(dispatch),
             }
         } else if pin.operation == FileOperation::Read {
-            if actual != expected {
+            if observed.destination != expected {
                 return Err(FileStoreError::DigestMismatch);
             }
             FileReceipt {
@@ -428,17 +417,17 @@ impl FileStore {
                         .as_ref()
                         .ok_or_else(|| FileStoreError::Corrupt("transfer has no source pin".into()))?;
                     let source_ok = if pin.operation == FileOperation::Move {
-                        source_actual.as_deref() == Some(ABSENT)
+                        observed.source.as_deref() == Some(ABSENT)
                     } else {
-                        source_actual.as_deref() == Some(source.digest.as_str())
+                        observed.source.as_deref() == Some(source.digest.as_str())
                     };
-                    if !source_ok || actual != source.digest {
+                    if !source_ok || observed.destination != source.digest {
                         return Err(FileStoreError::DigestMismatch);
                     }
                     vec![source.version]
                 }
                 FileOperation::Process => {
-                    if !inputs_unchanged {
+                    if !observed.inputs_unchanged {
                         return Err(FileStoreError::DigestMismatch);
                     }
                     pin.inputs.iter().map(|input| input.version).collect()
@@ -446,7 +435,7 @@ impl FileStore {
                 FileOperation::Replace => vec![],
                 FileOperation::Read => unreachable!(),
             };
-            if actual == ABSENT {
+            if observed.destination == ABSENT {
                 return Err(FileStoreError::DigestMismatch);
             }
             let id = state.next_id;
@@ -462,7 +451,7 @@ impl FileStore {
             let version = FileVersion {
                 id,
                 path: pin.path.clone(),
-                digest: actual,
+                digest: observed.destination,
                 label: output,
                 previous: pin.predecessor_version,
                 content_dependencies: dependencies,
@@ -496,19 +485,7 @@ impl FileStore {
         if reservation.actor != actor || reservation.call_key != call_key {
             return Ok(AbandonOutcome::Absent);
         }
-        let pin = reservation.pin.clone();
-        let destination = state_digest(&self.workspace, &pin.path)?;
-        let source = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace, &source.path))
-            .transpose()?;
-        let inputs = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace, &input.path)? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
+        if !Observed::of(&self.workspace, &reservation.pin)?.undisturbed(&reservation.pin) {
             return Ok(AbandonOutcome::Quarantined);
         }
         state.reservation = None;
@@ -670,17 +647,43 @@ fn check_links(dir: &Path) -> Result<(), FileStoreError> {
     }
     Ok(())
 }
-/// Whether a pin still describes the workspace: the destination holds the bytes the operation
-/// would have replaced, a transfer's source is where the operation would have left it, and
-/// every declared input is unchanged. `finish` and `abandon` compute these values themselves;
-/// both ask this one question of them.
-fn undisturbed(pin: &FilePin, destination: &str, source_state: Option<&str>, inputs: &[bool]) -> bool {
-    destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
-        && pin
+/// What the workspace holds now at every path a pin recorded, each hashed once.
+struct Observed {
+    destination: String,
+    source: Option<String>,
+    inputs_unchanged: bool,
+}
+
+impl Observed {
+    fn of(workspace: &Path, pin: &FilePin) -> Result<Self, FileStoreError> {
+        let destination = state_digest(workspace, &pin.path)?;
+        let source = pin
             .source
             .as_ref()
-            .is_none_or(|source| source_state == Some(source.digest.as_str()))
-        && inputs.iter().all(|unchanged| *unchanged)
+            .map(|source| state_digest(workspace, &source.path))
+            .transpose()?;
+        let mut inputs_unchanged = true;
+        for input in &pin.inputs {
+            inputs_unchanged &= state_digest(workspace, &input.path)? == input.digest;
+        }
+        Ok(Self {
+            destination,
+            source,
+            inputs_unchanged,
+        })
+    }
+
+    /// Whether the pin still describes the workspace: the destination holds the bytes the
+    /// operation would have replaced, a transfer's source is where the operation would have
+    /// left it, and every declared input is unchanged.
+    fn undisturbed(&self, pin: &FilePin) -> bool {
+        self.destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
+            && pin
+                .source
+                .as_ref()
+                .is_none_or(|source| self.source.as_deref() == Some(source.digest.as_str()))
+            && self.inputs_unchanged
+    }
 }
 
 fn pending_reservation(actor: &str, call_key: &str, pin: &FilePin) -> Reservation {
