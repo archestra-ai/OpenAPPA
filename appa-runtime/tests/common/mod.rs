@@ -81,22 +81,33 @@ pub fn free_port() -> u16 {
     port
 }
 
+/// Spawn `command` while no other spawn through here runs. Where the platform lacks
+/// `pipe2` (macOS), std creates a child's pipes and marks them close-on-exec in two
+/// steps, so a child spawned by a parallel test in between inherits them: it can hold a
+/// read end the test dropped, or a write end the child waits to see closed.
+pub fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
+    static SPAWNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _alone = SPAWNING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    command.spawn()
+}
+
 /// Start the built binary as `appa runtime` over `config` and `db`, and wait until
 /// `/health` answers.
 pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
     let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_appa"))
-        .arg("runtime")
-        .arg("--config")
-        .arg(config)
-        .arg("--db")
-        .arg(db)
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the binary spawns");
+    let child = spawn_child(
+        Command::new(env!("CARGO_BIN_EXE_appa"))
+            .arg("runtime")
+            .arg("--config")
+            .arg(config)
+            .arg("--db")
+            .arg(db)
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("the binary spawns");
     let mut served = ServedRuntime {
         child,
         url: format!("http://127.0.0.1:{port}"),

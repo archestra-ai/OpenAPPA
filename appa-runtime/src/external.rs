@@ -1790,17 +1790,32 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         }
     }
 
+    /// How long a freshly written fixture script may take to start and act. Under a loaded
+    /// parallel suite its cold execs take seconds on macOS; this bounds a hang, not the
+    /// latency under test. Recording a pid and awaiting its end together stay under the
+    /// fixtures' `sleep 30`, so a descendant cannot pass by exiting on its own.
     #[cfg(unix)]
-    async fn recorded_pid(path: &std::path::Path) -> i32 {
-        for _ in 0..100 {
-            if let Ok(value) = std::fs::read_to_string(path)
-                && let Ok(pid) = value.trim().parse()
-            {
-                return pid;
+    const PROCESS_BUDGET: Duration = Duration::from_secs(10);
+
+    /// Poll `probe` every 10ms until it yields a value or `deadline` passes.
+    #[cfg(unix)]
+    async fn wait_until<T>(deadline: tokio::time::Instant, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+        while tokio::time::Instant::now() < deadline {
+            if let Some(value) = probe() {
+                return Some(value);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the resolver did not record its descendant pid");
+        None
+    }
+
+    #[cfg(unix)]
+    async fn recorded_pid(path: &std::path::Path) -> i32 {
+        wait_until(tokio::time::Instant::now() + PROCESS_BUDGET, || {
+            std::fs::read_to_string(path).ok()?.trim().parse().ok()
+        })
+        .await
+        .expect("the resolver did not record its descendant pid")
     }
 
     #[cfg(unix)]
@@ -1811,13 +1826,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[cfg(unix)]
     async fn assert_process_gone(pid: i32) {
-        for _ in 0..100 {
-            if !process_exists(pid) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("resolver descendant {pid} survived process-group cleanup");
+        wait_until(tokio::time::Instant::now() + PROCESS_BUDGET, || {
+            (!process_exists(pid)).then_some(())
+        })
+        .await
+        .unwrap_or_else(|| panic!("resolver descendant {pid} survived process-group cleanup"));
     }
 
     #[cfg(unix)]
@@ -1949,7 +1962,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let raw = run_claude_code(
             &claude_backend(command, 65_536),
             &prompt,
-            tokio::time::Instant::now() + Duration::from_millis(2000),
+            tokio::time::Instant::now() + PROCESS_BUDGET,
             None,
         )
         .await
