@@ -447,6 +447,8 @@ pub enum TransitionError {
     UnknownDispatch,
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
+    #[error("a failure carries a body only for a call that touches a tracked file")]
+    FailureBodyOutsideFile,
     #[error(
         "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
     )]
@@ -568,7 +570,10 @@ pub enum ViewMismatch {
 /// The engine's derived working picture of one family log: the validated records and
 /// the projection built from them. Opaque and disposable — the runtime stores it for the next
 /// event, but every constructor and mutator here belongs to the engine.
-#[derive(Debug)]
+///
+/// Equality is equality of the derived picture: a view advanced batch by batch equals the view
+/// a replay of the same log builds, because both reach the log through the one fold.
+#[derive(Debug, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
     policy: PolicyIdentityV1,
