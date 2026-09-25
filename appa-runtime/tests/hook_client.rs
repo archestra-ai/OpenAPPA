@@ -3,7 +3,7 @@
 //! on stdin and reads the exit code and stdout the harness would.
 
 mod common;
-use common::{output_of, serve, serve_runtime, spawn_child};
+use common::{serve, serve_runtime, spawn_child};
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -74,6 +74,17 @@ fn finish(child: std::process::Child, stdin: &str) -> (i32, String) {
         output.status.code().expect("the hook client exits with a code"),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     )
+}
+
+/// [`Command::output`] through [`spawn_child`].
+fn output_of(command: &mut Command) -> std::io::Result<std::process::Output> {
+    spawn_child(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?
+    .wait_with_output()
 }
 
 fn run_client(url: &str, stdin: &str) -> (i32, String) {

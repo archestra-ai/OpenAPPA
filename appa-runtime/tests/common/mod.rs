@@ -91,17 +91,6 @@ pub fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
-/// [`Command::output`] through [`spawn_child`].
-pub fn output_of(command: &mut Command) -> std::io::Result<std::process::Output> {
-    spawn_child(
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )?
-    .wait_with_output()
-}
-
 /// Start the built binary as `appa runtime` over `config` and `db`, and wait until
 /// `/health` answers.
 pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
