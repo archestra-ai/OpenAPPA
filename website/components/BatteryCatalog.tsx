@@ -9,7 +9,7 @@ const BATTERIES = [
   },
   {
     name: "Claude Code tools",
-    description: "Rules for Bash and Read, with a built-in Bash annotator.",
+    description: "Rules for Read, Grep, Write, Edit and Bash, with model annotators for Bash and a secret-masking sanitizer.",
     href: "/battery-claude-code",
     logo: "/images/batteries/claude.svg",
   },
@@ -51,7 +51,7 @@ const BATTERIES = [
   },
   {
     name: "monday.com",
-    description: "Rules for 96 tools: internal reads, reviewed writes, and structural, workflow and agent changes.",
+    description: "Rules for 99 tools: internal reads, reviewed writes, and structural, workflow and agent changes.",
     href: "/battery-monday",
     logo: "/images/batteries/monday.svg",
   },

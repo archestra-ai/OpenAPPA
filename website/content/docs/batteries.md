@@ -102,7 +102,7 @@ name = "host/claude-code/Read"
 annotator = "approve-hidden-file-read"
 
 [externals.annotators.approve-hidden-file-read]
-command = ["python3", "./approve-hidden-file-read.py"]
+command = ["python3", "approve-hidden-file-read.py"]
 ```
 
 ## Use sanitizers in batteries
@@ -124,10 +124,10 @@ on = ["tool_input"]
 tags = ["messages"]
 
 [policy.sanitizer.permits]
-audience = { from = ["private"], to = ["public"] }
+audience = { from = ["internal"], to = ["public"] }
 
 [externals.sanitizers.remove-email-addresses]
-command = ["python3", "./remove-email-addresses.py"]
+command = ["python3", "remove-email-addresses.py"]
 ```
 
 ## Use authorities in batteries
@@ -149,7 +149,7 @@ requires = { attention = ["payment-approval"] }
 delta = {}
 
 [externals.authorities.approve-small-payment]
-command = ["python3", "./approve-small-payment.py"]
+command = ["python3", "approve-small-payment.py"]
 ```
 
 ## Audience sources
@@ -212,7 +212,7 @@ name = "host/claude-code/Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
-# This declaration replaces the annotator with the same name in the battery.
+# This root rule runs before the battery's Read rules.
 [[policy.annotator]]
 name = "local.read-sensitivity"
 audiences = []
