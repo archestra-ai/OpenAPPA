@@ -134,7 +134,7 @@ def gh_targets(words, environment, directory):
     for index, word in enumerate(words):
         if word.startswith("--hostname"):
             raise Unfollowable("gh --hostname reaches a host other than github.com")
-        if ("$" in word or "`" in word) and (words[0] == "repo" or "repos/" in word or "github.com" in word):
+        if ("$" in word or "`" in word) and (words[0] == "repo" or "/" in word):
             raise Unfollowable(f"{word} is computed when the command runs")
         if word in ("--repo", "-R") and index + 1 < len(words):
             chosen.append(words[index + 1])
