@@ -1466,6 +1466,122 @@ mod tests {
         );
     }
 
+    /// Hosts derive session ids from client-supplied values that are unique only within an
+    /// organization, so two organizations may present the same session, operation and tool
+    /// call ids. Each must claim, complete and replay its own receipt.
+    fn organizations_sharing_a_session_id_keep_their_receipts_apart(store: &LogStore, session_id: &str) {
+        let scope = |organization: &str| ReceiptScope {
+            organization_id: format!("{organization}:{session_id}"),
+            caller_id: Some("user:1".to_owned()),
+            session_id: session_id.to_owned(),
+            binding: ReceiptBinding::Caller,
+        };
+        let (first, second) = (scope("org-a"), scope("org-b"));
+        let operation = |scope: &ReceiptScope| OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "op-1".to_owned(),
+            },
+            root: format!("receipt-root:{session_id}"),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        let result = |scope: &ReceiptScope| ProcessedResultRequest {
+            key: ProcessedResultKey {
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: format!("receipt-root:{session_id}"),
+        };
+
+        for scope in [&first, &second] {
+            assert_eq!(
+                store.claim_operation(operation(scope)).unwrap(),
+                OperationClaim::Claimed
+            );
+            assert_eq!(
+                store.claim_processed_result(result(scope)).unwrap(),
+                ProcessedResultClaim::Claimed
+            );
+        }
+        let decided = |scope: &ReceiptScope| serde_json::json!({"decision": scope.organization_id});
+        store
+            .complete_operation(operation(&first).key, decided(&first))
+            .expect("the first organization completes its operation");
+        store
+            .complete_processed_result(result(&first).key, "first".to_owned(), decided(&first))
+            .expect("the first organization completes its result");
+        assert!(matches!(
+            store.claim_operation(operation(&second)),
+            Err(ReceiptError::Pending)
+        ));
+        assert!(matches!(
+            store.claim_processed_result(result(&second)),
+            Err(ReceiptError::Pending)
+        ));
+        store
+            .complete_operation(operation(&second).key, decided(&second))
+            .expect("the second organization completes its operation");
+        store
+            .complete_processed_result(result(&second).key, "second".to_owned(), decided(&second))
+            .expect("the second organization completes its result");
+
+        for (scope, output) in [(&first, "first"), (&second, "second")] {
+            assert_eq!(
+                store.claim_operation(operation(scope)).unwrap(),
+                OperationClaim::Complete {
+                    decision: decided(scope)
+                }
+            );
+            assert_eq!(
+                store.claim_processed_result(result(scope)).unwrap(),
+                ProcessedResultClaim::Complete {
+                    approved_output: output.to_owned(),
+                    decision: decided(scope),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn memory_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&memory(), "shared-session");
+    }
+
+    #[test]
+    fn sqlite_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let store = LogStore::open(Backend::Sqlite {
+            path: dir.path().join("appa.db"),
+        })
+        .expect("a fresh store opens");
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&store, "shared-session");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        let store = postgres_store(1).lease().expect("the connection leases");
+        let unique = tempfile::tempdir().expect("a unique session id exists");
+        let session = format!("shared-session:{}", unique.path().display());
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&store, &session);
+        store
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+                client.execute(
+                    "DELETE FROM openappa_processed_results WHERE session_id=$1",
+                    &[&session],
+                )?;
+                Ok(())
+            })
+            .expect("the test receipts clean up");
+    }
+
     /// Run against a disposable PostgreSQL database that holds the host schema,
     /// from a host's migrations or from `tests/fixtures/host_schema.sql`:
     /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres,fault-injection -- --ignored
@@ -2176,7 +2292,7 @@ mod tests {
             context: None,
         };
         let decision = serde_json::json!({"decision": "allow_call"});
-        let key = format!("openappa-operation:{session}:op-1");
+        let key = format!("openappa-operation:{organization}:{session}:op-1");
         hold(&key, true);
         assert!(matches!(
             pg.claim_operation(request.clone()),
@@ -2202,7 +2318,7 @@ mod tests {
             },
             root: owner.root.clone(),
         };
-        let key = format!("openappa-result:{session}:call-1");
+        let key = format!("openappa-result:{organization}:{session}:call-1");
         hold(&key, true);
         assert!(matches!(
             pg.claim_processed_result(result.clone()),
@@ -2233,6 +2349,65 @@ mod tests {
         .expect("the test receipts clean up");
         drop((holder, writer));
         forget_postgres_roots(&store, vec![root, created]);
+    }
+
+    /// A host whose receipt tables are keyed without the organization, or with its columns in
+    /// another order, refuses to open rather than let organizations collide on a receipt.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_refuses_a_host_whose_receipt_keys_omit_the_organization() {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let fixture = include_str!("../tests/fixtures/host_schema.sql");
+        let unique = tempfile::tempdir().expect("a unique schema name exists");
+        let suffix: String = unique
+            .path()
+            .display()
+            .to_string()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_lowercase();
+        let hosts = [
+            ("current", fixture.to_owned(), true),
+            (
+                "unscoped",
+                fixture
+                    .replace(
+                        "(organization_id, session_id, operation_id)",
+                        "(session_id, operation_id)",
+                    )
+                    .replace(
+                        "(organization_id, session_id, tool_call_id)",
+                        "(session_id, tool_call_id)",
+                    ),
+                false,
+            ),
+            (
+                "reordered",
+                fixture.replace(
+                    "(organization_id, session_id, tool_call_id)",
+                    "(session_id, organization_id, tool_call_id)",
+                ),
+                false,
+            ),
+        ];
+        let mut admin = ::postgres::Client::connect(&url, ::postgres::NoTls).expect("the admin connection opens");
+        for (name, ddl, opens) in hosts {
+            let schema = format!("appa_probe_{name}_{suffix}");
+            admin
+                .batch_execute(&format!("CREATE SCHEMA {schema}; SET search_path TO {schema}; {ddl}"))
+                .expect("the probe schema installs");
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let opened = LogStore::open(Backend::Postgres {
+                url: format!("{url}{separator}options=-c%20search_path%3D{schema}"),
+                max_connections: std::num::NonZeroUsize::new(1).expect("a pool holds a connection"),
+            });
+            admin
+                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE; RESET search_path"))
+                .expect("the probe schema drops");
+            assert_eq!(opened.is_ok(), opens, "{name}");
+        }
     }
 
     #[cfg(feature = "postgres")]

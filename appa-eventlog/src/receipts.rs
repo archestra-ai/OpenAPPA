@@ -469,17 +469,15 @@ mod tests {
 
             let other_caller = operation(scope(ReceiptBinding::Caller, "other"));
             let session_bound = operation(scope(ReceiptBinding::Session, "caller"));
-            let mut other_organization = owned.clone();
-            other_organization.key.scope.organization_id = "other-org".to_owned();
             let mut other_root = owned.clone();
             other_root.root = "other-root".to_owned();
-            for request in [&other_caller, &session_bound, &other_organization, &other_root] {
+            for request in [&other_caller, &session_bound, &other_root] {
                 assert!(matches!(
                     store.claim_operation(request.clone()),
                     Err(ReceiptError::ScopeMismatch)
                 ));
             }
-            for key in [&other_caller.key, &session_bound.key, &other_organization.key] {
+            for key in [&other_caller.key, &session_bound.key] {
                 assert!(matches!(
                     store.complete_operation(key.clone(), serde_json::json!({"decision": "deny"})),
                     Err(ReceiptError::ScopeMismatch)
@@ -518,22 +516,10 @@ mod tests {
             let owned = result("caller");
             store.claim_processed_result(owned.clone()).expect("the result claims");
 
-            let mut other_organization = owned.clone();
-            other_organization.key.organization_id = "other-org".to_owned();
             let mut other_root = owned.clone();
             other_root.root = "other-root".to_owned();
-            for request in [&other_organization, &other_root] {
-                assert!(matches!(
-                    store.claim_processed_result(request.clone()),
-                    Err(ReceiptError::ScopeMismatch)
-                ));
-            }
             assert!(matches!(
-                store.complete_processed_result(
-                    other_organization.key.clone(),
-                    "approved".to_owned(),
-                    serde_json::json!({"decision": "deny"})
-                ),
+                store.claim_processed_result(other_root),
                 Err(ReceiptError::ScopeMismatch)
             ));
             assert!(matches!(

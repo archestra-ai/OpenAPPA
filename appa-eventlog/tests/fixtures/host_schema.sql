@@ -60,7 +60,7 @@ CREATE TABLE openappa_operations (
     input jsonb NOT NULL,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_operations_pk PRIMARY KEY (session_id, operation_id),
+    CONSTRAINT openappa_operations_pk PRIMARY KEY (organization_id, session_id, operation_id),
     CONSTRAINT openappa_operations_status CHECK (
         (status = 'pending' AND decision IS NULL)
         OR (status = 'complete' AND decision IS NOT NULL)
@@ -78,7 +78,7 @@ CREATE TABLE openappa_processed_results (
     approved_output text,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_results_pk PRIMARY KEY (session_id, tool_call_id),
+    CONSTRAINT openappa_results_pk PRIMARY KEY (organization_id, session_id, tool_call_id),
     CONSTRAINT openappa_results_status CHECK (
         (status = 'pending' AND approved_output IS NULL AND decision IS NULL)
         OR (status = 'complete' AND approved_output IS NOT NULL AND decision IS NOT NULL)
