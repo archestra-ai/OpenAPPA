@@ -3,7 +3,7 @@
 //! on stdin and reads the exit code and stdout the harness would.
 
 mod common;
-use common::{serve, serve_runtime};
+use common::{output_of, serve, serve_runtime, spawn_child};
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -77,13 +77,16 @@ fn finish(child: std::process::Child, stdin: &str) -> (i32, String) {
 }
 
 fn run_client(url: &str, stdin: &str) -> (i32, String) {
-    finish(client(url).spawn().expect("the hook client spawns"), stdin)
+    finish(spawn_child(&mut client(url)).expect("the hook client spawns"), stdin)
 }
 
 /// Exit code, stdout and stderr together, for the tests that assert which channel an
 /// answer took.
 fn run_client_heard(url: &str, stdin: &str) -> (i32, String, String) {
-    let output = finish_output(client_heard(url).spawn().expect("the hook client spawns"), stdin);
+    let output = finish_output(
+        spawn_child(&mut client_heard(url)).expect("the hook client spawns"),
+        stdin,
+    );
     (
         output.status.code().expect("the hook client exits with a code"),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -93,7 +96,7 @@ fn run_client_heard(url: &str, stdin: &str) -> (i32, String, String) {
 
 fn run_turn_end(url: &str, stdin: &str) -> (i32, String) {
     finish(
-        client(url).arg("--turn-end").spawn().expect("the hook client spawns"),
+        spawn_child(client(url).arg("--turn-end")).expect("the hook client spawns"),
         stdin,
     )
 }
@@ -101,7 +104,7 @@ fn run_turn_end(url: &str, stdin: &str) -> (i32, String) {
 /// The client with the read end of its stdout closed before it answers: whatever it renders
 /// cannot reach the harness, and only its exit code is left to report that.
 fn run_unheard_client(url: &str, stdin: &str) -> i32 {
-    let mut child = client(url).spawn().expect("the hook client spawns");
+    let mut child = spawn_child(&mut client(url)).expect("the hook client spawns");
     drop(child.stdout.take().expect("the child has a stdout pipe"));
     child
         .stdin
@@ -224,7 +227,7 @@ async fn an_ungated_session_posts_nothing_and_never_blocks() {
                 };
                 (
                     gate,
-                    finish(command.spawn().expect("the hook client spawns"), PRE_TOOL_USE),
+                    finish(spawn_child(&mut command).expect("the hook client spawns"), PRE_TOOL_USE),
                 )
             })
             .collect::<Vec<_>>()
@@ -290,10 +293,7 @@ async fn the_sessions_runtime_url_beats_the_deployments_endpoint() {
     let deployment = refused_url().await;
     let (code, stdout) = tokio::task::spawn_blocking(move || {
         finish(
-            client(&deployment)
-                .env("APPA_RUNTIME_URL", &session)
-                .spawn()
-                .expect("the hook client spawns"),
+            spawn_child(client(&deployment).env("APPA_RUNTIME_URL", &session)).expect("the hook client spawns"),
             PRE_TOOL_USE,
         )
     })
@@ -502,14 +502,15 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
     let url = format!("http://127.0.0.1:{}", common::free_port());
     let session_start = r#"{"hook_event_name":"SessionStart","session_id":"client-test","source":"startup"}"#;
     let (code, stdout) = finish(
-        client(&url)
-            .arg("--ensure-runtime")
-            .arg("--config")
-            .arg(&config)
-            .arg("--data-dir")
-            .arg(&data)
-            .spawn()
-            .expect("the hook client spawns"),
+        spawn_child(
+            client(&url)
+                .arg("--ensure-runtime")
+                .arg("--config")
+                .arg(&config)
+                .arg("--data-dir")
+                .arg(&data),
+        )
+        .expect("the hook client spawns"),
         session_start,
     );
     let health = common::http(&format!("{url}/health"), "GET", None);
@@ -548,14 +549,15 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
 
     // A second ensure finds the healthy runtime and starts nothing.
     let (code, _) = finish(
-        client(&url)
-            .arg("--ensure-runtime")
-            .arg("--config")
-            .arg(&config)
-            .arg("--data-dir")
-            .arg(&data)
-            .spawn()
-            .expect("the hook client spawns"),
+        spawn_child(
+            client(&url)
+                .arg("--ensure-runtime")
+                .arg("--config")
+                .arg(&config)
+                .arg("--data-dir")
+                .arg(&data),
+        )
+        .expect("the hook client spawns"),
         session_start,
     );
     assert_eq!(code, 0);
@@ -573,14 +575,15 @@ async fn a_runtime_that_cannot_be_started_blocks_the_session_start_hook() {
     let session_start = r#"{"hook_event_name":"SessionStart","session_id":"client-test","source":"startup"}"#;
     let (code, stdout) = tokio::task::spawn_blocking(move || {
         finish(
-            client(&url)
-                .arg("--ensure-runtime")
-                .arg("--config")
-                .arg(&config)
-                .arg("--data-dir")
-                .arg(&data)
-                .spawn()
-                .expect("the hook client spawns"),
+            spawn_child(
+                client(&url)
+                    .arg("--ensure-runtime")
+                    .arg("--config")
+                    .arg(&config)
+                    .arg("--data-dir")
+                    .arg(&data),
+            )
+            .expect("the hook client spawns"),
             session_start,
         )
     })
@@ -594,21 +597,23 @@ async fn a_runtime_that_cannot_be_started_blocks_the_session_start_hook() {
 /// nothing outside one; it never blocks.
 #[test]
 fn the_session_context_entry_speaks_only_in_a_protected_session() {
-    let gated = Command::new(built_binary())
-        .arg("session-context")
-        .env("APPA_GATE", "1")
-        .output()
-        .expect("the binary runs");
+    let gated = output_of(
+        Command::new(built_binary())
+            .arg("session-context")
+            .env("APPA_GATE", "1"),
+    )
+    .expect("the binary runs");
     assert!(gated.status.success());
     assert!(!gated.stdout.is_empty(), "a protected session gets the advice");
 
     // A subagent's context is opened by its own event, which hears a hook
     // only through `additionalContext`.
-    let subagent = Command::new(built_binary())
-        .args(["session-context", "--subagent"])
-        .env("APPA_GATE", "1")
-        .output()
-        .expect("the binary runs");
+    let subagent = output_of(
+        Command::new(built_binary())
+            .args(["session-context", "--subagent"])
+            .env("APPA_GATE", "1"),
+    )
+    .expect("the binary runs");
     assert!(subagent.status.success());
     let heard: serde_json::Value = serde_json::from_slice(&subagent.stdout).expect("a subagent hears JSON");
     assert_eq!(heard["hookSpecificOutput"]["hookEventName"], "SubagentStart");
@@ -620,11 +625,12 @@ fn the_session_context_entry_speaks_only_in_a_protected_session() {
         "a subagent hears the same advice as the session"
     );
 
-    let ungated = Command::new(built_binary())
-        .arg("session-context")
-        .env_remove("APPA_GATE")
-        .output()
-        .expect("the binary runs");
+    let ungated = output_of(
+        Command::new(built_binary())
+            .arg("session-context")
+            .env_remove("APPA_GATE"),
+    )
+    .expect("the binary runs");
     assert!(ungated.status.success());
     assert!(ungated.stdout.is_empty(), "an unprotected session hears nothing");
 }
