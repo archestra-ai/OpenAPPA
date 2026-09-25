@@ -124,12 +124,11 @@ struct State {
 }
 
 /// A live reservation: the pinned operation a released call holds the workspace for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reservation {
-    pub actor: String,
-    pub call_key: String,
-    pub pin: FilePin,
-    pub bound_dispatch: Option<String>,
+struct Reservation {
+    actor: String,
+    call_key: String,
+    pin: FilePin,
+    bound_dispatch: Option<String>,
     output_label: Option<Label>,
 }
 
@@ -504,12 +503,6 @@ impl FileStore {
             .map(|r| r.pin.clone()))
     }
 
-    /// The live reservation, if any. One workspace holds at most one.
-    pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
-        let state = self.lock();
-        Ok(state.reservation.clone())
-    }
-
     /// The workspace this ledger is bound to.
     pub fn workspace(&self) -> &Path {
         &self.workspace
@@ -797,9 +790,9 @@ mod tests {
         // A released call the harness never ran: the workspace still shows the pin.
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
-        assert_eq!(store.reservation().unwrap().unwrap().actor, "a");
+        assert!(store.pin_for("a", "unrun").unwrap().is_some());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
-        assert!(store.reservation().unwrap().is_none());
+        assert!(store.pin_for("a", "unrun").unwrap().is_none());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);
         // The next call proceeds: the release did not leave the workspace wedged.
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
@@ -813,7 +806,7 @@ mod tests {
         store.bind("a", "copy", "dispatch-2", &Label::top()).unwrap();
         fs::write(fixture.workspace.join("destination.txt"), "partial").unwrap();
         assert_eq!(store.abandon("a", "copy").unwrap(), AbandonOutcome::Quarantined);
-        assert!(store.reservation().unwrap().is_some());
+        assert!(store.pin_for("a", "copy").unwrap().is_some());
         assert!(matches!(
             store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
@@ -827,8 +820,10 @@ mod tests {
         let second = fixture.store(&Label::top());
         first.prepare("a", "one", FileOperation::Read, "tracked.txt").unwrap();
         second.prepare("b", "two", FileOperation::Read, "tracked.txt").unwrap();
-        assert_eq!(first.reservation().unwrap().unwrap().call_key, "one");
-        assert_eq!(second.reservation().unwrap().unwrap().call_key, "two");
+        assert!(first.pin_for("a", "one").unwrap().is_some());
+        assert!(first.pin_for("b", "two").unwrap().is_none());
+        assert!(second.pin_for("b", "two").unwrap().is_some());
+        assert!(second.pin_for("a", "one").unwrap().is_none());
     }
 
     #[test]
