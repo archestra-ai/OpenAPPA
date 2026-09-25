@@ -447,6 +447,8 @@ pub enum TransitionError {
     UnknownDispatch,
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
+    #[error("a failure carries a body only for a call that touches a tracked file")]
+    FailureBodyOutsideFile,
     #[error(
         "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
     )]

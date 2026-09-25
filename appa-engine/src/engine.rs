@@ -761,6 +761,9 @@ impl Engine {
             .dispatch_call(dispatch)
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
+        if matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && call.file_basis().is_none() {
+            return Err(TransitionError::FailureBodyOutsideFile);
+        }
         let observed = match &report.outcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(raw),
@@ -14915,6 +14918,26 @@ mod tests {
         assert!(parameters.validate(&serde_json::json!({ "channel": 1 })).is_err());
     }
 
+    #[test]
+    fn a_failure_body_on_a_call_that_touches_no_file_is_refused() {
+        let e = engine(vec![plain_tool("quiet")]);
+        let mut log = vec![opened(&e)];
+        let dispatch = open(&e, &mut log, &call("quiet", json!({})));
+        let reported = e.handle(
+            &viewing(&e, &log),
+            EngineEvent::Outcome(ToolReport {
+                dispatch,
+                outcome: ToolOutcome::FailureWithBody {
+                    body: ValueBody::new("error text"),
+                },
+                evidence: Vec::new(),
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        );
+        assert_eq!(reported.unwrap_err(), TransitionError::FailureBodyOutsideFile);
+    }
+
     /// A held view advanced by the batches the engine sealed stays the view a cold replay of the
     /// same log builds, at every prefix: the runtime may keep one view per root and advance it
     /// with its own appends instead of replaying the whole log each turn.
@@ -14973,7 +14996,7 @@ mod tests {
                 )
                     .prop_map(|(on, exposed, proposed)| Step::Propose { on, exposed, proposed }),
                 2 => index().prop_map(|on| Step::Spawn { on }),
-                3 => (index(), 0usize..4).prop_map(|(pick, outcome)| Step::Outcome { pick, outcome }),
+                3 => (index(), 0usize..5).prop_map(|(pick, outcome)| Step::Outcome { pick, outcome }),
                 3 => (index(), any::<bool>()).prop_map(|(pick, approve)| Step::Offer { pick, approve }),
                 2 => index().prop_map(|pick| Step::Bind { pick }),
                 2 => (index(), any::<bool>()).prop_map(|(pick, value)| Step::Return { pick, value }),
@@ -15112,7 +15135,6 @@ mod tests {
                     }
                     Step::Outcome { pick: at, outcome } => {
                         let dispatch = self.dispatches[pick(self.dispatches.len(), *at)?].clone();
-                        // No `FailureWithBody`: it belongs to file calls, which this fixture has none of.
                         let outcome = match outcome {
                             0 => ToolOutcome::Success {
                                 body: OutcomeBody::Available(ValueBody::new("result")),
@@ -15121,6 +15143,9 @@ mod tests {
                                 body: OutcomeBody::Unavailable,
                             },
                             2 => ToolOutcome::Failure,
+                            3 => ToolOutcome::FailureWithBody {
+                                body: ValueBody::new("error"),
+                            },
                             _ => ToolOutcome::Indeterminate,
                         };
                         Some(EngineEvent::Outcome(ToolReport {
