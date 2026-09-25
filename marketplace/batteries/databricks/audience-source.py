@@ -219,7 +219,8 @@ def group_by_id(workspace, group_id):
 
 
 def is_group_member(member):
-    return "/Groups/" in str(member.get("$ref", "")) or member.get("type") == "Group"
+    ref = str(member.get("$ref", ""))
+    return ref.startswith("Groups/") or "/Groups/" in ref or member.get("type") == "Group"
 
 
 def group_user_ids(workspace, groups):

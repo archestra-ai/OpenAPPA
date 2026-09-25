@@ -1,5 +1,5 @@
-//! The repository paths that make up the batteries archive a generation
-//! carries, and the tree the build digests for its identity.
+//! How a batteries tree is copied into the archive a generation carries,
+//! and into the tree the build digests for its identity.
 //!
 //! This module is also compiled by `build.rs`. One source drives build-time
 //! identity and the staging of a development build's own archive

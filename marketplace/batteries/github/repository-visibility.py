@@ -51,7 +51,8 @@ API_ROOT = api_root(os.environ)
 CONTENT = "github.repository-visibility"
 READERS = "github.repository-readers"
 TIMEOUT_SECONDS = 30
-MAX_INPUT_BYTES = 64 * 1024
+# create_or_update_file and push_files carry the file content inside the consult.
+MAX_INPUT_BYTES = 4 * 1024 * 1024
 
 
 def rest_api(token):
