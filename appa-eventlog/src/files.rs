@@ -564,10 +564,13 @@ fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStore
     let mut cursor = workspace.to_path_buf();
     for component in stripped.components() {
         cursor.push(component);
-        if let Ok(meta) = fs::symlink_metadata(&cursor)
-            && meta.file_type().is_symlink()
-        {
-            return Err(FileStoreError::InvalidPath("symlink component".into()));
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(FileStoreError::InvalidPath("symlink component".into()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(stripped.to_string_lossy().into_owned())
@@ -1157,6 +1160,24 @@ mod tests {
             Err(FileStoreError::Io(_))
         ));
         store.prepare("a", "other", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn a_path_whose_parent_cannot_be_inspected_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let locked = fixture.workspace.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("file.txt"), "hidden").unwrap();
+        let store = fixture.store(&Label::top());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let inspectable = fs::symlink_metadata(locked.join("file.txt")).is_ok();
+        let lookup = store.current("locked/file.txt");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if inspectable {
+            return;
+        }
+        assert!(matches!(lookup, Err(FileStoreError::Io(_))));
     }
 
     #[test]
