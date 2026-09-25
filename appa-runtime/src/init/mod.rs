@@ -118,11 +118,8 @@ pub fn activate_claude_code(config: &Path) -> Result<String, InitError> {
         path: config.to_owned(),
         source,
     })?;
-    crate::config::Config::load(&config).map_err(|source| InitError::UnloadableConfig {
-        path: config.clone(),
-        source: Box::new(source),
-    })?;
-    install_claude(&build_label(), endpoint, config)
+    let composed_policy = verify_config(&config)?;
+    install_claude(&build_label(), endpoint, config, composed_policy)
 }
 
 /// The origin as a receipt names it: this binary's release tag, or the commit
@@ -139,7 +136,12 @@ fn build_label() -> String {
     }
 }
 
-fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<String, InitError> {
+fn install_claude(
+    origin: &str,
+    endpoint: Endpoint,
+    config: PathBuf,
+    composed_policy: ComposedPolicy,
+) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let paths = deployment_paths()?;
     let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
@@ -158,7 +160,6 @@ fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<S
             source,
         }
     })?;
-    let composed_policy = verify_config(&config)?;
 
     // 2. What the profile holds under APPA's names. A server or a skill that
     //    no install wrote is refused here, with the profile untouched.

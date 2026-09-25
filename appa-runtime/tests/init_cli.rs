@@ -521,6 +521,33 @@ fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
     );
 }
 
+/// A `token_env` resolves where the runtime runs, so a secret the installing terminal does
+/// not hold is not activation's to refuse: the surviving runtime is reloaded, and the
+/// reload it accepts settles the policy.
+#[test]
+fn activation_leaves_a_secret_it_cannot_see_to_the_runtime() {
+    let fixture = Fixture::new();
+    let config = fixture.config.join("appa.toml");
+    let mut text = fs::read_to_string(&config).expect("the config is readable");
+    text.push_str(
+        "\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\ntoken_env = \"APPA_UNSET_IN_THIS_PROCESS\"\n",
+    );
+    fs::write(&config, text).expect("the config is written");
+    let reloads = fixture.root.join("reloads");
+    let output = fixture
+        .activate()
+        .env_remove("APPA_UNSET_IN_THIS_PROCESS")
+        .env("FAKE_RELOADS", &reloads)
+        .output()
+        .expect("appa activates");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        reloads.exists(),
+        "a policy activation cannot compose is settled by a reload"
+    );
+}
+
 #[test]
 fn activation_keeps_a_custom_statusline() {
     let fixture = Fixture::new();

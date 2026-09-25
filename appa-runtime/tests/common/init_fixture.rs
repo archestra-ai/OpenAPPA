@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use appa_engine::profile::PolicyFileKey;
-use appa_runtime::config::Config;
+use appa_runtime::config::{Config, ConfigError};
 use sha2::{Digest, Sha256};
 
 use crate::common::repo_root;
@@ -139,9 +139,14 @@ impl Fixture {
             .env_remove("APPA_RUNTIME_URL");
     }
 
+    /// A config naming a secret this process cannot see has no key here; the
+    /// fake runtime then serves a stand-in, as a runtime that could see it would.
     pub fn policy_key(&self) -> String {
-        let config = Config::load(&self.config.join("appa.toml")).expect("the fixture policy loads");
-        PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
+        match Config::load(&self.config.join("appa.toml")) {
+            Ok(config) => PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned(),
+            Err(ConfigError::MissingSecret { .. }) => "composed-where-the-secret-is".to_owned(),
+            Err(error) => panic!("the fixture policy loads: {error}"),
+        }
     }
 
     /// Where activation deploys the harness binary: private to appa, never on PATH.
