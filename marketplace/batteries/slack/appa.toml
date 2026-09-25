@@ -14,12 +14,12 @@
 # autonomous, with no human approval in the loop.
 #
 # A root rule placed above these can narrow any of them by argument.
-# Root rules run first. For example, to let replies inside a thread go
-# out without a question:
+# Root rules run first. For example, to keep one announcement channel
+# for messages a person approves:
 #
 #   [[policy.tool]]
-#   name = "mcp/claude_ai_Slack/slack_send_message(thread_ts:*)"
-#   requires = { trust = "trusted" }
+#   name = "mcp/claude_ai_Slack/slack_send_message(channel_id:C0ANNOUNCE)"
+#   requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] }, attention = ["hitl"] }
 #   delta = {}
 #
 # The battery also binds `audience-source.py`, the `slack` audience
