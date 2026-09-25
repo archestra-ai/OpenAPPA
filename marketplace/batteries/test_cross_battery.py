@@ -84,7 +84,8 @@ class CrossBatteryReaderTests(unittest.TestCase):
             {"selector": "viewer"},
         )["members"][0]
 
-        self.assertNotEqual(github, workspace)
+        self.assertEqual(github, "alice@gmail.com")
+        self.assertEqual(workspace, "alice@corp.com")
 
     def test_a_member_without_an_attested_address_is_its_qualified_id(self):
         slack = SLACK.answer(

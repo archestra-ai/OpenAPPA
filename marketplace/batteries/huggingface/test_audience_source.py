@@ -159,9 +159,11 @@ class EnvelopeTests(unittest.TestCase):
 
     def test_a_foreign_envelope_is_refused_before_any_network(self):
         for body in [request({"selector": "viewer"}, version=2), request({"selector": "viewer"}, kind="annotation"), request({"selector": "viewer"}, name="github")]:
-            result = self.run_script(body, {"PATH": "/usr/bin:/bin"})
+            with Loopback({"/api/whoami-v2": WHOAMI}) as hub:
+                result = self.run_script(body, hub.env())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, "")
+            self.assertEqual(hub.seen, [])
 
     def test_a_declaration_of_other_templates_is_refused_before_the_token_is_read(self):
         for templates in [["viewer"], ["viewer", "org/<org>/members"], None]:

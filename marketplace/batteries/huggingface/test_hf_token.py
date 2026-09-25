@@ -37,6 +37,11 @@ class ResolveToken(unittest.TestCase):
         explicit = self.stored("from_path", Path(self.home.name) / "elsewhere")
         self.assertEqual(HF_TOKEN.resolve_token({"HF_HOME": str(home.parent), "HF_TOKEN_PATH": str(explicit)}), "from_path")
 
+    def test_xdg_cache_home_relocates_the_default_login(self):
+        cache = Path(self.home.name) / "xdg"
+        self.stored("from_xdg", cache / "huggingface" / "token")
+        self.assertEqual(HF_TOKEN.resolve_token({"HOME": self.home.name, "XDG_CACHE_HOME": str(cache)}), "from_xdg")
+
     def test_neither_present_names_both_fixes(self):
         self.stored("")
         with self.assertRaises(RuntimeError) as refused:

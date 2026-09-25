@@ -3,7 +3,7 @@
 APPA_PROVIDER_HUGGINGFACE_TOKEN when the deployment sets it; otherwise
 the token the Hugging Face CLI stored at login (`hf auth login`):
 HF_TOKEN_PATH when set, else `$HF_HOME/token`, else
-`~/.cache/huggingface/token`. Neither present, the helper stops with the
+`$XDG_CACHE_HOME/huggingface/token` (`~/.cache` when unset). Neither present, the helper stops with the
 two ways to fix it; nothing is guessed. The Hub root is HF_ENDPOINT when
 set, else https://huggingface.co; `hub_api` reads one JSON path of it
 with the token, telling a 404 and a 401/403 apart for the caller.
@@ -61,7 +61,8 @@ def token_path(environ):
         return Path(path)
     if home := environ.get("HF_HOME"):
         return Path(home) / "token"
-    return Path(environ.get("HOME") or "/nonexistent") / ".cache" / "huggingface" / "token"
+    cache = environ.get("XDG_CACHE_HOME") or Path(environ.get("HOME") or "/nonexistent") / ".cache"
+    return Path(cache) / "huggingface" / "token"
 
 
 def stored_token(environ):
