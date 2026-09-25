@@ -6961,14 +6961,7 @@ delta = {}
         use axum::routing::post;
         const REPLY: &str = r#"{"answers":{"delta_audience":{"probabilities":{"self":0.0,"internal":0.1,"public":0.9}},"delta_trust":{"probabilities":{"suspicious":0.1,"trusted":0.9}},"requires_audience":{"probabilities":{"public":0.0,"internal":0.1,"none":0.9}},"requires_trusted":{"noul":0.1}}}"#;
         let app = axum::Router::new().route("/v1/systemone", post(|| async { REPLY }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a loopback stub binds");
-        let url = format!(
-            "http://{}/v1/systemone",
-            listener.local_addr().expect("the stub has an address")
-        );
-        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let url = format!("http://{}/v1/systemone", crate::test_support::serve(app).await);
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
         std::fs::write(
@@ -6979,11 +6972,13 @@ delta = {}
              [externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
         )
         .expect("the fixture writes");
-        let mut config = Config::load(&path).expect("the fixture validates");
-        config.externals.jev = Some(crate::config::JevProfile {
-            url,
-            key: crate::config::JevKey::Set(crate::config::Token::new("jev-test-key".to_string())),
-        });
+        let config = Config::load_resolving(
+            &path,
+            &[],
+            |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| "jev-test-key".to_string()),
+            Some(url),
+        )
+        .expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let recorder = Arc::new(Collected::default());
         let session = runtime

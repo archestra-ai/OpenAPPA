@@ -317,14 +317,7 @@ mod tests {
                 ),
             )
             .with_state(stub.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral loopback port binds");
-        let addr = listener.local_addr().expect("the bound address is readable");
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("the stub serves");
-        });
-        (addr, stub)
+        (crate::test_support::serve(router).await, stub)
     }
 
     fn profile(provider: LlmProvider, url: Option<String>, token: Option<&str>, max_concurrent: usize) -> LlmProfile {

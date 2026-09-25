@@ -47,7 +47,6 @@ const REQUIRES_TRUSTED_CUTOFF: f64 = 0.5;
 const MAX_CONSULT_BYTES: usize = 64 * 1024;
 /// The most attempts one consult starts, hedges and retries together.
 const MAX_ATTEMPTS: usize = 3;
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// How one consult spends its budget.
@@ -63,6 +62,8 @@ pub(crate) struct JevTiming {
     pub(crate) budget_margin: Duration,
     /// No retry or hedge starts with less of the budget left than this.
     pub(crate) min_attempt: Duration,
+    /// A client's connection idle this long is closed, and its next attempt opens a new one.
+    pub(crate) pool_idle_timeout: Duration,
 }
 
 impl JevTiming {
@@ -71,6 +72,7 @@ impl JevTiming {
         cold_hedge_delay: Duration::from_secs(2),
         budget_margin: Duration::from_millis(250),
         min_attempt: Duration::from_millis(300),
+        pool_idle_timeout: Duration::from_secs(90),
     };
 }
 
@@ -217,7 +219,7 @@ impl JevBackend {
             }};
         }
         let mut prompt = None;
-        launch!(pool.current(&self.url));
+        launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
         let settled = loop {
             let (_, last_start, patience) = launched.last().expect("an attempt is launched first");
             let hedge_at = *last_start + *patience;
@@ -256,11 +258,11 @@ impl JevBackend {
                     };
                     match (in_flight.is_empty(), self.may_retry(launched.len(), deadline)) {
                         (false, _) => {}
-                        (true, true) => launch!(pool.current(&self.url)),
+                        (true, true) => launch!(pool.current(&self.url, self.timing.pool_idle_timeout)),
                         (true, false) => break Err((JevFailure::NoAnswer, failed)),
                     }
                 }
-                _ = tokio::time::sleep_until(hedge_at), if may_hedge => launch!(pool.fresh(&self.url)),
+                _ = tokio::time::sleep_until(hedge_at), if may_hedge => launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout)),
                 _ = tokio::time::sleep_until(deadline) => break Err((JevFailure::NoAnswer, NoAnswerReason::Timeout)),
             }
         };
@@ -694,6 +696,7 @@ pub(crate) struct ClientSlot {
     client: reqwest::Client,
     /// When a response last came back through this client.
     answered: Mutex<Option<Instant>>,
+    idle_timeout: Duration,
     /// Evicted: never the pool's current client again.
     condemned: AtomicBool,
 }
@@ -705,7 +708,7 @@ impl ClientSlot {
         self.answered
             .lock()
             .expect("the slot mutex is never poisoned")
-            .is_some_and(|at| at.elapsed() < POOL_IDLE_TIMEOUT)
+            .is_some_and(|at| at.elapsed() < self.idle_timeout)
     }
 }
 
@@ -723,7 +726,7 @@ impl JevClients {
 
     /// The current client for `url`, built on first use and again after an eviction or a
     /// change of endpoint.
-    fn current(&self, url: &str) -> Arc<ClientSlot> {
+    fn current(&self, url: &str, idle_timeout: Duration) -> Arc<ClientSlot> {
         let mut pool = self.pool();
         if pool.url.as_deref() != Some(url) {
             pool.url = Some(url.to_string());
@@ -732,7 +735,7 @@ impl JevClients {
         match &pool.current {
             Some(slot) => Arc::clone(slot),
             None => {
-                let slot = mint(url);
+                let slot = mint(url, idle_timeout);
                 pool.current = Some(Arc::clone(&slot));
                 slot
             }
@@ -740,8 +743,8 @@ impl JevClients {
     }
 
     /// A client outside the pool: its first request opens a new connection.
-    fn fresh(&self, url: &str) -> Arc<ClientSlot> {
-        mint(url)
+    fn fresh(&self, url: &str, idle_timeout: Duration) -> Arc<ClientSlot> {
+        mint(url, idle_timeout)
     }
 
     /// Adopt a client whose connection answered promptly, where the pool holds none and no
@@ -763,11 +766,11 @@ impl JevClients {
     }
 }
 
-fn mint(url: &str) -> Arc<ClientSlot> {
+fn mint(url: &str, idle_timeout: Duration) -> Arc<ClientSlot> {
     crate::tls::install_crypto_provider();
     let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .pool_idle_timeout(idle_timeout)
         .tcp_keepalive(TCP_KEEPALIVE);
     let builder = match Endpoint::new(url.to_string(), None).host() {
         EndpointHost::Loopback => builder.no_proxy(),
@@ -778,6 +781,7 @@ fn mint(url: &str) -> Arc<ClientSlot> {
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above"),
         answered: Mutex::new(None),
+        idle_timeout,
         condemned: AtomicBool::new(false),
     })
 }
@@ -806,6 +810,7 @@ mod tests {
         cold_hedge_delay: Duration::from_millis(300),
         budget_margin: Duration::from_millis(50),
         min_attempt: Duration::from_millis(50),
+        pool_idle_timeout: Duration::from_secs(90),
     };
 
     fn jev_answers() -> serde_json::Value {
@@ -1621,26 +1626,26 @@ mod tests {
     }
 
     /// A client idle past the pool's idle timeout has lost its connection, so its next
-    /// attempt waits the cold delay before it is hedged.
+    /// attempt opens a new one and waits the cold delay before it is hedged.
     #[tokio::test]
     async fn a_client_idle_past_the_pool_timeout_is_cold_again() {
+        let timing = JevTiming {
+            pool_idle_timeout: Duration::from_millis(150),
+            ..FAST
+        };
         let (url, stub) = serve(
             vec![Scripted::Answers, Scripted::Late(Duration::from_millis(200))],
             vec![],
         )
         .await;
-        let jev = backend(&url, Duration::from_secs(2), FAST);
+        let jev = backend(&url, Duration::from_secs(2), timing);
         let (_, record) = jev.consult(&call()).await;
         assert_eq!(attempts(&record), json!(["ok"]));
-        let current = jev.clients.current(&url);
-        let long_ago = Instant::now()
-            .checked_sub(POOL_IDLE_TIMEOUT + Duration::from_secs(1))
-            .expect("the clock has run past the idle timeout");
-        *current.answered.lock().unwrap() = Some(long_ago);
+        tokio::time::sleep(timing.pool_idle_timeout * 2).await;
         let (answered, record) = jev.consult(&call()).await;
         assert_eq!(answered, Ok(jev_annotation()));
         assert_eq!(attempts(&record), json!(["ok"]));
-        assert_eq!(stub.per_connection(), [2]);
+        assert_eq!(stub.per_connection(), [1, 1]);
     }
 
     /// With the one permit held by a hung consult, a second consult with a shorter budget

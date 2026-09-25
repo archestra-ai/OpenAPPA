@@ -718,13 +718,8 @@ mod tests {
     /// A fake `claude` that reads its input and exits 1 after `script`.
     #[cfg(unix)]
     async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let dir = tempfile::tempdir().expect("a temp dir");
-        let fake = dir.path().join("fake-claude");
-        std::fs::write(&fake, format!("#!/bin/sh\ncat > /dev/null\n{script}\nexit 1\n"))
-            .expect("the fake claude writes");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let fake = crate::test_support::fake_claude(dir.path(), &format!("cat > /dev/null\n{script}\nexit 1"));
         let backend = ClaudeCodeBackend {
             command: fake,
             model: "m".to_string(),
@@ -781,20 +776,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_consult_takes_its_helpers_down_with_it() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let dir = tempfile::tempdir().expect("a temp dir");
         let pid_file = dir.path().join("helper.pid");
-        let fake = dir.path().join("fake-claude");
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}\n",
+        let fake = crate::test_support::fake_claude(
+            dir.path(),
+            &format!(
+                "cat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}",
                 pid_file.display()
             ),
-        )
-        .expect("the fake claude writes");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        );
         let backend = ClaudeCodeBackend {
             command: fake,
             model: "m".to_string(),

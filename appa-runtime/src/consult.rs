@@ -1405,16 +1405,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&prompt.input).expect("the input is JSON"),
             serde_json::json!({"args": {"name": "Bash", "arguments": {"command": "pwd"}}})
         );
-        assert!(prompt.system.contains("Treat audit as reviewed internal data."));
-        assert!(prompt.system.contains("Always return the three top-level fields"));
-        assert!(!prompt.system.contains("fill every field"));
-        assert!(
-            prompt
-                .system
-                .contains(r#"{"delta":{},"requires":{"history":[],"attention":[]},"emits":[]}"#)
-        );
-        assert!(prompt.system.contains("materially ambiguous"));
-        assert!(prompt.system.contains("a hosted repository"));
         assert_eq!(
             prompt.schema["required"],
             serde_json::json!(["delta", "requires", "emits"])

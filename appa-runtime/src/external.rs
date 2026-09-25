@@ -1210,9 +1210,11 @@ mod tests {
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
-        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, MembersAnswer,
-        SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, InputArtifact,
+        MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
+    #[cfg(unix)]
+    use crate::test_support::fake_claude;
     use appa_engine::audience::DeclaredTemplate;
     use appa_engine::label::ChainAudience;
 
@@ -1241,14 +1243,7 @@ mod tests {
     }
 
     async fn stub(router: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral loopback port binds");
-        let addr = listener.local_addr().expect("the bound address is readable");
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("the stub serves");
-        });
-        format!("http://{addr}/")
+        format!("http://{}/", crate::test_support::serve(router).await)
     }
 
     fn endpoint(url: &str) -> Implementation {
@@ -1401,16 +1396,6 @@ mod tests {
         services
             .consult(&audience_consult("slack", "user-group/eng"), None, None)
             .await
-    }
-
-    /// A fake `claude` executable: a shell script the backend's `command` override runs.
-    #[cfg(unix)]
-    fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("fake-claude");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
-        path
     }
 
     #[cfg(unix)]
@@ -2128,6 +2113,93 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 Ok(_) => panic!("{} jev must refuse", section.name()),
             }
         }
+    }
+
+    /// No model answers a directory read or an input program's finding. The configuration
+    /// never binds a model backend for either kind, so the test moves the builtin annotators'
+    /// backends under those kinds: each consult is `Unregistered`, and nothing is asked.
+    #[tokio::test]
+    async fn a_model_backend_asked_what_it_cannot_prompt_is_unregistered() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&asked);
+        let url = stub(Router::new().fallback(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }
+        }))
+        .await;
+        let mut config = externals(None, 2000, 65_536);
+        config.llm = Some(crate::config::LlmProfile {
+            provider: crate::config::LlmProvider::Anthropic,
+            model: "m".to_string(),
+            url: Some(url.clone()),
+            token: Some(Token::new("sekret".to_string())),
+            timeout: None,
+            max_concurrent: 2,
+        });
+        config.jev = Some(crate::config::JevProfile {
+            url,
+            key: crate::config::JevKey::Set(Token::new("sekret".to_string())),
+        });
+        let mut builtins = BTreeMap::from([
+            ("llm".to_string(), AnnotatorBuiltin::Llm),
+            ("jev".to_string(), AnnotatorBuiltin::Jev),
+        ]);
+        #[cfg(unix)]
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        #[cfg(unix)]
+        let ran = dir.path().join("ran");
+        #[cfg(unix)]
+        {
+            config.claude_code.command = fake_claude(dir.path(), &format!("touch {}", ran.display()));
+            builtins.insert("claude".to_string(), AnnotatorBuiltin::ClaudeCode);
+        }
+        let names: Vec<String> = builtins.keys().cloned().collect();
+        let mut services = services_declaring(config, builtins);
+
+        let models = services
+            .backends
+            .remove(&ConsultKind::Annotation)
+            .expect("the builtin annotators are bound");
+        services.backends.insert(ConsultKind::AudienceSource, models);
+        for name in &names {
+            let (outcome, transcript) = services
+                .consult_transcribed(&Consult::audience_selector(name, "user-group/eng", vec![]), None, None)
+                .await;
+            assert_eq!(
+                outcome,
+                ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
+                "{name}"
+            );
+            assert!(transcript.is_some(), "{name} reached its model backend");
+        }
+        let models = services
+            .backends
+            .remove(&ConsultKind::AudienceSource)
+            .expect("the models were moved here");
+        services.backends.insert(ConsultKind::Input, models);
+        for name in &names {
+            let artifact = InputArtifact {
+                tool: "fetch".to_string(),
+                arguments: serde_json::json!({}),
+                cwd: None,
+            };
+            let (outcome, transcript) = services
+                .consult_transcribed(&Consult::input(name, artifact), None, None)
+                .await;
+            assert_eq!(
+                outcome,
+                ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
+                "{name}"
+            );
+            assert!(transcript.is_some(), "{name} reached its model backend");
+        }
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no provider was asked"
+        );
+        #[cfg(unix)]
+        assert!(!ran.exists(), "no claude process ran");
     }
 
     /// A roster answers a member lookup in process — the mapped reader, or `null` for a

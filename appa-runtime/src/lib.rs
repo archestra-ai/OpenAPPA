@@ -56,4 +56,6 @@ mod label_guide;
 mod llm;
 mod recorder;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 pub mod yell;

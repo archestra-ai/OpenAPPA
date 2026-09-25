@@ -854,6 +854,23 @@ impl Config {
     /// Load `path`, resolving `batteries/<name>/appa.toml` includes against
     /// `battery_dirs` in the given order before the root config directory.
     pub fn load_from(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
+        Config::load_resolving(
+            path,
+            battery_dirs,
+            |var| std::env::var(var).ok(),
+            std::env::var(JEV_URL_VARIABLE).ok(),
+        )
+    }
+
+    /// [`Config::load_from`] with what it reads of the process environment supplied by the
+    /// caller: `lookup` answers every `token_env`, and `jev_url` is the operator's
+    /// [`JEV_URL_VARIABLE`].
+    pub(crate) fn load_resolving(
+        path: &Path,
+        battery_dirs: &[PathBuf],
+        lookup: impl Fn(&str) -> Option<String>,
+        jev_url: Option<String>,
+    ) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
             path: path.display().to_string(),
             source,
@@ -968,7 +985,8 @@ impl Config {
             file_tracking,
             origins,
             included_batteries.into_iter().collect(),
-            |var| std::env::var(var).ok(),
+            lookup,
+            jev_url,
         )
     }
 
@@ -1119,6 +1137,7 @@ impl Config {
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             lookup,
+            std::env::var(JEV_URL_VARIABLE).ok(),
         )
     }
 
@@ -1194,9 +1213,11 @@ impl Config {
             origins,
             Vec::new(),
             lookup,
+            std::env::var(JEV_URL_VARIABLE).ok(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_composed(
         text: String,
         raw: RawConfig,
@@ -1205,6 +1226,7 @@ impl Config {
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
         lookup: impl Fn(&str) -> Option<String>,
+        jev_url: Option<String>,
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
         let RawExternals {
@@ -1230,9 +1252,7 @@ impl Config {
             return Err(ConfigError::ZeroByteCap);
         }
         let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
-        let jev = jev
-            .map(|raw| resolve_jev(raw, &lookup, std::env::var(JEV_URL_VARIABLE).ok()))
-            .transpose()?;
+        let jev = jev.map(|raw| resolve_jev(raw, &lookup, jev_url)).transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
         };
