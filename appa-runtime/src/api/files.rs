@@ -105,17 +105,8 @@ impl FileTracking {
         workspace: &str,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
         let workspace = std::fs::canonicalize(workspace)?;
-        let mut stores = self
-            .stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
-        if let Some(store) = stores.get(&root.0) {
-            if store.workspace() != workspace {
-                return Err(appa_eventlog::files::FileStoreError::Configuration(
-                    "a session cannot change its tracked workspace".into(),
-                ));
-            }
-            return Ok(std::sync::Arc::clone(store));
+        if let Some(store) = self.bound(root, &workspace)? {
+            return Ok(store);
         }
         if self.protected_paths.iter().any(|path| path.starts_with(&workspace))
             || self
@@ -128,24 +119,54 @@ impl FileTracking {
             ));
         }
         let store = std::sync::Arc::new(FileStore::new(&workspace, &self.initial)?);
-        stores.insert(root.0.clone(), std::sync::Arc::clone(&store));
-        Ok(store)
+        let mut stores = self.lock_stores()?;
+        same_workspace(stores.entry(root.0.clone()).or_insert(store), &workspace)
+    }
+
+    fn bound(
+        &self,
+        root: &super::TrajectoryId,
+        workspace: &std::path::Path,
+    ) -> Result<Option<std::sync::Arc<FileStore>>, appa_eventlog::files::FileStoreError> {
+        self.lock_stores()?
+            .get(&root.0)
+            .map(|store| same_workspace(store, workspace))
+            .transpose()
+    }
+
+    fn lock_stores(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>,
+        appa_eventlog::files::FileStoreError,
+    > {
+        self.stores
+            .lock()
+            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))
     }
 
     pub(super) fn store(
         &self,
         root: &super::TrajectoryId,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-        let stores = self
-            .stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
-        stores.get(&root.0).cloned().ok_or_else(|| {
+        self.lock_stores()?.get(&root.0).cloned().ok_or_else(|| {
             appa_eventlog::files::FileStoreError::Configuration(
                 "the session has not supplied a working directory for file tracking".into(),
             )
         })
     }
+}
+
+fn same_workspace(
+    store: &std::sync::Arc<FileStore>,
+    workspace: &std::path::Path,
+) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+    if store.workspace() != workspace {
+        return Err(appa_eventlog::files::FileStoreError::Configuration(
+            "a session cannot change its tracked workspace".into(),
+        ));
+    }
+    Ok(std::sync::Arc::clone(store))
 }
 
 pub(crate) const TOOLS: [&str; 6] = [

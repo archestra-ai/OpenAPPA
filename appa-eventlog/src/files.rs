@@ -124,6 +124,7 @@ pub struct FileStore {
 }
 
 struct State {
+    initial: Label,
     next_id: i64,
     versions: BTreeMap<i64, FileVersion>,
     current: BTreeMap<String, i64>,
@@ -142,30 +143,13 @@ struct StoredReservation {
 impl FileStore {
     pub fn new(workspace: &Path, initial: &Label) -> Result<Self, FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
-        let mut versions = BTreeMap::new();
-        let mut current = BTreeMap::new();
-        let mut next_id = 1;
-        for (path, digest) in scan(&workspace)? {
-            versions.insert(
-                next_id,
-                FileVersion {
-                    id: next_id,
-                    path: path.clone(),
-                    digest,
-                    label: initial.clone(),
-                    previous: None,
-                    content_dependencies: vec![],
-                    dispatch: None,
-                },
-            );
-            current.insert(path, next_id);
-            next_id += 1;
-        }
+        check_links(&workspace)?;
         Ok(Self {
             state: Mutex::new(State {
-                next_id,
-                versions,
-                current,
+                initial: initial.clone(),
+                next_id: 1,
+                versions: BTreeMap::new(),
+                current: BTreeMap::new(),
                 reservation: None,
                 receipts: HashMap::new(),
             }),
@@ -193,7 +177,7 @@ impl FileStore {
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let predecessor = current_state(&state, &relative);
+        let predecessor = current_or_adopt(&mut state, &self.workspace, &relative)?;
         match operation {
             FileOperation::Read | FileOperation::Edit if predecessor.is_none() => {
                 return Err(FileStoreError::Untracked);
@@ -251,7 +235,8 @@ impl FileStore {
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let source_version = current_state(&state, &source).ok_or(FileStoreError::Untracked)?;
+        let source_version =
+            current_or_adopt(&mut state, &self.workspace, &source)?.ok_or(FileStoreError::Untracked)?;
         let source_actual = state_digest(&self.workspace, &source)?;
         if source_actual == ABSENT {
             return Err(FileStoreError::Untracked);
@@ -260,7 +245,7 @@ impl FileStore {
         if source_actual != source_version.digest {
             return Err(FileStoreError::DigestMismatch);
         }
-        let predecessor = current_state(&state, &destination);
+        let predecessor = current_or_adopt(&mut state, &self.workspace, &destination)?;
         let destination_actual = state_digest(&self.workspace, &destination)?;
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
@@ -310,7 +295,7 @@ impl FileStore {
         }
         let mut pinned = Vec::with_capacity(inputs.len());
         for path in inputs {
-            let version = current_state(&state, &path).ok_or(FileStoreError::Untracked)?;
+            let version = current_or_adopt(&mut state, &self.workspace, &path)?.ok_or(FileStoreError::Untracked)?;
             let actual = state_digest(&self.workspace, &path)?;
             if actual == ABSENT {
                 return Err(FileStoreError::Untracked);
@@ -325,7 +310,7 @@ impl FileStore {
                 digest: version.digest,
             });
         }
-        let predecessor = current_state(&state, &destination);
+        let predecessor = current_or_adopt(&mut state, &self.workspace, &destination)?;
         if state_digest(&self.workspace, &destination)?
             != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT)
         {
@@ -593,8 +578,8 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
-        Ok(current_state(&state, &relative))
+        let mut state = self.lock()?;
+        current_or_adopt(&mut state, &self.workspace, &relative)
     }
 
     pub fn history(&self, path: &str) -> Result<Vec<FileVersion>, FileStoreError> {
@@ -655,9 +640,6 @@ fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStore
     }
     Ok(stripped.to_string_lossy().into_owned())
 }
-fn check_regular(path: &Path) -> Result<(), FileStoreError> {
-    check_regular_metadata(&fs::symlink_metadata(path)?)
-}
 fn check_regular_metadata(m: &fs::Metadata) -> Result<(), FileStoreError> {
     #[cfg(unix)]
     let singly_linked = m.nlink() == 1;
@@ -669,10 +651,6 @@ fn check_regular_metadata(m: &fs::Metadata) -> Result<(), FileStoreError> {
         ));
     }
     Ok(())
-}
-fn hash(path: &Path) -> Result<String, FileStoreError> {
-    check_regular(path)?;
-    digest(File::open(path)?)
 }
 fn digest(mut f: File) -> Result<String, FileStoreError> {
     let mut h = Sha256::new();
@@ -720,34 +698,22 @@ fn check_move_filesystem(operation: FileOperation, source: &Path, destination: &
     }
     Ok(())
 }
-fn scan(root: &Path) -> Result<Vec<(String, String)>, FileStoreError> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), FileStoreError> {
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            let p = e.path();
-            let m = fs::symlink_metadata(&p)?;
-            if m.file_type().is_symlink() {
-                return Err(FileStoreError::InvalidPath("workspace contains symlink".into()));
-            }
-            if m.is_dir() {
-                walk(root, &p, out)?
-            } else {
-                check_regular(&p)?;
-                out.push((
-                    p.strip_prefix(root)
-                        .map_err(|_| FileStoreError::InvalidPath("outside workspace".into()))?
-                        .to_string_lossy()
-                        .into_owned(),
-                    hash(&p)?,
-                ));
-            }
+/// Refuse a workspace holding a symlink or a multiply linked file anywhere. Only metadata
+/// is read: each file is hashed when a call first touches it.
+fn check_links(dir: &Path) -> Result<(), FileStoreError> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            return Err(FileStoreError::InvalidPath("workspace contains symlink".into()));
         }
-        Ok(())
+        if meta.is_dir() {
+            check_links(&path)?;
+        } else {
+            check_regular_metadata(&meta)?;
+        }
     }
-    let mut o = vec![];
-    walk(root, root, &mut o)?;
-    o.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(o)
+    Ok(())
 }
 /// Whether a pin still describes the workspace: the destination holds the bytes the operation
 /// would have replaced, a transfer's source is where the operation would have left it, and
@@ -800,6 +766,34 @@ fn current_state(state: &State, path: &str) -> Option<FileVersion> {
     state.current.get(path).and_then(|id| state.versions.get(id)).cloned()
 }
 
+/// The path's current version. A path the ledger has never versioned that holds a file on
+/// disk is adopted first, with the operator's initial label.
+fn current_or_adopt(state: &mut State, workspace: &Path, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
+    if let Some(version) = current_state(state, path) {
+        return Ok(Some(version));
+    }
+    if state.versions.values().any(|version| version.path == path) {
+        return Ok(None);
+    }
+    let digest = state_digest(workspace, path)?;
+    if digest == ABSENT {
+        return Ok(None);
+    }
+    let version = FileVersion {
+        id: state.next_id,
+        path: path.into(),
+        digest,
+        label: state.initial.clone(),
+        previous: None,
+        content_dependencies: vec![],
+        dispatch: None,
+    };
+    state.next_id += 1;
+    state.versions.insert(version.id, version.clone());
+    state.current.insert(version.path.clone(), version.id);
+    Ok(Some(version))
+}
+
 fn snapshot_state(state: &State) -> Vec<FileVersion> {
     state
         .current
@@ -817,10 +811,9 @@ mod tests {
     #[test]
     fn file_digest_preserves_sha256_lowercase_hex() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("value.txt");
-        std::fs::write(&path, b"abc").unwrap();
+        std::fs::write(dir.path().join("value.txt"), b"abc").unwrap();
         assert_eq!(
-            hash(&path).unwrap(),
+            state_digest(dir.path(), "value.txt").unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
@@ -847,7 +840,6 @@ mod tests {
     #[test]
     fn abandoning_releases_only_an_undisturbed_workspace() {
         let fixture = Fixture::new();
-        // Both paths exist before initialization, so both are classified and tracked.
         fs::write(fixture.workspace.join("destination.txt"), "before").unwrap();
         let store = fixture.store(&Label::top());
         // A released call the harness never ran: the workspace still shows the pin.
@@ -926,6 +918,8 @@ mod tests {
     fn mismatch_and_failed_partial_write_stay_pending() {
         let fixture = Fixture::new();
         let store = fixture.store(&Label::top());
+        store.prepare("a", "touch", FileOperation::Read, "tracked.txt").unwrap();
+        store.cancel("a", "touch").unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "foreign").unwrap();
         assert!(matches!(
             store.prepare("a", "bad", FileOperation::Read, "tracked.txt"),
@@ -1162,5 +1156,116 @@ mod tests {
             store.finish("a", "partial", false),
             Err(FileStoreError::Quarantined)
         ));
+    }
+
+    fn secret() -> Label {
+        Label::new(
+            appa_engine::label::Trust::new(2),
+            appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("operator")]),
+        )
+    }
+
+    #[test]
+    fn binding_reads_no_file_contents() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let sealed = fixture.workspace.join("sealed.bin");
+        fs::write(&sealed, "unreadable").unwrap();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&sealed).is_ok() {
+            return;
+        }
+        let store = fixture.store(&Label::top());
+        assert!(store.snapshot().unwrap().is_empty());
+        assert!(matches!(
+            store.prepare("a", "sealed", FileOperation::Read, "sealed.bin"),
+            Err(FileStoreError::Io(_))
+        ));
+        store.prepare("a", "other", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn first_touch_adopts_current_bytes_and_later_drift_is_caught() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&secret());
+        fs::write(fixture.workspace.join("tracked.txt"), "edited before first touch").unwrap();
+        let pin = store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        let adopted = store.current("tracked.txt").unwrap().unwrap();
+        assert_eq!(pin.predecessor_label, Some(secret()));
+        assert_eq!(adopted.label, secret());
+        assert_eq!(pin.predecessor_digest, Some(adopted.digest));
+        assert_eq!(adopted.previous, None);
+        store.cancel("a", "read").unwrap();
+
+        fs::write(fixture.workspace.join("tracked.txt"), "out of band").unwrap();
+        assert!(matches!(
+            store.prepare("a", "again", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::DigestMismatch)
+        ));
+        assert_eq!(store.drifted().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn links_anywhere_in_the_workspace_refuse_binding() {
+        let symlinked = Fixture::new();
+        fs::create_dir_all(symlinked.workspace.join("deep/er")).unwrap();
+        std::os::unix::fs::symlink("../../tracked.txt", symlinked.workspace.join("deep/er/link")).unwrap();
+        assert!(matches!(
+            FileStore::new(&symlinked.workspace, &Label::top()),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+
+        let hard_linked = Fixture::new();
+        fs::create_dir(hard_linked.workspace.join("deep")).unwrap();
+        fs::hard_link(
+            hard_linked.workspace.join("tracked.txt"),
+            hard_linked.workspace.join("deep/hard"),
+        )
+        .unwrap();
+        assert!(matches!(
+            FileStore::new(&hard_linked.workspace, &Label::top()),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+    }
+
+    #[test]
+    fn transfers_and_process_from_untouched_sources_carry_the_initial_label() {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join("second.txt"), "second").unwrap();
+        fs::write(fixture.workspace.join("third.txt"), "third").unwrap();
+        let store = fixture.store(&secret());
+
+        let copy = store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
+            .unwrap();
+        assert_eq!(copy.source.as_ref().unwrap().label, secret());
+        store.bind("a", "copy", "dispatch-1", &secret()).unwrap();
+        fs::copy(
+            fixture.workspace.join("tracked.txt"),
+            fixture.workspace.join("copy.txt"),
+        )
+        .unwrap();
+        assert_eq!(store.finish("a", "copy", true).unwrap().source_label, Some(secret()));
+
+        let moved = store
+            .prepare_transfer("a", "move", FileOperation::Move, "second.txt", "moved.txt")
+            .unwrap();
+        assert_eq!(moved.source.as_ref().unwrap().label, secret());
+        store.bind("a", "move", "dispatch-2", &secret()).unwrap();
+        fs::rename(
+            fixture.workspace.join("second.txt"),
+            fixture.workspace.join("moved.txt"),
+        )
+        .unwrap();
+        assert_eq!(store.finish("a", "move", true).unwrap().source_label, Some(secret()));
+        assert!(store.current("second.txt").unwrap().is_none());
+
+        let process = store
+            .prepare_process("a", "process", &["third.txt".into()], "output.txt")
+            .unwrap();
+        assert_eq!(process.inputs[0].label, secret());
+        store.bind("a", "process", "dispatch-3", &secret()).unwrap();
+        fs::write(fixture.workspace.join("output.txt"), "derived").unwrap();
+        assert_eq!(store.finish("a", "process", true).unwrap().source_label, Some(secret()));
     }
 }
