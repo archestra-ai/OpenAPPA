@@ -158,6 +158,8 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
     command
         .arg("-C")
         .arg(repository)
+        // The source archive must carry committed bytes, regardless of Git for Windows' checkout setting.
+        .args(["-c", "core.autocrlf=false"])
         .args(["archive", "--format=tar", "HEAD", "--", batteries_staging::SOURCE]);
     let output = command.output()?;
     if !output.status.success() {

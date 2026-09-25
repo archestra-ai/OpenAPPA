@@ -467,6 +467,7 @@ fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
+        .args(["-c", "core.autocrlf=false"])
         .args(["archive", "--format=tar", "HEAD", "marketplace"])
         .output()
         .map_err(|error| io("export the build's commit", root, error))?;
@@ -694,6 +695,23 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn export_commit_preserves_committed_bytes_with_windows_autocrlf() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let destination = stage.path().join("source");
+        export_commit(root, &destination).unwrap();
+        let path = "marketplace/batteries/archestra/README.md";
+        let committed = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["cat-file", "blob", &format!("HEAD:{path}")])
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        assert_eq!(fs::read(destination.join(path)).unwrap(), committed.stdout);
+    }
 
     #[test]
     fn a_build_generation_needs_no_marketplace_archive_and_refuses_kagent() {

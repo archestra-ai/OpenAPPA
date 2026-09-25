@@ -133,6 +133,20 @@ class BatteryLinterTests(unittest.TestCase):
         )
         self.assertIn("unused manifest helper", self.kinds(directory))
 
+    def test_plugin_default_can_reach_an_installed_battery_helper(self):
+        source = self.make_battery([], ["entry.py"], {"entry.py": "pass\n"})
+        marketplace = source / "marketplace"
+        battery = marketplace / "batteries" / "fixture"
+        battery.parent.mkdir(parents=True)
+        shutil.copytree(source, battery, ignore=shutil.ignore_patterns("marketplace"))
+        plugin = marketplace / "plugins" / "claude-code"
+        plugin.mkdir(parents=True)
+        policy = plugin / "default.appa.toml"
+        policy.write_text('[externals.inputs.helper]\ncommand = ["python3", "batteries/fixture/entry.py"]\n')
+        self.assertEqual(self.kinds(battery), [])
+        policy.write_text('[externals.inputs.helper]\ncommand = ["python3", "batteries/other/entry.py"]\n')
+        self.assertIn("unused manifest helper", self.kinds(battery))
+
     def test_commands_are_discovered_inside_nested_toml_values(self):
         directory = self.make_battery(
             [],

@@ -17,33 +17,29 @@ fn bash(command: &str) -> ProposedCall {
     }
 }
 
-/// The shipped battery under a root whose `claude` fails: a command that reaches the Bash
-/// annotator is refused, so a static rule's narrowing is told apart from a classification.
+/// The shipped default and battery under a failing `claude`: a static credential
+/// rule narrows without consulting the root's Bash Annotator.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let target = dir.path().join("marketplace/batteries/claude-code");
+    let target = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::copy(
         repo_root().join("marketplace/batteries/claude-code/appa.toml"),
         target.join("appa.toml"),
     )
     .unwrap();
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/claude-code/repository.py"),
+        target.join("repository.py"),
+    )
+    .unwrap();
     let command = fake_claude(dir.path(), "exit 1");
     let path = dir.path().join("appa.toml");
+    let root_policy =
+        std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
     std::fs::write(
         &path,
         format!(
-            r#"include = ["marketplace/batteries/claude-code/appa.toml"]
-
-[policy]
-version = 2
-
-[externals]
-timeout_ms = 30000
-max_body_bytes = 1048576
-
-[externals.claude_code]
-command = "{command}"
-"#,
+            "include = [\"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
             command = command.display(),
         ),
     )

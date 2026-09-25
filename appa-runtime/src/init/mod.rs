@@ -10,6 +10,7 @@ use crate::config::ConfigError;
 use crate::installation::archive;
 use std::env;
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use thiserror::Error;
@@ -361,19 +362,36 @@ fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
     // APPA_RUNTIME_URL is removed rather than set: to the start it means "the
     // user runs their own runtime here", and setting it would suppress managed
     // replacement permanently.
-    let output = command
+    // A long-lived Windows runtime can inherit the starter's output handles.
+    // A regular file keeps diagnostics without waiting for those handles to close.
+    let mut output = tempfile::tempfile().map_err(|error| InitError::Starter(error.to_string()))?;
+    let stdout = output
+        .try_clone()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let stderr = output
+        .try_clone()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let status = command
         .env_remove("APPA_RUNTIME_URL")
         .stdin(Stdio::null())
-        .output()
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
         .map_err(|error| InitError::Starter(error.to_string()))?;
-    if output.status.success() {
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(InitError::Starter(if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    output.rewind().map_err(|error| InitError::Starter(error.to_string()))?;
+    let mut diagnostics = Vec::new();
+    output
+        .take(65536)
+        .read_to_end(&mut diagnostics)
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let message = String::from_utf8_lossy(&diagnostics).trim().to_owned();
+    Err(InitError::Starter(if message.is_empty() {
+        format!("runtime ensure exited with {status}")
     } else {
-        stderr
+        message
     }))
 }
 

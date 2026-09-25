@@ -651,6 +651,13 @@ pub fn install(args: Install) -> ExitCode {
                 None => {
                     let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?;
+                    let text = if name == "claude-code" {
+                        crate::default_config::for_installed_policy(&text)
+                            .map_err(|reason| InstallError::Invalid(reason.into()))?
+                            .into_owned()
+                    } else {
+                        text
+                    };
                     match (agent_yell, with_agent_yell_on(&text)) {
                         (Some(AgentYell::On), Some(on)) => on,
                         (Some(AgentYell::On), None) if args.agent_yell => {

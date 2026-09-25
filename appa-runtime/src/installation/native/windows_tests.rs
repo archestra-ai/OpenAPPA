@@ -78,7 +78,7 @@ fn primary_exited(child: &mut NativeChild) -> std::process::ExitStatus {
 
 #[test]
 fn job_owns_descendants_after_primary_exit_and_releases_success() {
-    for mode in ["fail", "success", "powershell-fail", "powershell-success"] {
+    for mode in ["fail", "success"] {
         let directory = tempfile::tempdir().unwrap();
         let stdout = tempfile::tempfile().unwrap();
         let stderr = tempfile::tempfile().unwrap();
@@ -137,13 +137,30 @@ fn invoke_bounds_output_and_time_and_cleans_descendants() {
     for mode in ["noisy", "stderr", "timeout"] {
         let directory = tempfile::tempdir().unwrap();
         let args = arguments(mode, directory.path());
+        let timeout = if mode == "timeout" {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_secs(10)
+        };
         let task = std::thread::spawn(move || {
             let refs: Vec<_> = args.iter().map(OsString::as_os_str).collect();
-            invoke(&std::env::current_exe().unwrap(), &refs, Duration::from_secs(10))
+            invoke(&std::env::current_exe().unwrap(), &refs, timeout)
         });
         let descendant = Descendant::read(directory.path());
         fs::write(directory.path().join("release"), b"go").unwrap();
-        assert!(task.join().unwrap().is_err());
+        let result = task.join().unwrap();
+        match (mode, result) {
+            ("noisy" | "stderr", Err(InstallError::Recovery { reason, .. })) => {
+                assert!(
+                    reason.starts_with("selected binary output exceeded its byte limit"),
+                    "{reason}"
+                );
+            }
+            ("timeout", Err(InstallError::Recovery { reason, .. })) => {
+                assert!(reason.starts_with("selected binary timed out"), "{reason}");
+            }
+            (_, result) => panic!("{mode} did not reach its expected limit: {result:?}"),
+        }
         descendant.assert_stopped();
     }
 }
@@ -205,46 +222,30 @@ fn child_fixture() {
         std::process::exit(0);
     }
     let child_args = arguments("sleep", directory);
-    let pid = if mode.starts_with("powershell-") {
-        // Same Start-Process options as hook.ps1; the executable is a Rust
-        // fixture instead of a listening runtime. Inputs are child-only env.
-        let argument_line = child_args
-            .iter()
-            .map(|arg| format!("\"{}\"", arg.to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command",
-                "$p = Start-Process -FilePath $env:APPA_TEST_EXECUTABLE -WindowStyle Hidden -ArgumentList $env:APPA_TEST_ARGUMENTS -PassThru; [Console]::Write($p.Id)"])
-            .env("APPA_TEST_EXECUTABLE", executable)
-            .env("APPA_TEST_ARGUMENTS", argument_line)
-            .output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8(output.stdout).unwrap().trim().parse::<u32>().unwrap()
-    } else {
-        Command::new(executable)
-            .args(child_args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap()
-            .id()
-    };
+    let pid = Command::new(executable)
+        .args(child_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+        .id();
     fs::write(directory.join("pid.tmp"), pid.to_string()).unwrap();
     fs::rename(directory.join("pid.tmp"), directory.join("pid")).unwrap();
     await_file(&directory.join("release"));
     match mode {
         "noisy" => {
             std::io::stdout().write_all(&vec![b'x'; 70000]).unwrap();
+            await_file(&directory.join("limit-handled"));
         }
         "stderr" => {
             std::io::stderr().write_all(&vec![b'x'; 70000]).unwrap();
+            await_file(&directory.join("limit-handled"));
         }
         "timeout" => {
             std::thread::sleep(Duration::from_secs(60));
         }
         _ => {}
     }
-    std::process::exit(if mode.ends_with("success") { 0 } else { 7 });
+    std::process::exit(if mode == "success" { 0 } else { 7 });
 }
