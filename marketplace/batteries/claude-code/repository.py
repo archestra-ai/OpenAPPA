@@ -37,11 +37,12 @@ OPERATORS = "();<>&|\n"
 PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
 INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "busybox", "eval", "source", ".", "xargs"}
 GLOB = set("*?[")
+SETTERS = {"declare", "typeset", "local", "readonly", "read", "mapfile", "readarray", "getopts", "alias"}
 PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
-API_PATH = re.compile(r"^/?repos/([\w.-]+)/([\w.-]+)")
+API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)")
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
 INVOCATION = re.compile(r"\b(git|gh)\s")
@@ -146,21 +147,25 @@ def repository_targets(command, cwd):
     a slug or URL, a remote of a checkout, or a checkout's own repository."""
     if any(INVOCATION.search("".join(inner)) for inner in SUBSTITUTION.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this input cannot follow")
-    targets, exported, directory = [], {}, cwd
+    targets, exported, assigned, directory = [], {}, set(), cwd
     for words in segments_of(command):
         environment = dict(exported)
-        if words[0] == "export":
+        exporting = words[0] == "export"
+        if exporting:
             words = words[1:]
         while words and ("=" in words[0] and not words[0].startswith(("=", "-")) or words[0] in PREFIXES):
             name, assigns, value = words[0].partition("=")
             if assigns:
                 environment[name] = value
             words = words[1:]
-        if not words:
+        if not words and exporting:
             exported = environment
             continue
+        if not words:
+            assigned |= {name for name, value in environment.items() if exported.get(name) != value}
+            continue
         program = os.path.basename(words[0])
-        if program in ("git", "gh") and (settings := environment.keys() - HARMLESS_VARIABLES):
+        if program in ("git", "gh") and (settings := assigned | environment.keys() - HARMLESS_VARIABLES):
             raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
         match program:
             case "git":
@@ -174,6 +179,8 @@ def repository_targets(command, cwd):
                 raise Unfollowable(f"{' '.join(words)} moves to a directory this input cannot follow")
             case _ if program in INTERPRETERS:
                 raise Unfollowable(f"{program} runs commands this input cannot follow")
+            case _ if program in SETTERS or program == "printf" and "-v" in words:
+                raise Unfollowable(f"{program} sets a variable this input cannot follow")
             case _ if (
                 GLOB & set(program)
                 or "$" in program

@@ -53,6 +53,7 @@ class RepositoryTargets(unittest.TestCase):
         for command in (
             "gh api repos/acme/api/issues -f title=x",
             "gh api /repos/acme/api/pulls",
+            "gh api https://api.github.com/repos/acme/api/pulls",
             "gh issue comment https://github.com/acme/api/issues/5 --body x",
             "gh pr create --title repos/acme/api",
             "gh repo view acme/api",
@@ -119,6 +120,9 @@ class RepositoryTargets(unittest.TestCase):
             "cd && git push origin",
             "cd - && git push origin",
             "popd && git push origin",
+            "GH_REPO=acme/secret; gh pr create",
+            "declare -x GIT_DIR=/tmp/evil; git push origin",
+            "printf -v GIT_DIR /tmp/evil; git push origin",
             "xargs git push",
             "git -c url.x.insteadOf=y push origin",
             "git --git-dir=/tmp/x push origin",

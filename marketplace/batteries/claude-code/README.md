@@ -53,8 +53,10 @@ and `host/claude-code/Edit`:
   shell, `eval`, `source` or subshell, `git -c`, an environment setting
   such as `GIT_DIR` or `HOME`, a program or target computed at run time) is
   answered as unknown, and the Annotator treats the destination as public.
-  The finding informs the Annotator; the repository's collaborators are not
-  resolved as readers.
+  The finding covers the `git` and `gh` calls the command line shows; a
+  script or another program that pushes on its own is the Annotator's to
+  judge from the command. The finding informs the Annotator; the
+  repository's collaborators are not resolved as readers.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules
