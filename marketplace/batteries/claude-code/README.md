@@ -43,14 +43,15 @@ and `host/claude-code/Edit`:
   readers, which the command line does not say. Before the Annotator is
   asked, `repository.py` establishes every repository the command reaches —
   each one a `gh` call names by `--repo`, `GH_REPO`, a `repos/OWNER/NAME`
-  path, or a URL, and each one a push names by URL or remote (in its `-C`
+  path, a URL, or an `OWNER/NAME` word of `gh repo`, and each one a push names by URL or remote (in its `-C`
   directory), else the checkout's own in the directory Claude Code runs
   the command in — and their visibility, through the GitHub CLI's own login
   (`gh repo view`). Several repositories answer the most widely readable.
   The Annotator reads the finding as an established input and requires
   audience `public` for a public repository, `internal` for a private or
   internal one. A repository it cannot establish (no `gh`, no checkout, a
-  nested shell, `git -c`, `GIT_DIR`, a target computed at run time) is
+  shell, `eval` or `source`, `git -c`, `GIT_DIR`, a program or target
+  computed at run time) is
   answered as unknown, and the Annotator treats the destination as public.
   The finding informs the Annotator; the repository's collaborators are not
   resolved as readers.

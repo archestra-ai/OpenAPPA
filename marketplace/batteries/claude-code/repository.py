@@ -8,12 +8,13 @@ the harness would run it in), one answer out:
 
 The command is split into its simple commands, and every `git push` and
 `gh` call among them names a destination: `--repo`/`-R`, `GH_REPO`, a
-`repos/OWNER/NAME` API path or a GitHub URL on a `gh` call, a URL or a
+`repos/OWNER/NAME` API path, a GitHub URL, or an `OWNER/NAME` word of
+`gh repo` on a `gh` call, a URL or a
 remote on a push (in the `-C` directory when given), else the checkout's
 own repository. Each is asked of the GitHub CLI's login (`gh repo view`);
 several destinations answer the most widely readable one. A call this
-input cannot follow — a nested shell, `git -c`, `GIT_DIR`, a computed
-target — and whatever else cannot be established answers `null` with a
+input cannot follow — a shell, `eval` or `source`, `git -c`, `GIT_DIR`,
+a computed program or target — and whatever else cannot be established answers `null` with a
 reason and a zero exit: the annotator then reads the finding, not a
 guess. Only a transport failure — a crash, a timeout — is a refused
 answer.
@@ -31,14 +32,16 @@ GH_TIMEOUT_SECONDS = 4
 VISIBILITY = {"PUBLIC": "public", "PRIVATE": "private", "INTERNAL": "internal"}
 MOST_READABLE_FIRST = ["public", "internal", "private"]
 
-SEPARATORS = set("();<>&|\n")
+OPERATORS = "();<>&|\n"
 PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
-SHELLS = {"bash", "sh", "zsh", "eval", "xargs"}
+INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "busybox", "eval", "source", ".", "xargs"}
+GLOB = set("*?[")
 PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
 API_PATH = re.compile(r"^/?repos/([\w.-]+)/([\w.-]+)")
+SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
 INVOCATION = re.compile(r"\b(git|gh)\s")
 REDIRECTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG", "GIT_SSH", "GIT_PROXY", "GIT_NAMESPACE")
@@ -56,13 +59,13 @@ def unknown(reason):
 
 def segments_of(command):
     """The command's simple commands, split at every shell operator and newline."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     segment = []
     try:
         for token in lexer:
-            if set(token) <= SEPARATORS:
+            if set(token) <= set(OPERATORS):
                 if segment:
                     yield segment
                 segment = []
@@ -118,11 +121,11 @@ def gh_targets(words, environment, directory):
     for index, word in enumerate(words):
         if word in ("--repo", "-R") and index + 1 < len(words):
             chosen.append(words[index + 1])
-        elif word.startswith("--repo="):
-            chosen.append(word.partition("=")[2])
+        elif word.startswith(("--repo=", "-R")) and word not in ("--repo", "-R"):
+            chosen.append(word.removeprefix("--repo=").removeprefix("-R").removeprefix("="))
         elif match := API_PATH.match(word):
             mentioned.append(f"{match.group(1)}/{match.group(2)}")
-        elif GITHUB_URL.match(word):
+        elif GITHUB_URL.match(word) or words[0] == "repo" and SLUG.match(word):
             mentioned.append(word)
     targets = [("slug", named(slug), directory) for slug in chosen + mentioned]
     return targets if chosen else [*targets, ("default", None, directory)]
@@ -159,11 +162,13 @@ def repository_targets(command, cwd):
                 targets += [target] if target else []
             case "gh":
                 targets += gh_targets(words[1:], environment, cwd)
+            case _ if program in INTERPRETERS:
+                raise Unfollowable(f"{program} runs commands this input cannot follow")
             case _ if (
-                "$" in program
+                GLOB & set(program)
+                or "$" in program
                 or "`" in program
                 or any(os.path.basename(word) in ("git", "gh") for word in words[1:])
-                or program in SHELLS and any(INVOCATION.search(word) for word in words[1:])
             ):
                 raise Unfollowable(f"{program} runs a git or gh call this input cannot follow")
     return list(dict.fromkeys(targets)) or [("default", None, cwd)]

@@ -40,6 +40,8 @@ class RepositoryTargets(unittest.TestCase):
         for command in (
             "gh pr create --repo acme/api --title x",
             "gh issue list -R acme/api",
+            "gh issue list -Racme/api",
+            "gh issue list -R=acme/api",
             "gh pr create --repo=acme/api",
             "GH_REPO=acme/api gh pr create",
             "export GH_REPO=acme/api; gh pr create",
@@ -53,6 +55,8 @@ class RepositoryTargets(unittest.TestCase):
             "gh api /repos/acme/api/pulls",
             "gh issue comment https://github.com/acme/api/issues/5 --body x",
             "gh pr create --title repos/acme/api",
+            "gh repo view acme/api",
+            "gh repo edit acme/api --description x",
         ):
             self.assertEqual(INPUT.repository_targets(command, "/w"), [("slug", "acme/api", "/w"), ("default", None, "/w")], command)
 
@@ -91,6 +95,14 @@ class RepositoryTargets(unittest.TestCase):
         for command in (
             'bash -c "git push https://github.com/acme/public.git"',
             "sudo -u bob git push upstream",
+            "bash deploy.sh && git push",
+            "dash -c 'git push https://github.com/acme/public.git'",
+            "fish -c 'gh pr create --repo acme/public'",
+            "sh -s < push.sh; gh pr create",
+            "V=git; eval $V push https://github.com/acme/public.git",
+            'V="git push https://github.com/acme/public.git"; sh -c "$V"',
+            "source push.sh; gh pr create",
+            "/usr/bin/gi? push https://github.com/acme/public.git",
             "xargs git push",
             "git -c url.x.insteadOf=y push origin",
             "git --git-dir=/tmp/x push origin",
