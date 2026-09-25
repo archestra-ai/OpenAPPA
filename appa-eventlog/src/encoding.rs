@@ -81,18 +81,19 @@ pub(crate) fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, Sequ
         .collect()
 }
 
-/// The policy file key a log's opening names, or `None` where its first batch is not an
-/// opening. A log with no batch is an unknown root.
-pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Option<PolicyFileKey>, ReadError> {
+/// The policy file key a log's opening names. A log with no batch is an unknown root.
+pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<PolicyFileKey, ReadError> {
     let Some(first) = batches.first() else {
         return Err(ReadError::UnknownRoot {
             root: root.as_str().to_string(),
         });
     };
-    Ok(match decode(first)?.facts.into_iter().next() {
-        Some(Fact::TrajectoryOpened(TrajectoryOpening { policy_file_key, .. })) => Some(policy_file_key),
-        _ => None,
-    })
+    match decode(first)?.facts.into_iter().next() {
+        Some(Fact::TrajectoryOpened(TrajectoryOpening { policy_file_key, .. })) => Ok(policy_file_key),
+        _ => Err(ReadError::Undecodable(
+            "the log does not open with a TrajectoryOpened record".to_string(),
+        )),
+    }
 }
 
 pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
@@ -169,20 +170,6 @@ mod tests {
             },
             HostObservation::TurnEnded { actor },
         ]
-    }
-
-    /// The encoding is the shape, and a batch with no observation is byte-for-byte what an
-    /// engine-only store wrote: nothing sniffs between two unrelated payloads.
-    #[test]
-    fn a_batch_without_an_observation_is_the_bare_array_of_its_facts() {
-        assert_eq!(
-            encode(&punctuation(), None),
-            serde_json::to_vec(&punctuation()).unwrap()
-        );
-        let host = observed(root().as_str(), "demo");
-        let object: serde_json::Value = serde_json::from_slice(&encode(&[], Some(&host))).unwrap();
-        assert_eq!(object["facts"], serde_json::json!([]));
-        assert_eq!(object["host"]["kind"], "inventory");
     }
 
     /// The stored batch bytes are a persisted format: every host observation kind, the bare

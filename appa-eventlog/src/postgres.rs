@@ -670,10 +670,7 @@ impl PostgresStore {
             contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
                 .map_err(|gap| PostgresError(gap.to_string()))
         })?;
-        let hash = opening_key(root, &batches)?
-            .ok_or_else(|| ReadError::Undecodable("log does not begin with an opening".into()))?
-            .as_str()
-            .to_owned();
+        let hash = opening_key(root, &batches)?.as_str().to_owned();
         let lookup = hash.clone();
         let policy = self
             .query(move |client| {

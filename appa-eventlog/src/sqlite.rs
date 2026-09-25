@@ -197,9 +197,7 @@ impl Sqlite {
                     Some(gap.to_string()),
                 ))
             })?;
-            let key = opening_key(root, &batches)?.ok_or_else(|| {
-                ReadError::Undecodable("the log does not open with a TrajectoryOpened record".to_string())
-            })?;
+            let key = opening_key(root, &batches)?;
             let policy_file = connection
                 .query_row(
                     "SELECT bytes FROM policy_files WHERE key = ?1",
