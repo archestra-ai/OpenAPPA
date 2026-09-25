@@ -6,10 +6,10 @@
 //! the same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
 //! through their own migrations.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-use super::LogStore;
+use super::{LogStore, Store, immediate, lock};
 
 /// Scope binding for a durable receipt: conversation session or authenticated caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -195,58 +195,58 @@ pub(crate) fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> b
 impl LogStore {
     /// Stores an offer owner record. Repeated writes with identical data are idempotent.
     pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.store_offer_owner(record);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                sqlite_store_offer_owner(connection, &record)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.store_offer_owner(record),
         }
-        with_sqlite_tx(self, |connection| sqlite_store_offer_owner(connection, &record))
     }
 
     /// Reads an offer owner record by key.
     pub fn offer_owner(&self, key: OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.offer_owner(key).map_err(Into::into);
+        match &self.store {
+            Store::Sqlite(connection) => sqlite_read_offer_owner(&lock(connection), &key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.offer_owner(key).map_err(Into::into),
         }
-        sqlite_read_offer_owner(&self.lock(), &key)
     }
 
     /// Deletes stored offer owner records for a session scope.
     pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, ReceiptStorageError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.expire_offer_owners(scope).map_err(Into::into);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                Ok(connection.execute(
+                    "DELETE FROM offer_owners WHERE organization_id=?1 AND caller_id IS ?2 AND session_id=?3",
+                    params![scope.organization_id, scope.caller_id, scope.session_id],
+                )? as u64)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.expire_offer_owners(scope).map_err(Into::into),
         }
-        with_sqlite_tx(self, |connection| {
-            Ok(connection.execute(
-                "DELETE FROM offer_owners WHERE organization_id=?1 AND caller_id IS ?2 AND session_id=?3",
-                params![scope.organization_id, scope.caller_id, scope.session_id],
-            )? as u64)
-        })
-        .map_err(|error| match error {
-            ReceiptError::Storage(error) => error,
-            other => ReceiptStorageError(other.to_string()),
-        })
     }
 
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
     pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.claim_operation(request);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                sqlite_claim_operation(connection, &request)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_operation(request),
         }
-        with_sqlite_tx(self, |connection| sqlite_claim_operation(connection, &request))
     }
 
     /// Completes a claimed operation receipt with its final decision.
     pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.complete_operation(key, decision);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                sqlite_complete_operation(connection, &key, &decision)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_operation(key, decision),
         }
-        with_sqlite_tx(self, |connection| {
-            sqlite_complete_operation(connection, &key, &decision)
-        })
     }
 
     /// Claims a durable processed-result receipt before result processing.
@@ -254,11 +254,13 @@ impl LogStore {
         &self,
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.claim_processed_result(request);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                sqlite_claim_processed_result(connection, &request)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_processed_result(request),
         }
-        with_sqlite_tx(self, |connection| sqlite_claim_processed_result(connection, &request))
     }
 
     /// Completes a processed-result receipt with its approved output and decision.
@@ -268,47 +270,35 @@ impl LogStore {
         approved_output: String,
         decision: Value,
     ) -> Result<(), ReceiptError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.complete_processed_result(key, approved_output, decision);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |connection| {
+                sqlite_complete_processed_result(connection, &key, &approved_output, &decision)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision),
         }
-        with_sqlite_tx(self, |connection| {
-            sqlite_complete_processed_result(connection, &key, &approved_output, &decision)
-        })
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
     pub fn has_pending_receipts(&self, root: String) -> Result<bool, ReceiptStorageError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = self.postgres() {
-            return pg.has_pending_receipts(root).map_err(Into::into);
-        }
-        let connection = self.lock();
-        let found: Option<i64> = connection
-            .query_row(
-                "SELECT 1 FROM operations WHERE root=?1 AND status='pending'
+        match &self.store {
+            Store::Sqlite(connection) => {
+                let found: Option<i64> = lock(connection)
+                    .query_row(
+                        "SELECT 1 FROM operations WHERE root=?1 AND status='pending'
                  UNION ALL
                  SELECT 1 FROM processed_results WHERE root=?1 AND status='pending'
                  LIMIT 1",
-                params![root],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
+                        params![root],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(found.is_some())
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
+        }
     }
-}
-
-fn with_sqlite_tx<T>(
-    store: &LogStore,
-    operation: impl FnOnce(&Connection) -> Result<T, ReceiptError>,
-) -> Result<T, ReceiptError> {
-    let mut connection = store.lock();
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = operation(&transaction);
-    if result.is_ok() {
-        transaction.commit()?;
-    }
-    result
 }
 
 fn sqlite_store_offer_owner(connection: &Connection, record: &OfferOwnerRecord) -> Result<(), ReceiptError> {

@@ -97,12 +97,17 @@ pub enum Backend {
 }
 
 pub struct LogStore {
-    connection: Option<Mutex<Connection>>,
-    #[cfg(feature = "postgres")]
-    postgres: Option<postgres::PostgresStore>,
+    store: Store,
     /// Shared with every store leased from this one, so a fail point armed here fires there.
     #[cfg(feature = "fault-injection")]
     faults: std::sync::Arc<FaultPoints>,
+}
+
+/// Where this store's log is kept. [`Backend::Memory`] is a SQLite connection to `:memory:`.
+enum Store {
+    Sqlite(Mutex<Connection>),
+    #[cfg(feature = "postgres")]
+    Postgres(postgres::PostgresStore),
 }
 
 #[cfg(feature = "fault-injection")]
@@ -433,7 +438,10 @@ impl LogStore {
     /// leased store, this is the lease's connection.
     #[cfg(feature = "postgres")]
     pub fn postgres(&self) -> Option<&postgres::PostgresStore> {
-        self.postgres.as_ref()
+        match &self.store {
+            Store::Sqlite(_) => None,
+            Store::Postgres(pg) => Some(pg),
+        }
     }
 
     /// This store over one pooled connection of its own. Everything the leased store does —
@@ -441,59 +449,401 @@ impl LogStore {
     /// the connection goes back to the pool when the leased store and what it began have dropped.
     #[cfg(feature = "postgres")]
     pub fn lease(&self) -> Result<LogStore, postgres::LeaseError> {
-        let pg = self.postgres.as_ref().ok_or(postgres::LeaseError::NotPostgres)?;
-        Ok(LogStore {
-            connection: None,
-            postgres: Some(pg.lease()?),
-            #[cfg(feature = "fault-injection")]
-            faults: std::sync::Arc::clone(&self.faults),
-        })
+        match &self.store {
+            Store::Sqlite(_) => Err(postgres::LeaseError::NotPostgres),
+            Store::Postgres(pg) => Ok(LogStore {
+                store: Store::Postgres(pg.lease()?),
+                #[cfg(feature = "fault-injection")]
+                faults: std::sync::Arc::clone(&self.faults),
+            }),
+        }
     }
 
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
-        #[cfg(feature = "postgres")]
-        if let Backend::Postgres { url, max_connections } = &backend {
-            return Ok(LogStore {
-                connection: None,
-                postgres: Some(postgres::PostgresStore::open(url.clone(), *max_connections)?),
+        let store = match backend {
+            Backend::Sqlite { path } => {
+                let connection = Connection::open(&path)?;
+                let path = path.display().to_string();
+                let probe = || -> Result<String, rusqlite::Error> {
+                    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+                    connection.pragma_update(None, "journal_mode", "WAL")?;
+                    connection.pragma_update(None, "synchronous", "FULL")?;
+                    connection.query_row("PRAGMA quick_check", [], |row| row.get(0))
+                };
+                let check = probe().map_err(|error| OpenError::Damaged {
+                    path: path.clone(),
+                    detail: error.to_string(),
+                })?;
+                if check != "ok" {
+                    return Err(OpenError::Damaged { path, detail: check });
+                }
+                Store::Sqlite(Mutex::new(install(connection, path)?))
+            }
+            Backend::Memory => Store::Sqlite(Mutex::new(install(
+                Connection::open_in_memory()?,
+                ":memory:".to_string(),
+            )?)),
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { url, max_connections } => {
+                Store::Postgres(postgres::PostgresStore::open(url, max_connections)?)
+            }
+        };
+        Ok(LogStore {
+            store,
+            #[cfg(feature = "fault-injection")]
+            faults: Default::default(),
+        })
+    }
+
+    /// Open a root's log with the opening batch the engine sealed, and store the policy file it
+    /// opens under. One transaction, so the opening is durable before any other record of that
+    /// root or none is.
+    pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
+        let (root, key) = opened_by(&opening)?;
+        if PolicyFileKey::of(policy_file) != key {
+            return Err(CreateError::PolicyFileMismatch);
+        }
+        let bytes = encode(&opening, None);
+        match &self.store {
+            Store::Sqlite(connection) => immediate(&mut lock(connection), |transaction| {
+                transaction.execute(
+                    "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+                    params![key.as_str(), policy_file],
+                )?;
+                match transaction.execute(
+                    "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
+                    params![root.as_str(), bytes],
+                ) {
+                    Ok(_) => {}
+                    Err(error) if is_taken(&error) => {
+                        return Err(CreateError::AlreadyExists {
+                            root: root.as_str().to_string(),
+                        });
+                    }
+                    Err(error) => return Err(CreateError::Storage(error)),
+                }
                 #[cfg(feature = "fault-injection")]
-                faults: Default::default(),
+                if self.failure_fires() {
+                    // Dropping the transaction rolls it back, exactly as a process kill before
+                    // the commit would leave the file.
+                    return Err(CreateError::Injected);
+                }
+                Ok(root)
+            }),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.create(&root, &key, policy_file, bytes),
+        }
+    }
+
+    /// Whether this root has a log at all. The cheap question a caller asks before it decides
+    /// to open one — reading the whole log to learn only this would cost the caller a second
+    /// read on the path that then goes on to read it properly.
+    pub fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
+        match &self.store {
+            Store::Sqlite(connection) => {
+                let found: Option<i64> = lock(connection)
+                    .query_row(
+                        "SELECT 1 FROM logs WHERE root = ?1 LIMIT 1",
+                        params![root.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(found.is_some())
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.has_root(root).map_err(Into::into),
+        }
+    }
+
+    /// Read one root's whole log, with the position it stands at and the policy file it opened
+    /// under.
+    pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        match &self.store {
+            Store::Sqlite(connection) => {
+                let (batches, policy_file) = stored(&lock(connection), root)?;
+                decoded(root, batches, policy_file)
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.log(root),
+        }
+    }
+
+    /// Append records to the log `based_on` was read from, only if it still stands where that
+    /// read left it. A conflict writes nothing; the caller reads again and replays.
+    pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
+        self.append_at(&based_on.root, based_on.basis, encode(facts, None), None)
+    }
+
+    /// Append one host observation, and the engine facts it belongs with. The observation is
+    /// durable exactly when those facts are, and a stale read writes nothing, just as append.
+    pub fn append_host(
+        &self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: &HostObservation,
+    ) -> Result<(), AppendError> {
+        self.append_at(
+            &based_on.root,
+            based_on.basis,
+            encode(facts, Some(observation)),
+            observation.key(),
+        )
+    }
+
+    /// Every root whose host records ever named `key`, and nothing of what they recorded.
+    ///
+    /// The store answers "which families may stand behind this" without the caller naming
+    /// them and without decoding a single row: the caller reads the families it gets back.
+    /// The answer stays small by what a key is for — at most one root for an offer, and one
+    /// root per session that quoted an identical ticket. The lookup is one index probe on the
+    /// host keys table, whatever the log holds, so a key that stands for nothing costs the
+    /// same as one that does.
+    pub fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        match &self.store {
+            Store::Sqlite(connection) => {
+                let connection = lock(connection);
+                let mut statement =
+                    connection.prepare("SELECT root FROM host_keys WHERE key = ?1 ORDER BY root ASC")?;
+                let roots = statement
+                    .query_map(params![key], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(roots.into_iter().map(TrajectoryId::new).collect())
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.roots_mentioning(key),
+        }
+    }
+
+    /// One batch at one position, and the key row beside it where the batch names a key.
+    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
+        match &self.store {
+            Store::Sqlite(connection) => {
+                let mut connection = lock(connection);
+                #[cfg(feature = "fault-injection")]
+                if self.contention_fires() {
+                    self.contend(&mut connection, root)?;
+                }
+                immediate(&mut connection, |transaction| {
+                    let current = position(transaction, root)?;
+                    if current != basis {
+                        return Err(AppendError::Conflict { current });
+                    }
+                    insert_batch(transaction, root, current, &bytes, key)?;
+                    #[cfg(feature = "fault-injection")]
+                    if self.failure_fires() {
+                        return Err(AppendError::Injected);
+                    }
+                    Ok(())
+                })
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.append(root, basis, bytes, key),
+        }
+    }
+
+    /// A foreign writer wins the race in its own committed transaction, exactly as a second
+    /// process would. It takes the position and records nothing, so this caller's append
+    /// conflicts on position and replays, and an assertion reads whose write landed from the
+    /// position rather than from records a later read would have to accept.
+    ///
+    /// Where the injection names an observation, the winner records that instead, and where it
+    /// names another family it records there and still takes this one's position: a foreign
+    /// writer that changed a sibling's log is the race a reader of several families has to
+    /// survive.
+    #[cfg(feature = "fault-injection")]
+    fn contend(&self, connection: &mut Connection, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
+        let armed = self
+            .faults
+            .contending_record
+            .lock()
+            .expect("the injection mutex is never poisoned")
+            .take()
+            .filter(|(racing, _, _)| racing == root);
+        immediate(connection, |transaction| {
+            let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
+                let at = position(transaction, into)?;
+                insert_batch(transaction, into, at, &bytes, key)
+            };
+            match &armed {
+                Some((_, recorded_in, observation)) => {
+                    write(recorded_in, encode(&[], Some(observation)), observation.key())?;
+                    if recorded_in != root {
+                        write(root, encode(&[], None), None)?;
+                    }
+                }
+                None => write(root, encode(&[], None), None)?,
+            }
+            Ok(())
+        })
+    }
+
+    /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
+    /// process kill inside the transaction would. A PostgreSQL store never consults it.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_commit_after(&self, skip: u64) {
+        self.faults
+            .commits_until_failure
+            .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm the read fail point: the next `count` reads answer with a failure instead of the
+    /// store's rows. A caller that refuses without asking the store leaves the arming where
+    /// it was, so the read that comes after it still meets the failure.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_next_reads(&self, count: u64) {
+        self.faults
+            .failing_reads
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm the contention point: the next `count` appends are raced by a foreign writer that
+    /// wins, so each loses the compare-and-swap and its caller replays. A PostgreSQL store
+    /// never consults it.
+    #[cfg(feature = "fault-injection")]
+    pub fn contend_next_appends(&self, count: u64) {
+        self.faults
+            .contended_appends
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm the contention point once, with what the winner records. The next append to `root`
+    /// loses to a writer that put `observation` in the log, so the caller's next derivation
+    /// answers to a state another writer changed rather than to a position it only moved.
+    #[cfg(feature = "fault-injection")]
+    pub fn contend_next_append_with(
+        &self,
+        racing: &TrajectoryId,
+        recorded_in: &TrajectoryId,
+        observation: &HostObservation,
+    ) {
+        *self
+            .faults
+            .contending_record
+            .lock()
+            .expect("the injection mutex is never poisoned") =
+            Some((racing.clone(), recorded_in.clone(), observation.clone()));
+        self.contend_next_appends(1);
+    }
+
+    /// Forget every stored policy file, leaving each root's opening naming a
+    /// file this database no longer holds. Damage stated in this
+    /// crate's own vocabulary, so a caller can pin how it refuses without
+    /// learning the schema. SQLite only.
+    #[cfg(feature = "fault-injection")]
+    pub fn forget_policy_files(&self) {
+        self.damage("DELETE FROM policy_files", []);
+    }
+
+    /// Replace the bytes of every stored policy file, so each stops hashing to
+    /// the key its roots' openings name. SQLite only.
+    #[cfg(feature = "fault-injection")]
+    pub fn corrupt_policy_files(&self, bytes: &[u8]) {
+        self.damage("UPDATE policy_files SET bytes = ?1", params![bytes]);
+    }
+
+    /// Replace what one batch of a root's log holds. The bytes are stored as
+    /// given, so a caller can leave records that do not decode, or records
+    /// that decode but are not the history they claim to be. SQLite only.
+    #[cfg(feature = "fault-injection")]
+    pub fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) {
+        let changed = self.damage(
+            "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
+            params![root.as_str(), seq as i64, bytes],
+        );
+        assert_eq!(changed, 1, "the batch to corrupt exists");
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn damage(&self, sql: &str, params: impl rusqlite::Params) -> usize {
+        match &self.store {
+            Store::Sqlite(connection) => lock(connection).execute(sql, params).expect("the damage lands"),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(_) => panic!("SQLite-only operation"),
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn failure_fires(&self) -> bool {
+        consume(&self.faults.commits_until_failure) == Some(1)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn contention_fires(&self) -> bool {
+        consume(&self.faults.contended_appends).is_some()
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn read_refused(&self) -> Result<(), ReadError> {
+        match consume(&self.faults.failing_reads) {
+            Some(_) => Err(ReadError::Injected),
+            None => Ok(()),
+        }
+    }
+
+    /// The SQLite connection, for tests that reach under the log's API.
+    #[cfg(test)]
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        match &self.store {
+            Store::Sqlite(connection) => lock(connection),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(_) => panic!("SQLite-only operation"),
+        }
+    }
+}
+
+fn lock(connection: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
+    connection
+        .lock()
+        .expect("the log store mutex is never poisoned: no panics under the lock")
+}
+
+/// Run `operation` in an immediate transaction, committed only when it succeeds.
+fn immediate<T, E: From<rusqlite::Error>>(
+    connection: &mut Connection,
+    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, E>,
+) -> Result<T, E> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = operation(&transaction)?;
+    transaction.commit()?;
+    Ok(result)
+}
+
+/// Give a fresh database the schema and its version stamp, or check an existing one.
+fn install(mut connection: Connection, path: String) -> Result<Connection, OpenError> {
+    {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // Only an empty file is initialized. A database that holds tables
+        // but carries no stamp was written by something else — an earlier
+        // store, another tool — and creating this schema beside its data
+        // would leave its histories present and invisible.
+        if version == 0 && is_empty(&transaction)? {
+            transaction.execute_batch(SCHEMA)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if version != SCHEMA_VERSION {
+            return Err(OpenError::ForeignSchema {
+                path,
+                found: version,
+                expected: SCHEMA_VERSION,
+            });
+        } else if !has_schema(&transaction)? {
+            return Err(OpenError::Damaged {
+                path,
+                detail: "stamped at this build's schema version, but its tables are missing".to_string(),
             });
         }
-        let (mut connection, path) = match &backend {
-            Backend::Sqlite { path } => (Connection::open(path)?, path.display().to_string()),
-            Backend::Memory => (Connection::open_in_memory()?, ":memory:".to_string()),
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { .. } => unreachable!("handled above"),
-        };
-        if matches!(backend, Backend::Sqlite { .. }) {
-            let probe = || -> Result<String, rusqlite::Error> {
-                connection.busy_timeout(std::time::Duration::from_secs(5))?;
-                connection.pragma_update(None, "journal_mode", "WAL")?;
-                connection.pragma_update(None, "synchronous", "FULL")?;
-                connection.query_row("PRAGMA quick_check", [], |row| row.get(0))
-            };
-            let check = probe().map_err(|error| OpenError::Damaged {
-                path: path.clone(),
-                detail: error.to_string(),
-            })?;
-            if check != "ok" {
-                return Err(OpenError::Damaged { path, detail: check });
-            }
-        }
+        transaction.commit()?;
+    }
+    Ok(connection)
+}
 
-        {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            // Only an empty file is initialized. A database that holds tables
-            // but carries no stamp was written by something else — an earlier
-            // store, another tool — and creating this schema beside its data
-            // would leave its histories present and invisible.
-            if version == 0 && is_empty(&transaction)? {
-                transaction.execute_batch(
-                    "CREATE TABLE logs (
+const SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
                          seq   INTEGER NOT NULL,
                          facts BLOB NOT NULL,
@@ -542,316 +892,7 @@ impl LogStore {
                          approved_output TEXT,
                          decision TEXT,
                          PRIMARY KEY (session_id, tool_call_id)
-                     );",
-                )?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            } else if version != SCHEMA_VERSION {
-                return Err(OpenError::ForeignSchema {
-                    path,
-                    found: version,
-                    expected: SCHEMA_VERSION,
-                });
-            } else if !has_schema(&transaction)? {
-                return Err(OpenError::Damaged {
-                    path,
-                    detail: "stamped at this build's schema version, but its tables are missing".to_string(),
-                });
-            }
-            transaction.commit()?;
-        }
-        Ok(LogStore {
-            connection: Some(Mutex::new(connection)),
-            #[cfg(feature = "postgres")]
-            postgres: None,
-            #[cfg(feature = "fault-injection")]
-            faults: Default::default(),
-        })
-    }
-
-    /// Open a root's log with the opening batch the engine sealed, and store the policy file it
-    /// opens under. One transaction, so the opening is durable before any other record of that
-    /// root or none is.
-    pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
-        let (root, key) = opened_by(&opening)?;
-        if PolicyFileKey::of(policy_file) != key {
-            return Err(CreateError::PolicyFileMismatch);
-        }
-        let bytes = encode(&opening, None);
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.create(&root, &key, policy_file, bytes);
-        }
-        let mut connection = self.lock();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-            params![key.as_str(), policy_file],
-        )?;
-        match transaction.execute(
-            "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
-            params![root.as_str(), bytes],
-        ) {
-            Ok(_) => {}
-            Err(error) if is_taken(&error) => {
-                return Err(CreateError::AlreadyExists {
-                    root: root.as_str().to_string(),
-                });
-            }
-            Err(error) => return Err(CreateError::Storage(error)),
-        }
-        #[cfg(feature = "fault-injection")]
-        if self.failure_fires() {
-            // Dropping the transaction rolls it back, exactly as a process kill before the
-            // commit would leave the file.
-            return Err(CreateError::Injected);
-        }
-        transaction.commit()?;
-        Ok(root)
-    }
-
-    /// Whether this root has a log at all. The cheap question a caller asks before it decides
-    /// to open one — reading the whole log to learn only this would cost the caller a second
-    /// read on the path that then goes on to read it properly.
-    pub fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.has_root(root).map_err(Into::into);
-        }
-        let connection = self.lock();
-        let found: Option<i64> = connection
-            .query_row(
-                "SELECT 1 FROM logs WHERE root = ?1 LIMIT 1",
-                params![root.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    }
-
-    /// Read one root's whole log, with the position it stands at and the policy file it opened
-    /// under.
-    pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
-        #[cfg(feature = "fault-injection")]
-        self.read_refused()?;
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.log(root);
-        }
-        let (batches, policy_file) = {
-            let connection = self.lock();
-            stored(&connection, root)?
-        };
-        decoded(root, batches, policy_file)
-    }
-
-    /// Append records to the log `based_on` was read from, only if it still stands where that
-    /// read left it. A conflict writes nothing; the caller reads again and replays.
-    pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        self.append_at(&based_on.root, based_on.basis, encode(facts, None), None)
-    }
-
-    /// Append one host observation, and the engine facts it belongs with. The observation is
-    /// durable exactly when those facts are, and a stale read writes nothing, just as append.
-    pub fn append_host(
-        &self,
-        based_on: &Log,
-        facts: &[Fact],
-        observation: &HostObservation,
-    ) -> Result<(), AppendError> {
-        self.append_at(
-            &based_on.root,
-            based_on.basis,
-            encode(facts, Some(observation)),
-            observation.key(),
-        )
-    }
-
-    /// Every root whose host records ever named `key`, and nothing of what they recorded.
-    ///
-    /// The store answers "which families may stand behind this" without the caller naming
-    /// them and without decoding a single row: the caller reads the families it gets back.
-    /// The answer stays small by what a key is for — at most one root for an offer, and one
-    /// root per session that quoted an identical ticket. The lookup is one index probe on the
-    /// host keys table, whatever the log holds, so a key that stands for nothing costs the
-    /// same as one that does.
-    pub fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
-        #[cfg(feature = "fault-injection")]
-        self.read_refused()?;
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.roots_mentioning(key);
-        }
-        let connection = self.lock();
-        let mut statement = connection.prepare("SELECT root FROM host_keys WHERE key = ?1 ORDER BY root ASC")?;
-        let roots = statement
-            .query_map(params![key], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(roots.into_iter().map(TrajectoryId::new).collect())
-    }
-
-    /// One batch at one position, and the key row beside it where the batch names a key.
-    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.append(root, basis, bytes, key);
-        }
-        let mut connection = self.lock();
-        #[cfg(feature = "fault-injection")]
-        if self.contention_fires() {
-            // A foreign writer wins the race in its own committed transaction, exactly as a
-            // second process would. It takes the position and records nothing, so this caller's
-            // append conflicts on position and replays, and an assertion reads whose write landed
-            // from the position rather than from records a later read would have to accept.
-            //
-            // Where the injection names an observation, the winner records that instead, and
-            // where it names another family it records there and still takes this one's
-            // position: a foreign writer that changed a sibling's log is the race a reader of
-            // several families has to survive.
-            let armed = self
-                .faults
-                .contending_record
-                .lock()
-                .expect("the injection mutex is never poisoned")
-                .take()
-                .filter(|(racing, _, _)| racing == root);
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
-                let at = position(&transaction, into)?;
-                insert_batch(&transaction, into, at, &bytes, key)
-            };
-            match &armed {
-                Some((_, recorded_in, observation)) => {
-                    write(recorded_in, encode(&[], Some(observation)), observation.key())?;
-                    if recorded_in != root {
-                        write(root, encode(&[], None), None)?;
-                    }
-                }
-                None => write(root, encode(&[], None), None)?,
-            }
-            transaction.commit()?;
-        }
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = position(&transaction, root)?;
-        if current != basis {
-            return Err(AppendError::Conflict { current });
-        }
-        insert_batch(&transaction, root, current, &bytes, key)?;
-        #[cfg(feature = "fault-injection")]
-        if self.failure_fires() {
-            return Err(AppendError::Injected);
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
-    /// process kill inside the transaction would.
-    #[cfg(feature = "fault-injection")]
-    pub fn fail_commit_after(&self, skip: u64) {
-        self.faults
-            .commits_until_failure
-            .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Arm the read fail point: the next `count` reads answer with a failure instead of the
-    /// store's rows. A caller that refuses without asking the store leaves the arming where
-    /// it was, so the read that comes after it still meets the failure.
-    #[cfg(feature = "fault-injection")]
-    pub fn fail_next_reads(&self, count: u64) {
-        self.faults
-            .failing_reads
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Arm the contention point: the next `count` appends are raced by a foreign writer that
-    /// wins, so each loses the compare-and-swap and its caller replays.
-    #[cfg(feature = "fault-injection")]
-    pub fn contend_next_appends(&self, count: u64) {
-        self.faults
-            .contended_appends
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Arm the contention point once, with what the winner records. The next append to `root`
-    /// loses to a writer that put `observation` in the log, so the caller's next derivation
-    /// answers to a state another writer changed rather than to a position it only moved.
-    #[cfg(feature = "fault-injection")]
-    pub fn contend_next_append_with(
-        &self,
-        racing: &TrajectoryId,
-        recorded_in: &TrajectoryId,
-        observation: &HostObservation,
-    ) {
-        *self
-            .faults
-            .contending_record
-            .lock()
-            .expect("the injection mutex is never poisoned") =
-            Some((racing.clone(), recorded_in.clone(), observation.clone()));
-        self.contend_next_appends(1);
-    }
-
-    /// Forget every stored policy file, leaving each root's opening naming a
-    /// file this database no longer holds. Damage stated in this
-    /// crate's own vocabulary, so a caller can pin how it refuses without
-    /// learning the schema.
-    #[cfg(feature = "fault-injection")]
-    pub fn forget_policy_files(&self) {
-        self.lock()
-            .execute("DELETE FROM policy_files", [])
-            .expect("the deletion runs");
-    }
-
-    /// Replace the bytes of every stored policy file, so each stops hashing to
-    /// the key its roots' openings name.
-    #[cfg(feature = "fault-injection")]
-    pub fn corrupt_policy_files(&self, bytes: &[u8]) {
-        self.lock()
-            .execute("UPDATE policy_files SET bytes = ?1", params![bytes])
-            .expect("the update runs");
-    }
-
-    /// Replace what one batch of a root's log holds. The bytes are stored as
-    /// given, so a caller can leave records that do not decode, or records
-    /// that decode but are not the history they claim to be.
-    #[cfg(feature = "fault-injection")]
-    pub fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) {
-        let changed = self
-            .lock()
-            .execute(
-                "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
-                params![root.as_str(), seq as i64, bytes],
-            )
-            .expect("the update runs");
-        assert_eq!(changed, 1, "the batch to corrupt exists");
-    }
-
-    #[cfg(feature = "fault-injection")]
-    fn failure_fires(&self) -> bool {
-        consume(&self.faults.commits_until_failure) == Some(1)
-    }
-
-    #[cfg(feature = "fault-injection")]
-    fn contention_fires(&self) -> bool {
-        consume(&self.faults.contended_appends).is_some()
-    }
-
-    #[cfg(feature = "fault-injection")]
-    fn read_refused(&self) -> Result<(), ReadError> {
-        match consume(&self.faults.failing_reads) {
-            Some(_) => Err(ReadError::Injected),
-            None => Ok(()),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.connection
-            .as_ref()
-            .expect("SQLite-only operation")
-            .lock()
-            .expect("the log store mutex is never poisoned: no panics under the lock")
-    }
-}
+                     );";
 
 #[cfg(feature = "fault-injection")]
 fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
