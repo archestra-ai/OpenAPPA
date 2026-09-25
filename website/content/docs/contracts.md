@@ -525,6 +525,12 @@ If you omit `trust_chain`, the ranks are `suspicious` followed by `trusted`, fro
 
 To define your own ranks, set `trust_chain` in `[policy]`. For example, `trust_chain = ["untrusted", "reviewed", "trusted"]` defines three ranks in increasing order. This replaces the default ranks. A trust rank used elsewhere in the policy must appear in this list, or the policy does not load.
 
+#### Choose a result's trust by who can write it
+
+Set a result's trust by who can write its text, not by which service returns it. Text that only members of the organization can write keeps the trajectory's trust: its `delta` omits `trust`. Text that someone outside the organization can write lowers it to `suspicious`: a web page, an issue on a public repository, a shared channel with another company, a meeting transcript with outside participants. A member account an attacker controls is outside this model.
+
+Guests and integrations a member installed write as the organization. An integration can relay text that an outsider wrote, such as a public issue title posted to a chat channel, and that text keeps the trajectory's trust.
+
 #### Declare tool restrictions and requirements
 
 In the example below, `trust_chain` explicitly sets the default ranks. The `read_web_page` contract marks its result as `suspicious`. Once the agent receives that result, OpenAPPA blocks `apply_db_migration` because it requires `trusted` data.

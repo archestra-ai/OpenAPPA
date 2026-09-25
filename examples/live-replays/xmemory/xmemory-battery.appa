@@ -7,17 +7,17 @@ mcp/xmemory/decide_suggestions {
 }
 expect allow
 
-# Creating an instance needs trusted data and returns the whole instance,
-# which enters suspicious, so it always asks the authority.
+# Creating an instance needs trusted data; the instance it returns keeps
+# the trust.
 mcp/xmemory/admin_create_instance {
   cluster_id: "00000000-0000-0000-0000-00000000c001"
   name: "team-memory"
   description: "Who does what on the team"
   schema_yaml: "xmd_version: v1\ntitle: Team memory\nobjects:\n  Person:\n    description: A teammate.\n    fields:\n      name:\n        type: str\n        required: true\n        description: Full name.\n      role:\n        type: str\n        required: false\n        description: Current role on the team.\n    primary_key:\n    - name\nrelations: {}\n"
 }
-expect authority xmemory-operator
+expect allow
 
-# A text write needs no trusted data.
+# A text write needs trusted data.
 mcp/xmemory/write {
   text: "Alice owns the Q3 launch plan."
 }
@@ -30,17 +30,18 @@ mcp/xmemory/write {
 }
 expect allow
 
-# A read narrows the trajectory to internal and marks it suspicious.
+# A read narrows the trajectory to internal and keeps its trust: only
+# trusted data was written.
 mcp/xmemory/read {
   query: "Who owns the Q3 launch plan?"
 }
 expect allow
 
-# Memory content enters a tool that requires trusted input only with review.
+# Memory content enters a tool that requires trusted input.
 mcp/shell/run_command {
   command: "deploy"
 }
-expect authority xmemory-operator
+expect allow
 
 # Memory content cannot go to a public destination.
 mcp/mail/send {
@@ -54,7 +55,7 @@ mcp/mail/send {
 }
 expect allow
 
-# Writes after a read still run: nothing a later read returns is trusted.
+# Writes and schema decisions after a read still run.
 mcp/xmemory/write_async {
   text: "Bob reviews the Q3 launch plan."
 }
@@ -66,15 +67,21 @@ mcp/xmemory/write {
 }
 expect allow
 
-mcp/xmemory/write_async {
-  structured_mutations: [{"object_mutation": {"object_type": "Person", "update": {"key": {"name": "Alice"}, "values": {"role": "Launch owner"}}}}]
-}
-expect allow
-
-# Schema decisions after a read need trusted data.
 mcp/xmemory/decide_suggestions {
   proposal_version: "v2"
   decisions: [{"item_fingerprint": "f2", "decision": "reject"}]
+}
+expect allow
+
+# Outside text lowers the trajectory's trust.
+mcp/web/fetch {
+  url: "https://example.com/launch"
+}
+expect allow
+
+# From then on, it enters memory only with review.
+mcp/xmemory/write_async {
+  structured_mutations: [{"object_mutation": {"object_type": "Person", "update": {"key": {"name": "Alice"}, "values": {"role": "Launch owner"}}}}]
 }
 expect authority xmemory-operator
 

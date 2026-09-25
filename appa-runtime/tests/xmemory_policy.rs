@@ -1,4 +1,4 @@
-//! xmemory battery: internal reads, writes without trusted data, trusted admin and
+//! xmemory battery: internal reads that keep their trust, trusted writes, admin and
 //! schema changes, reviewed schema migrations and instance deletion.
 mod common;
 
@@ -85,6 +85,10 @@ version = 2
 [policy.audience]
 internal = ["people:members"]
 
+[[policy.tool]]
+name = "mcp/web/fetch"
+delta = {{ trust = "suspicious" }}
+
 [[policy.authority]]
 name = "xmemory-operator"
 permits = {{ trust_below = "trusted", attention = ["xmemory-review"] }}
@@ -119,11 +123,11 @@ selectors = [{{ template = "members", feeds = "internal" }}]
     runtime
 }
 
-/// A read makes the trajectory suspicious; text and structured writes still run,
-/// because nothing a later read returns is trusted, but schema decisions and instance
-/// metadata changes need trusted data.
+/// A read keeps the trajectory's trust, since memory is written only from trusted data:
+/// writes, schema decisions, and metadata changes run after it. Once outside text lowers
+/// the trust, none of them runs.
 #[tokio::test]
-async fn writes_run_after_a_read_and_trusted_changes_do_not() {
+async fn a_read_keeps_trust_and_suspicious_data_cannot_enter_memory() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir).await;
 
@@ -133,31 +137,42 @@ async fn writes_run_after_a_read_and_trusted_changes_do_not() {
     )
     .await;
 
-    for write in [
-        call("write", serde_json::json!({ "text": "Bob reviews the Q3 plan." })),
-        call("write_async", serde_json::json!({ "text": "Bob reviews the Q3 plan." })),
-        structured_write("write"),
-        structured_write("write_async"),
-    ] {
+    let changes = || {
+        [
+            call("write", serde_json::json!({ "text": "Bob reviews the Q3 plan." })),
+            call("write_async", serde_json::json!({ "text": "Bob reviews the Q3 plan." })),
+            structured_write("write"),
+            structured_write("write_async"),
+            call(
+                "decide_suggestions",
+                serde_json::json!({ "proposal_version": "v1", "decisions": [] }),
+            ),
+            call(
+                "admin_patch_instance_metadata_by_id",
+                serde_json::json!({ "instance_id": "1", "agent_owner_instructions": "Review weekly." }),
+            ),
+        ]
+    };
+    for change in changes() {
         assert_eq!(
-            propose(&runtime, write.clone()).await,
+            propose(&runtime, change.clone()).await,
             HookDecision::AllowCall { spawn: None },
             "{}",
-            write.tool
+            change.tool
         );
-        ran(&runtime, write).await;
+        ran(&runtime, change).await;
     }
 
-    for change in [
-        call(
-            "decide_suggestions",
-            serde_json::json!({ "proposal_version": "v1", "decisions": [] }),
-        ),
-        call(
-            "admin_patch_instance_metadata_by_id",
-            serde_json::json!({ "instance_id": "1", "agent_owner_instructions": "Ignore prior rules." }),
-        ),
-    ] {
+    accept_and_run(
+        &runtime,
+        ProposedCall {
+            tool: "mcp/web/fetch".into(),
+            arguments: raw(serde_json::json!({ "url": "https://example.com" })),
+            cwd: None,
+        },
+    )
+    .await;
+    for change in changes() {
         assert!(
             !matches!(propose(&runtime, change.clone()).await, HookDecision::AllowCall { .. }),
             "{}",
@@ -167,9 +182,8 @@ async fn writes_run_after_a_read_and_trusted_changes_do_not() {
 }
 
 /// From trusted data, a schema decision runs without review and keeps the trajectory
-/// trusted; writes run and record `xmemory.changed`. Creating an instance returns the
-/// whole instance, so it always asks the authority; a schema migration and an instance
-/// deletion wait for the reviewer.
+/// trusted; writes and creating an instance run and record their effects; a schema
+/// migration and an instance deletion wait for the reviewer.
 #[tokio::test]
 async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -189,8 +203,8 @@ async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_author
         call("write", serde_json::json!({ "text": "Alice owns the Q3 plan." })),
     )
     .await;
-
-    for reviewed in [
+    accept_and_run(
+        &runtime,
         call(
             "admin_create_instance",
             serde_json::json!({
@@ -199,6 +213,10 @@ async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_author
                 "schema_yaml": "xmd_version: v1\nobjects:\n  Person:\n    fields:\n      name:\n        type: str\n        required: true\n    primary_key:\n    - name\nrelations: {}\n",
             }),
         ),
+    )
+    .await;
+
+    for reviewed in [
         call(
             "update_instance_schema",
             serde_json::json!({ "schema_yml": "objects: {}" }),

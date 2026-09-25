@@ -65,7 +65,7 @@ const TERMS = {
   trusted:
     "The higher default trust rank. A tool can declare this rank for its result or require it before a call. A trusted rank does not guarantee that the data is factually correct.",
   suspicious:
-    "Data from an unverified source, such as a web page. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
+    "Data that someone outside the organization can write, such as a web page or an issue on a public repository. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":

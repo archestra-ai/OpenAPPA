@@ -6,8 +6,12 @@ itself. The manifest registers the battery with the marketplace.
 
 ## Files
 
-**`appa.toml`** — the rules. Reads and mutation responses enter as
-`suspicious`. A tool that names an issue, team, or document by id is
+**`appa.toml`** — the rules. Trust follows who can write the text.
+Workspace members write issues, comments, documents, and projects, so
+reads and mutation responses keep the session's trust. Text an installed
+integration posts counts as trusted too, because a member installed it.
+Linear's public documentation (`search_documentation`) and images from
+arbitrary URLs (`extract_images`) enter `suspicious`. A tool that names an issue, team, or document by id is
 labelled with that resource's readers through a selector placeholder
 such as `@linear:issue/$issueId/readers`; a write into it needs trusted
 data those readers may see, the `linear-review` mark, and records

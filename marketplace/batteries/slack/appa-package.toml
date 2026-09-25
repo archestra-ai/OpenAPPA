@@ -6,4 +6,4 @@ description = "Rules for the claude.ai Slack connector, all 19 of its tools: rea
 policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude_ai_Slack"]
-helpers = ["audience-source.py"]
+helpers = ["audience-source.py", "conversation-trust.py", "slack_api.py"]
