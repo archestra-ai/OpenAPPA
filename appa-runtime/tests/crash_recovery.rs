@@ -4,7 +4,7 @@
 //! the wire decision the server sends.
 
 mod common;
-use common::{ServedRuntime, free_port, http, serve_runtime};
+use common::{ServedRuntime, http, serve_runtime};
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,7 +56,7 @@ fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
         .arg("--db")
         .arg(db)
         .arg("--listen")
-        .arg(format!("127.0.0.1:{}", free_port()))
+        .arg("127.0.0.1:0")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
