@@ -1,21 +1,23 @@
 # GitHub battery: the GitHub MCP server's default toolsets.
 #
-# Issue, pull-request, and file text is written by whoever pushed it, so
-# every read enters at the low rank of the trust chain, like a fetched
-# web page. Who may see it, and who must be allowed to see what a write
-# puts there, is the repository's own visibility: for a tool that names a
-# repository (`owner`, `repo`), the two annotators bound below ask GitHub
-# whether it is private. A public repository's content is `public` and
-# its writes need trusted data everyone may see; a private repository's
-# content is read by `@github:repo/<owner>/<repo>/collaborators`, the
-# collection the `github` audience source resolves, and its writes need
+# Trust follows who can write the text, and who may see it, and who must
+# be allowed to see what a write puts there, is the repository's own
+# visibility: for a tool that names a repository (`owner`, `repo`), the
+# two annotators bound below ask GitHub whether it is private. Anyone can
+# open an issue or a pull request on a public repository, so its content
+# enters `suspicious`, is `public`, and its writes need trusted data
+# everyone may see. A private or internal repository's content is written
+# by the organization's people and its collaborators, keeps the session's
+# trust, and is read by `@github:repo/<owner>/<repo>/collaborators`, the
+# collection the `github` audience source resolves; its writes need
 # trusted data those collaborators may see. A repository the token cannot
 # see gets no answer, and the call is refused.
 #
 # Searches and org-level listings name no single repository and reach
-# every private repository the token sees, so their results stay with the
-# viewer (`self`). A root rule can treat a search of public repositories
-# as public by its query. Root rules run first:
+# public repositories as well as every private one the token sees, so
+# their results enter `suspicious` and stay with the viewer (`self`). A
+# root rule can treat a search of public repositories as public by its
+# query. Root rules run first:
 #
 #   [[policy.tool]]
 #   name = "mcp/github/search_code(query:*repo:acme/website*)"

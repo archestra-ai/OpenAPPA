@@ -128,11 +128,6 @@ async fn restricted_linear_content_can_reach_a_github_destination_with_the_same_
 name = "mcp/github/issue_write(repo:private)"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["alice@corp.example"] } }
-[[policy.authority]]
-name = "trust-review"
-permits = { trust_below = "trusted" }
-[externals.authorities.trust-review]
-builtin = "approve"
 "#,
         None,
     )
@@ -148,17 +143,22 @@ builtin = "approve"
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, read).await;
+    let trusts: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some(label.trust),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trusts, ["trusted"], "workspace members write Linear issues");
     let write = ProposedCall {
         tool: "mcp/github/issue_write".into(),
         arguments: raw(serde_json::json!({
         "owner":"example","repo":"private","title":"Reviewed summary","body":"Restricted fixture content"})),
         cwd: None,
     };
-    let offer = offer_of(&propose(&runtime, write.clone()).await);
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer).await,
-        RemedyOutcome::Authorized { .. }
-    ));
     assert_eq!(
         propose(&runtime, write.clone()).await,
         HookDecision::AllowCall { spawn: None }

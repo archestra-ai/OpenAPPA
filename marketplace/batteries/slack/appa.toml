@@ -13,6 +13,16 @@
 # secrets (`self`) never enter a channel; internal communication stays
 # autonomous, with no human approval in the loop.
 #
+# Trust follows who can write the text. Members, guests, and installed
+# integrations write as the workspace: a guest was invited and an
+# integration was installed by a member, even when an outsider wrote the
+# words an integration relays. A read of one conversation asks Slack,
+# through `conversation-trust.py`, whether it is shared with another
+# organization (Slack Connect); a shared conversation enters
+# `suspicious`, and one Slack cannot answer for keeps the session's
+# trust. Searches, canvases, and files name no conversation, so they keep
+# the session's trust even when a result came from a shared one.
+#
 # A root rule placed above these can narrow any of them by argument.
 # Root rules run first. For example, to keep one announcement channel
 # for messages a person approves:
@@ -39,23 +49,33 @@ selectors = [
   { template = "channel/<id>" },
 ]
 
-# --- reads of one conversation: its members ---
+# --- reads of one conversation: its members; Slack Connect is suspicious ---
+
+[[policy.annotator]]
+name = "slack.conversation-trust"
+ranks = ["suspicious"]
+audiences = ["@slack:channel/$channel_id"]
+marks = []
+
+[externals.annotators."slack.conversation-trust"]
+command = ["python3", "conversation-trust.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_channel"
-delta = { audience = ["@slack:channel/$channel_id"] }
+annotator = "slack.conversation-trust"
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_thread"
-delta = { audience = ["@slack:channel/$channel_id"] }
+annotator = "slack.conversation-trust"
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_list_channel_members"
-delta = { audience = ["@slack:channel/$channel_id"] }
+annotator = "slack.conversation-trust"
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_get_reactions"
-delta = { audience = ["@slack:channel/$channel_id"] }
+annotator = "slack.conversation-trust"
 
 # --- reads without a conversation: internal ---
 

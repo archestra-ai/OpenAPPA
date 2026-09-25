@@ -9,7 +9,7 @@ so a deployment can customize its hint without editing the battery.
 | Battery | Covers | Externals |
 | --- | --- | --- |
 | `claude-code/` | five built-in tools of a Claude Code session: `host/claude-code/Bash`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash calls; the stock `redact-secrets` sanitizer masks each withheld Bash result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
-| `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | the `slack` audience source: viewer, full members, user groups, one conversation's members |
+| `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
 | `google-workspace/` | no tools yet; audiences only | the `google-workspace` audience source: viewer, active Workspace users, a Workspace group with nested groups expanded |
 | `linear/` | 65 Linear MCP tools; per-issue, per-team, per-project audiences and reviewed writes | the `linear` audience source: viewer, full members, team members and readers, an issue's, project's, or document's readers |
@@ -25,7 +25,7 @@ so a deployment can customize its hint without editing the battery.
 | `huggingface/` | the hosted Hugging Face MCP server, all 11 built-in tools: account, search, repository reads and writes, Spaces, Jobs, sandbox; each repository's Hub visibility decides its readers, code run with the token reviewed | two annotators asking the Hub for each named repository's visibility and resource group; the `huggingface` audience source: viewer, one resource group's members |
 | `databricks/` | Databricks' managed MCP servers Genie One (5 tools) and Databricks SQL (`execute_sql`), one namespace bound to both host servers; internal Genie reads, each SQL statement classified before it runs | the Claude Code model classifies each statement; the `databricks` audience source: viewer, active users, a group with nested groups expanded, a Genie space's readers |
 | `archestra/` | Archestra's built-in sharing tools (11 tools, 43 rules): projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, team membership | the `archestra` audience source: organization members, a team, one member |
-| `xmemory/` | the hosted xmemory instance (15 tools) and admin (17 tools) MCP servers, one namespace bound to both; internal reads, writes without trusted input, trusted admin and schema changes, reviewed schema migrations and instance deletion | none |
+| `xmemory/` | the hosted xmemory instance (15 tools) and admin (17 tools) MCP servers, one namespace bound to both; internal reads, writes from trusted input only, trusted admin and schema changes, reviewed schema migrations and instance deletion | none |
 | `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name, description, and arguments are sent to the TypeSafe API |
 
 Include a battery with a path relative to the including file. An install

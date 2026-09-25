@@ -86,10 +86,11 @@ selectors = [{{ template = "members", feeds = "internal" }}]
     runtime
 }
 
-/// A page read narrows the trajectory to internal; what was read cannot be written back
-/// as trusted, nor fetched from a URL into the workspace.
+/// A page read narrows the trajectory to internal and keeps its trust, so the page can be
+/// written back; a search reaches connected sources such as mail and lowers the trust, so
+/// nothing built from it is written as trusted, nor fetched from a URL into the workspace.
 #[tokio::test]
-async fn a_read_is_internal_and_suspicious() {
+async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir).await;
 
@@ -108,7 +109,22 @@ async fn a_read_is_internal_and_suspicious() {
     );
     ran(&runtime, read).await;
 
+    let summary = call(
+        "notion-create-pages",
+        serde_json::json!({ "pages": [{ "properties": { "title": "Summary" } }] }),
+    );
+    assert_eq!(
+        propose(&runtime, summary.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, summary).await;
+
     let search = call("notion-search", serde_json::json!({ "query": "budget" }));
+    let offer = offer_of(&propose(&runtime, search.clone()).await);
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
     assert_eq!(
         propose(&runtime, search.clone()).await,
         HookDecision::AllowCall { spawn: None }

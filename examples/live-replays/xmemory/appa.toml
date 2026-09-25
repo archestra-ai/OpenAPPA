@@ -12,7 +12,12 @@ name = "xmemory-operator"
 # Deliberately cannot widen an audience: internal reads must write back as-is.
 permits = { trust_below = "trusted", attention = ["xmemory-review"] }
 
-# This tool tests the trust change from an xmemory result.
+# This tool brings in text written outside the organisation.
+[[policy.tool]]
+name = "mcp/web/fetch"
+delta = { trust = "suspicious" }
+
+# This tool tests the trust of an xmemory result.
 [[policy.tool]]
 name = "mcp/shell/run_command"
 requires = { trust = "trusted" }

@@ -71,18 +71,19 @@ requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issueId
 delta = { audience = ["@linear:issue/$issueId/readers"] }
 ```
 
-In another example, the battery labels all Slack history `internal`. A root rule can mark one channel as untrusted, such as a channel shared with people outside your company:
+In another example, the battery keeps the trust of every conversation inside your workspace, including text an installed integration posts. A root rule can mark one channel as untrusted, such as a channel where an integration relays customer emails:
 
 ```toml
-# root config: a shared channel may contain outsiders' words
+# root config: the support inbox relays words written outside the company
 [[policy.tool]]
-name = "mcp/claude_ai_Slack/slack_read_channel(channel_id:C0SHARED*)"
-delta = { trust = "suspicious", audience = ["internal"] }
+name = "mcp/claude_ai_Slack/slack_read_channel(channel_id:C0SUPPORT*)"
+delta = { trust = "suspicious", audience = ["@slack:channel/$channel_id"] }
 
-# included battery: every other channel is internal and keeps its trust
+# included battery: an annotator asks Slack whether the channel is shared
+# with another organization
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_channel"
-delta = { audience = ["internal"] }
+annotator = "slack.conversation-trust"
 ```
 
 ## Use annotators in batteries
@@ -159,8 +160,9 @@ A battery that covers a provider with its own directory ships a membership servi
 ```toml
 # batteries/slack/appa.toml
 [[policy.tool]]
-name = "mcp/claude_ai_Slack/slack_read_channel"
-delta = { audience = ["@slack:channel/$channel_id"] }
+name = "mcp/claude_ai_Slack/slack_send_message"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] } }
 
 [externals.audience.slack]
 command = ["python3", "audience-source.py"]
