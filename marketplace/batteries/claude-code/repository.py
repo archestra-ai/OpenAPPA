@@ -6,12 +6,17 @@ the harness would run it in), one answer out:
   {"name_with_owner": "acme/api", "visibility": "public"}
   {"name_with_owner": null, "visibility": null, "reason": "..."}
 
-The repository is the one the command names — `--repo`/`-R` on a `gh`
-call, a URL or a remote on `git push` — else the checkout's own `origin`,
-asked of the GitHub CLI's login (`gh repo view`) in the harness's
-directory. Whatever cannot be established answers `null` with a reason
-and a zero exit: the annotator then reads the finding, not a guess.
-Only a transport failure — a crash, a timeout — is a refused answer.
+The command is split into its simple commands, and every `git push` and
+`gh` call among them names a destination: `--repo`/`-R`, `GH_REPO`, a
+`repos/OWNER/NAME` API path or a GitHub URL on a `gh` call, a URL or a
+remote on a push (in the `-C` directory when given), else the checkout's
+own repository. Each is asked of the GitHub CLI's login (`gh repo view`);
+several destinations answer the most widely readable one. A call this
+input cannot follow — a nested shell, `git -c`, `GIT_DIR`, a computed
+target — and whatever else cannot be established answers `null` with a
+reason and a zero exit: the annotator then reads the finding, not a
+guess. Only a transport failure — a crash, a timeout — is a refused
+answer.
 """
 
 import json
@@ -24,40 +29,144 @@ import sys
 MAX_INPUT_BYTES = 64 * 1024
 GH_TIMEOUT_SECONDS = 4
 VISIBILITY = {"PUBLIC": "public", "PRIVATE": "private", "INTERNAL": "internal"}
+MOST_READABLE_FIRST = ["public", "internal", "private"]
+
+SEPARATORS = set("();<>&|\n")
+PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
+SHELLS = {"bash", "sh", "zsh", "eval", "xargs"}
+PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
+HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
+GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
+GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
+API_PATH = re.compile(r"^/?repos/([\w.-]+)/([\w.-]+)")
+SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
+INVOCATION = re.compile(r"\b(git|gh)\s")
+REDIRECTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG", "GIT_SSH", "GIT_PROXY", "GIT_NAMESPACE")
+CREDENTIAL_VARIABLES = {"GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"}
+MAX_TARGETS = 4
+
+
+class Unfollowable(Exception):
+    """The command reaches a repository this input cannot establish."""
 
 
 def unknown(reason):
     return {"name_with_owner": None, "visibility": None, "reason": reason}
 
 
-def words_of(command):
+def segments_of(command):
+    """The command's simple commands, split at every shell operator and newline."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    segment = []
     try:
-        return shlex.split(command, comments=False, posix=True)
-    except ValueError:
-        return command.split()
+        for token in lexer:
+            if set(token) <= SEPARATORS:
+                if segment:
+                    yield segment
+                segment = []
+            else:
+                segment.append(token)
+    except ValueError as error:
+        raise Unfollowable(f"the command does not parse: {error}") from None
+    if segment:
+        yield segment
 
 
-def repository_named(command):
-    """The repository the command itself names, or `None` when it names none.
+def named(word):
+    if "$" in word or "`" in word:
+        raise Unfollowable(f"{word} is computed when the command runs")
+    match = GITHUB_URL.match(word)
+    return f"{match.group(1)}/{match.group(2)}" if match else word
 
-    `gh ... --repo OWNER/NAME` (or `-R`) names it outright; `git push <url>`
-    names it by URL; `git push <remote>` names a remote the checkout resolves.
-    """
-    words = words_of(command)
+
+def git_target(words, directory):
+    """What one `git` call pushes to, or `None` for a call that pushes nothing."""
+    index, unfollowable = 0, None
+    while index < len(words) and words[index].startswith("-"):
+        option = words[index]
+        if option == "-C" and index + 1 < len(words):
+            index += 1
+            directory = os.path.join(directory, words[index]) if directory else words[index]
+        elif option not in HARMLESS_GIT_OPTIONS:
+            unfollowable = option
+            index += option in GIT_OPTIONS_WITH_VALUE
+        index += 1
+    if words[index : index + 1] != ["push"]:
+        return None
+    if unfollowable:
+        raise Unfollowable(f"git {unfollowable} changes which repository a push reaches")
+    arguments = iter(words[index + 1 :])
+    for word in arguments:
+        if word in PUSH_OPTIONS_WITH_VALUE:
+            next(arguments, None)
+        elif not word.startswith("-"):
+            if "://" in word or word.startswith("git@"):
+                return ("slug", named(word), directory)
+            return ("remote", named(word), directory)
+    return ("default", None, directory)
+
+
+def gh_targets(words, environment, directory):
+    """What one `gh` call reaches. `--repo`/`-R` and `GH_REPO` choose the
+    repository outright; otherwise the checkout's own counts too, beside
+    any API path or URL among the words, since a word may be a title or a
+    body rather than the destination."""
+    chosen = [environment["GH_REPO"]] if "GH_REPO" in environment else []
+    mentioned = []
     for index, word in enumerate(words):
         if word in ("--repo", "-R") and index + 1 < len(words):
-            return {"slug": words[index + 1]}
-        if word.startswith("--repo="):
-            return {"slug": word.partition("=")[2]}
-    match = re.search(r"(?:^|[;&|(]\s*)git\s+(?:-C\s+\S+\s+)?push\b(.*?)(?:$|[;&|)])", command)
-    if match:
-        for word in words_of(match.group(1)):
-            if word.startswith("-"):
-                continue
-            if "://" in word or word.startswith("git@"):
-                return {"slug": word}
-            return {"remote": word}
-    return None
+            chosen.append(words[index + 1])
+        elif word.startswith("--repo="):
+            chosen.append(word.partition("=")[2])
+        elif match := API_PATH.match(word):
+            mentioned.append(f"{match.group(1)}/{match.group(2)}")
+        elif GITHUB_URL.match(word):
+            mentioned.append(word)
+    targets = [("slug", named(slug), directory) for slug in chosen + mentioned]
+    return targets if chosen else [*targets, ("default", None, directory)]
+
+
+def unfollowable_setting(name):
+    return name.startswith(REDIRECTING_VARIABLES) or name in CREDENTIAL_VARIABLES
+
+
+def repository_targets(command, cwd):
+    """Every repository the command reaches, as `(kind, value, directory)`:
+    a slug or URL, a remote of a checkout, or a checkout's own repository."""
+    if any(INVOCATION.search("".join(inner)) for inner in SUBSTITUTION.findall(command)):
+        raise Unfollowable("a command substitution runs a git or gh call this input cannot follow")
+    targets, exported = [], {}
+    for words in segments_of(command):
+        environment = dict(exported)
+        if words[0] == "export":
+            words = words[1:]
+        while words and ("=" in words[0] and not words[0].startswith(("=", "-")) or words[0] in PREFIXES):
+            name, assigns, value = words[0].partition("=")
+            if assigns and unfollowable_setting(name):
+                raise Unfollowable(f"{name} changes which repository or login a call uses")
+            if assigns:
+                environment[name] = value
+            words = words[1:]
+        if not words:
+            exported = environment
+            continue
+        program = os.path.basename(words[0])
+        match program:
+            case "git":
+                target = git_target(words[1:], cwd)
+                targets += [target] if target else []
+            case "gh":
+                targets += gh_targets(words[1:], environment, cwd)
+            case _ if (
+                "$" in program
+                or "`" in program
+                or any(os.path.basename(word) in ("git", "gh") for word in words[1:])
+                or program in SHELLS and any(INVOCATION.search(word) for word in words[1:])
+            ):
+                raise Unfollowable(f"{program} runs a git or gh call this input cannot follow")
+    return list(dict.fromkeys(targets)) or [("default", None, cwd)]
 
 
 def gh(arguments, cwd):
@@ -89,8 +198,34 @@ def remote_url(remote, cwd):
     return completed.stdout.strip()
 
 
+def finding_of(target):
+    kind, value, directory = target
+    if value and value.startswith("-"):
+        return unknown(f"{value} is an option, not a repository")
+    if kind != "slug" and not (directory and os.path.isabs(directory) and os.path.isdir(directory)):
+        return unknown(f"the command reaches a checkout's {value or 'own'} repository and names no directory this input can read")
+    try:
+        match kind:
+            case "slug":
+                view = [value]
+            case "remote":
+                view = [remote_url(value, directory)]
+            case "default":
+                view = []
+        found = json.loads(gh(["repo", "view", *view, "--json", "nameWithOwner,visibility"], directory))
+    except FileNotFoundError:
+        return unknown("the GitHub CLI (gh) is not installed")
+    except (subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as error:
+        return unknown(str(error) or type(error).__name__)
+    visibility = VISIBILITY.get(str(found.get("visibility", "")).upper()) if isinstance(found, dict) else None
+    if visibility is None:
+        return unknown("gh reported no visibility")
+    return {"name_with_owner": found.get("nameWithOwner"), "visibility": visibility}
+
+
 def repository_of(consult):
-    """The finding for one consult."""
+    """The finding for one consult: the most widely readable repository the
+    command reaches, or the first one that cannot be established."""
     artifact = consult.get("artifact") if isinstance(consult, dict) else None
     if not isinstance(artifact, dict) or consult.get("kind") != "input":
         raise ValueError("the consult must be an input consult with an artifact")
@@ -99,28 +234,21 @@ def repository_of(consult):
     if not isinstance(command, str):
         return unknown("the call runs no command")
     cwd = artifact.get("cwd")
-    if isinstance(cwd, str) and not os.path.isdir(cwd):
+    if not (isinstance(cwd, str) and os.path.isdir(cwd)):
         cwd = None
-    named = repository_named(command)
-    if named is None and cwd is None:
-        return unknown("the command names no repository and the harness reported no directory")
     try:
-        target = []
-        if named and "slug" in named:
-            target = [named["slug"]]
-        elif named and "remote" in named:
-            if cwd is None:
-                return unknown(f"the command pushes to remote {named['remote']} and the harness reported no directory")
-            target = [remote_url(named["remote"], cwd)]
-        found = json.loads(gh(["repo", "view", *target, "--json", "nameWithOwner,visibility"], cwd))
-    except FileNotFoundError:
-        return unknown("the GitHub CLI (gh) is not installed")
-    except (subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as error:
-        return unknown(str(error) or type(error).__name__)
-    visibility = VISIBILITY.get(str(found.get("visibility", "")).upper())
-    if visibility is None:
-        return unknown("gh reported no visibility")
-    return {"name_with_owner": found.get("nameWithOwner"), "visibility": visibility}
+        targets = repository_targets(command, cwd)
+    except Unfollowable as error:
+        return unknown(str(error))
+    if len(targets) > MAX_TARGETS:
+        return unknown(f"the command reaches more than {MAX_TARGETS} repositories")
+    findings = []
+    for target in targets:
+        finding = finding_of(target)
+        if finding["visibility"] is None:
+            return finding
+        findings.append(finding)
+    return min(findings, key=lambda finding: MOST_READABLE_FIRST.index(finding["visibility"]))
 
 
 def main():

@@ -133,12 +133,13 @@ tags = ["credentials"]
 
 # Who reads what a `git push` or a `gh` call puts on GitHub is the repository's
 # own visibility, which the command line does not say. Before the Annotator is
-# asked, `repository.py` establishes it: the repository the command names
-# (`--repo`, a URL, a remote), else the checkout's `origin` in the directory
-# the harness would run the command in, asked of the GitHub CLI's login. The
-# Annotator reads the finding under `repository` and requires the readers it
-# implies; a repository it could not establish reads as `null` with a reason,
-# and the Annotator treats an unestablished destination as public.
+# asked, `repository.py` establishes it: every repository the command's `git
+# push` and `gh` calls name, else the checkout's own in the directory the
+# harness would run the command in, asked of the GitHub CLI's login; several
+# answer the most widely readable. The Annotator reads the finding under
+# `repository` and requires the readers it implies; a repository it could not
+# establish, or a call it cannot follow, reads as `null` with a reason, and
+# the Annotator treats an unestablished destination as public.
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
 builtin = "claude-code"
