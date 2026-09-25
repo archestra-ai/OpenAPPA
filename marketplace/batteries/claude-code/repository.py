@@ -10,11 +10,12 @@ The command is split into its simple commands, and every `git push` and
 `gh` call among them names a destination: `--repo`/`-R`, `GH_REPO`, a
 `repos/OWNER/NAME` API path, a GitHub URL, or an `OWNER/NAME` word of
 `gh repo` on a `gh` call, a URL or a
-remote on a push (in the `-C` directory when given), else the checkout's
+remote on a push (in the `-C` or `cd` directory when given), else the checkout's
 own repository. Each is asked of the GitHub CLI's login (`gh repo view`);
 several destinations answer the most widely readable one. A call this
-input cannot follow — a shell, `eval` or `source`, `git -c`, `GIT_DIR`,
-a computed program or target — and whatever else cannot be established answers `null` with a
+input cannot follow — a shell, `eval`, `source` or subshell, `git -c`,
+an environment setting such as `GIT_DIR`, a computed program or target —
+and whatever else cannot be established answers `null` with a
 reason and a zero exit: the annotator then reads the finding, not a
 guess. Only a transport failure — a crash, a timeout — is a refused
 answer.
@@ -44,8 +45,7 @@ API_PATH = re.compile(r"^/?repos/([\w.-]+)/([\w.-]+)")
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
 INVOCATION = re.compile(r"\b(git|gh)\s")
-REDIRECTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG", "GIT_SSH", "GIT_PROXY", "GIT_NAMESPACE")
-CREDENTIAL_VARIABLES = {"GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"}
+HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", "PAGER", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
 MAX_TARGETS = 4
 
 
@@ -62,9 +62,12 @@ def segments_of(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    segment = []
+    segment, previous = [], ""
     try:
         for token in lexer:
+            if token == "(" and not previous.endswith("$"):
+                raise Unfollowable("a subshell's directory and settings do not reach the rest of the command")
+            previous = token
             if set(token) <= set(OPERATORS):
                 if segment:
                     yield segment
@@ -89,9 +92,10 @@ def git_target(words, directory):
     index, unfollowable = 0, None
     while index < len(words) and words[index].startswith("-"):
         option = words[index]
-        if option == "-C" and index + 1 < len(words):
-            index += 1
-            directory = os.path.join(directory, words[index]) if directory else words[index]
+        if option.startswith("-C") and (option != "-C" or index + 1 < len(words)):
+            if option == "-C":
+                index += 1
+            directory = within(directory, option.removeprefix("-C") or words[index])
         elif option not in HARMLESS_GIT_OPTIONS:
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
@@ -119,6 +123,8 @@ def gh_targets(words, environment, directory):
     chosen = [environment["GH_REPO"]] if "GH_REPO" in environment else []
     mentioned = []
     for index, word in enumerate(words):
+        if word.startswith("--hostname"):
+            raise Unfollowable("gh --hostname reaches a host other than github.com")
         if word in ("--repo", "-R") and index + 1 < len(words):
             chosen.append(words[index + 1])
         elif word.startswith(("--repo=", "-R")) and word not in ("--repo", "-R"):
@@ -131,8 +137,8 @@ def gh_targets(words, environment, directory):
     return targets if chosen else [*targets, ("default", None, directory)]
 
 
-def unfollowable_setting(name):
-    return name.startswith(REDIRECTING_VARIABLES) or name in CREDENTIAL_VARIABLES
+def within(directory, path):
+    return os.path.join(directory, path) if directory else path
 
 
 def repository_targets(command, cwd):
@@ -140,15 +146,13 @@ def repository_targets(command, cwd):
     a slug or URL, a remote of a checkout, or a checkout's own repository."""
     if any(INVOCATION.search("".join(inner)) for inner in SUBSTITUTION.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this input cannot follow")
-    targets, exported = [], {}
+    targets, exported, directory = [], {}, cwd
     for words in segments_of(command):
         environment = dict(exported)
         if words[0] == "export":
             words = words[1:]
         while words and ("=" in words[0] and not words[0].startswith(("=", "-")) or words[0] in PREFIXES):
             name, assigns, value = words[0].partition("=")
-            if assigns and unfollowable_setting(name):
-                raise Unfollowable(f"{name} changes which repository or login a call uses")
             if assigns:
                 environment[name] = value
             words = words[1:]
@@ -156,22 +160,28 @@ def repository_targets(command, cwd):
             exported = environment
             continue
         program = os.path.basename(words[0])
+        if program in ("git", "gh") and (settings := environment.keys() - HARMLESS_VARIABLES):
+            raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
         match program:
             case "git":
-                target = git_target(words[1:], cwd)
+                target = git_target(words[1:], directory)
                 targets += [target] if target else []
             case "gh":
-                targets += gh_targets(words[1:], environment, cwd)
+                targets += gh_targets(words[1:], environment, directory)
+            case "cd" | "pushd" if len(words) == 2 and words[1] != "-" and not {"$", "`", "~"} & set(words[1]):
+                directory = within(directory, words[1])
+            case "cd" | "pushd" | "popd":
+                raise Unfollowable(f"{' '.join(words)} moves to a directory this input cannot follow")
             case _ if program in INTERPRETERS:
                 raise Unfollowable(f"{program} runs commands this input cannot follow")
             case _ if (
                 GLOB & set(program)
                 or "$" in program
                 or "`" in program
-                or any(os.path.basename(word) in ("git", "gh") for word in words[1:])
+                or any(os.path.basename(word) in ("git", "gh") or INVOCATION.search(word) for word in words)
             ):
                 raise Unfollowable(f"{program} runs a git or gh call this input cannot follow")
-    return list(dict.fromkeys(targets)) or [("default", None, cwd)]
+    return list(dict.fromkeys(targets)) or [("default", None, directory)]
 
 
 def gh(arguments, cwd):

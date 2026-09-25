@@ -74,6 +74,11 @@ class RepositoryTargets(unittest.TestCase):
             self.assertEqual(INPUT.repository_targets(command, "/w"), [("remote", "upstream", "/w")], command)
         self.assertEqual(INPUT.repository_targets("git -C sub push origin", "/w"), [("remote", "origin", "/w/sub")])
         self.assertEqual(INPUT.repository_targets("git -C /other push origin", "/w"), [("remote", "origin", "/other")])
+        self.assertEqual(INPUT.repository_targets("git -Csub push origin", "/w"), [("remote", "origin", "/w/sub")])
+
+    def test_a_cd_moves_every_later_call_to_its_directory(self):
+        self.assertEqual(INPUT.repository_targets("cd sub && git push origin", "/w"), [("remote", "origin", "/w/sub")])
+        self.assertEqual(INPUT.repository_targets("cd /other; gh pr create", "/w"), [("default", None, "/other")])
 
     def test_every_destination_of_a_compound_command_is_named(self):
         command = "git push https://github.com/acme/public.git && gh pr create --repo acme/private"
@@ -103,6 +108,17 @@ class RepositoryTargets(unittest.TestCase):
             'V="git push https://github.com/acme/public.git"; sh -c "$V"',
             "source push.sh; gh pr create",
             "/usr/bin/gi? push https://github.com/acme/public.git",
+            "HOME=/tmp/evil git push origin",
+            "export XDG_CONFIG_HOME=/tmp/evil; git push origin",
+            "GIT_COMMON_DIR=/tmp/other.git git push origin",
+            "PATH=/tmp/bin:$PATH gh pr create",
+            "gh api --hostname ghe.example repos/acme/api",
+            "python3 -c \"import os; os.system('git push https://github.com/acme/public.git')\"",
+            "node -e \"require('child_process').execSync('gh pr create --repo acme/public')\"",
+            "(cd ../public && git push origin)",
+            "cd && git push origin",
+            "cd - && git push origin",
+            "popd && git push origin",
             "xargs git push",
             "git -c url.x.insteadOf=y push origin",
             "git --git-dir=/tmp/x push origin",
