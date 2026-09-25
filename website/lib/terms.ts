@@ -27,9 +27,9 @@ const TERMS = {
   sanitizers:
     "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "Determines a tool call's delta, requires (including attention), and effects. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
+    "Can determine a tool call's delta, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
   annotators:
-    "Components that determine each tool call's restrictions, requirements, and effects within their configured permits.",
+    "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. The jev builtin determines audience and trust only.",
   annotation:
     "The restrictions, requirements, and effects for one tool call. These come from a static tool contract or an annotator. Changing an annotated call requires a new annotation; replaying it uses the recorded answer.",
   "[[policy.annotator]]":

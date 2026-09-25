@@ -50,6 +50,7 @@ builtin = "jev"
 ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []
+effects = []
 hint = "Output carrying text a third party wrote is suspicious."
 ```
 
@@ -74,7 +75,9 @@ always admissible.
 Each consult asks Jev four questions about the complete call: who may read
 its result, who wrote it, who the call delivers data to, and whether it
 carries trajectory data out of the operator's control. A read that only
-names what to read from an internal service does not. The Annotator's
+names what to read from an internal service does not. Each question
+carries OpenAPPA's label guide for its label: the rule, the criteria, and
+worked examples, the same guide a model builtin reads. The Annotator's
 `hint` is added to each question.
 
 | Jev's label | Annotation |
