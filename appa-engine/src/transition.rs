@@ -148,6 +148,9 @@ pub enum OfferConsult {
     Accept {
         sanitizer: Option<SanitizerName>,
     },
+    /// No external is consulted. The selected call runs, but its result does not cross into the
+    /// trajectory.
+    Withhold,
     Authorities {
         call: ResolvedCall,
         required: Vec<crate::plan::RequiredRuling>,
@@ -323,7 +326,10 @@ pub enum EvidenceRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutcomeFollowUp {
-    Closed { admitted: Option<ValueBody> },
+    Closed {
+        admitted: Option<ValueBody>,
+        withheld: bool,
+    },
     Resolve(EvidenceRequest),
     Staged(Box<Confined>),
 }
@@ -883,7 +889,7 @@ struct Remedy {
     plans: BTreeSet<crate::plan::PlanId>,
     reviewed: Vec<crate::execute::AuthorityReview>,
     acceptance: Option<Narrowing>,
-    sanitizer: Option<SanitizerName>,
+    output: Option<crate::plan::OutputRemedy>,
     contribution: Option<Label>,
     evidence: Option<AudienceEvidence>,
 }
@@ -1109,7 +1115,7 @@ impl<'a> Sequence<'a> {
                 plan,
                 acceptance,
                 rulings,
-                sanitizer,
+                output,
                 return_policy,
                 basis,
                 evidence,
@@ -1120,7 +1126,7 @@ impl<'a> Sequence<'a> {
                 plan,
                 acceptance,
                 rulings,
-                sanitizer,
+                output,
                 return_policy,
                 basis,
                 evidence,
@@ -1298,8 +1304,18 @@ impl<'a> Sequence<'a> {
                 self.recorded_expansions(evidence)?;
                 let remedy = self.remedies.entry(dispatch.clone()).or_default();
                 remedy.pin_evidence(evidence)?;
-                remedy.sanitizer = Some(sanitizer.clone());
+                remedy.output = Some(crate::plan::OutputRemedy::Sanitize(sanitizer.clone()));
                 remedy.contribution = Some(contribution.clone());
+                remedy.plans.insert(*plan);
+            }
+            Fact::OutputWithheld {
+                trajectory,
+                dispatch,
+                plan,
+            } => {
+                self.pending_dispatch(trajectory, dispatch)?;
+                let remedy = self.remedies.entry(dispatch.clone()).or_default();
+                remedy.output = Some(crate::plan::OutputRemedy::Withhold);
                 remedy.plans.insert(*plan);
             }
             Fact::Denial {
@@ -1640,7 +1656,7 @@ impl<'a> Sequence<'a> {
         plan: &crate::plan::PlanId,
         acceptance: &Option<Narrowing>,
         rulings: &[AuthorityEvidence],
-        sanitizer: &Option<SanitizerName>,
+        output: &Option<crate::plan::OutputRemedy>,
         return_policy: &Option<ReturnPolicy>,
         basis: &crate::basis::PolicyBasis,
         evidence: &AudienceEvidence,
@@ -1664,7 +1680,7 @@ impl<'a> Sequence<'a> {
             || call.digest() != recorded.call
             || plan != &offered.id
             || acceptance.as_ref() != offered.narrowing()
-            || sanitizer.as_ref() != offered.sanitizer()
+            || output != &offered.output_remedy()
             || rulings.len() != offered.required.len()
         {
             return Err(TransitionRefusal::UnbackedApproval);
@@ -2034,7 +2050,8 @@ impl<'a> Sequence<'a> {
                 ReleasePart::Remedy(owed),
                 Fact::Acceptance { dispatch, .. }
                 | Fact::Ruling { dispatch, .. }
-                | Fact::OutputSanitizerBound { dispatch, .. },
+                | Fact::OutputSanitizerBound { dispatch, .. }
+                | Fact::OutputWithheld { dispatch, .. },
             ) if dispatch == &next.dispatch => Ok(Obligation::Consuming(owed)),
             (
                 ReleasePart::Opening | ReleasePart::Remedy(_),
@@ -2366,8 +2383,7 @@ impl<'a> Sequence<'a> {
             Obligation::Consuming(offer) => {
                 let approval = views.approval(&offer).ok_or(TransitionRefusal::UnknownApproval)?;
                 self.audit_inherit(&approval.evidence)?;
-                let lands =
-                    !approval.rulings.is_empty() || approval.acceptance.is_some() || approval.sanitizer.is_some();
+                let lands = !approval.rulings.is_empty() || approval.acceptance.is_some() || approval.output.is_some();
                 match (lands, remedy) {
                     // A plan of only a return declaration lands nothing on the dispatch: the fork
                     // preparation the obligation checked is what backs it.
@@ -2383,19 +2399,20 @@ impl<'a> Sequence<'a> {
                             plans: BTreeSet::from([approval.plan]),
                             reviewed: approval.rulings.iter().map(|given| given.reviewed.clone()).collect(),
                             acceptance: approval.acceptance.clone(),
-                            sanitizer: approval.sanitizer.clone(),
-                            contribution: match approval.sanitizer.as_ref() {
-                                None => None,
-                                Some(name) => crate::plan::bound_contribution(
+                            output: approval.output.clone(),
+                            contribution: match approval.output.as_ref() {
+                                Some(crate::plan::OutputRemedy::Sanitize(name)) => crate::plan::bound_contribution(
                                     self.engine.registry(),
                                     &contract,
                                     name,
                                     &self.context(expansions),
                                 )
                                 .map_err(TransitionRefusal::from)?,
+                                Some(crate::plan::OutputRemedy::Withhold) | None => None,
                             },
-                            evidence: (!approval.rulings.is_empty() || approval.sanitizer.is_some())
-                                .then(|| evidence.clone()),
+                            evidence: (!approval.rulings.is_empty()
+                                || matches!(approval.output, Some(crate::plan::OutputRemedy::Sanitize(_))))
+                            .then(|| evidence.clone()),
                         };
                         if landed.is_none_or(|landed| landed != expected) {
                             return Err(TransitionRefusal::UnbackedApproval);
@@ -2525,7 +2542,7 @@ impl<'a> Sequence<'a> {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
                         None => {
-                            if views.bound_sanitizer(dispatch).is_some() {
+                            if views.bound_sanitizer(dispatch).is_some() || views.withholds_output(dispatch) {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
                             let digest = RawResultDigest::of(value.body.as_str().as_bytes());

@@ -17,6 +17,9 @@ pub enum ResultAdmission {
     FailureWithBody {
         body: ValueBody,
     },
+    FailureNoValue {
+        observed: RawResultDigest,
+    },
     Indeterminate,
     SuccessNoValue,
     SuccessRaw {
@@ -172,6 +175,7 @@ pub(crate) fn admit_result(
     let reported = match &admission {
         ResultAdmission::SuccessRaw { body } => Some(RawResultDigest::of(body.as_str().as_bytes())),
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
+        ResultAdmission::FailureNoValue { observed } => Some(*observed),
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
         | ResultAdmission::SuccessNoValue
@@ -232,6 +236,16 @@ pub(crate) fn admit_result(
                 },
                 admit_value(output_label(), body),
             ]
+        }
+        ResultAdmission::FailureNoValue { observed } => {
+            if call.file_basis().is_none() {
+                return Err(AdmitError::ObservationMismatch);
+            }
+            vec![Fact::DispatchClosed {
+                trajectory: trajectory.clone(),
+                dispatch: dispatch.clone(),
+                outcome: CloseOutcome::FailureWithBody { observed },
+            }]
         }
         ResultAdmission::Indeterminate => vec![Fact::DispatchClosed {
             trajectory: trajectory.clone(),

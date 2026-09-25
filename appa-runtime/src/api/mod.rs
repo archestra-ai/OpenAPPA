@@ -353,6 +353,7 @@ impl From<EventError> for RemedyOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OfferKind {
     Accept,
+    Withhold,
     Authority { names: Vec<String> },
     Sanitizer { name: String },
 }
