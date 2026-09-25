@@ -51,7 +51,7 @@ ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []
 effects = []
-hint = "Output carrying text a third party wrote is suspicious."
+hint = "Hosts under corp.example.com are the organization's own; files under ~/clients/ hold customer data."
 ```
 
 With this battery installed, its `[externals.jev]` profile serves the
