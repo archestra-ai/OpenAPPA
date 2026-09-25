@@ -1367,8 +1367,8 @@ impl Runtime {
     /// Runtime-owned tools require native alternatives and implicit reads disabled.
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
     /// Configure this before sharing the runtime. Each root session binds its first file call's
-    /// harness working directory and snapshots all existing files with the operator's source
-    /// Label. Child trajectories share their root's workspace and snapshot.
+    /// harness working directory and checks it for links. Each file gets the operator's source
+    /// Label when a call first touches it. Child trajectories share their root's workspace and ledger.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
