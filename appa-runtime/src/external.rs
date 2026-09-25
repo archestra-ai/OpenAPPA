@@ -2804,11 +2804,14 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn a_helper_holding_stderr_costs_a_recorded_answer_only_the_grace() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let pid_file = dir.path().join("helper.pid");
+        // The helper holds stderr only, and records its pid once it has left the group, so
+        // the command answers only after the group kill can no longer reach it.
         let script = format!(
             "cat >/dev/null\nprintf 'warming up\\n' >&2\n\
-             perl -MPOSIX -e 'setsid(); sleep 30' &\necho $! > {}\n\
+             perl -MPOSIX -e 'setsid(); open(my $f, \">\", $ARGV[0]) or die; print $f $$; close $f; sleep 30' {pid} >/dev/null &\n\
+             while [ ! -s {pid} ]; do sleep 0.01; done\n\
              printf '%s' '{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}'",
-            pid_file.display()
+            pid = pid_file.display()
         );
         let services = command_services(dir.path(), &script, budget_ms(), 1024);
 
