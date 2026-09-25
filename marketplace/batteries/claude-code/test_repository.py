@@ -116,6 +116,10 @@ class RepositoryTargets(unittest.TestCase):
             "gh api graphql -f query=mutation",
             "gh issue view https://ghe.example/acme/api/issues/1",
             "gh pr view --json title https://ghe.example/acme/secret/pull/1",
+            "gh repo create new --public --source=. --push",
+            "git push origin && gh gist create --public data.txt",
+            "git -C $DIR push origin",
+            "git -C ~/sub push origin",
             "~/bin/gh pr create",
             "HOME=/tmp/evil git push origin",
             "export XDG_CONFIG_HOME=/tmp/evil; git push origin",
@@ -167,6 +171,13 @@ class RepositoryOf(unittest.TestCase):
     def test_a_directory_that_is_no_checkout_is_an_unestablished_finding(self):
         with tempfile.TemporaryDirectory() as empty:
             finding = INPUT.repository_of(consult("git push origin main", cwd=empty))
+        self.assertIsNone(finding["visibility"])
+        self.assertTrue(finding["reason"])
+
+    def test_a_directory_that_is_a_file_is_an_unestablished_finding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "file").write_text("")
+            finding = INPUT.repository_of(consult("cd file && gh pr create --repo acme/api", cwd=directory))
         self.assertIsNone(finding["visibility"])
         self.assertTrue(finding["reason"])
 

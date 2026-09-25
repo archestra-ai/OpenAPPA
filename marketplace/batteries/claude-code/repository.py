@@ -44,6 +44,8 @@ HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 GITHUB_URL = re.compile(r"^(?:https?://|git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?]|$)")
 API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)")
+# gh commands that act on one repository: `--repo`/`-R`, `GH_REPO`, or the checkout.
+CHECKOUT_COMMANDS = {"api", "browse", "cache", "issue", "label", "pr", "release", "repo", "ruleset", "run", "secret", "variable", "workflow"}
 URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 CHECKOUT_API_PATH = re.compile(r"^/?repos/\{owner\}/\{repo\}(?:/|$)")
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
@@ -134,6 +136,10 @@ def gh_targets(words, environment, directory):
     chosen = [environment["GH_REPO"]] if "GH_REPO" in environment else []
     mentioned = []
     match words:
+        case [command, *_] if command not in CHECKOUT_COMMANDS:
+            raise Unfollowable(f"gh {command} reaches a destination other than a named or checked-out repository")
+        case ["repo", "create" | "fork", *_]:
+            raise Unfollowable(f"gh repo {words[1]} creates a repository this input cannot establish")
         case ["api", *rest]:
             endpoint = next((word for word in rest if not word.startswith("-")), "")
             if not (API_PATH.match(endpoint) or CHECKOUT_API_PATH.match(endpoint)):
@@ -159,6 +165,8 @@ def gh_targets(words, environment, directory):
 
 
 def within(directory, path):
+    if path == "-" or {"$", "`", "~"} & set(path):
+        raise Unfollowable(f"{path} is a directory this input cannot follow")
     return os.path.join(directory, path) if directory else path
 
 
@@ -197,7 +205,7 @@ def repository_targets(command, cwd):
                 targets += [target] if target else []
             case "gh":
                 targets += gh_targets(words[1:], environment, directory)
-            case "cd" | "pushd" if len(words) == 2 and words[1] != "-" and not {"$", "`", "~"} & set(words[1]):
+            case "cd" | "pushd" if len(words) == 2:
                 directory = within(directory, words[1])
             case "cd" | "pushd" | "popd":
                 raise Unfollowable(f"{' '.join(words)} moves to a directory this input cannot follow")
@@ -261,7 +269,7 @@ def finding_of(target):
         found = json.loads(gh(["repo", "view", *view, "--json", "nameWithOwner,visibility"], directory))
     except FileNotFoundError:
         return unknown("the GitHub CLI (gh) is not installed")
-    except (subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as error:
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as error:
         return unknown(str(error) or type(error).__name__)
     visibility = VISIBILITY.get(str(found.get("visibility", "")).upper()) if isinstance(found, dict) else None
     if visibility is None:
