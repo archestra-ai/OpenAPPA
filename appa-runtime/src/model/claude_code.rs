@@ -110,7 +110,7 @@ pub(crate) async fn run_claude_code(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
-    isolate_claude_environment(&mut command);
+    isolate_claude_environment(&mut command, std::env::vars_os().collect());
     tracing::debug!("claude consult starts");
     let mut child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.config.command.display(), "the claude executable did not start");
@@ -172,7 +172,16 @@ pub(crate) async fn run_claude_code(
 }
 
 #[cfg(unix)]
-fn isolate_claude_environment(command: &mut tokio::process::Command) {
+fn isolate_claude_environment(
+    command: &mut tokio::process::Command,
+    parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+) {
+    // No APPA variable of any kind reaches the model: the child needs its own credentials
+    // and HOME, never this runtime's bearer tokens — and not the provider credential a
+    // `command` external inherits either, which this consult never reads.
+    command
+        .env_clear()
+        .envs(crate::external::without_runtime_variables(parent));
     // Claude Code marks its own process tree and refuses to start a nested CLI
     // while that marker is present. This consult is deliberately isolated,
     // tool-less, and non-persistent, so it is safe and necessary to clear the
@@ -182,17 +191,6 @@ fn isolate_claude_environment(command: &mut tokio::process::Command) {
     // bootstrap fetches, the session-title call) is one more connection per consult
     // on a host that may run many consults at once, and none of it reaches the answer.
     command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
-    // No APPA variable of any kind reaches the model: the child needs its own credentials
-    // and HOME, never this runtime's bearer tokens — and not the provider credential a
-    // `command` external inherits either, which this consult never reads.
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_string_lossy()
-            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
-        {
-            command.env_remove(key);
-        }
-    }
 }
 
 /// The builtin is a local process under a process group this platform lacks; the
@@ -213,22 +211,28 @@ mod tests {
     use crate::test_support::{PROCESS_BUDGET, assert_process_gone, recorded_pid};
 
     #[test]
-    fn a_claude_consult_clears_the_parent_session_marker() {
+    fn a_claude_consult_inherits_neither_the_session_marker_nor_the_runtimes_variables() {
+        use std::ffi::OsStr;
+        let parent = [
+            ("CLAUDECODE", "1"),
+            ("APPA_TEST_SECRET_TOKEN", "leaky"),
+            ("HOME", "/home/user"),
+        ]
+        .map(|(name, value)| (name.into(), value.into()));
         let mut command = tokio::process::Command::new("claude");
-        command.env("CLAUDECODE", "1");
-        isolate_claude_environment(&mut command);
-        assert!(
-            command
-                .as_std()
-                .get_envs()
-                .any(|(name, value)| name == "CLAUDECODE" && value.is_none()),
-            "the nested-session marker is explicitly removed"
-        );
-        assert!(
-            command.as_std().get_envs().any(|(name, value)| {
-                name == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && value.is_some_and(|value| value == "1")
-            }),
-            "the consult runs without the CLI's background traffic"
+        isolate_claude_environment(&mut command, parent.into());
+        let child: Vec<_> = command.as_std().get_envs().collect();
+        assert_eq!(
+            child,
+            [
+                (
+                    OsStr::new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+                    Some(OsStr::new("1"))
+                ),
+                (OsStr::new("HOME"), Some(OsStr::new("/home/user"))),
+            ],
+            "the child starts from the parent's environment without the nested-session \
+             marker or any APPA variable, and without the CLI's background traffic"
         );
     }
 

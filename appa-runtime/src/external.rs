@@ -1077,6 +1077,19 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
 }
 
+/// `parent` without the runtime's own namespace. A consult child starts from exactly this,
+/// its environment cleared first: filtering one read of the environment, rather than
+/// removing names from the live one, leaves no gap for a variable set in between.
+#[cfg(unix)]
+pub(crate) fn without_runtime_variables(
+    parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
+    parent.into_iter().filter(|(key, _)| {
+        !key.to_string_lossy()
+            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
+    })
+}
+
 #[cfg(unix)]
 async fn run_command_process(
     command: ResolverCommand,
@@ -1104,21 +1117,15 @@ async fn run_command_process(
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
     // variable, reaches the child. The binding's own provider credential is put back
     // afterwards, so a command inherits the one variable it reads and no other's.
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_string_lossy()
-            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
-        {
-            configured.env_remove(key);
-        }
-    }
-    if let Some((var, credential)) = command
+    let parent: Vec<_> = std::env::vars_os().collect();
+    let credential = command
         .token_env
         .as_ref()
-        .and_then(|var| std::env::var_os(var).map(|credential| (var, credential)))
-    {
-        configured.env(var, credential);
-    }
+        .and_then(|var| parent.iter().find(|(key, _)| key == var.as_str()).cloned());
+    configured
+        .env_clear()
+        .envs(without_runtime_variables(parent))
+        .envs(credential);
 
     let mut child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
     let tail = child.stderr.take().map(stderr_tail);
