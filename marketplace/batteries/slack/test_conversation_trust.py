@@ -42,11 +42,11 @@ class Established(unittest.TestCase):
         return ANNOTATOR.established_external(fixture_api({method: list(answers)}), channel_id, delays=(0, 0))
 
     def test_a_conversation_shared_with_another_organization_is_external(self):
-        for channel in ({"is_ext_shared": True}, {"is_pending_ext_shared": True}):
+        for channel in ({"is_ext_shared": True}, {"is_ext_shared": False, "is_pending_ext_shared": True}):
             self.assertTrue(self.established("conversations.info", {"ok": True, "channel": channel}), channel)
 
     def test_a_workspace_conversation_is_not_external(self):
-        for channel in ({"is_ext_shared": False, "is_shared": True}, {"is_im": True}):
+        for channel in ({"is_ext_shared": False, "is_shared": True}, {"is_ext_shared": False, "is_im": True}):
             self.assertFalse(self.established("conversations.info", {"ok": True, "channel": channel}), channel)
 
     def test_a_dm_with_a_user_from_another_organization_is_external(self):
@@ -65,7 +65,12 @@ class Established(unittest.TestCase):
             self.established("conversations.info", OSError("timed out"), OSError("timed out"), OSError("timed out"))
 
     def test_a_definite_slack_error_is_raised_without_retrying(self):
-        for response in ({"ok": False, "error": "channel_not_found"}, ["malformed"]):
+        for response in (
+            {"ok": False, "error": "channel_not_found"},
+            ["malformed"],
+            {"ok": True, "channel": {}},
+            {"ok": True, "channel": {"is_ext_shared": "yes"}},
+        ):
             with self.assertRaises(RuntimeError, msg=response):
                 self.established("conversations.info", response)
 

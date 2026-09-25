@@ -70,7 +70,9 @@ def is_external(call, channel_id):
             return bool(api_ok(call, "users.info", user=channel_id).get("user", {}).get("is_stranger"))
         case "conversation":
             conversation = api_ok(call, "conversations.info", channel=channel_id).get("channel", {})
-            return bool(conversation.get("is_ext_shared") or conversation.get("is_pending_ext_shared"))
+            if not isinstance(conversation.get("is_ext_shared"), bool):
+                raise RuntimeError("conversations.info reports no is_ext_shared")
+            return conversation["is_ext_shared"] or conversation.get("is_pending_ext_shared") is True
 
 
 def is_transient(error):
