@@ -605,6 +605,12 @@ jobs:
       - name: Verify installer process containment
         run: cargo test --locked --package appa --lib installation::native
 
+      - name: Verify portable Claude policy and battery
+        run: cargo test --locked --package appa --lib default_config::tests
+
+      - name: Verify committed marketplace bytes under Windows Git
+        run: cargo test --locked --package appa --lib export_commit_preserves_committed_bytes_with_windows_autocrlf
+
       # Start from an empty directory, as the release package check does. The
       # generated policy must both open and omit the subprocess fallback this
       # platform cannot serve.

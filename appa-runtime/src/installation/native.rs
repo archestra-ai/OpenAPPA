@@ -1,6 +1,8 @@
 //! Executables are selected with their batteries archive, never independently.
 
-use std::fs::{self, File};
+use std::fs;
+#[cfg(any(not(windows), test))]
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -142,9 +144,7 @@ impl ClaudeArtifacts {
         if destination.exists() {
             acquisition::verify_artifact(&destination.join(binary_name), &expected)?;
         } else {
-            File::open(&staged_binary)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| io("sync binary", &staged_binary, error))?;
+            sync_binary(&staged_binary)?;
             sync_directory(stage.path())?;
             fs::rename(stage.path(), &destination)
                 .map_err(|error| io("publish selected binary", &destination, error))?;
@@ -173,6 +173,14 @@ impl ClaudeArtifacts {
         )?;
         Ok(())
     }
+}
+
+fn sync_binary(path: &Path) -> Result<(), InstallError> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| io("sync binary", path, error))
 }
 
 fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallError> {
@@ -418,6 +426,7 @@ mod tests {
             let result = extract_windows_binary(&archive, &target);
             assert_eq!(result.is_ok(), name == "appa.exe");
             if result.is_ok() {
+                sync_binary(&target).unwrap();
                 assert_eq!(fs::read(target).unwrap(), b"verified executable bytes");
             } else {
                 assert!(!target.exists());

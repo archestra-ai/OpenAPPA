@@ -20,7 +20,7 @@ and `host/claude-code/Edit`:
   the session keeps its label.
   The sanitizer carries no tags: it is offered for any withheld Bash result
   the session cannot read as it is, including one the Annotator narrowed to
-  `self`, and for a subagent's return. Before any other command runs, the
+  `self`, and for a subagent's return. On Unix, before any other command runs, the
   Claude Code model decides what trust and fresh attention it requires and
   labels its output for trust and audience, inside the vocabulary static rules
   write: a command that visibly reads the requester's or the organization's
@@ -50,7 +50,8 @@ and `host/claude-code/Edit`:
   repository it cannot establish (no `gh`, no checkout, no `--repo`) is
   answered as unknown, and the Annotator treats the destination as public.
   The finding informs the Annotator; the repository's collaborators are not
-  resolved as readers.
+  resolved as readers. On Windows, the Unix-only publishing selectors are
+  absent, so these otherwise undeclared calls are refused.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules
@@ -66,9 +67,12 @@ and `host/claude-code/Edit`:
   deployment's policy (`appa/appa.toml`, `appa/batteries/`) asks that person
   every time. Every other path takes the session's label as it is.
 
-The default config `appa plugin install claude-code` writes provides the
-wildcard fallback for tools it does not name and the deployment-specific Bash
-Annotator hint. The root Annotator replaces this battery's default declaration.
+On Unix, the default config `appa plugin install claude-code` writes declares
+the Bash Annotators, the GitHub publishing selectors, and the wildcard fallback.
+It resolves `repository.py` from the included battery's installed directory.
+On Windows, the installer omits these Unix-only declarations. Bash calls that
+have no static rule remain fail-closed. The battery still labels credential
+paths and confines Bash results on both platforms.
 
 ## Add it to a deployment
 
@@ -78,6 +82,10 @@ include = ["batteries/claude-code/appa.toml"]
 [policy]
 version = 2
 ```
+
+This small root only includes the battery's static rules. Use the installed
+default root for Unix Bash Annotators and publishing selectors, or declare
+those contracts in your own root policy.
 
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
@@ -102,10 +110,10 @@ builtin = "claude-code"
 hint = "Hosts under corp.example are the organization's own: what they return is internal. Require hitl attention before commands that publish releases or change production infrastructure."
 ```
 
-The root declaration replaces the battery's Annotator with the same name.
-Preserve `builtin` unless you intend to alter the implementation; write
-`audiences` only to narrow the mandate below the policy's vocabulary. The battery continues to provide ordered Bash rules, including its
-credential-path refusals.
+On Unix, replace the default root declaration with this one. Preserve `builtin`
+unless you intend to alter the implementation; write `audiences` only to narrow
+the mandate below the policy's vocabulary. The battery continues to provide
+ordered credential-path rules.
 
 ## Example override
 

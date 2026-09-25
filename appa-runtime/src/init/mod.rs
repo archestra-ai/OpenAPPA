@@ -361,20 +361,17 @@ fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
     // APPA_RUNTIME_URL is removed rather than set: to the start it means "the
     // user runs their own runtime here", and setting it would suppress managed
     // replacement permanently.
-    let output = command
+    // A long-lived Windows runtime can inherit the starter's output pipes.
+    // Wait for the starter, not for every process holding those pipes to exit.
+    let status = command
         .env_remove("APPA_RUNTIME_URL")
         .stdin(Stdio::null())
-        .output()
+        .status()
         .map_err(|error| InitError::Starter(error.to_string()))?;
-    if output.status.success() {
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(InitError::Starter(if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    } else {
-        stderr
-    }))
+    Err(InitError::Starter(format!("runtime ensure exited with {status}")))
 }
 
 /// What the switch has changed on disk, in Claude's profile and in process

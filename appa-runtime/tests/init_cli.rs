@@ -8,7 +8,7 @@ mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
 use common::{free_port, http, repo_root, serve_runtime};
-use init_fixture::{Fixture, Installed, default_policy_key, runtime_fingerprint, shipped_default_config};
+use init_fixture::{Fixture, Installed, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
 /// running activation against a config that does not exist: the endpoint is
@@ -508,7 +508,7 @@ fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
         // This deployment's own runtime, serving a policy that is not the file the
         // marketplace wrote: the one state a reload is for.
         .env("FAKE_POLICY_KEY", "a-policy-this-activation-did-not-compose")
-        .env("FAKE_POLICY_KEY_AFTER_RELOAD", default_policy_key())
+        .env("FAKE_POLICY_KEY_AFTER_RELOAD", fixture.policy_key())
         .env("FAKE_RELOADS", &reloads)
         .output()
         .expect("appa activates");

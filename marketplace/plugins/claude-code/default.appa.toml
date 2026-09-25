@@ -1,11 +1,12 @@
 # Example deployment for protecting a Claude Code session.
 #
-# The stable built-in tools of the harness are named. Bash, Read, Grep, Write
+# The stable built-in tools of the harness are named. Read, Grep, Write
 # and Edit are left to the Claude Code battery, which `appa plugin install
 # claude-code` includes with this file; a deployment that removed the battery
-# sends them to the bounded Claude fallback at the end of this file instead. Any other tool the policy
-# does not name gets the same per-call fallback until `/appa-guide init` gives it
-# an exact contract. A named tool without a `delta` key restricts nothing, the
+# sends them to the bounded Claude fallback on Unix. Off Unix, unlisted calls
+# remain fail-closed. Other tools the policy does not name get the same per-call
+# fallback on Unix until `/appa-guide init` gives them an exact contract.
+# A named tool without a `delta` key restricts nothing, the
 # same statement as `delta = {}`: the result's label is the combination of its
 # sources, unchanged.
 #
@@ -226,22 +227,67 @@ name = "mcp/appa/yell"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
-# Compatibility net for tools installed after this policy was generated. Exact
+# On Unix, a compatibility net covers tools installed after this policy. Exact
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
 # two trust ranks, HITL, and no effects. `audiences` is left omitted, so an
 # annotation may narrow a result to `self` or `internal`, or require a reader
 # this policy names, exactly as a static rule above would.
 # APPA-UNIX-FALLBACK-BEGIN
-# The Bash Annotator of the Claude Code battery. How a model Annotator
-# classifies — trust by who wrote the returned text, audience by the visible
-# destination — is the runtime's. Add a `hint` with what only this deployment
-# knows: which hosts are its own, which paths hold whose data. This root
-# declaration replaces the battery's Annotator, while the battery continues to
-# provide the Bash contract and credential-path rules.
+# The Bash Annotators run a Claude subprocess, which is available only on Unix.
+# The root supplies the Bash rules absent from the portable battery. The
+# repository input resolves a publishing destination before its Annotator runs.
+[[policy.annotator]]
+name = "claude-code.bash-repository-requirements"
+builtin = "claude-code"
+inputs = { call = "$tool_call", repository = "$input.claude-code.repository" }
+hint = "`repository` is the deployment's own finding: the GitHub repository the command reaches, with its `visibility`, or `null` with a `reason`. A push, pull request, issue, release, or comment into a public repository, or into one not established, requires audience public; into a private or internal one requires audience internal. A read keeps the session's audience."
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*git push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh pr *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh issue *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh release *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh api *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh repo *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[externals.inputs."claude-code.repository"]
+command = ["python3", "batteries/claude-code/repository.py"]
+
+# How a model Annotator classifies — trust by who wrote the returned text,
+# audience by the visible destination — is the runtime's. Add a `hint` with
+# what only this deployment knows: which hosts are its own and which paths hold
+# whose data. The mandate leaves `audiences` omitted, so it may name readers.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
+
+[[policy.tool]]
+name = "host/claude-code/Bash"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-requirements"
 
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
