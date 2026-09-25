@@ -545,10 +545,11 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(cwd.starts_with("/etc/appa/.appa/my deployment.toml/files/"));
-        let result = std::process::Command::new("./helper.sh")
-            .current_dir(prepared.join("assets").join(cwd.strip_prefix("/etc/appa/").unwrap()))
-            .output()
-            .unwrap();
+        let result = crate::child_process::output(
+            std::process::Command::new("./helper.sh")
+                .current_dir(prepared.join("assets").join(cwd.strip_prefix("/etc/appa/").unwrap())),
+        )
+        .unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"helper-ok");
         File::create(base.join("large.dat"))

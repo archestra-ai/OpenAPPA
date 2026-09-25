@@ -127,20 +127,10 @@ pub fn served_url(child: &mut Child) -> String {
     line.trim_end().to_string()
 }
 
-/// Spawn `command` while no other spawn through here runs. Where the platform lacks
-/// `pipe2` (macOS), std creates a child's pipes and marks them close-on-exec in two
-/// steps, so a child spawned by a parallel test in between inherits them: it can hold a
-/// read end the test dropped, or a write end the child waits to see closed.
-pub fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
-    static SPAWNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _alone = SPAWNING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    command.spawn()
-}
-
 /// Start the built binary as `appa runtime` over `config` and `db`, and wait until
 /// `/health` answers.
 pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
-    let child = spawn_child(
+    let child = appa_runtime::child_process::spawn(
         Command::new(env!("CARGO_BIN_EXE_appa"))
             .arg("runtime")
             .arg("--config")

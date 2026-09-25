@@ -279,9 +279,7 @@ fn spawn(
         command.process_group(0);
     }
     Ok(NativeChild {
-        child: command
-            .spawn()
-            .map_err(|error| io("run selected binary", binary, error))?,
+        child: crate::child_process::spawn(&mut command).map_err(|error| io("run selected binary", binary, error))?,
         completed: false,
     })
 }

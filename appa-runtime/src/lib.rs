@@ -46,6 +46,7 @@ mod batteries_layout;
 #[cfg(feature = "daemon")]
 mod batteries_staging;
 mod builtins;
+pub mod child_process;
 mod consult;
 mod elicit;
 mod engine;

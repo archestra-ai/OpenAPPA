@@ -112,7 +112,7 @@ pub(crate) async fn run_claude_code(
     command.as_std_mut().process_group(0);
     isolate_claude_environment(&mut command, std::env::vars_os().collect());
     tracing::debug!("claude consult starts");
-    let mut child = command.spawn().map_err(|_| {
+    let mut child = crate::child_process::spawn_async(&mut command).map_err(|_| {
         tracing::warn!(command = %backend.config.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;

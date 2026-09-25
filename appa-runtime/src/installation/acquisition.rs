@@ -449,12 +449,8 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
 }
 
 fn git_head(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
+    let output =
+        crate::child_process::output(Command::new("git").arg("-C").arg(root).args(["rev-parse", "HEAD"])).ok()?;
     output
         .status
         .success()
@@ -464,13 +460,14 @@ fn git_head(root: &Path) -> Option<String> {
 /// Committed content only, so a dirty checkout exports exactly its HEAD. The
 /// marketplace tree holds every source `batteries_layout` maps.
 fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "core.autocrlf=false"])
-        .args(["archive", "--format=tar", "HEAD", "marketplace"])
-        .output()
-        .map_err(|error| io("export the build's commit", root, error))?;
+    let output = crate::child_process::output(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "core.autocrlf=false"])
+            .args(["archive", "--format=tar", "HEAD", "marketplace"]),
+    )
+    .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
         return Err(InstallError::Invalid(format!(
             "git archive failed at {}: {}",
@@ -703,12 +700,12 @@ mod tests {
         let destination = stage.path().join("source");
         export_commit(root, &destination).unwrap();
         let path = "marketplace/batteries/archestra/README.md";
-        let committed = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["cat-file", "blob", &format!("HEAD:{path}")])
-            .output()
-            .unwrap();
+        let committed = crate::child_process::output(Command::new("git").arg("-C").arg(root).args([
+            "cat-file",
+            "blob",
+            &format!("HEAD:{path}"),
+        ]))
+        .unwrap();
         assert!(committed.status.success());
         assert_eq!(fs::read(destination.join(path)).unwrap(), committed.stdout);
     }

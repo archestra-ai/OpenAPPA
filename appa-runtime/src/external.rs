@@ -1127,7 +1127,7 @@ async fn run_command_process(
         .envs(without_runtime_variables(parent))
         .envs(credential);
 
-    let mut child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
+    let mut child = crate::child_process::spawn_async(&mut configured).map_err(|_| NoAnswerReason::Unreachable)?;
     let tail = child.stderr.take().map(stderr_tail);
     let mut process = CommandProcess::spawned(child)?;
     let process_group = process.process_group();
@@ -2517,7 +2517,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         if let Some(features) = features {
             command.args(["--features", features]);
         }
-        let output = command.output().expect("cargo runs");
+        let output = crate::child_process::output(&mut command).expect("cargo runs");
         assert!(
             output.status.success(),
             "the fixture build failed:\n{}",
@@ -2856,12 +2856,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     #[cfg(unix)]
     #[tokio::test]
     async fn a_tail_reader_past_its_wait_is_aborted() {
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("10")
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("sleep starts");
+        let mut child = crate::child_process::spawn_async(
+            tokio::process::Command::new("sleep")
+                .arg("10")
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true),
+        )
+        .expect("sleep starts");
         let mut tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
 
         assert_eq!(tail.within(Duration::from_millis(20)).await, None);
