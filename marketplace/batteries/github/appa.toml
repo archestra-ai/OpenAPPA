@@ -18,7 +18,7 @@
 # as public by its query. Root rules run first:
 #
 #   [[policy.tool]]
-#   name = "mcp/github/search_code(query:*repo\:acme/website*)"
+#   name = "mcp/github/search_code(query:*repo:acme/website*)"
 #   delta = { trust = "suspicious" }
 #
 # The battery also binds `audience-source.py`, the `github` audience

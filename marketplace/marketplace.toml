@@ -4,11 +4,11 @@ name = "appa"
 
 [packages.battery.archestra]
 path = "batteries/archestra"
-digest = "sha256:9f03eb7072dfdf97221494830ffd7dae3647b74086e99a1ce44455f07821be2c"
+digest = "sha256:c2656e5e55a6b222517253adce4b80214e879a9f4e5330a1e2de7af8f16df319"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:eeea9a788db3b06c0d8ef7a4a86f5b0c41610538196d87fd518b1005f65e7f53"
+digest = "sha256:44742d5a0ceb0a5350cd221a4ebfa711fe5c9d76eff083726d0106a2ca194049"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
@@ -20,7 +20,7 @@ digest = "sha256:264b2cf3539e18dbb24112376b75afe7adaa2c5ca57a722405f9101ddf51b2b
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:11d512421d3841e6f50d260ad7666e1310e8d5cf3aab9a6867bf50e1d97e5fa1"
+digest = "sha256:c14ee53a4c8aa4a785e39c5a41f09f439af9b789d7b0ab504e8ae1ac8ea4ab20"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -36,7 +36,7 @@ digest = "sha256:465831ee32962ca5a6a525e981edc96eb54bc8383680579d3f029502f3f100f
 
 [packages.battery.jev]
 path = "batteries/jev"
-digest = "sha256:7ad8564bf4ce5227cdf11847af3847ec13b1bd5b76c93a3ccf623bdbdb758e0f"
+digest = "sha256:4ec10b90f6b97c2962dd740a6c61ae8e347269d50f2e0991406b62bef9e222d5"
 
 [packages.battery.launchdarkly]
 path = "batteries/launchdarkly"
@@ -60,7 +60,7 @@ digest = "sha256:c0979f9c76fe86006956ec3f55bcd782f4722f15a943ce7eb1cb1a04ca97d89
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
-digest = "sha256:2e1e7ad194caa618b976fbf90740274af6e153fd01d82fecd903a9e0822bfbad"
+digest = "sha256:31af454de917dc50544a2ba0930c2d0ccea722750975366bef6e56f02992f470"
 
 [packages.battery.posthog]
 path = "batteries/posthog"

@@ -105,7 +105,7 @@ hint = "Hosts under corp.example are the organization's own: what they return is
 The root declaration replaces the battery's Annotator with the same name.
 Preserve `builtin` unless you intend to alter the implementation; write
 `audiences` only to narrow the mandate below the policy's vocabulary. The battery continues to provide ordered Bash rules, including its
-credential-path refusals.
+credential-path narrowing.
 
 ## Example override
 
