@@ -10,10 +10,14 @@ process or provider credential. Add it to your root config with
 
 *Reads* — search, AI search, fetch, data-source queries, meeting notes,
 comments, teams, users, Skills, attachments, and the read side of custom
-Agent sessions. Page and database content was written by whoever edits
-the workspace and by connected sources, so it enters `suspicious`,
-restricted to `internal`. A query's input must be sharable with
-`internal` too.
+Agent sessions. Trust follows who can write the text. Workspace members
+write pages, databases, and comments, so reads keep the session's trust,
+restricted to `internal`. Form responses and integration-synced pages
+count as trusted too, because a member published the form or connected
+the source. Search also reaches connected sources such as mail, and AI
+meeting notes carry what outside participants said, so `notion-search`,
+`notion-ai-search`, and `notion-query-meeting-notes` enter `suspicious`.
+A query's input must be sharable with `internal` too.
 
 *Writes inside the workspace* — creating and updating pages, databases,
 folders, views, comments, and file uploads need trusted data that

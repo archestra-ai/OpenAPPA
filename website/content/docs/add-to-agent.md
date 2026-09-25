@@ -10,7 +10,7 @@ Your agent runs the tools. APPA checks whether your rules allow each tool call a
 
 :::fig-runtime-overview:::
 
-Choose how to connect: add APPA to your own agent's code, use an existing agent's hooks, or route model requests through Archestra.
+Choose an integration path below, or give your coding agent a prompt to work out the details.
 
 :::integration-paths:::
 
@@ -18,9 +18,9 @@ Choose how to connect: add APPA to your own agent's code, use an existing agent'
 
 Use APPA with an agent written in Python, Rust, TypeScript, Java, Go, or another language. This includes agents built with LangGraph, PydanticAI, or the OpenAI Agents SDK. Keep your stack and add the integration to your existing code.
 
-Start with the [Python binding](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-agent-python) and [Rust example agent](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-example-agent) as references. Give your coding agent the [integration prompt below](#start-in-your-repository) to build and test the integration for your agent.
+Start with the [Python binding](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-agent-python) and [Rust example agent](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-example-agent) as references.
 
-See [What will happen next](#what-will-happen-next) for an overview of the integration work.
+Ask your coding agent to run [this prompt](#start-in-your-repository) to implement it.
 
 ## Connect a coding agent through hooks
 
@@ -30,7 +30,7 @@ APPA runs alongside the agent as a local process, sidecar, or shared service. Fo
 
 [Claude Code](/claude-code) is a ready-made example for a coding agent; [kagent](/kagent) shows the same approach for Kubernetes agents. Their dedicated guides cover setup and configuration.
 
-See [What will happen next](#what-will-happen-next) for an overview of the integration work.
+Ask your coding agent to run [this prompt](#start-in-your-repository) to implement it.
 
 ## Use APPA at the LLM proxy
 

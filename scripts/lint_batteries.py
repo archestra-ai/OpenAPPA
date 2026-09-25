@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Check that every production battery script is reachable from appa.toml.
+"""Check that every production battery script is reachable from policy commands.
 
 The linter deliberately understands a small command language.  This keeps the
-answer useful for package validation: a command is either an exact two-element
-argv for ``python3`` and one local Python script, or it is diagnosed as an
-unsupported command. It does not try to execute TOML or Python.
+answer useful for package validation: a command in the battery or a plugin's
+default policy is an exact two-element argv for ``python3`` and one local
+Python script, or it is diagnosed as unsupported. It does not execute policies.
 """
 
 from __future__ import annotations
@@ -109,6 +109,20 @@ def _command_values(
     elif isinstance(value, list):
         for child in value:
             yield from _command_values(child, source, text, cursor)
+
+
+def _plugin_commands_for_battery(root: Path) -> Iterator[Command]:
+    """Follow plugin default commands that target this installed battery."""
+
+    if root.parent.name != "batteries":
+        return
+    prefix = f"batteries/{root.name}/"
+    for policy in sorted((root.parent.parent / "plugins").glob("*/default.appa.toml")):
+        text = policy.read_text(encoding="utf-8")
+        for command in _command_values(tomllib.loads(text), policy, text):
+            argv = command.argv
+            if isinstance(argv, list) and len(argv) == 2 and isinstance(argv[1], str) and argv[1].startswith(prefix):
+                yield Command([argv[0], argv[1][len(prefix):]], command.location)
 
 
 def _toml_line(error: tomllib.TOMLDecodeError) -> int | None:
@@ -373,7 +387,7 @@ def lint_battery(root: Path) -> list[Diagnostic]:
             _diagnostic(battery, "invalid manifest", f"appa.toml is not valid TOML: {error}", Location(appa, _toml_line(error)))
         ]
 
-    commands = list(_command_values(appa_data, appa, appa_text))
+    commands = list(_command_values(appa_data, appa, appa_text)) + list(_plugin_commands_for_battery(root))
     direct_targets: set[Path] = set()
     for command in commands:
         target, found = _parse_command(command, battery, root)

@@ -3,12 +3,16 @@ use common::repo_root;
 #[cfg(unix)]
 use common::{actor, last_offer, offer_of, propose, ran, raw, root};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::Arc;
 
 #[cfg(unix)]
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+#[cfg(unix)]
+use appa_runtime::config::AnnotatorImplementation;
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
@@ -17,6 +21,7 @@ use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolO
 
 /// The policies a package directory ships, by the suffix every one of them
 /// carries. The package's own `appa-package.toml` manifest is not a policy.
+#[cfg(unix)]
 fn policy_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
@@ -41,6 +46,7 @@ fn opens(path: &Path) {
         .unwrap_or_else(|error| panic!("{} does not open: {error}", path.display()));
 }
 
+#[cfg(unix)]
 #[test]
 fn every_shipped_example_opens() {
     let examples = policy_files(&repo_root().join("marketplace/plugins/claude-code"));
@@ -81,6 +87,11 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
+    std::fs::copy(
+        repository.join("marketplace/batteries/claude-code/repository.py"),
+        battery_dir.join("repository.py"),
+    )
+    .expect("the repository input is copied");
 
     let root = dir.path().join("appa.toml");
     std::fs::write(
@@ -97,6 +108,11 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
 fn the_initialized_default_composes_with_the_claude_code_battery() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
+    let Some(AnnotatorImplementation::Command(repository)) = config.externals.inputs.get("claude-code.repository")
+    else {
+        panic!("the root registers the battery's repository input");
+    };
+    assert!(repository.cwd.join(&repository.argv[1]).is_file());
     let annotators = config.policy_file().value()["annotator"]
         .as_array()
         .expect("the composed Annotators are an array");
@@ -104,16 +120,16 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .iter()
         .filter(|annotator| annotator["name"].as_str() == Some("claude-code.bash-requirements"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        bash_annotators.len(),
-        1,
-        "the root Bash Annotator replaces the battery default"
-    );
+    assert_eq!(bash_annotators.len(), 1, "the root supplies the Bash Annotator");
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
     for (name, annotator) in [
         ("host/claude-code/Bash", "claude-code.bash-requirements"),
+        (
+            "host/claude-code/Bash(command:*git push*)",
+            "claude-code.bash-repository-requirements",
+        ),
         ("*", "claude-code.undeclared-tool"),
     ] {
         let matches = tools
@@ -453,6 +469,10 @@ version = 2
 
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash"
+annotator = "claude-code.bash-requirements"
 
 [externals]
 timeout_ms = 5000

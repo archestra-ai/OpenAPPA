@@ -10,6 +10,7 @@ use crate::config::ConfigError;
 use crate::installation::archive;
 use std::env;
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use thiserror::Error;
@@ -117,11 +118,8 @@ pub fn activate_claude_code(config: &Path) -> Result<String, InitError> {
         path: config.to_owned(),
         source,
     })?;
-    crate::config::Config::load(&config).map_err(|source| InitError::UnloadableConfig {
-        path: config.clone(),
-        source: Box::new(source),
-    })?;
-    install_claude(&build_label(), endpoint, config)
+    let composed_policy = verify_config(&config)?;
+    install_claude(&build_label(), endpoint, config, composed_policy)
 }
 
 /// The origin as a receipt names it: this binary's release tag, or the commit
@@ -138,7 +136,12 @@ fn build_label() -> String {
     }
 }
 
-fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<String, InitError> {
+fn install_claude(
+    origin: &str,
+    endpoint: Endpoint,
+    config: PathBuf,
+    composed_policy: ComposedPolicy,
+) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let paths = deployment_paths()?;
     let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
@@ -157,7 +160,6 @@ fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<S
             source,
         }
     })?;
-    let composed_policy = verify_config(&config)?;
 
     // 2. What the profile holds under APPA's names. A server or a skill that
     //    no install wrote is refused here, with the profile untouched.
@@ -361,19 +363,36 @@ fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
     // APPA_RUNTIME_URL is removed rather than set: to the start it means "the
     // user runs their own runtime here", and setting it would suppress managed
     // replacement permanently.
-    let output = command
+    // A long-lived Windows runtime can inherit the starter's output handles.
+    // A regular file keeps diagnostics without waiting for those handles to close.
+    let mut output = tempfile::tempfile().map_err(|error| InitError::Starter(error.to_string()))?;
+    let stdout = output
+        .try_clone()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let stderr = output
+        .try_clone()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let status = command
         .env_remove("APPA_RUNTIME_URL")
         .stdin(Stdio::null())
-        .output()
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
         .map_err(|error| InitError::Starter(error.to_string()))?;
-    if output.status.success() {
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(InitError::Starter(if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    output.rewind().map_err(|error| InitError::Starter(error.to_string()))?;
+    let mut diagnostics = Vec::new();
+    output
+        .take(65536)
+        .read_to_end(&mut diagnostics)
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let message = String::from_utf8_lossy(&diagnostics).trim().to_owned();
+    Err(InitError::Starter(if message.is_empty() {
+        format!("runtime ensure exited with {status}")
     } else {
-        stderr
+        message
     }))
 }
 

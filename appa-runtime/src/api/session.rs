@@ -10,7 +10,8 @@ use crate::consult::{
 };
 use crate::engine::{
     Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
-    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
+    ForkStatus, InputRequest, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
+    engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -302,6 +303,11 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
         &self.trajectory
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deployment(&self) -> &Deployment {
+        &self.deployment
     }
 
     /// The actor's turn is over. Calls still open here got no outcome
@@ -1577,27 +1583,12 @@ impl Session {
             } => {
                 // Every input program answers first, together; one that does not refuses
                 // the annotation exactly as the annotator's own silence would.
-                let mut asked = Vec::with_capacity(inputs.len());
-                for input in inputs {
-                    asked.push(self.timed_consult(&input.consult, None, None, occasion, Some(call)));
-                }
-                let outcomes = crate::external::settle_batch(asked).await;
-                let mut args = args.clone();
-                let mut refused = None;
-                for (input, outcome) in inputs.iter().zip(outcomes) {
-                    match outcome {
-                        ConsultOutcome::Answer(answer) => {
-                            args.as_object_mut()
-                                .expect("an annotation with declared inputs carries an object artifact")
-                                .insert(input.input.clone(), answer);
-                        }
-                        ConsultOutcome::NoAnswer(reason) => {
-                            refused.get_or_insert((input, reason));
-                        }
-                    }
-                }
-                let answer = match refused {
-                    Some((input, reason)) => {
+                let joined = join_input_answers(args.clone(), inputs, |consult| {
+                    self.timed_consult(consult, None, None, occasion, Some(call))
+                })
+                .await;
+                let answer = match joined {
+                    Err((input, reason)) => {
                         tracing::warn!(
                             annotator,
                             input = input.input,
@@ -1607,7 +1598,7 @@ impl Session {
                         );
                         Err(reason)
                     }
-                    None => {
+                    Ok(args) => {
                         let consult = Consult {
                             name: annotator.clone(),
                             body: ConsultBody::Annotation {
@@ -1617,11 +1608,7 @@ impl Session {
                         };
                         match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
                             ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
-                                .ok_or_else(|| {
-                                    crate::external::NoAnswerReason::MalformedAnswer(
-                                        "detail=invalid_fields_or_value_types".to_string(),
-                                    )
-                                }),
+                                .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                             ConsultOutcome::NoAnswer(reason) => Err(reason),
                         }
                     }
@@ -1776,6 +1763,35 @@ impl Decided<'_> {
             _ => Err(EventError::SpawnAmbiguous),
         }
     }
+}
+
+/// An annotation's artifact with each input program's answer joined under its input's name,
+/// the programs asked together; or the first input, in declaration order, that produced no
+/// answer.
+pub(super) async fn join_input_answers<'a, Asked>(
+    mut args: serde_json::Value,
+    inputs: &'a [InputRequest],
+    ask: impl Fn(&'a Consult) -> Asked,
+) -> Result<serde_json::Value, (&'a InputRequest, crate::external::NoAnswerReason)>
+where
+    Asked: std::future::Future<Output = ConsultOutcome>,
+{
+    let mut asked = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        asked.push(ask(&input.consult));
+    }
+    let outcomes = crate::external::settle_batch(asked).await;
+    for (input, outcome) in inputs.iter().zip(outcomes) {
+        match outcome {
+            ConsultOutcome::Answer(answer) => {
+                args.as_object_mut()
+                    .expect("an annotation with declared inputs carries an object artifact")
+                    .insert(input.input.clone(), answer);
+            }
+            ConsultOutcome::NoAnswer(reason) => return Err((input, reason)),
+        }
+    }
+    Ok(args)
 }
 
 fn remedy_presentation(
@@ -6961,14 +6977,7 @@ delta = {}
         use axum::routing::post;
         const REPLY: &str = r#"{"answers":{"delta_audience":{"probabilities":{"self":0.0,"internal":0.1,"public":0.9}},"delta_trust":{"probabilities":{"suspicious":0.1,"trusted":0.9}},"requires_audience":{"probabilities":{"public":0.0,"internal":0.1,"none":0.9}},"requires_trusted":{"noul":0.1}}}"#;
         let app = axum::Router::new().route("/v1/systemone", post(|| async { REPLY }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a loopback stub binds");
-        let url = format!(
-            "http://{}/v1/systemone",
-            listener.local_addr().expect("the stub has an address")
-        );
-        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let url = format!("http://{}/v1/systemone", crate::test_support::serve(app).await);
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
         std::fs::write(
@@ -6980,10 +6989,9 @@ delta = {}
         )
         .expect("the fixture writes");
         let mut config = Config::load(&path).expect("the fixture validates");
-        config.externals.jev = Some(crate::config::JevProfile {
-            url,
-            key: crate::config::JevKey::Set(crate::config::Token::new("jev-test-key".to_string())),
-        });
+        let jev = config.externals.jev.as_mut().expect("the profile is declared");
+        jev.url = url;
+        jev.key = crate::config::ProfileKey::Set(crate::config::Token::new("jev-test-key".to_string()));
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let recorder = Arc::new(Collected::default());
         let session = runtime

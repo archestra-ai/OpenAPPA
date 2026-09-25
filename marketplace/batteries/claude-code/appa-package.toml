@@ -1,6 +1,6 @@
 schema = 1
 name = "claude-code"
-description = "Rules for the Claude Code built-in tools host/claude-code/Bash, host/claude-code/Read, host/claude-code/Grep, host/claude-code/Write and host/claude-code/Edit: credential paths and credential commands narrow to self, writes into them need a trusted session, and the model Annotator writes every other command's contract."
+description = "Static Claude Code tool rules: credential paths and commands narrow to self, writes into them require a trusted session, and Bash results remain confined for sanitization. The Unix default root supplies the Bash Annotator."
 
 [battery]
 policy = "appa.toml"

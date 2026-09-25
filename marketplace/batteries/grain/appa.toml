@@ -1,9 +1,15 @@
 # Grain battery: meeting recordings, notes, deals, and workspace admin.
 #
-# What a meeting tool returns was said by the people in the meeting,
-# including outside participants, so it is untrusted and stays with the
-# organization's members (`internal`). Writes that stay in
-# the workspace need only that the data going in is Grain data. Sharing a
+# Trust follows who can write the text. What a meeting tool returns was
+# said by the people in the meeting, including outside participants, so
+# meeting content enters `suspicious` and stays with the organization's
+# members (`internal`). Workspace users, teams, and settings are written
+# by members and keep the session's trust.
+#
+# Clips, stories, collections, and tags are read back as meeting content,
+# at `suspicious`, so writing them needs no trusted data: a session that
+# read a transcript can still cut a clip from it. A smart topic is read
+# back with the settings, so creating one needs trusted data. Sharing a
 # collection with anyone who has the link, inviting people, and changing
 # seats, teams, or settings need a person. The root config supplies the
 # `hitl` authority.
@@ -11,91 +17,91 @@
 [policy]
 version = 2
 
-# --- meeting content: internal ---
+# --- meeting content: outside participants, internal ---
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_meetings"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_attended_meetings"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_meeting"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_meeting_transcript"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_meeting_notes"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_meeting_action_items"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_user_recording_notes"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/search_in_transcripts"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_meeting_coaching_feedback"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_coaching_feedback"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_clips"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_collections"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_collection"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_stories"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_story"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/search_companies"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/search_persons"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/get_dossier_for_company"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_all_deals"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/list_open_deals"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/fetch_deal"
-delta = { audience = ["internal"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 # --- workspace directory and settings: internal ---
 
@@ -142,37 +148,39 @@ name = "mcp/claude_ai_Grain/resolve_urls"
 delta = {}
 
 # --- writes that stay inside the workspace ---
+# Each is read back as meeting content, at `suspicious`.
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/create_clip"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/create_story"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/add_clips_to_story"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/create_collection"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/add_recordings_to_collection"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/tag_meetings"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
+# Read back with the settings, so it needs trusted data.
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/create_smart_topic"
 delta = {}

@@ -56,27 +56,27 @@
 //! re-validation on read is the gate.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::SystemTime;
-
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
+mod encoding;
 pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod receipts;
+mod sqlite;
+
+use encoding::encode;
+use sqlite::Sqlite;
 
 pub use receipts::{
     OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
     ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
 };
-
-const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -97,12 +97,17 @@ pub enum Backend {
 }
 
 pub struct LogStore {
-    connection: Option<Mutex<Connection>>,
-    #[cfg(feature = "postgres")]
-    postgres: Option<postgres::PostgresStore>,
+    store: Store,
     /// Shared with every store leased from this one, so a fail point armed here fires there.
     #[cfg(feature = "fault-injection")]
     faults: std::sync::Arc<FaultPoints>,
+}
+
+/// Where this store's log is kept. [`Backend::Memory`] is a SQLite connection to `:memory:`.
+enum Store {
+    Sqlite(Sqlite),
+    #[cfg(feature = "postgres")]
+    Postgres(postgres::PostgresStore),
 }
 
 #[cfg(feature = "fault-injection")]
@@ -113,7 +118,7 @@ struct FaultPoints {
     failing_reads: std::sync::atomic::AtomicU64,
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
-    contending_record: Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
+    contending_record: std::sync::Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
 /// The records of one read, and the position they were read at.
@@ -216,31 +221,6 @@ pub struct CallBinding<'a> {
     pub trajectory: &'a TrajectoryId,
     pub call_id: &'a str,
     pub dispatch: &'a DispatchId,
-}
-
-/// One stored batch. Both streams share a position, so an engine decision and the host
-/// observation it belongs with are durable together or not at all.
-///
-/// The encoding is the shape: a batch carrying no host observation is the bare JSON array of
-/// its facts, and one carrying an observation is an object with both fields. Nothing sniffs
-/// between unrelated payloads — the first token settles which of the two a stored row is.
-struct Record {
-    facts: Vec<Fact>,
-    host: Option<HostObservation>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostRow {
-    #[serde(default)]
-    facts: Vec<Fact>,
-    host: HostObservation,
-}
-
-#[derive(serde::Serialize)]
-struct HostRowRef<'a> {
-    facts: &'a [Fact],
-    host: &'a HostObservation,
 }
 
 impl Log {
@@ -433,7 +413,10 @@ impl LogStore {
     /// leased store, this is the lease's connection.
     #[cfg(feature = "postgres")]
     pub fn postgres(&self) -> Option<&postgres::PostgresStore> {
-        self.postgres.as_ref()
+        match &self.store {
+            Store::Sqlite(_) => None,
+            Store::Postgres(pg) => Some(pg),
+        }
     }
 
     /// This store over one pooled connection of its own. Everything the leased store does —
@@ -441,128 +424,29 @@ impl LogStore {
     /// the connection goes back to the pool when the leased store and what it began have dropped.
     #[cfg(feature = "postgres")]
     pub fn lease(&self) -> Result<LogStore, postgres::LeaseError> {
-        let pg = self.postgres.as_ref().ok_or(postgres::LeaseError::NotPostgres)?;
-        Ok(LogStore {
-            connection: None,
-            postgres: Some(pg.lease()?),
-            #[cfg(feature = "fault-injection")]
-            faults: std::sync::Arc::clone(&self.faults),
-        })
+        match &self.store {
+            Store::Sqlite(_) => Err(postgres::LeaseError::NotPostgres),
+            Store::Postgres(pg) => Ok(LogStore {
+                store: Store::Postgres(pg.lease()?),
+                #[cfg(feature = "fault-injection")]
+                faults: std::sync::Arc::clone(&self.faults),
+            }),
+        }
     }
 
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
-        #[cfg(feature = "postgres")]
-        if let Backend::Postgres { url, max_connections } = &backend {
-            return Ok(LogStore {
-                connection: None,
-                postgres: Some(postgres::PostgresStore::open(url.clone(), *max_connections)?),
-                #[cfg(feature = "fault-injection")]
-                faults: Default::default(),
-            });
-        }
-        let (mut connection, path) = match &backend {
-            Backend::Sqlite { path } => (Connection::open(path)?, path.display().to_string()),
-            Backend::Memory => (Connection::open_in_memory()?, ":memory:".to_string()),
+        let store = match backend {
+            Backend::Sqlite { path } => Store::Sqlite(Sqlite::open(&path)?),
+            Backend::Memory => Store::Sqlite(Sqlite::memory()?),
             #[cfg(feature = "postgres")]
-            Backend::Postgres { .. } => unreachable!("handled above"),
+            Backend::Postgres { url, max_connections } => {
+                Store::Postgres(postgres::PostgresStore::open(url, max_connections)?)
+            }
         };
-        if matches!(backend, Backend::Sqlite { .. }) {
-            let probe = || -> Result<String, rusqlite::Error> {
-                connection.busy_timeout(std::time::Duration::from_secs(5))?;
-                connection.pragma_update(None, "journal_mode", "WAL")?;
-                connection.pragma_update(None, "synchronous", "FULL")?;
-                connection.query_row("PRAGMA quick_check", [], |row| row.get(0))
-            };
-            let check = probe().map_err(|error| OpenError::Damaged {
-                path: path.clone(),
-                detail: error.to_string(),
-            })?;
-            if check != "ok" {
-                return Err(OpenError::Damaged { path, detail: check });
-            }
-        }
-
-        {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            // Only an empty file is initialized. A database that holds tables
-            // but carries no stamp was written by something else — an earlier
-            // store, another tool — and creating this schema beside its data
-            // would leave its histories present and invisible.
-            if version == 0 && is_empty(&transaction)? {
-                transaction.execute_batch(
-                    "CREATE TABLE logs (
-                         root  TEXT NOT NULL,
-                         seq   INTEGER NOT NULL,
-                         facts BLOB NOT NULL,
-                         PRIMARY KEY (root, seq)
-                     );
-                     CREATE TABLE policy_files (
-                         key   TEXT PRIMARY KEY,
-                         bytes BLOB NOT NULL
-                     );
-                     CREATE TABLE host_keys (
-                         key  TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         PRIMARY KEY (key, root)
-                     );
-                     CREATE TABLE offer_owners (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         binding TEXT NOT NULL,
-                         offer_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         parent_id TEXT,
-                         arguments TEXT,
-                         tool TEXT,
-                         spelling TEXT,
-                         PRIMARY KEY (organization_id, offer_id)
-                     );
-                     CREATE TABLE operations (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         operation_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         input TEXT NOT NULL,
-                         status TEXT NOT NULL,
-                         decision TEXT,
-                         PRIMARY KEY (session_id, operation_id)
-                     );
-                     CREATE TABLE processed_results (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         tool_call_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         status TEXT NOT NULL,
-                         approved_output TEXT,
-                         decision TEXT,
-                         PRIMARY KEY (session_id, tool_call_id)
-                     );",
-                )?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            } else if version != SCHEMA_VERSION {
-                return Err(OpenError::ForeignSchema {
-                    path,
-                    found: version,
-                    expected: SCHEMA_VERSION,
-                });
-            } else if !has_schema(&transaction)? {
-                return Err(OpenError::Damaged {
-                    path,
-                    detail: "stamped at this build's schema version, but its tables are missing".to_string(),
-                });
-            }
-            transaction.commit()?;
-        }
         Ok(LogStore {
-            connection: Some(Mutex::new(connection)),
-            #[cfg(feature = "postgres")]
-            postgres: None,
+            store,
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
         })
@@ -577,55 +461,32 @@ impl LogStore {
             return Err(CreateError::PolicyFileMismatch);
         }
         let bytes = encode(&opening, None);
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.create(&root, &key, policy_file, bytes);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite
+                .create(&root, &key, policy_file, &bytes, || {
+                    // A refusal here rolls the transaction back, exactly as a process kill before
+                    // the commit would leave the file.
+                    #[cfg(feature = "fault-injection")]
+                    if self.failure_fires() {
+                        return Err(CreateError::Injected);
+                    }
+                    Ok(())
+                })
+                .map(|()| root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.create(&root, &key, policy_file, bytes),
         }
-        let mut connection = self.lock();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-            params![key.as_str(), policy_file],
-        )?;
-        match transaction.execute(
-            "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
-            params![root.as_str(), bytes],
-        ) {
-            Ok(_) => {}
-            Err(error) if is_taken(&error) => {
-                return Err(CreateError::AlreadyExists {
-                    root: root.as_str().to_string(),
-                });
-            }
-            Err(error) => return Err(CreateError::Storage(error)),
-        }
-        #[cfg(feature = "fault-injection")]
-        if self.failure_fires() {
-            // Dropping the transaction rolls it back, exactly as a process kill before the
-            // commit would leave the file.
-            return Err(CreateError::Injected);
-        }
-        transaction.commit()?;
-        Ok(root)
     }
 
     /// Whether this root has a log at all. The cheap question a caller asks before it decides
     /// to open one — reading the whole log to learn only this would cost the caller a second
     /// read on the path that then goes on to read it properly.
     pub fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.has_root(root).map_err(Into::into);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.has_root(root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.has_root(root).map_err(Into::into),
         }
-        let connection = self.lock();
-        let found: Option<i64> = connection
-            .query_row(
-                "SELECT 1 FROM logs WHERE root = ?1 LIMIT 1",
-                params![root.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
     }
 
     /// Read one root's whole log, with the position it stands at and the policy file it opened
@@ -633,15 +494,11 @@ impl LogStore {
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.log(root);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.log(root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.log(root),
         }
-        let (batches, policy_file) = {
-            let connection = self.lock();
-            stored(&connection, root)?
-        };
-        decoded(root, batches, policy_file)
     }
 
     /// Append records to the log `based_on` was read from, only if it still stands where that
@@ -677,76 +534,147 @@ impl LogStore {
     pub fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.roots_mentioning(key);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.roots_mentioning(key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.roots_mentioning(key),
         }
-        let connection = self.lock();
-        let mut statement = connection.prepare("SELECT root FROM host_keys WHERE key = ?1 ORDER BY root ASC")?;
-        let roots = statement
-            .query_map(params![key], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
     /// One batch at one position, and the key row beside it where the batch names a key.
     fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
-        #[cfg(feature = "postgres")]
-        if let Some(pg) = &self.postgres {
-            return pg.append(root, basis, bytes, key);
-        }
-        let mut connection = self.lock();
-        #[cfg(feature = "fault-injection")]
-        if self.contention_fires() {
-            // A foreign writer wins the race in its own committed transaction, exactly as a
-            // second process would. It takes the position and records nothing, so this caller's
-            // append conflicts on position and replays, and an assertion reads whose write landed
-            // from the position rather than from records a later read would have to accept.
-            //
-            // Where the injection names an observation, the winner records that instead, and
-            // where it names another family it records there and still takes this one's
-            // position: a foreign writer that changed a sibling's log is the race a reader of
-            // several families has to survive.
-            let armed = self
-                .faults
-                .contending_record
-                .lock()
-                .expect("the injection mutex is never poisoned")
-                .take()
-                .filter(|(racing, _, _)| racing == root);
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
-                let at = position(&transaction, into)?;
-                insert_batch(&transaction, into, at, &bytes, key)
-            };
-            match &armed {
-                Some((_, recorded_in, observation)) => {
-                    write(recorded_in, encode(&[], Some(observation)), observation.key())?;
-                    if recorded_in != root {
-                        write(root, encode(&[], None), None)?;
-                    }
+        match &self.store {
+            Store::Sqlite(sqlite) => {
+                #[allow(unused_mut, reason = "only the fault-injection build races the append")]
+                let mut appender = sqlite.appender();
+                #[cfg(feature = "fault-injection")]
+                if self.contention_fires() {
+                    self.contend(&mut appender, root)?;
                 }
-                None => write(root, encode(&[], None), None)?,
+                appender.append(root, basis, &bytes, key, || {
+                    #[cfg(feature = "fault-injection")]
+                    if self.failure_fires() {
+                        return Err(AppendError::Injected);
+                    }
+                    Ok(())
+                })
             }
-            transaction.commit()?;
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.append(root, basis, bytes, key),
         }
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = position(&transaction, root)?;
-        if current != basis {
-            return Err(AppendError::Conflict { current });
+    }
+
+    /// Stores an offer owner record. Repeated writes with identical data are idempotent.
+    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.store_offer_owner(&record),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.store_offer_owner(record),
         }
-        insert_batch(&transaction, root, current, &bytes, key)?;
-        #[cfg(feature = "fault-injection")]
-        if self.failure_fires() {
-            return Err(AppendError::Injected);
+    }
+
+    /// Reads an offer owner record by key.
+    pub fn offer_owner(&self, key: OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.offer_owner(&key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.offer_owner(key).map_err(Into::into),
         }
-        transaction.commit()?;
-        Ok(())
+    }
+
+    /// Deletes stored offer owner records for a session scope.
+    pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.expire_offer_owners(&scope),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.expire_offer_owners(scope).map_err(Into::into),
+        }
+    }
+
+    /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
+    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.claim_operation(&request),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_operation(request),
+        }
+    }
+
+    /// Completes a claimed operation receipt with its final decision.
+    pub fn complete_operation(&self, key: OperationKey, decision: serde_json::Value) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.complete_operation(&key, &decision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_operation(key, decision),
+        }
+    }
+
+    /// Claims a durable processed-result receipt before result processing.
+    pub fn claim_processed_result(
+        &self,
+        request: ProcessedResultRequest,
+    ) -> Result<ProcessedResultClaim, ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.claim_processed_result(&request),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_processed_result(request),
+        }
+    }
+
+    /// Completes a processed-result receipt with its approved output and decision.
+    pub fn complete_processed_result(
+        &self,
+        key: ProcessedResultKey,
+        approved_output: String,
+        decision: serde_json::Value,
+    ) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.complete_processed_result(&key, &approved_output, &decision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision),
+        }
+    }
+
+    /// Checks whether pending receipts exist for a root trajectory.
+    pub fn has_pending_receipts(&self, root: String) -> Result<bool, ReceiptStorageError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.has_pending_receipts(&root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
+        }
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+impl LogStore {
+    /// A foreign writer wins the race in its own committed transaction, exactly as a second
+    /// process would. It takes the position and records nothing, so this caller's append
+    /// conflicts on position and replays, and an assertion reads whose write landed from the
+    /// position rather than from records a later read would have to accept.
+    ///
+    /// Where the injection names an observation, the winner records that instead, and where it
+    /// names another family it records there and still takes this one's position: a foreign
+    /// writer that changed a sibling's log is the race a reader of several families has to
+    /// survive.
+    fn contend(&self, appender: &mut sqlite::Appender<'_>, root: &TrajectoryId) -> Result<(), rusqlite::Error> {
+        let armed = self
+            .faults
+            .contending_record
+            .lock()
+            .expect("the injection mutex is never poisoned")
+            .take()
+            .filter(|(racing, _, _)| racing == root);
+        match &armed {
+            Some((_, recorded_in, observation)) if recorded_in != root => {
+                appender.foreign(&[(recorded_in, Some(observation)), (root, None)])
+            }
+            Some((_, recorded_in, observation)) => appender.foreign(&[(recorded_in, Some(observation))]),
+            None => appender.foreign(&[(root, None)]),
+        }
     }
 
     /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
-    /// process kill inside the transaction would.
-    #[cfg(feature = "fault-injection")]
+    /// process kill inside the transaction would. A PostgreSQL store never consults it.
     pub fn fail_commit_after(&self, skip: u64) {
         self.faults
             .commits_until_failure
@@ -756,7 +684,6 @@ impl LogStore {
     /// Arm the read fail point: the next `count` reads answer with a failure instead of the
     /// store's rows. A caller that refuses without asking the store leaves the arming where
     /// it was, so the read that comes after it still meets the failure.
-    #[cfg(feature = "fault-injection")]
     pub fn fail_next_reads(&self, count: u64) {
         self.faults
             .failing_reads
@@ -764,8 +691,8 @@ impl LogStore {
     }
 
     /// Arm the contention point: the next `count` appends are raced by a foreign writer that
-    /// wins, so each loses the compare-and-swap and its caller replays.
-    #[cfg(feature = "fault-injection")]
+    /// wins, so each loses the compare-and-swap and its caller replays. A PostgreSQL store
+    /// never consults it.
     pub fn contend_next_appends(&self, count: u64) {
         self.faults
             .contended_appends
@@ -775,7 +702,6 @@ impl LogStore {
     /// Arm the contention point once, with what the winner records. The next append to `root`
     /// loses to a writer that put `observation` in the log, so the caller's next derivation
     /// answers to a state another writer changed rather than to a position it only moved.
-    #[cfg(feature = "fault-injection")]
     pub fn contend_next_append_with(
         &self,
         racing: &TrajectoryId,
@@ -794,62 +720,46 @@ impl LogStore {
     /// Forget every stored policy file, leaving each root's opening naming a
     /// file this database no longer holds. Damage stated in this
     /// crate's own vocabulary, so a caller can pin how it refuses without
-    /// learning the schema.
-    #[cfg(feature = "fault-injection")]
+    /// learning the schema. SQLite only.
     pub fn forget_policy_files(&self) {
-        self.lock()
-            .execute("DELETE FROM policy_files", [])
-            .expect("the deletion runs");
+        self.sqlite_only().forget_policy_files();
     }
 
     /// Replace the bytes of every stored policy file, so each stops hashing to
-    /// the key its roots' openings name.
-    #[cfg(feature = "fault-injection")]
+    /// the key its roots' openings name. SQLite only.
     pub fn corrupt_policy_files(&self, bytes: &[u8]) {
-        self.lock()
-            .execute("UPDATE policy_files SET bytes = ?1", params![bytes])
-            .expect("the update runs");
+        self.sqlite_only().corrupt_policy_files(bytes);
     }
 
     /// Replace what one batch of a root's log holds. The bytes are stored as
     /// given, so a caller can leave records that do not decode, or records
-    /// that decode but are not the history they claim to be.
-    #[cfg(feature = "fault-injection")]
+    /// that decode but are not the history they claim to be. SQLite only.
     pub fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) {
-        let changed = self
-            .lock()
-            .execute(
-                "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
-                params![root.as_str(), seq as i64, bytes],
-            )
-            .expect("the update runs");
+        let changed = self.sqlite_only().corrupt_batch(root, seq, bytes);
         assert_eq!(changed, 1, "the batch to corrupt exists");
     }
 
-    #[cfg(feature = "fault-injection")]
+    fn sqlite_only(&self) -> &Sqlite {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite,
+            #[cfg(feature = "postgres")]
+            Store::Postgres(_) => panic!("SQLite-only operation"),
+        }
+    }
+
     fn failure_fires(&self) -> bool {
         consume(&self.faults.commits_until_failure) == Some(1)
     }
 
-    #[cfg(feature = "fault-injection")]
     fn contention_fires(&self) -> bool {
         consume(&self.faults.contended_appends).is_some()
     }
 
-    #[cfg(feature = "fault-injection")]
     fn read_refused(&self) -> Result<(), ReadError> {
         match consume(&self.faults.failing_reads) {
             Some(_) => Err(ReadError::Injected),
             None => Ok(()),
         }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.connection
-            .as_ref()
-            .expect("SQLite-only operation")
-            .lock()
-            .expect("the log store mutex is never poisoned: no panics under the lock")
     }
 }
 
@@ -862,24 +772,6 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
             remaining => Some(remaining - 1),
         })
         .ok()
-}
-
-fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
-    let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'offer_owners', 'operations', 'processed_results')",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(found == 6)
-}
-
-fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
-    let tables: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(tables == 0)
 }
 
 fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateError> {
@@ -898,132 +790,21 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
     }
 }
 
-fn insert_batch(
-    connection: &Connection,
-    root: &TrajectoryId,
-    at: u64,
-    bytes: &[u8],
-    key: Option<&str>,
-) -> Result<(), rusqlite::Error> {
-    connection.execute(
-        "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-        params![root.as_str(), at as i64, bytes],
-    )?;
-    if let Some(key) = key {
-        connection.execute(
-            "INSERT OR IGNORE INTO host_keys (key, root) VALUES (?1, ?2)",
-            params![key, root.as_str()],
-        )?;
-    }
-    Ok(())
-}
-
-fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM logs WHERE root = ?1",
-        params![root.as_str()],
-        |row| row.get(0),
-    )?;
-    Ok(count as u64)
-}
-
-fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>, Vec<u8>), ReadError> {
-    let mut statement = connection.prepare("SELECT facts FROM logs WHERE root = ?1 ORDER BY seq ASC")?;
-    let batches = statement
-        .query_map(params![root.as_str()], |row| row.get::<_, Vec<u8>>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let Some(first) = batches.first() else {
-        return Err(ReadError::UnknownRoot {
-            root: root.as_str().to_string(),
-        });
-    };
-    let opening = decode(first)?;
-    let Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
-        policy_file_key: key, ..
-    })) = opening.facts.first()
-    else {
-        return Err(ReadError::Undecodable(
-            "the log does not open with a TrajectoryOpened record".to_string(),
-        ));
-    };
-    let policy_file: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT bytes FROM policy_files WHERE key = ?1",
-            params![key.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(policy_file) = policy_file else {
-        return Err(ReadError::PolicyFileMissing {
-            key: key.as_str().to_string(),
-        });
-    };
-    Ok((batches, policy_file))
-}
-
-fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let basis = batches.len() as u64;
-    let mut facts = Vec::new();
-    let mut host = Vec::new();
-    for (seq, batch) in batches.iter().enumerate() {
-        let record = decode(batch)?;
-        facts.extend(record.facts);
-        if let Some(observation) = record.host {
-            host.push(HostRecord {
-                seq: seq as u64,
-                observation,
-            });
-        }
-    }
-    Ok(Log {
-        root: root.clone(),
-        facts,
-        basis,
-        policy_file,
-        host,
-    })
-}
-
-fn encode(facts: &[Fact], host: Option<&HostObservation>) -> Vec<u8> {
-    let expectation = "records serialize: every field is a serde type with no float or map key";
-    match host {
-        None => serde_json::to_vec(facts).expect(expectation),
-        Some(host) => serde_json::to_vec(&HostRowRef { facts, host }).expect(expectation),
-    }
-}
-
-/// Which of the two shapes a stored row is, from its first token. A row that is neither —
-/// an older encoding, or bytes this build cannot read — refuses the whole log.
-fn decode(bytes: &[u8]) -> Result<Record, ReadError> {
-    let undecodable = |error: serde_json::Error| ReadError::Undecodable(error.to_string());
-    match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
-        Some(b'[') => serde_json::from_slice(bytes)
-            .map(|facts| Record { facts, host: None })
-            .map_err(undecodable),
-        Some(b'{') => serde_json::from_slice::<HostRow>(bytes)
-            .map(|row| Record {
-                facts: row.facts,
-                host: Some(row.host),
-            })
-            .map_err(undecodable),
-        _ => Err(ReadError::Undecodable(
-            "a stored batch is neither an engine batch nor a host record".to_string(),
-        )),
-    }
-}
-
-fn is_taken(error: &rusqlite::Error) -> bool {
-    const PRIMARY_KEY: i32 = 1555;
-    const UNIQUE: i32 = 2067;
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(e, _) if e.extended_code == PRIMARY_KEY || e.extended_code == UNIQUE
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+
+    /// The SQLite connection, for tests that reach under the log's API.
+    impl LogStore {
+        pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+            match &self.store {
+                Store::Sqlite(sqlite) => sqlite.connection(),
+                #[cfg(feature = "postgres")]
+                Store::Postgres(_) => panic!("SQLite-only operation"),
+            }
+        }
+    }
 
     const POLICY: &str = r#"
         version = 2
@@ -1036,7 +817,7 @@ mod tests {
             .clone()
     }
 
-    fn root() -> TrajectoryId {
+    pub(crate) fn root() -> TrajectoryId {
         TrajectoryId::new("cc:root")
     }
 
@@ -1047,7 +828,7 @@ mod tests {
             .into_unsealed()
     }
 
-    fn punctuation() -> Vec<Fact> {
+    pub(crate) fn punctuation() -> Vec<Fact> {
         vec![Fact::Boundary {
             trajectory: root(),
             kind: appa_engine::fact::BoundaryKind::VoidReturn,
@@ -1138,7 +919,7 @@ mod tests {
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
     }
 
-    fn observed(actor: &str, server: &str) -> HostObservation {
+    pub(crate) fn observed(actor: &str, server: &str) -> HostObservation {
         HostObservation::Inventory {
             actor: TrajectoryId::new(actor),
             adapter: AdapterName::Kagent,
@@ -1222,18 +1003,34 @@ mod tests {
         assert_eq!(bindings[0].trajectory, &root());
     }
 
-    /// The encoding is the shape, and a batch with no observation is byte-for-byte what an
-    /// engine-only store wrote: nothing sniffs between two unrelated payloads.
+    /// The wire names a caller reports a failure class under.
     #[test]
-    fn a_batch_without_an_observation_is_the_bare_array_of_its_facts() {
-        assert_eq!(
-            encode(&punctuation(), None),
-            serde_json::to_vec(&punctuation()).unwrap()
-        );
-        let host = observed(root().as_str(), "demo");
-        let object: serde_json::Value = serde_json::from_slice(&encode(&[], Some(&host))).unwrap();
-        assert_eq!(object["facts"], serde_json::json!([]));
-        assert_eq!(object["host"]["kind"], "inventory");
+    fn store_error_classes_serialize_to_their_frozen_wire_names() {
+        let wire = |class: StoreErrorClass| match class {
+            StoreErrorClass::UnknownRoot => "unknown_root",
+            StoreErrorClass::AlreadyExists => "already_exists",
+            StoreErrorClass::PolicyUnavailable => "policy_unavailable",
+            StoreErrorClass::PolicyMismatch => "policy_mismatch",
+            StoreErrorClass::Undecodable => "undecodable",
+            StoreErrorClass::Malformed => "malformed",
+            StoreErrorClass::Conflict => "conflict",
+            StoreErrorClass::Storage => "storage",
+        };
+        for class in [
+            StoreErrorClass::UnknownRoot,
+            StoreErrorClass::AlreadyExists,
+            StoreErrorClass::PolicyUnavailable,
+            StoreErrorClass::PolicyMismatch,
+            StoreErrorClass::Undecodable,
+            StoreErrorClass::Malformed,
+            StoreErrorClass::Conflict,
+            StoreErrorClass::Storage,
+        ] {
+            assert_eq!(
+                serde_json::to_value(class).expect("a class serializes"),
+                serde_json::Value::String(wire(class).to_owned())
+            );
+        }
     }
 
     /// An object that is not this build's host record refuses the read rather than being
@@ -1259,6 +1056,47 @@ mod tests {
                 String::from_utf8_lossy(row)
             );
         }
+    }
+
+    #[test]
+    fn a_log_with_a_sequence_gap_refuses_the_read() {
+        let store = opened();
+        for _ in 0..2 {
+            let log = store.log(&root()).expect("the log reads");
+            store.append(&log, &punctuation()).expect("the append lands");
+        }
+        store
+            .lock()
+            .execute("DELETE FROM logs WHERE seq = 1", [])
+            .expect("the middle row deletes");
+        let error = store.log(&root()).expect_err("a gapped log does not read");
+        assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+    }
+
+    /// The position is one past the highest stored `seq`, not the row count, so the two
+    /// differ only on a damaged log.
+    #[test]
+    fn the_append_position_follows_the_highest_stored_seq() {
+        let store = opened();
+        for _ in 0..2 {
+            let log = store.log(&root()).expect("the log reads");
+            store.append(&log, &punctuation()).expect("the append lands");
+        }
+        let log = store.log(&root()).expect("the log reads");
+        store
+            .lock()
+            .execute("DELETE FROM logs WHERE seq = 1", [])
+            .expect("the middle row deletes");
+        store.append(&log, &punctuation()).expect("the append lands at seq 3");
+        let seqs = store
+            .lock()
+            .prepare("SELECT seq FROM logs ORDER BY seq")
+            .expect("the query prepares")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("the seqs read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every seq reads");
+        assert_eq!(seqs, [0, 2, 3]);
     }
 
     #[test]
@@ -1411,76 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn a_database_at_another_schema_version_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
-        Connection::open(&path)
-            .expect("the file reopens")
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .expect("the version moves");
-
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
-            }
-            other => panic!("expected a schema refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_stamped_database_without_its_tables_is_damaged() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        Connection::open(&path)
-            .expect("the file opens")
-            .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .expect("the stamp lands");
-
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::Damaged { .. }) => {}
-            other => panic!("expected a damage refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_unstamped_database_that_already_holds_tables_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        Connection::open(&path)
-            .expect("the file opens")
-            .execute_batch("CREATE TABLE batches (family TEXT, seq INTEGER, bytes BLOB);")
-            .expect("the older schema lands");
-
-        match LogStore::open(Backend::Sqlite { path: path.clone() }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (0, SCHEMA_VERSION));
-            }
-            other => panic!("expected a schema refusal, got {other:?}"),
-        }
-        let tables: i64 = Connection::open(&path)
-            .expect("the file reopens")
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("the count runs");
-        assert_eq!(tables, 0, "the refusal wrote nothing");
-    }
-
-    #[test]
-    fn a_damaged_file_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::Damaged { .. }) => {}
-            other => panic!("expected a damage refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn the_memory_backend_is_private_to_its_store() {
         let first = opened();
         assert!(first.log(&root()).is_ok());
@@ -1583,10 +1351,9 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope: ReceiptScope {
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: owner.root.clone(),
@@ -1697,6 +1464,122 @@ mod tests {
                 .is_none(),
             "Memory receipts are private to the store that wrote them"
         );
+    }
+
+    /// Hosts derive session ids from client-supplied values that are unique only within an
+    /// organization, so two organizations may present the same session, operation and tool
+    /// call ids. Each must claim, complete and replay its own receipt.
+    fn organizations_sharing_a_session_id_keep_their_receipts_apart(store: &LogStore, session_id: &str) {
+        let scope = |organization: &str| ReceiptScope {
+            organization_id: format!("{organization}:{session_id}"),
+            caller_id: Some("user:1".to_owned()),
+            session_id: session_id.to_owned(),
+            binding: ReceiptBinding::Caller,
+        };
+        let (first, second) = (scope("org-a"), scope("org-b"));
+        let operation = |scope: &ReceiptScope| OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "op-1".to_owned(),
+            },
+            root: format!("receipt-root:{session_id}"),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        let result = |scope: &ReceiptScope| ProcessedResultRequest {
+            key: ProcessedResultKey {
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: format!("receipt-root:{session_id}"),
+        };
+
+        for scope in [&first, &second] {
+            assert_eq!(
+                store.claim_operation(operation(scope)).unwrap(),
+                OperationClaim::Claimed
+            );
+            assert_eq!(
+                store.claim_processed_result(result(scope)).unwrap(),
+                ProcessedResultClaim::Claimed
+            );
+        }
+        let decided = |scope: &ReceiptScope| serde_json::json!({"decision": scope.organization_id});
+        store
+            .complete_operation(operation(&first).key, decided(&first))
+            .expect("the first organization completes its operation");
+        store
+            .complete_processed_result(result(&first).key, "first".to_owned(), decided(&first))
+            .expect("the first organization completes its result");
+        assert!(matches!(
+            store.claim_operation(operation(&second)),
+            Err(ReceiptError::Pending)
+        ));
+        assert!(matches!(
+            store.claim_processed_result(result(&second)),
+            Err(ReceiptError::Pending)
+        ));
+        store
+            .complete_operation(operation(&second).key, decided(&second))
+            .expect("the second organization completes its operation");
+        store
+            .complete_processed_result(result(&second).key, "second".to_owned(), decided(&second))
+            .expect("the second organization completes its result");
+
+        for (scope, output) in [(&first, "first"), (&second, "second")] {
+            assert_eq!(
+                store.claim_operation(operation(scope)).unwrap(),
+                OperationClaim::Complete {
+                    decision: decided(scope)
+                }
+            );
+            assert_eq!(
+                store.claim_processed_result(result(scope)).unwrap(),
+                ProcessedResultClaim::Complete {
+                    approved_output: output.to_owned(),
+                    decision: decided(scope),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn memory_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&memory(), "shared-session");
+    }
+
+    #[test]
+    fn sqlite_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let store = LogStore::open(Backend::Sqlite {
+            path: dir.path().join("appa.db"),
+        })
+        .expect("a fresh store opens");
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&store, "shared-session");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_organizations_sharing_a_session_id_keep_their_receipts_apart() {
+        let store = postgres_store(1).lease().expect("the connection leases");
+        let unique = tempfile::tempdir().expect("a unique session id exists");
+        let session = format!("shared-session:{}", unique.path().display());
+        organizations_sharing_a_session_id_keep_their_receipts_apart(&store, &session);
+        store
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+                client.execute(
+                    "DELETE FROM openappa_processed_results WHERE session_id=$1",
+                    &[&session],
+                )?;
+                Ok(())
+            })
+            .expect("the test receipts clean up");
     }
 
     /// Run against a disposable PostgreSQL database that holds the host schema,
@@ -1960,10 +1843,9 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                scope: ReceiptScope {
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
                 tool_call_id: "call-1".to_owned(),
             },
             root: owner.root.clone(),
@@ -2081,6 +1963,53 @@ mod tests {
                 Ok(())
             })
             .expect("the test roots clean up");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_gapped_log_refuses_the_read_and_appends_after_its_highest_seq() {
+        let store = postgres_store(1);
+        let root = postgres_root(&store, "gapped");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        for _ in 0..2 {
+            let log = store.log(&root).expect("the log reads");
+            store.append(&log, &boundary).expect("the append lands");
+        }
+        let before = store.log(&root).expect("the log reads");
+        let gapped = root.as_str().to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_events WHERE root=$1 AND seq=1", &[&gapped])?;
+                Ok(())
+            })
+            .expect("the middle row deletes");
+        let error = store.log(&root).expect_err("a gapped log does not read");
+        assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+        store.append(&before, &boundary).expect("the append lands at seq 3");
+        let listed = root.as_str().to_owned();
+        let seqs: Vec<i64> = store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                Ok(client
+                    .query("SELECT seq FROM openappa_events WHERE root=$1 ORDER BY seq", &[&listed])?
+                    .into_iter()
+                    .map(|row| row.get(0))
+                    .collect())
+            })
+            .expect("the seqs read");
+        assert_eq!(seqs, [0, 2, 3]);
+        forget_postgres_roots(&store, vec![root]);
     }
 
     #[cfg(feature = "postgres")]
@@ -2244,6 +2173,243 @@ mod tests {
             .expect("the test receipt cleans up");
     }
 
+    /// Every writer serializes on `pg_advisory_xact_lock(hashtextextended(key, 0))` under a
+    /// key other processes share, so the key and its hash are a wire format: a session lock
+    /// held on exactly that key by another connection must stop each write until released.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_writers_serialize_on_their_advisory_lock_keys() {
+        use crate::postgres::{
+            OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
+            ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope,
+        };
+
+        let store = postgres_store(2);
+        let unique = tempfile::tempdir().expect("a unique namespace exists");
+        let suffix = unique.path().display().to_string();
+        // Opened before both connections are leased: an unleased store needs one of its own.
+        let root = postgres_root(&store, "locked");
+        let (holder, writer) = (store.lease().unwrap(), store.lease().unwrap());
+        writer
+            .postgres()
+            .unwrap()
+            .with_client(|client| {
+                client.batch_execute("SET lock_timeout = '200ms'")?;
+                Ok(())
+            })
+            .expect("the writer bounds its lock waits");
+        let hold = |key: &str, held: bool| {
+            let key = key.to_owned();
+            holder
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    let sql = match held {
+                        true => "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                        false => "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                    };
+                    client.query_one(sql, &[&key])?;
+                    Ok(())
+                })
+                .expect("the holder takes or gives up the lock");
+        };
+
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        hold(root.as_str(), true);
+        let before = writer.log(&root).expect("a read takes no lock");
+        assert!(matches!(
+            writer.append(&before, &boundary),
+            Err(AppendError::Postgres(_))
+        ));
+        hold(root.as_str(), false);
+        writer.append(&before, &boundary).expect("the released root appends");
+
+        let created = TrajectoryId::new(format!("pg-test:created:{suffix}"));
+        hold(created.as_str(), true);
+        assert!(matches!(
+            writer.create_root(opening(&created), POLICY.as_bytes()),
+            Err(CreateError::Postgres(_))
+        ));
+        hold(created.as_str(), false);
+        writer
+            .create_root(opening(&created), POLICY.as_bytes())
+            .expect("the released root opens");
+
+        let organization = format!("lock-org:{suffix}");
+        let session = format!("lock-session:{suffix}");
+        let scope = ReceiptScope {
+            organization_id: organization.clone(),
+            caller_id: Some("caller".to_owned()),
+            session_id: session.clone(),
+            binding: ReceiptBinding::Caller,
+        };
+        let pg = writer.postgres().unwrap();
+
+        let owner = OfferOwnerRecord {
+            scope: scope.clone(),
+            offer_id: "0123456789abcdef".to_owned(),
+            root: format!("lock-root:{suffix}"),
+            parent_id: None,
+            arguments: None,
+            tool: None,
+            spelling: None,
+        };
+        let key = format!("openappa-offer-owner:{organization}:0123456789abcdef");
+        hold(&key, true);
+        assert!(matches!(
+            pg.store_offer_owner(owner.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.store_offer_owner(owner.clone()).expect("the released owner stores");
+
+        let key = format!("openappa-offer-session:{organization}:caller:{session}");
+        hold(&key, true);
+        assert!(pg.expire_offer_owners(scope.clone()).is_err());
+        hold(&key, false);
+        assert_eq!(pg.expire_offer_owners(scope.clone()).expect("the owners expire"), 1);
+        let callerless = ReceiptScope {
+            caller_id: None,
+            ..scope.clone()
+        };
+        let key = format!("openappa-offer-session:{organization}::{session}");
+        hold(&key, true);
+        assert!(pg.expire_offer_owners(callerless.clone()).is_err());
+        hold(&key, false);
+        assert_eq!(pg.expire_offer_owners(callerless).expect("nothing expires"), 0);
+
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "op-1".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        let decision = serde_json::json!({"decision": "allow_call"});
+        let key = format!("openappa-operation:{organization}:{session}:op-1");
+        hold(&key, true);
+        assert!(matches!(
+            pg.claim_operation(request.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        assert_eq!(pg.claim_operation(request.clone()).unwrap(), OperationClaim::Claimed);
+        hold(&key, true);
+        assert!(matches!(
+            pg.complete_operation(request.key.clone(), decision.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.complete_operation(request.key, decision.clone())
+            .expect("the released operation completes");
+
+        let result = ProcessedResultRequest {
+            key: ProcessedResultKey {
+                organization_id: scope.organization_id.clone(),
+                caller_id: scope.caller_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: owner.root.clone(),
+        };
+        let key = format!("openappa-result:{organization}:{session}:call-1");
+        hold(&key, true);
+        assert!(matches!(
+            pg.claim_processed_result(result.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        assert_eq!(
+            pg.claim_processed_result(result.clone()).unwrap(),
+            ProcessedResultClaim::Claimed
+        );
+        hold(&key, true);
+        assert!(matches!(
+            pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone()),
+            Err(ReceiptError::Storage(_))
+        ));
+        hold(&key, false);
+        pg.complete_processed_result(result.key, "approved".to_owned(), decision)
+            .expect("the released result completes");
+
+        pg.with_client(move |client| {
+            client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+            client.execute(
+                "DELETE FROM openappa_processed_results WHERE session_id=$1",
+                &[&session],
+            )?;
+            Ok(())
+        })
+        .expect("the test receipts clean up");
+        drop((holder, writer));
+        forget_postgres_roots(&store, vec![root, created]);
+    }
+
+    /// A host whose receipt tables are keyed without the organization, or with its columns in
+    /// another order, refuses to open rather than let organizations collide on a receipt.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_refuses_a_host_whose_receipt_keys_omit_the_organization() {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let fixture = include_str!("../tests/fixtures/host_schema.sql");
+        let unique = tempfile::tempdir().expect("a unique schema name exists");
+        let suffix: String = unique
+            .path()
+            .display()
+            .to_string()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_lowercase();
+        let hosts = [
+            ("current", fixture.to_owned(), true),
+            (
+                "unscoped",
+                fixture
+                    .replace(
+                        "(organization_id, session_id, operation_id)",
+                        "(session_id, operation_id)",
+                    )
+                    .replace(
+                        "(organization_id, session_id, tool_call_id)",
+                        "(session_id, tool_call_id)",
+                    ),
+                false,
+            ),
+            (
+                "reordered",
+                fixture.replace(
+                    "(organization_id, session_id, tool_call_id)",
+                    "(session_id, organization_id, tool_call_id)",
+                ),
+                false,
+            ),
+        ];
+        let mut admin = ::postgres::Client::connect(&url, ::postgres::NoTls).expect("the admin connection opens");
+        for (name, ddl, opens) in hosts {
+            let schema = format!("appa_probe_{name}_{suffix}");
+            admin
+                .batch_execute(&format!("CREATE SCHEMA {schema}; SET search_path TO {schema}; {ddl}"))
+                .expect("the probe schema installs");
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let opened = LogStore::open(Backend::Postgres {
+                url: format!("{url}{separator}options=-c%20search_path%3D{schema}"),
+                max_connections: std::num::NonZeroUsize::new(1).expect("a pool holds a connection"),
+            });
+            admin
+                .batch_execute(&format!("DROP SCHEMA {schema} CASCADE; RESET search_path"))
+                .expect("the probe schema drops");
+            assert_eq!(opened.is_ok(), opens, "{name}");
+        }
+    }
+
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
@@ -2293,22 +2459,67 @@ mod tests {
     fn postgres_pool_bounds_its_checkout_and_its_reset() {
         use std::time::Duration;
 
+        // The checkout wait also bounds opening a replacement connection, so it must fit a
+        // real connect; the reset wait only has to stay well under the armed stall.
+        let checkout = Duration::from_secs(5);
+        let reset = Duration::from_millis(200);
         let store = postgres_store(1);
         let pg = store.postgres().unwrap();
-        pg.set_waits(Duration::from_millis(200), Duration::from_millis(200));
+        pg.set_waits(checkout, reset);
         let lease = store.lease().unwrap();
         let pid = backend_pid(&lease);
+        let asked = std::time::Instant::now();
         assert!(
-            matches!(store.lease(), Err(crate::postgres::LeaseError::Exhausted(_))),
+            matches!(store.lease(), Err(crate::postgres::LeaseError::Exhausted(wait)) if wait == checkout),
             "a full pool refuses within its wait instead of hanging"
         );
+        let waited = asked.elapsed();
+        assert!(
+            waited >= checkout && waited < checkout + Duration::from_secs(5),
+            "the refusal comes when the wait runs out: {waited:?}"
+        );
 
-        pg.stall_next_reset(Duration::from_secs(2));
+        pg.stall_next_reset(reset * 10);
         drop(lease);
         assert_ne!(
             backend_pid(&store.lease().expect("a silent connection frees its place")),
             pid,
             "a connection that does not answer its reset is never handed out again"
+        );
+    }
+
+    /// A replacement connection opened late in a checkout gets only what is left of the
+    /// checkout wait, so one checkout never takes much longer than that wait.
+    #[cfg(all(feature = "postgres", feature = "fault-injection"))]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_replacement_connection_gets_only_the_remaining_checkout_wait() {
+        use std::time::{Duration, Instant};
+
+        let checkout = Duration::from_secs(2);
+        let reset = Duration::from_millis(100);
+        let store = postgres_store(1);
+        let pg = store.postgres().unwrap();
+        pg.set_waits(checkout, reset);
+        let lease = store.lease().unwrap();
+        let (leased, waited) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let asked = Instant::now();
+                (store.lease().map(drop), asked.elapsed())
+            });
+            std::thread::sleep(checkout / 2);
+            pg.stall_next_reset(reset * 30);
+            pg.stall_next_connect(checkout * 5);
+            drop(lease);
+            waiter.join().expect("the waiter finishes")
+        });
+        assert!(
+            matches!(leased, Err(crate::postgres::LeaseError::Connect(_))),
+            "{leased:?}"
+        );
+        assert!(
+            waited < checkout + Duration::from_millis(500),
+            "the checkout ends when its wait runs out: {waited:?}"
         );
     }
 }

@@ -4,7 +4,7 @@
 export function Oversimplified({ text }: { text: string }) {
   return (
     <fieldset className="oversimplified">
-      <legend className="oversimplified-label">Over-simplified</legend>
+      <legend className="oversimplified-label">TLDR</legend>
       {text}
     </fieldset>
   );

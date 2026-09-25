@@ -102,8 +102,8 @@ tags = ["credentials"]
 # global flags anywhere (`databricks --profile dev auth token`), so the
 # verb is matched after `databricks` with anything between. A selector is a
 # substring of the command line, so a spelling these miss (the command
-# inside `$(...)`, a heredoc, an alias) is classified by the Bash annotator
-# below like any other command; nothing here promises full recall.
+# inside `$(...)`, a heredoc, an alias) reaches the Unix root's Bash
+# Annotator; without it, the call remains fail-closed.
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.databrickscfg*)"
 delta = { audience = ["self"] }
@@ -129,61 +129,9 @@ name = "host/claude-code/Bash(command:*databricks*configure*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
-# --- Bash: a push or a GitHub CLI call reaches the repository's readers ---
-
-# Who reads what a `git push` or a `gh` call puts on GitHub is the repository's
-# own visibility, which the command line does not say. Before the Annotator is
-# asked, `repository.py` establishes it: every repository the command's `git
-# push` and `gh` calls name, else the checkout's own in the directory the
-# harness would run the command in, asked of the GitHub CLI's login; several
-# answer the most widely readable. The Annotator reads the finding under
-# `repository` and requires the readers it implies; a repository it could not
-# establish, or a call it cannot follow, reads as `null` with a reason, and
-# the Annotator treats an unestablished destination as public.
-[[policy.annotator]]
-name = "claude-code.bash-repository-requirements"
-builtin = "claude-code"
-inputs = { call = "$tool_call", repository = "$input.claude-code.repository" }
-hint = "`repository` is the deployment's own finding: the GitHub repository the command reaches, with its `visibility`, or `null` with a `reason`. A push, pull request, issue, release, or comment into a public repository, or into one not established, requires audience public; into a private or internal one requires audience internal. A read keeps the session's audience."
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*git push*)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-# Options between `git` and `push`, such as `git -C sub push`.
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*git -* push*)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh pr *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh issue *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh release *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh api *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh repo *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[externals.inputs."claude-code.repository"]
-command = ["python3", "repository.py"]
+# The Unix root policy declares the Bash publishing selectors, their
+# repository input, and the general Bash Annotator. Off Unix, those calls
+# have no matching declaration and remain fail-closed.
 
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the AWS secret access key, the value of any assignment
@@ -206,26 +154,6 @@ confined_results = ["host/claude-code/Bash"]
 
 [externals.sanitizers.redact-secrets]
 builtin = "redact-secrets"
-
-# The default model Annotator generates every other command's complete contract
-# before dispatch: its output label, required trust, review marks, and effects.
-# How it classifies — the runtime's label guide: trust by who wrote the
-# returned text, audience by the visible destination, with worked examples —
-# is the same for every model Annotator.
-# A `hint` carries what only this deployment knows: which hosts are its own,
-# which paths hold whose data. To add one without modifying this battery,
-# declare an Annotator with the same name in the root config. `audiences` is
-# left omitted, so an annotation may narrow command output to `self` or
-# `internal`, or require a reader the policy names — the same vocabulary a
-# static rule writes.
-[[policy.annotator]]
-name = "claude-code.bash-requirements"
-builtin = "claude-code"
-
-[[policy.tool]]
-name = "host/claude-code/Bash"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-requirements"
 
 # --- Read: the requester's own secrets are `self` data ---
 

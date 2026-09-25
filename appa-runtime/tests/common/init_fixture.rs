@@ -11,17 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use appa_engine::profile::PolicyFileKey;
-use appa_runtime::config::Config;
+use appa_runtime::config::{Config, ConfigError};
 use sha2::{Digest, Sha256};
 
 use crate::common::repo_root;
-
-/// The key of the policy the fixture's config carries: the shipped default,
-/// which composes to the same bytes wherever it is loaded from.
-pub fn default_policy_key() -> String {
-    let config = Config::load(&default_config_path()).expect("the shipped default loads");
-    PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
-}
 
 fn default_config_path() -> PathBuf {
     repo_root().join("marketplace/plugins/claude-code/default.appa.toml")
@@ -141,9 +134,19 @@ impl Fixture {
             .env("FAKE_CLAUDE_LOG", self.root.join("claude.log"))
             .env("FAKE_RUNTIME_FINGERPRINT", runtime_fingerprint(&self.appa))
             .env("FAKE_RUNTIME_CONFIG", self.config.join("appa.toml"))
-            .env("FAKE_POLICY_KEY", default_policy_key())
+            .env("FAKE_POLICY_KEY", self.policy_key())
             .env_remove("APPA_ENDPOINT")
             .env_remove("APPA_RUNTIME_URL");
+    }
+
+    /// A config naming a secret this process cannot see has no key here; the
+    /// fake runtime then serves a stand-in, as a runtime that could see it would.
+    pub fn policy_key(&self) -> String {
+        match Config::load(&self.config.join("appa.toml")) {
+            Ok(config) => PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned(),
+            Err(ConfigError::MissingSecret { .. }) => "composed-where-the-secret-is".to_owned(),
+            Err(error) => panic!("the fixture policy loads: {error}"),
+        }
     }
 
     /// Where activation deploys the harness binary: private to appa, never on PATH.

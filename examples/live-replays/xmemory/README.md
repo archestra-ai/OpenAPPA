@@ -1,10 +1,10 @@
 # Test the xmemory battery
 
-The offline trace checks that text and structured writes run before and after
-a memory read, that a read makes the trajectory untrusted and internal, that a
-schema decision needs trusted data, that instance creation and metadata changes
-always ask the authority, and that a schema migration and an instance deletion
-are reviewed. The root uses a fictional fixed audience. Its review authority
+The offline trace checks that a memory read makes the trajectory internal and
+keeps its trust, that text and structured writes, schema decisions, and
+instance creation run from trusted data before and after a read, that once a
+web fetch lowers the trust a write and a metadata change ask the authority, and
+that a schema migration and an instance deletion are reviewed. The root uses a fictional fixed audience. Its review authority
 cannot expand an audience.
 
 ```sh

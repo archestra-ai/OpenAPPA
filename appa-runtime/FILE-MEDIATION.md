@@ -218,9 +218,11 @@ The runtime keeps one in-memory ledger for each root session. A root trajectory 
 trajectories use the same root ID to select it. Therefore, subagents share file Labels,
 versions, receipts, and the live reservation. Another root session gets an independent ledger.
 
-The first file operation in a root session scans the workspace. It gives every existing file
-the operator-configured initial Label. The ledger then holds every published version, the
-current version per path, one live reservation, and idempotent receipts for completed calls.
+The first file operation in a root session binds the workspace. Binding checks file metadata
+for links and reads no content. A file gets the operator-configured initial Label when an
+operation first touches it: the ledger hashes the file and records that digest as its first
+version. The ledger then holds every published version, the current version per path, one
+live reservation, and idempotent receipts for completed calls.
 The map and every ledger are process-local. Restarting the runtime discards them.
 
 Hashes verify bytes; they never classify them. Historical bytes are not retained, so a
@@ -291,9 +293,9 @@ appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   file tracking. A complete table supplies `initial_trust` and `initial_audience`.
 - Each root session binds to the `cwd` in its first file call. Its subagents share that
   workspace and ledger. Another root session can bind to a different workspace.
-- The initial settings classify each root session's initial snapshot. They do not inspect
-  content. The policy separately defines which file-tool flows are permitted.
-- A snapshot refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
+- The initial settings classify each file on its first touch in a root session. They do not
+  inspect content. The policy separately defines which file-tool flows are permitted.
+- Binding refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
 - Keep the policy, runtime database, and backend outside the workspace.
 - The policy must name all six file tools. A tool the policy does not name is refused, not
   annotated.
@@ -310,7 +312,7 @@ appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   plugin install.
 
 `file-policy.toml` is an ordinary APPA policy, not a second initial classification. Its
-file-tool contracts define the flows that the Engine permits after the snapshot has Labels.
+file-tool contracts define the flows that the Engine permits once files have Labels.
 For example, this minimal policy permits all six mediated operations without adding a tool
 delta or requirement:
 
@@ -355,8 +357,8 @@ context_control = true
 ```
 
 Add `requires` or a non-empty `delta` when the deployment needs tighter file flows. The
-`initial_trust` and `initial_audience` settings only Label bytes that exist when a root takes
-its snapshot; they do not replace these contracts.
+`initial_trust` and `initial_audience` settings only Label a file's bytes when a root session
+first touches it; they do not replace these contracts.
 
 ## What is verified
 

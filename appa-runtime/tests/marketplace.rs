@@ -122,6 +122,7 @@ fn export_committed(destination: &Path) {
     let archive = Command::new("git")
         .arg("-C")
         .arg(repository())
+        .args(["-c", "core.autocrlf=false"])
         .args(["archive", "--format=tar", "HEAD", "--", "marketplace"])
         .output()
         .expect("git runs");

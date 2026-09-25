@@ -3,7 +3,7 @@ import Link from "next/link";
 const BATTERIES = [
   {
     name: "Slack",
-    description: "Rules for 19 Slack tools, with audiences from Slack channels, users, and groups.",
+    description: "Rules for 19 Slack tools, with audiences from Slack channels, users, and groups; Slack Connect conversations are untrusted.",
     href: "/battery-slack",
     logo: "/images/batteries/slack.svg",
   },
@@ -105,7 +105,7 @@ const BATTERIES = [
   },
   {
     name: "xmemory",
-    description: "Rules for 32 instance and admin tools; internal reads, writes without trusted input, reviewed schema migrations and deletions.",
+    description: "Rules for 32 instance and admin tools; internal reads, writes from trusted input only, reviewed schema migrations and deletions.",
     href: "/battery-xmemory",
     logo: "/images/batteries/xmemory.svg",
   },

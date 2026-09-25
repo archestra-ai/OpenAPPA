@@ -525,6 +525,12 @@ If you omit `trust_chain`, the ranks are `suspicious` followed by `trusted`, fro
 
 To define your own ranks, set `trust_chain` in `[policy]`. For example, `trust_chain = ["untrusted", "reviewed", "trusted"]` defines three ranks in increasing order. This replaces the default ranks. A trust rank used elsewhere in the policy must appear in this list, or the policy does not load.
 
+#### Choose a result's trust by who can write it
+
+Set a result's trust by who can write its text, not by which service returns it. Text that only members of the organization can write keeps the trajectory's trust: its `delta` omits `trust`. Text that someone outside the organization can write lowers it to `suspicious`: a web page, an issue on a public repository, a shared channel with another company, a meeting transcript with outside participants. A member account an attacker controls is outside this model.
+
+Guests and integrations a member installed write as the organization. An integration can relay text that an outsider wrote, such as a public issue title posted to a chat channel, and that text keeps the trajectory's trust.
+
 #### Declare tool restrictions and requirements
 
 In the example below, `trust_chain` explicitly sets the default ranks. The `read_web_page` contract marks its result as `suspicious`. Once the agent receives that result, OpenAPPA blocks `apply_db_migration` because it requires `trusted` data.
@@ -609,11 +615,11 @@ A deployment with one reviewer can permit every mark at once. `permits = { atten
 
 ## Annotators
 
-An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
 
 Use an annotator when a script or service must determine the rules for a call. For example, a script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
-A tool selects one annotator with `annotator = "<name>"`. The annotator supplies `delta`, `requires` (including attention marks), and emitted effects. Do not also declare these fields on that tool.
+A tool selects one annotator with `annotator = "<name>"`. The annotator supplies `delta`, `requires` (including attention marks), and emitted effects. A `jev` annotator supplies audience and trust only, so its effects, `requires.history`, and `requires.attention` are always empty. Do not also declare these fields on that tool.
 
 ### Example: annotate a tool call with Claude Code
 
@@ -715,7 +721,7 @@ An annotator can use a selector placeholder only when its own `audiences` lists 
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
-The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what an established input means. It can give examples. A model builtin (`builtin = "claude-code"`, `builtin = "llm"`) already applies OpenAPPA's label guide: the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide, and overrides it where the two disagree. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
+The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what an established input means. It can give examples. Every annotator builtin (`claude-code`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code` and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 
@@ -729,7 +735,7 @@ Alternatively, use a built-in annotator. The available options are:
 
 Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]`. `jev` requires `[externals.jev]`, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or an implementation unavailable on that system.
+`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, an implementation unavailable on that system, or a model implementation whose key is not set.
 
 ### Annotator protocol
 
@@ -792,7 +798,7 @@ The response uses `emits` for effects and `requires.history` for history checks.
 - JSON audience values use `"public"` or a list of permitted audiences. Do not put `public` inside a JSON audience list.
 - A restricted list cannot repeat entries or contain both `self` and `internal`.
 
-OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
+OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. For a value outside the permits, the refusal names the field and the declaration list that does not contain it, such as `field=delta.audience allowed=declaration.audiences`. It never repeats the answered value. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
 OpenAPPA uses the annotation only for the call it classified. Changing the call requires a new annotation. Rechecking or replaying the same recorded call reuses its annotation and membership responses.
 
@@ -1222,7 +1228,7 @@ url = "https://approver.corp/rule"
 token_env = "APPA_APPROVER_TOKEN"
 ```
 
-`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment.
+`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section. `max_concurrent` limits the requests of one implementation across the whole runtime, all sessions included. A reload that OpenAPPA accepts applies a changed value to later requests of every session. Requests that already run or wait finish under the previous limit.
 
 The available settings depend on the component's role:
 
@@ -1236,7 +1242,7 @@ The available settings depend on the component's role:
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
-Included files can add bindings and annotator builtins. One included file may add `[externals.jev]` when no other file declares it. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
+Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
 
 ### HTTP services
 
@@ -1305,7 +1311,9 @@ OpenAPPA rejects a response if the HTTP service reports an error, the program ex
 
 ### Model implementations
 
-The `claude-code` and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. For an annotator, the fixed instructions include the label guide: the criteria for each trust and audience leaf, and worked example calls, each with the annotation it gets under the annotator's permits. An example whose labels the permits exclude is left out. OpenAPPA sends `artifact` as the user message, to be processed as data.
+The `claude-code` and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. For an annotator, the fixed instructions include the label guide: the rule and the criteria for each trust and audience leaf, and worked example calls, each with the annotation it gets under the annotator's permits. An example whose labels the permits exclude is left out. OpenAPPA sends `artifact` as the user message, to be processed as data.
+
+Before an annotator request leaves for a model provider, OpenAPPA redacts what it recognizes as a secret in `artifact.args`. This applies to `claude-code`, `llm`, and `jev`. Each string goes through the detector of `builtin = "redact-secrets"`. The whole value of a field whose name contains `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `private_key`, `access_key`, `authorization`, `cookie`, or `credential`, or is `auth`, is replaced. Each secret becomes `[redacted-secret]`. The tool name is not redacted. Redaction is best effort, not a proof that no secret remains. Authority and sanitizer requests are not redacted, because a sanitizer must see the value it cleans. The consult record keeps the request before redaction.
 
 OpenAPPA builds the expected response format from the declaration. The model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
@@ -1315,11 +1323,12 @@ OpenAPPA checks authority and annotator answers against their permits and assign
 
 | Field | Purpose |
 |---|---|
-| `command` | Selects the executable. |
-| `model` | Selects the model. |
-| `timeout_ms` | Sets the timeout for one request. |
+| `command` | Selects the executable. Default: `claude`. |
+| `model` | Selects the model. Default: `sonnet`. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: 60,000. |
+| `max_concurrent` | Sets how many requests the runtime runs at once. Default: 4. |
 
-Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables. Each OpenAPPA instance runs at most four of these requests at once.
+Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables.
 
 `[externals.llm]` selects the model used by all `builtin = "llm"` components. This example uses an Anthropic model, a token from `APPA_LLM_TOKEN`, a 30-second timeout, and up to four concurrent requests:
 
@@ -1334,7 +1343,11 @@ max_concurrent = 4
 # url = "https://gateway.corp/v1"
 ```
 
-Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` is required except for `ollama`. An optional `url` selects a custom endpoint and follows the same URL rules as [HTTP services](#http-services).
+Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` follows the rules of [HTTP services](#http-services). An optional `url` selects a custom endpoint and follows the same URL rules. `timeout_ms` defaults to 60,000 and includes the wait for a free slot. `max_concurrent` defaults to 4.
+
+A deployment in which any component uses `builtin = "llm"` opens only when the section's key is available: `token_env` names a variable that is set, or the provider is `ollama` and the section names no `token_env`. A section that no component uses loads without its key.
+
+An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. Each attempt takes a free slot, and the wait before a retry holds none.
 
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
 
@@ -1345,8 +1358,19 @@ Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_en
 ```toml
 [externals.jev]
 token_env = "APPA_PROVIDER_JEV_API_KEY"
+# Optional limits:
+# timeout_ms = 2000
+# max_concurrent = 16
 ```
 
-`token_env` is the only field and must start with `APPA_`. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services). While the key's variable is unset, every `jev` consult returns no answer.
+| Field | Purpose |
+|---|---|
+| `token_env` | Names the variable that holds the TypeSafe API key. Required. Must start with `APPA_`. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: the shared `timeout_ms`. Minimum: 550; OpenAPPA rejects a smaller value, inherited or declared. |
+| `max_concurrent` | Sets how many requests the runtime runs at once. Default: 16. |
 
-Each consult sends the tool's name, description, and arguments to that endpoint. OpenAPPA first redacts, on a best-effort basis, what it recognizes as a secret: well-known token and key shapes, private-key blocks, `Authorization` header values, and the value of any field named for a secret, such as `password`, `token`, or `auth`. It then cuts each string at 4,000 characters. Redaction is not a proof that no secret remains. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.
+A battery that ships this section declares `token_env` only. The root config can then declare `[externals.jev]` with `timeout_ms` or `max_concurrent`, and the section takes the key from the battery and the limits from the root. OpenAPPA rejects a second `token_env`, from the root or from another battery, and a section in which no file declares `token_env`. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services).
+
+A deployment that declares a `jev` annotator opens only when the key's variable is set. A reload that OpenAPPA refuses leaves the running deployment serving. A section that no annotator uses loads without its key.
+
+Each consult sends the tool's name, description, and arguments to that endpoint, with secrets redacted as for every model provider; see [Model implementations](#model-implementations). A consult larger than 64 KiB is not sent and gets no answer. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.

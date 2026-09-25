@@ -9,13 +9,19 @@ Add it to your root config with `include`.
 **`appa.toml`** — four groups.
 
 *Reads of one conversation* — a channel's messages, a thread, a
-channel's members, a message's reactions. The result is read by that
-conversation's members: `delta = { audience =
-["@slack:channel/$channel_id"] }` labels it with the collection the
-call's `channel_id` spells, and the `slack` audience source answers who
-is in it. A private channel's history stays with the people in that
-channel; a DM's stays with its two ends. Trust is unchanged, so the
-result can be summarised and posted back where those people read.
+channel's members, a message's reactions. The `slack.conversation-trust`
+annotator labels the result. It is read by that conversation's members:
+the audience is `@slack:channel/$channel_id`, the collection the call's
+`channel_id` spells, and the `slack` audience source answers who is in
+it. A private channel's history stays with the people in that channel;
+a DM's stays with its two ends. Trust follows who can write the text.
+Members, guests, and installed integrations write as the workspace: a
+guest was invited and an integration was installed by a member, even
+when an outsider wrote the words an integration relays. So a workspace
+conversation keeps the session's trust, and the result can be
+summarised and posted back where those people read. A conversation
+shared with another organization through Slack Connect carries text
+written outside the workspace and enters `suspicious`.
 
 *Reads without a conversation* — canvases, files, profiles, and public
 search. The result is `internal`: nothing built from it can go to a
@@ -104,13 +110,43 @@ Reads are workspace-wide: `full-members`, `user-group/<handle>`, and
 `externals.max_body_bytes` for your workspace, not for a single
 annotation.
 
+**`conversation-trust.py`** — the `slack.conversation-trust`
+annotator. A consult carries the call's `channel_id`. For a conversation
+id the script reads `conversations.info`: `is_ext_shared` or
+`is_pending_ext_shared` means Slack Connect. For a user id standing for
+a DM it reads `users.info`: an `is_stranger` user is from another
+organization. A Slack Connect conversation enters `suspicious`; any
+other keeps the session's trust. The script uses the same
+`APPA_PROVIDER_SLACK_TOKEN` and the same scopes the `channel/<id>`
+selector already needs, so it adds no setup. Without the token the
+battery stays static: every conversation keeps the session's trust.
+With it, a network error or rate limit is retried twice, and a failure
+left after that exits nonzero, so the runtime refuses the read. The script refuses a consult whose mandate does not
+name `@slack:channel/<id>` (exit status 2). Each conversation read costs
+one extra Slack API call.
+
+**`slack_api.py`** — the Slack Web API client and conversation-id
+classification that both scripts share.
+
 **`test_audience_source.py`** — tests without network: recorded Slack
 Web API payloads for the selectors, id classification and refusals for
 `channel/<id>`, and the envelope and declaration checks. Run with
 `python3 test_audience_source.py`.
 
+**`test_conversation_trust.py`** — tests without network: recorded
+`conversations.info` and `users.info` payloads, the static answer without a
+token, retries and the refusal when Slack keeps failing, and the consult and mandate refusals. Run with
+`python3 test_conversation_trust.py`.
+
+## Limits
+
+Searches, canvases, and files name no conversation, so the battery does
+not check them per conversation. They keep the session's trust even when
+a result came from a Slack Connect conversation.
+
 ## Change the behaviour
 
 Put a narrower rule in your root config; root rules run first. The
-comment at the top of `appa.toml` shows one: let thread replies through
-without a question. Nothing in this file needs editing.
+comment at the top of `appa.toml` shows one: messages to one
+announcement channel wait for a person to approve them. Nothing in this
+file needs editing.

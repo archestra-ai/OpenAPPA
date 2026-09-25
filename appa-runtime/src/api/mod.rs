@@ -427,6 +427,15 @@ pub enum OpenError {
     BoundBuiltinAnnotator(String),
     #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured(String),
+    #[error(
+        "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
+    )]
+    ModelKeyMissing {
+        kind: &'static str,
+        name: String,
+        builtin: &'static str,
+        missing: crate::config::MissingKey,
+    },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
@@ -889,6 +898,7 @@ impl Prepared {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
+        gates.size_by(&deployment.config.externals);
         Ok(Prepared {
             modules,
             gates,
@@ -1038,10 +1048,10 @@ impl Runtime {
     /// alone, and names roots uniquely across the whole runtime: the runtime's in-process
     /// diagnostics and each root's last working directory are keyed by root id alone.
     ///
-    /// The deployment's `llm` pool is its own, bounded by its profile's `max_concurrent`.
-    /// The `command` and `claude-code` permit pools and the `jev` connection pool are the
-    /// runtime's, shared by every deployment it serves or pins; the jev pool is keyed by
-    /// endpoint and each request carries its own deployment's key.
+    /// The `command` gate, each model builtin's gate and the `jev` connection pool are the
+    /// runtime's, shared by every deployment it serves or pins. The serving deployment's
+    /// `max_concurrent` sizes each model gate; a pinned one's does not. The jev pool is keyed
+    /// by endpoint and each request carries its own deployment's key.
     ///
     /// # Panics
     ///
@@ -1357,8 +1367,8 @@ impl Runtime {
     /// Runtime-owned tools require native alternatives and implicit reads disabled.
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
     /// Configure this before sharing the runtime. Each root session binds its first file call's
-    /// harness working directory and snapshots all existing files with the operator's source
-    /// Label. Child trajectories share their root's workspace and snapshot.
+    /// harness working directory and checks it for links. Each file gets the operator's source
+    /// Label when a call first touches it. Child trajectories share their root's workspace and ledger.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
@@ -1506,34 +1516,27 @@ impl Runtime {
         let Some(crate::engine::ExternalRequest::Annotation {
             annotator,
             declaration,
-            mut args,
+            args,
             inputs,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
             return Ok(None);
         };
-        let mut asked = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            asked.push(deployment.externals.consult(&input.consult, None, None));
-        }
-        let outcomes = crate::external::settle_batch(asked).await;
-        for (input, outcome) in inputs.iter().zip(outcomes) {
-            match outcome {
-                crate::external::ConsultOutcome::Answer(answer) => {
-                    args.as_object_mut()
-                        .expect("an annotation with declared inputs carries an object artifact")
-                        .insert(input.input.clone(), answer);
-                }
-                crate::external::ConsultOutcome::NoAnswer(_) => {
-                    return Ok(Some(AnnotationConsult {
-                        annotator,
-                        outcome,
-                        admitted: false,
-                    }));
-                }
+        let args = match session::join_input_answers(args, &inputs, |consult| {
+            deployment.externals.consult(consult, None, None)
+        })
+        .await
+        {
+            Ok(args) => args,
+            Err((_, reason)) => {
+                return Ok(Some(AnnotationConsult {
+                    annotator,
+                    outcome: crate::external::ConsultOutcome::NoAnswer(reason),
+                    admitted: false,
+                }));
             }
-        }
+        };
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
@@ -1545,7 +1548,7 @@ impl Runtime {
         let admitted = matches!(
             &outcome,
             crate::external::ConsultOutcome::Answer(answer)
-                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_some()
+                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_ok()
         );
         Ok(Some(AnnotationConsult {
             annotator,
@@ -1639,6 +1642,7 @@ impl Runtime {
                 .expect("the deployment lock is never poisoned: no panic runs while it is held"),
             Arc::clone(&deployment),
         );
+        self.inner.shared.gates.size_by(&deployment.config.externals);
         // Every reload retires at most one more policy, so clearing here bounds the
         // cache by the reloads since the last one instead of by the life of the
         // process. A trajectory still replaying under a dropped entry recompiles it.
@@ -2534,8 +2538,7 @@ impl Runtime {
         if reviewed {
             return self.review_timeout();
         }
-        let externals = &self.inner.deployment().config.externals;
-        externals.timeout.max(externals.claude_code.timeout) * session::RESOLUTION_ROUNDS
+        self.inner.deployment().config.externals.longest_consult() * session::RESOLUTION_ROUNDS
     }
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
@@ -3050,12 +3053,48 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             {
                 return Err(OpenError::JevTrustRanks(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::Llm
-            | appa_policy::AnnotatorBuiltin::ClaudeCode
-            | appa_policy::AnnotatorBuiltin::Jev => {}
+            appa_policy::AnnotatorBuiltin::Jev
+            | appa_policy::AnnotatorBuiltin::Llm
+            | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // A model profile loads without its key, so a battery installs before the key is
+    // exported; a deployment that consults the profile needs the key to open.
+    use crate::config::Implementation;
+    use appa_policy::AnnotatorBuiltin;
+    for (builtin, missing) in [
+        (
+            AnnotatorBuiltin::Llm,
+            externals.llm.as_ref().and_then(crate::config::LlmProfile::missing_key),
+        ),
+        (
+            AnnotatorBuiltin::Jev,
+            externals.jev.as_ref().and_then(|jev| jev.key.token().err()),
+        ),
+    ] {
+        let Some(missing) = missing else { continue };
+        let annotators = policy
+            .annotators()
+            .filter(|(_, binding)| binding.builtin == Some(builtin))
+            .map(|(name, _)| ("annotator", name.as_str()));
+        let bindings = [
+            ("authority", &externals.authorities),
+            ("sanitizer", &externals.sanitizers),
+        ]
+        .into_iter()
+        .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
+        .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
+        .map(|(kind, name, _)| (kind, name));
+        if let Some((kind, name)) = annotators.chain(bindings).next() {
+            return Err(OpenError::ModelKeyMissing {
+                kind,
+                name: name.to_string(),
+                builtin: builtin.wire_name(),
+                missing,
+            });
+        }
+    }
     // Every program an annotator input reads is bound. A bound program no annotator reads
     // stays idle rather than refused, as an audience source does: a battery binds the
     // program beside the annotator that reads it, and a root that replaces that annotator
@@ -3327,13 +3366,18 @@ mod deployment_tests {
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(document: &str) -> Config {
+        hosted_with_keys(document, &[])
+    }
+
+    /// A hosted document whose host sets each of `keys`.
+    fn hosted_with_keys(document: &str, keys: &[&str]) -> Config {
         Config::hosted(
             document,
             HostDefaults {
                 consult_timeout: Duration::from_secs(30),
                 max_body_bytes: 65_536,
             },
-            |_| None,
+            |var| keys.contains(&var).then(|| "sekret".to_string()),
         )
         .expect("the hosted document validates")
     }
@@ -3420,34 +3464,6 @@ mod deployment_tests {
                 ToolNaming::AsAuthored
             )
             .is_ok()
-        );
-    }
-
-    #[test]
-    fn a_reload_keeps_the_one_claude_consult_gate() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let config = || {
-            claude_config(
-                r#"
-                [policy]
-                version = 2
-                [[policy.annotator]]
-                name = "classifier"
-                builtin = "claude-code"
-                [[policy.tool]]
-                name = "fetch"
-                description = "Fetches one URL."
-                annotator = "classifier"
-            "#,
-            )
-        };
-        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let before = Arc::as_ptr(runtime.inner.deployment().externals.claude_permits());
-        runtime.reload(config()).expect("the reload installs");
-        let after = Arc::as_ptr(runtime.inner.deployment().externals.claude_permits());
-        assert_eq!(
-            before, after,
-            "old and new deployment snapshots contend on the same permits"
         );
     }
 
@@ -3610,12 +3626,16 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
     }
 
+    fn keyed_config(document: &str) -> Config {
+        hosted_with_keys(document, &["APPA_PROVIDER_JEV_API_KEY", "APPA_LLM_TOKEN"])
+    }
+
     /// A declared `jev` Annotator opens only over a deployment that declares its profile,
     /// and only as a judge of the complete call under a mandate with two ends of the chain.
     #[test]
     fn a_declared_jev_annotator_needs_its_profile_the_complete_call_and_two_ranks() {
         let policy = |mandate: &str, externals: &str| {
-            claude_config(&format!(
+            keyed_config(&format!(
                 "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"jev\"\n{mandate}\n\
                  [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
                  {externals}"
@@ -3637,40 +3657,140 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
     }
 
-    fn llm_permits(deployment: &Deployment) -> Option<usize> {
-        deployment.externals.llm_permits()
+    /// A model profile without its key loads, and a deployment opens over it while nothing
+    /// consults it; one that consults it refuses to open, naming the consumer and the key.
+    #[test]
+    fn a_model_builtin_in_use_needs_its_key_at_open() {
+        use crate::config::MissingKey;
+        const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
+        const LLM: &str = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n";
+        const LLM_KEYED: &str =
+            "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n";
+        let annotator = |builtin: &str| {
+            format!(
+                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{builtin}\"\nranks = [\"suspicious\", \"trusted\"]\n"
+            )
+        };
+        let authority = "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
+                         [externals.authorities.judge]\nbuiltin = \"llm\"\n";
+        let unset = |var: &str| MissingKey::Unset { var: var.to_string() };
+        for (policy, externals, keys, refused) in [
+            (String::new(), JEV, &[][..], None),
+            (String::new(), LLM, &[], None),
+            (annotator("llm"), LLM_KEYED, &["APPA_LLM_TOKEN"], None),
+            (
+                annotator("jev"),
+                JEV,
+                &[],
+                Some(("annotator", "classifier", "jev", unset("APPA_PROVIDER_JEV_API_KEY"))),
+            ),
+            (
+                annotator("llm"),
+                LLM,
+                &[],
+                Some((
+                    "annotator",
+                    "classifier",
+                    "llm",
+                    MissingKey::Undeclared { provider: "openai" },
+                )),
+            ),
+            (
+                authority.to_string(),
+                LLM_KEYED,
+                &[],
+                Some(("authority", "judge", "llm", unset("APPA_LLM_TOKEN"))),
+            ),
+        ] {
+            let document = format!(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\n{policy}\n{externals}"
+            );
+            let opened = match load(hosted_with_keys(&document, keys)) {
+                Ok(_) => None,
+                Err(OpenError::ModelKeyMissing {
+                    kind,
+                    name,
+                    builtin,
+                    missing,
+                }) => Some((kind, name, builtin, missing)),
+                Err(other) => panic!("{document}: {other}"),
+            };
+            let refused = refused.map(|(kind, name, builtin, missing)| (kind, name.to_string(), builtin, missing));
+            assert_eq!(opened, refused, "{document}");
+        }
     }
 
-    /// Every deployment bounds its `llm` consults by its own profile: installing one or
-    /// pinning another resizes no other deployment's pool.
+    /// A runtime bounds each model builtin's consults by one gate, sized by the serving
+    /// deployment: every deployment it builds draws on the same permits, and an installed
+    /// reload resizes the gate for every later consult, a session opened before it included.
+    /// A pin and a refused reload leave the size as it is.
     #[test]
-    fn each_deployment_bounds_its_llm_consults_by_its_own_profile() {
-        let policy = r#"
-            [policy]
-            version = 2
-            [[policy.annotator]]
-            name = "classifier"
-            builtin = "llm"
-            [[policy.tool]]
-            name = "lookup"
-            description = "Looks one record up."
-            annotator = "classifier"
-        "#;
-        let with_pool = |max_concurrent: u32| {
-            claude_config(&format!(
-                "{policy}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\nmax_concurrent = {max_concurrent}\n"
-            ))
-        };
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let narrow = runtime.prepare_deployment(with_pool(1)).expect("loads");
-        let wide = runtime.prepare_deployment(with_pool(3)).expect("loads");
+    fn a_runtime_bounds_each_model_builtins_consults_by_one_gate() {
+        use appa_policy::AnnotatorBuiltin;
+        use appa_runtime_api::inventory::ToolInventory;
 
-        runtime.install(narrow.clone());
-        let pinned = runtime.pinned(&wide);
-        assert_eq!(llm_permits(&runtime.inner.deployment()), Some(1));
-        assert_eq!(llm_permits(&pinned.inner.deployment()), Some(3));
-        assert_eq!(llm_permits(&narrow.deployment), Some(1));
+        let mut tables = vec![
+            (
+                AnnotatorBuiltin::Llm,
+                "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
+            ),
+            (
+                AnnotatorBuiltin::Jev,
+                "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
+            ),
+        ];
+        if cfg!(unix) {
+            tables.push((AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"));
+        }
+        // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
+        const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\
+                               [[policy.tool]]\nname = \"other\"\ndescription = \"Looks another record up.\"\nannotator = \"refused\"\n";
+        for (builtin, table) in tables {
+            let policy = |max_concurrent: u32, extra: &str| {
+                keyed_config(&format!(
+                    "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{}\"\n\
+                     ranks = [\"suspicious\", \"trusted\"]\n\
+                     [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
+                     {extra}{table}max_concurrent = {max_concurrent}\n",
+                    builtin.wire_name()
+                ))
+            };
+            let with_pool = |max_concurrent: u32| policy(max_concurrent, "");
+            let permits = |deployment: &Deployment| deployment.externals.model_permits(builtin);
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
+            let session = |id: &str| {
+                runtime
+                    .create_session_with_inventory(TrajectoryId(id.to_string()), ToolInventory::default())
+                    .expect("the inventory session opens")
+            };
+            let (first, second) = (session("first"), session("second"));
+
+            let held = runtime
+                .inner
+                .shared
+                .gates
+                .model(builtin)
+                .try_acquire_many_owned(2)
+                .expect("the gate is free");
+            for deployment in [&*runtime.inner.deployment(), first.deployment(), second.deployment()] {
+                assert_eq!(permits(deployment), 0, "{builtin:?}");
+            }
+            drop(held);
+
+            let pinned = runtime.pinned(&runtime.prepare_deployment(with_pool(5)).expect("loads"));
+            assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{builtin:?}");
+            assert_eq!(permits(&pinned.inner.deployment()), 2, "{builtin:?}");
+
+            runtime.reload(with_pool(3)).expect("reloads");
+            for deployment in [
+                &*runtime.inner.deployment(),
+                first.deployment(),
+                &*pinned.inner.deployment(),
+            ] {
+                assert_eq!(permits(deployment), 3, "{builtin:?}");
+            }
+        }
     }
 
     fn minimal_policy() -> Config {

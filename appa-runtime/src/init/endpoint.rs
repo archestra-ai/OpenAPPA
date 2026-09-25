@@ -92,15 +92,6 @@ impl RuntimeOutcome {
     }
 }
 
-/// Why a running runtime may not be answering under the file this init validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Divergence {
-    /// It serves a different policy than this file composes to.
-    Serving,
-    /// Whether it serves this file cannot be established here.
-    Unestablished,
-}
-
 /// Who is answering the endpoint, as far as one probe can establish.
 ///
 /// A healthy runtime left by an install under a different `APPA_INSTALL_DIR` or
@@ -414,35 +405,31 @@ fn classify_endpoint_owner(
 /// startup, and a config written since is on disk only. A divergence is reloaded, and the
 /// reload must be confirmed by the key the runtime serves afterwards: a plugin bound to a
 /// runtime serving another policy is the skew activation exists to prevent.
+///
+/// A config this process cannot compose is never assumed to agree: the runtime is always
+/// reloaded, and the reload resolves the secret where the runtime runs, which is the
+/// environment that has it. With no key to compare, the confirmation is the runtime's own:
+/// it validates this file before it swaps, so the key it serves after a reload it accepted
+/// is this file's.
 pub(super) fn reconcile_policy(
     endpoint: &Endpoint,
     config: &Path,
     composed: &ComposedPolicy,
 ) -> Result<RuntimeOutcome, InitError> {
-    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_none() {
+    let serving = serving_policy_key(endpoint)?;
+    if let ComposedPolicy::Key(key) = composed
+        && *key == serving
+    {
         return Ok(RuntimeOutcome::Healthy);
     }
     reload_policy(endpoint, config)?;
-    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_some() {
-        return Err(InitError::PolicyKey {
+    let serving = serving_policy_key(endpoint)?;
+    match composed {
+        ComposedPolicy::Key(key) if *key != serving => Err(InitError::PolicyKey {
             endpoint: endpoint.url().to_owned(),
             message: "runtime did not confirm the prepared policy after reload".into(),
-        });
-    }
-    Ok(RuntimeOutcome::Reloaded)
-}
-
-/// Why a serving runtime may not be answering under the file this activation validated,
-/// or `None` when it demonstrably is.
-///
-/// A config this process cannot compose is not settled by assumption: the runtime is
-/// reloaded, and the reload resolves the secret where the runtime runs, which is the
-/// environment that has it.
-fn policy_divergence(composed: &ComposedPolicy, serving: &str) -> Option<Divergence> {
-    match composed {
-        ComposedPolicy::Key(key) if key == serving => None,
-        ComposedPolicy::Key(_) => Some(Divergence::Serving),
-        ComposedPolicy::Unknowable => Some(Divergence::Unestablished),
+        }),
+        ComposedPolicy::Key(_) | ComposedPolicy::Unknowable => Ok(RuntimeOutcome::Reloaded),
     }
 }
 
@@ -483,13 +470,26 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
     let output = ask_endpoint(
         endpoint,
         "/reload",
-        &["--fail", "--silent", "--show-error", "--max-time", "10", "-X", "POST"],
+        &[
+            "--fail-with-body",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "10",
+            "-X",
+            "POST",
+        ],
     )
     .map_err(|error| refused(error.to_string()))?;
-    if !output.status.success() {
-        return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    // A refused reload answers with the runtime's reason; curl's own line only names the status.
+    let reason = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    match reason.is_empty() {
+        true => Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned())),
+        false => Err(refused(reason)),
+    }
 }
 
 /// The endpoint answers for this deployment: this build, serving this configuration.
@@ -626,6 +626,13 @@ mod tests {
     /// probe's path is part of the contract it has with the runtime, so a test that cares
     /// which endpoint init asks reads them.
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        recorded_statuses(answers.into_iter().map(|answer| ("200 OK", answer)).collect())
+    }
+
+    /// [`recorded_answers`] where each answer carries its own status line.
+    fn recorded_statuses(
+        answers: Vec<(&'static str, String)>,
+    ) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -634,7 +641,7 @@ mod tests {
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = std::sync::Arc::clone(&asked);
         std::thread::spawn(move || {
-            for answer in answers {
+            for (status, answer) in answers {
                 let (mut connection, _) = listener.accept().expect("the health probe connects");
                 let mut request = [0u8; 2048];
                 let read = connection.read(&mut request).unwrap_or(0);
@@ -648,7 +655,7 @@ mod tests {
                     .expect("the request recorder is never poisoned")
                     .push(requested);
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                     answer.len()
                 );
                 connection
@@ -725,23 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn a_serving_runtime_is_reconciled_only_when_agreement_is_not_established() {
-        let key = |key: &str| ComposedPolicy::Key(key.to_string());
-        assert_eq!(
-            policy_divergence(&key("composed"), "serving"),
-            Some(Divergence::Serving)
-        );
-        // An install that changed nothing must ask nothing.
-        assert_eq!(policy_divergence(&key("same"), "same"), None);
-        // A config this process cannot compose is unsettled, never settled: assuming
-        // agreement here is what would leave an older policy serving unremarked.
-        assert_eq!(
-            policy_divergence(&ComposedPolicy::Unknowable, "serving"),
-            Some(Divergence::Unestablished)
-        );
-    }
-
-    #[test]
     fn a_serving_policy_key_is_read_from_the_policy_route() {
         let (endpoint, asked) = recorded_answers(vec!["c54f1509".to_string()]);
         assert_eq!(serving_policy_key(&endpoint).expect("the key reads"), "c54f1509");
@@ -789,6 +779,56 @@ mod tests {
                 .expect("the reconcile completes"),
             RuntimeOutcome::Reloaded
         );
+    }
+
+    #[test]
+    fn a_refused_reload_names_the_runtimes_reason() {
+        let reason = "the jev annotator names APPA_PROVIDER_JEV_API_KEY, which is not set";
+        let endpoint = recorded_statuses(vec![("422 Unprocessable Entity", reason.to_string())]).0;
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert!(matches!(
+            reload_policy(&endpoint, &config),
+            Err(InitError::ReloadRefused { message, .. }) if message == reason
+        ));
+    }
+
+    /// A config this process cannot compose is reloaded even when the runtime already
+    /// serves the key it would have had: not knowing is never agreeing.
+    #[test]
+    fn a_config_this_process_cannot_compose_is_settled_by_the_reload_the_runtime_accepts() {
+        let (endpoint, asked) = recorded_answers(vec![
+            "serving".to_string(),
+            r#"{"policy_key":"serving","policy_identity":"x","changed":false}"#.to_string(),
+            "serving".to_string(),
+        ]);
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert_eq!(
+            reconcile_policy(&endpoint, &config, &ComposedPolicy::Unknowable).expect("the reconcile completes"),
+            RuntimeOutcome::Reloaded
+        );
+        assert!(
+            asked
+                .lock()
+                .expect("the request recorder is never poisoned")
+                .iter()
+                .any(|request| request.starts_with("POST /reload")),
+            "the reload is asked for"
+        );
+    }
+
+    #[test]
+    fn a_reload_that_serves_another_policy_refuses_init() {
+        let endpoint = recorded_answers(vec![
+            "older".to_string(),
+            r#"{"policy_key":"older","policy_identity":"x","changed":false}"#.to_string(),
+            "older".to_string(),
+        ])
+        .0;
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert!(matches!(
+            reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("this-deployment".to_string())),
+            Err(InitError::PolicyKey { .. })
+        ));
     }
 
     #[cfg(unix)]

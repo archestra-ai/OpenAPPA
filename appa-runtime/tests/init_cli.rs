@@ -8,7 +8,7 @@ mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
 use common::{free_port, http, repo_root, serve_runtime};
-use init_fixture::{Fixture, Installed, default_policy_key, runtime_fingerprint, shipped_default_config};
+use init_fixture::{Fixture, Installed, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
 /// running activation against a config that does not exist: the endpoint is
@@ -131,6 +131,7 @@ fn a_failure_at_the_start_puts_the_previous_profile_back() {
         .expect("appa activates");
 
     assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("deliberate fake starter failure"));
     assert_eq!(Installed::of(&fixture), before);
     assert!(!fixture.deployed_binary().with_extension("prev").exists());
     assert!(
@@ -508,7 +509,7 @@ fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
         // This deployment's own runtime, serving a policy that is not the file the
         // marketplace wrote: the one state a reload is for.
         .env("FAKE_POLICY_KEY", "a-policy-this-activation-did-not-compose")
-        .env("FAKE_POLICY_KEY_AFTER_RELOAD", default_policy_key())
+        .env("FAKE_POLICY_KEY_AFTER_RELOAD", fixture.policy_key())
         .env("FAKE_RELOADS", &reloads)
         .output()
         .expect("appa activates");
@@ -517,6 +518,33 @@ fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
     assert!(
         reloads.exists(),
         "a diverged runtime of this deployment must be reloaded, not left serving its older policy",
+    );
+}
+
+/// A `token_env` resolves where the runtime runs, so a secret the installing terminal does
+/// not hold is not activation's to refuse: the surviving runtime is reloaded, and the
+/// reload it accepts settles the policy.
+#[test]
+fn activation_leaves_a_secret_it_cannot_see_to_the_runtime() {
+    let fixture = Fixture::new();
+    let config = fixture.config.join("appa.toml");
+    let mut text = fs::read_to_string(&config).expect("the config is readable");
+    text.push_str(
+        "\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\ntoken_env = \"APPA_UNSET_IN_THIS_PROCESS\"\n",
+    );
+    fs::write(&config, text).expect("the config is written");
+    let reloads = fixture.root.join("reloads");
+    let output = fixture
+        .activate()
+        .env_remove("APPA_UNSET_IN_THIS_PROCESS")
+        .env("FAKE_RELOADS", &reloads)
+        .output()
+        .expect("appa activates");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        reloads.exists(),
+        "a policy activation cannot compose is settled by a reload"
     );
 }
 

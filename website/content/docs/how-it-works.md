@@ -13,6 +13,8 @@ Powered by **APPA** (Agentic Permissions Policy Algebra), OpenAPPA tracks data s
 
 OpenAPPA also helps the agent remain useful under security restrictions. If an action is blocked by policy, OpenAPPA returns ways to continue: request human approval, clean sensitive fields, or isolate a read in a subagent.
 
+:::video-how-it-works:::
+
 ## The Core Concepts
 
 OpenAPPA operates with three concepts:
@@ -28,7 +30,7 @@ OpenAPPA operates with three concepts:
    Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
    1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination. An audience can be as specific as the members of one Slack channel: the contract extracts the channel ID from the tool's arguments, so reading channel `C0123` labels the data with that channel's membership, and posting to it requires that they are already valid readers.
-   2. **Trust:** How much the data in the session can be trusted. Reading an untrusted web page can lower the session's trust, and tools that require trusted input will no longer be allowed to run.
+   2. **Trust:** How much the data in the session can be trusted. Trust follows who can write the text. Text that only members of the organization can write, such as a private issue or an internal channel, keeps the session's trust. Text that an outsider can write, such as a web page or an issue on a public repository, lowers it, and tools that require trusted input will no longer be allowed to run.
    3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
    4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.
 
@@ -102,7 +104,7 @@ See [Sanitizers in Policy configuration](/contracts#sanitizers) for service conf
 
 ### Annotators
 
-An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
 
 For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
