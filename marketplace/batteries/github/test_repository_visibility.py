@@ -143,6 +143,14 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(github.seen, [("/repos/acme/api", "Bearer ghp-fixture")])
         self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"trust": "suspicious", "audience": [COLLABORATORS]})
 
+    def test_a_write_carrying_a_large_file_is_answered(self):
+        arguments = {"owner": "acme", "repo": "api", "path": "data.txt", "content": "x" * 100_000}
+        request = consult(name=ANNOTATOR.READERS, artifact={"args": {"name": "create_or_update_file", "arguments": arguments}})
+        with Loopback({"/repos/acme/api": {"visibility": "private"}}) as github:
+            result = self.run_script(request, github.env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["answer"]["requires"]["audience"], {"contains": [COLLABORATORS]})
+
     def test_a_missing_token_is_a_failure_before_any_network(self):
         # A PATH with no gh on it: neither the variable nor a CLI login answers.
         with tempfile.TemporaryDirectory() as empty:

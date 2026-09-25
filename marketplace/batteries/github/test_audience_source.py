@@ -256,15 +256,17 @@ class EnvelopeTests(unittest.TestCase):
         }
 
     def test_a_foreign_envelope_is_refused(self):
-        env = {"PATH": "/usr/bin:/bin", "APPA_PROVIDER_GITHUB_TOKEN": "ghp-fixture"}
+        answers = {"/user": {"login": "octocat", "id": 1}, "/user/emails": [{"email": "octocat@example.com", "primary": True, "verified": True}]}
         for request in [
             self.envelope(version=2),
             self.envelope(kind="annotation"),
             self.envelope(name="slack"),
         ]:
-            result = self.run_script(request, env)
+            with Loopback(answers) as github:
+                result = self.run_script(request, github.env())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, "")
+            self.assertEqual(github.seen, [])
 
     def test_the_api_root_is_github_api_url(self):
         answers = {"/user": {"login": "octocat", "id": 1}, "/user/emails": [{"email": "octocat@example.com", "primary": True, "verified": True}]}

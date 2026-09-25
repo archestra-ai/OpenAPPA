@@ -113,7 +113,7 @@ hint = "Hosts under corp.example are the organization's own: what they return is
 On Unix, replace the default root declaration with this one. Preserve `builtin`
 unless you intend to alter the implementation; write `audiences` only to narrow
 the mandate below the policy's vocabulary. The battery continues to provide
-ordered credential-path rules.
+ordered credential-path narrowing rules.
 
 ## Example override
 

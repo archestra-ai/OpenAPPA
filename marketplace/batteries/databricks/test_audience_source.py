@@ -116,6 +116,18 @@ class SelectorTests(unittest.TestCase):
         members = AUDIENCE_SOURCE.answer(run, {"selector": "group/finance"})["members"]
         self.assertEqual(members, ["alice@corp.com", "carol@corp.com"])
 
+    def test_a_nested_group_is_recognised_by_its_ref_alone(self):
+        finance = {"id": "g1", "displayName": "finance", "members": [{"value": "g2", "$ref": "Groups/g2"}]}
+        run = fixture_cli(
+            [
+                (group_listing("finance"), [finance]),
+                (("groups", "get", "g2"), group("g2", "controllers", users=["3"])),
+                user_lookup("3", user("3", "carol@corp.com")),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "group/finance"})["members"]
+        self.assertEqual(members, ["carol@corp.com"])
+
     def test_nested_groups_are_read_in_one_directory_listing_past_the_direct_bound(self):
         nested = [f"g{i}" for i in range(1, 6)]
         run = fixture_cli(

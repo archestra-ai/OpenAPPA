@@ -221,8 +221,9 @@ class ReadTests(unittest.TestCase):
         mixed = read(hub, details("arsenyinfo/notes", "acme/weights", repo_type="model"))
         self.assertEqual(mixed["delta"]["audience"], ["self"])
         other = "@huggingface:org/acme/resource-group/other/members"
-        hub.resource_group = lambda facts: ("other", "other") if facts.name == "other" else ("507f1f77bcf86cd799439011", "research")
-        two = read(hub, details("acme/weights", "acme/other", repo_type="model"), declared=["self", GROUP, other])
+        other_group = {"id": "other", "name": "other", "resources": [{"type": "model", "name": "acme/other", "private": True}]}
+        hub = fixture_hub(**{"/api/organizations/acme/resource-groups": [*RESOURCE_GROUPS, other_group]})
+        two = read(hub,details("acme/weights", "acme/other", repo_type="model"), declared=["self", GROUP, other])
         self.assertEqual(two["delta"]["audience"], ["self"])
         with self.assertRaises(ANNOTATOR.NotFound):
             read(fixture_hub(), details("openai-community/gpt2", "nobody/nothing", repo_type="model"))
@@ -416,8 +417,11 @@ class EnvelopeTests(unittest.TestCase):
 
     def test_an_oversized_consult_is_refused(self):
         request = consult(name=ANNOTATOR.READERS, tool="hf_fs_write", arguments={"cmd": "put", "args": ["hf://models/a/b/f"], "content": "x" * (ANNOTATOR.MAX_INPUT_BYTES + 1)})
-        result = self.run_script(request, {"PATH": "/usr/bin:/bin"})
+        with Loopback(HUB) as hub:
+            result = self.run_script(request, hub.env())
         self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(hub.seen, [])
 
 
 if __name__ == "__main__":

@@ -155,7 +155,7 @@ class RefreshBatteriesTests(unittest.TestCase):
             arguments = root / "arguments"
             executable.write_text(
                 "#!/bin/sh\n"
-                "test -z \"${APPA_BATTERIES_DIR+x}\"\n"
+                "test -z \"${APPA_BATTERIES_DIR+x}\" || exit 3\n"
                 "printf '%s\\n' \"$@\" >\"$ARGS_OUT\"\n"
             )
             executable.chmod(0o755)

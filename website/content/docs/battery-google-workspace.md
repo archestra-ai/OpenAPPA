@@ -21,6 +21,6 @@ The source builds:
 
 Members of nested groups are included. Suspended and archived users are excluded from `internal`.
 
-Set up the source in the root config and pass its token through `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`.
+The battery binds the source; map `self` and `internal` onto it in the root config and pass its token through `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`.
 
 Its tests use saved Google API responses. They do not call Google.

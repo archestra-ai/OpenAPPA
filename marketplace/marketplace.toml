@@ -4,11 +4,11 @@ name = "appa"
 
 [packages.battery.archestra]
 path = "batteries/archestra"
-digest = "sha256:9f03eb7072dfdf97221494830ffd7dae3647b74086e99a1ce44455f07821be2c"
+digest = "sha256:c2656e5e55a6b222517253adce4b80214e879a9f4e5330a1e2de7af8f16df319"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:b4d3413956f9122bd6012d0d57091c37b638c9e79e3863ef04e17341885e453a"
+digest = "sha256:6774ee14eebc8d5a82bfd07a26bb0f16c3a08b72d3d31538039cad31acdca8a8"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
@@ -16,11 +16,11 @@ digest = "sha256:ea62ddcaa6a70ff1e4346011051f0555cf906da83ba167fa8836fa194c96195
 
 [packages.battery.databricks]
 path = "batteries/databricks"
-digest = "sha256:1b7cc1e35b9f955b0c24cf9da9208fd6d003c8c90244131c92057609b1a0ec69"
+digest = "sha256:264b2cf3539e18dbb24112376b75afe7adaa2c5ca57a722405f9101ddf51b2b2"
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:b3f6d27b409e3fb4b80bfe35d52b419ec136a3ac7e1f172017526c9c72928a1b"
+digest = "sha256:c14ee53a4c8aa4a785e39c5a41f09f439af9b789d7b0ab504e8ae1ac8ea4ab20"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -32,11 +32,11 @@ digest = "sha256:de05f7e62a2cdd36fcc3d646866e4815030f70fdca8ab03ab2939169060a57b
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:f7d8f289003dc5d69d5373c6997975db1f57febe02fbc3183b9cde32447f3a8c"
+digest = "sha256:465831ee32962ca5a6a525e981edc96eb54bc8383680579d3f029502f3f100f5"
 
 [packages.battery.jev]
 path = "batteries/jev"
-digest = "sha256:7ad8564bf4ce5227cdf11847af3847ec13b1bd5b76c93a3ccf623bdbdb758e0f"
+digest = "sha256:4ec10b90f6b97c2962dd740a6c61ae8e347269d50f2e0991406b62bef9e222d5"
 
 [packages.battery.launchdarkly]
 path = "batteries/launchdarkly"
@@ -60,7 +60,7 @@ digest = "sha256:c0979f9c76fe86006956ec3f55bcd782f4722f15a943ce7eb1cb1a04ca97d89
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
-digest = "sha256:2e1e7ad194caa618b976fbf90740274af6e153fd01d82fecd903a9e0822bfbad"
+digest = "sha256:31af454de917dc50544a2ba0930c2d0ccea722750975366bef6e56f02992f470"
 
 [packages.battery.posthog]
 path = "batteries/posthog"

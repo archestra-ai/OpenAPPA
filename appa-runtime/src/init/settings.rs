@@ -343,9 +343,9 @@ fn read(path: &Path) -> Result<Map<String, Value>, InitError> {
     parse(path, bytes.as_deref())
 }
 
-/// An absent file is an empty object; anything else must be an object.
+/// An absent or blank file is an empty object; anything else must be an object.
 fn parse(path: &Path, bytes: Option<&[u8]>) -> Result<Map<String, Value>, InitError> {
-    let Some(bytes) = bytes else {
+    let Some(bytes) = bytes.filter(|bytes| !bytes.trim_ascii().is_empty()) else {
         return Ok(Map::new());
     };
     let value: Value = serde_json::from_slice(bytes).map_err(|error| conflict(path, &error.to_string()))?;
@@ -549,6 +549,24 @@ mod tests {
         }
         fs::remove_file(path(&paths)).unwrap();
         verify(&paths).unwrap();
+    }
+
+    #[test]
+    fn a_blank_settings_file_is_an_empty_one() {
+        let root = tempfile::tempdir().unwrap();
+        let (paths, binary) = fixture(root.path());
+        let target = HookTarget {
+            binary: &binary,
+            url: "http://127.0.0.1:1",
+            config: &paths.config_dir.join("appa.toml"),
+            data_dir: &paths.data_dir,
+        };
+        for bytes in ["", "\n"] {
+            fs::write(path(&paths), bytes).unwrap();
+            verify(&paths).unwrap();
+            install_hooks(&paths, &target, &mut Compensation::default()).unwrap();
+            assert!(settings(&paths)["hooks"]["PreToolUse"].is_array(), "{bytes:?}");
+        }
     }
 
     /// The runtime start budget and the client's own deadlines are the

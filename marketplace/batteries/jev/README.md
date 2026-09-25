@@ -84,13 +84,12 @@ names what to read from an internal service does not. The Annotator's
 | call delivers data outside it | `requires.audience = { contains = "public" }` |
 | call sends or writes what the trajectory holds where people or outside services read it, or runs it | `requires.trust` = the mandate's highest rank |
 
-When Jev's probability for a label is below 0.6, the builtin answers the
-safer of Jev's two likeliest options: the narrower result audience, the
-lower trust rank, or the wider required audience. The call still gets an
-annotation, and a remedy plan can still clear it. The consult is no
-answer, and the runtime refuses the call, when the mandate does not admit
-a label, when the API does not answer, or when its answer is not a
-probability for each option.
+For each label the builtin answers Jev's likeliest option. When two
+options are equally likely, it answers the safer one: the narrower result
+audience, the lower trust rank, or the wider required audience. The
+consult is no answer, and the runtime refuses the call, when the mandate
+does not admit a label, when the API does not answer, or when its answer
+is not a probability for each option.
 
 With no answer after 0.8 s on a connection that has answered before, or
 after 2 s on a new one, a second request goes out on a new connection and
@@ -100,10 +99,10 @@ an unreadable body are not. Every attempt ends inside the deployment's
 `externals.timeout_ms`.
 
 The consult record carries one JSON object under `jev_diagnostics`, also
-logged at debug level: each label's probabilities, threshold, and
-decision, the outcome of each attempt, the elapsed milliseconds, and the
-error class on failure. It never carries the API key or the call's
-arguments.
+logged at debug level: each label's probabilities and decision, the
+`requires.trust` cutoff, the outcome of each attempt, the elapsed
+milliseconds, and the error class on failure. It never carries the API
+key or the call's arguments.
 
 The requests go to TypeSafe's API. The operator can point them at another
 endpoint with `APPA_PROVIDER_JEV_API_URL` in the runtime's environment; a

@@ -43,12 +43,6 @@ class Diagnostic:
     file: Path | None = None
     severity: str = "error"
 
-    @property
-    def path(self) -> Path | None:
-        """Alias useful to callers that think of a diagnostic as a path."""
-
-        return self.file or (self.location.path if self.location else None)
-
     def __str__(self) -> str:
         where = f" [{self.location.display()}]" if self.location else ""
         affected = f" ({self.file})" if self.file and (not self.location or self.file != self.location.path) else ""
@@ -64,7 +58,6 @@ class Command:
 @dataclass(frozen=True)
 class LocalPath:
     path: Path | None
-    relative: str | None
     reason: str | None = None
 
 
@@ -86,8 +79,7 @@ def _line_for_key(text: str, key: str, start: int = 0) -> tuple[int, int] | None
             position = line.find(key)
             while position >= 0:
                 after = line[position + len(key) :].lstrip()
-                before = line[:position].rstrip()
-                if (not before or before.endswith((" ", "\t"))) and after.startswith("="):
+                if not line[:position].strip() and after.startswith("="):
                     return number, offset + position
                 position = line.find(key, position + 1)
         offset += len(line)
@@ -137,7 +129,7 @@ def _toml_line(error: tomllib.TOMLDecodeError) -> int | None:
     return getattr(error, "lineno", None)
 
 
-def _relative_local_path(root: Path, raw: str, *, canonical: bool = True) -> LocalPath:
+def _relative_local_path(root: Path, raw: str) -> LocalPath:
     """Resolve a path and prove that it stays in ``root``.
 
     The canonical spelling check intentionally agrees with the Rust manifest
@@ -146,21 +138,21 @@ def _relative_local_path(root: Path, raw: str, *, canonical: bool = True) -> Loc
     """
 
     if not raw or "\x00" in raw:
-        return LocalPath(None, None, "the target is empty or contains a NUL")
+        return LocalPath(None, "the target is empty or contains a NUL")
     candidate = Path(raw)
     if candidate.is_absolute():
-        return LocalPath(None, None, "the target is absolute and escapes the battery")
+        return LocalPath(None, "the target is absolute and escapes the battery")
     try:
         resolved = (root / candidate).resolve(strict=False)
     except OSError as error:
-        return LocalPath(None, None, f"the target cannot be resolved: {error}")
+        return LocalPath(None, f"the target cannot be resolved: {error}")
     try:
         relative = resolved.relative_to(root).as_posix()
     except ValueError:
-        return LocalPath(None, None, "the target escapes the battery")
-    if canonical and raw != relative:
-        return LocalPath(None, relative, "the target is not a canonical relative path")
-    return LocalPath(resolved, relative)
+        return LocalPath(None, "the target escapes the battery")
+    if raw != relative:
+        return LocalPath(None, "the target is not a canonical relative path")
+    return LocalPath(resolved)
 
 
 def _diagnostic(
@@ -357,7 +349,6 @@ def _python_import_diagnostics(
 
 def _read_manifest(root: Path, battery: str) -> tuple[str, list[tuple[str, Location]], list[Diagnostic]]:
     manifest = root / "appa-package.toml"
-    diagnostics: list[Diagnostic] = []
     try:
         text = manifest.read_text(encoding="utf-8")
         data = tomllib.loads(text)
@@ -376,7 +367,7 @@ def _read_manifest(root: Path, battery: str) -> tuple[str, list[tuple[str, Locat
         return name, [], [_diagnostic(name, "invalid manifest", "[battery].helpers must be an array of strings", Location(manifest))]
     found = _line_for_key(text, "helpers")
     location = Location(manifest, found[0] if found else None)
-    return name, [(helper, location) for helper in helpers], diagnostics
+    return name, [(helper, location) for helper in helpers], []
 
 
 def lint_battery(root: Path) -> list[Diagnostic]:
