@@ -13,6 +13,8 @@ Powered by **APPA** (Agentic Permissions Policy Algebra), OpenAPPA tracks data s
 
 OpenAPPA also helps the agent remain useful under security restrictions. If an action is blocked by policy, OpenAPPA returns ways to continue: request human approval, clean sensitive fields, or isolate a read in a subagent.
 
+:::video-how-it-works:::
+
 ## The Core Concepts
 
 OpenAPPA operates with three concepts:
