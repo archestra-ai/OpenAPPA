@@ -9,7 +9,7 @@
 //! covers the spawn call only, never the wait for the child.
 
 use std::io;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 /// [`Command::spawn`], alone.
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
@@ -34,7 +34,8 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 }
 
 /// [`Command::status`], alone: stdio inherited unless `command` sets it.
-pub(crate) fn status(command: &mut Command) -> io::Result<ExitStatus> {
+#[cfg(feature = "daemon")]
+pub(crate) fn status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
     spawn(command)?.wait()
 }
 
