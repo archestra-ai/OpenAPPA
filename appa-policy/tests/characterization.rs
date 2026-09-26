@@ -9,7 +9,7 @@ use appa_engine::label::{Audience, ChainAudience, DeclaredAudience, ReaderId, Tr
 use appa_engine::names::SurfaceName;
 use appa_engine::params::ParamsError;
 use appa_engine::profile::{BindingMode, OpenVector, SurfaceMode};
-use appa_engine::registry::{LoadError, TrustChain};
+use appa_engine::registry::{LoadError, MAX_HINT_CHARS, TrustChain};
 use appa_policy::{
     Config, ConfigError, InputSource, SelectorDeclaration, ToolCallSource, declare_templates, declared_sources,
     parse_delta,
@@ -162,6 +162,38 @@ fn a_zero_planner_cap_is_refused() {
         Config::from_toml_str("version = 2\n[limits]\nplanner_cap = 0\n"),
         Err(ConfigError::ZeroPlannerCap)
     ));
+}
+
+// --- hints ---------------------------------------------------------------------
+
+fn hinted(kind: &str, hint: &str) -> String {
+    match kind {
+        "authority" => format!(
+            "version = 2\n[[authority]]\nname = \"desk\"\nhint = \"{hint}\"\n[authority.permits]\ntrust_below = \"trusted\"\n"
+        ),
+        "sanitizer" => format!(
+            "version = 2\n[[sanitizer]]\nname = \"desk\"\non = [\"tool_input\"]\nhint = \"{hint}\"\n\
+             [sanitizer.permits]\naudience = {{ from = [\"insider\"], to = [\"partner\"] }}\n"
+        ),
+        "annotator" => format!("version = 2\n[[annotator]]\nname = \"desk\"\nhint = \"{hint}\"\n"),
+        _ => unreachable!("a hinted component kind"),
+    }
+}
+
+#[test]
+fn a_hint_is_bounded_in_characters_for_every_component_kind() {
+    for kind in ["authority", "sanitizer", "annotator"] {
+        Config::from_toml_str(&hinted(kind, &"é".repeat(MAX_HINT_CHARS)))
+            .unwrap_or_else(|error| panic!("a {kind} hint of the maximum length loads: {error}"));
+        assert!(
+            matches!(
+                Config::from_toml_str(&hinted(kind, &"é".repeat(MAX_HINT_CHARS + 1))),
+                Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
+                    if context == format!("{kind} desk") && len == MAX_HINT_CHARS + 1 && max == MAX_HINT_CHARS
+            ),
+            "an overlong {kind} hint must be refused naming the {kind}"
+        );
+    }
 }
 
 // --- trust chain ---------------------------------------------------------------

@@ -3651,6 +3651,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_malformed_selector_declaration_is_refused_at_load_naming_the_source_and_template() {
+        for (selectors, expected) in [
+            (
+                "[{ template = \"channel//x\" }]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"channel//x\" has an empty segment",
+            ),
+            (
+                "[{ template = \"viewer\", feeds = \"public\" }]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"viewer\" `feeds` names a built-in audience: `self` or `internal`",
+            ),
+            (
+                "[]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"\" `selectors` declares no template",
+            ),
+        ] {
+            let document = format!("{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n");
+            let refused = parse(&document).expect_err("a malformed selector declaration refuses the load");
+            assert_eq!(refused.to_string(), expected);
+            let value: toml::Value = toml::from_str(&document).expect("the document is TOML");
+            let described = source_registrations_of(&value).expect_err("the document's sources are refused");
+            assert_eq!(described.to_string(), expected);
+        }
+    }
+
     /// Everything outside `[policy]` and `[externals]` describes the deployment the host
     /// runs, not the policy its author wrote.
     #[test]
