@@ -1176,7 +1176,15 @@ mod tests {
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(&repository)
-            .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "marketplace"])
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "marketplace",
+            ])
             .output()
             .unwrap();
         assert!(output.status.success(), "git lists the marketplace");
