@@ -151,8 +151,9 @@ pub(super) fn remove_hooks(paths: &DeploymentPaths, binary: &Path) -> Result<(),
     })
 }
 
-/// The settings `clappa` loads for its sessions alone: APPA's status line. The
-/// user's `statusLine` stays theirs in every session `clappa` does not start.
+/// The settings `clappa` loads for its sessions alone: APPA's status line and the
+/// `SendMessage` deny. The user's settings stay theirs in every session `clappa`
+/// does not start.
 pub(super) fn clappa_settings_path(paths: &DeploymentPaths) -> PathBuf {
     paths.data_dir.join("clappa.settings.json")
 }
@@ -163,7 +164,12 @@ pub(super) fn install_clappa_settings(
     compensation: &mut Compensation,
 ) -> Result<(), InitError> {
     let path = clappa_settings_path(paths);
-    let settings = json!({"statusLine": {"type": "command", "command": statusline_command(target.binary, target.url)}});
+    // A message to a peer session leaves the trajectory without its label; `Agent`
+    // is the branch whose return the runtime checks.
+    let settings = json!({
+        "statusLine": {"type": "command", "command": statusline_command(target.binary, target.url)},
+        "permissions": {"deny": ["SendMessage"]},
+    });
     let bytes = serde_json::to_vec_pretty(&settings).expect("a JSON value serializes");
     let before = file_before(&path)?;
     if before.as_deref() == Some(bytes.as_slice()) {
@@ -485,7 +491,10 @@ mod tests {
         let written: Value = serde_json::from_slice(&fs::read(clappa_settings_path(&paths)).unwrap()).unwrap();
         assert_eq!(
             written,
-            json!({"statusLine": {"type": "command", "command": statusline_command(&binary, "http://127.0.0.1:1")}})
+            json!({
+                "statusLine": {"type": "command", "command": statusline_command(&binary, "http://127.0.0.1:1")},
+                "permissions": {"deny": ["SendMessage"]},
+            })
         );
         assert_eq!(fs::read(path(&paths)).unwrap(), user);
 

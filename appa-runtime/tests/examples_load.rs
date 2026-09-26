@@ -328,7 +328,14 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
     ran(&runtime, settled).await;
 
-    let publication = propose(&runtime, call("host/claude-code/Artifact", "file_path", "page.html")).await;
+    let artifact = call("host/claude-code/Artifact", "file_path", "page.html");
+    assert_eq!(
+        propose(&runtime, artifact).await,
+        HookDecision::AllowCall { spawn: None },
+        "an artifact is private to the requester until they share it"
+    );
+
+    let publication = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
     let HookDecision::DenyCall {
         feedback,
         offers,
@@ -536,8 +543,9 @@ command = ["/bin/sh", "annotator.sh"]
 
 /// A search inside a credential path is a read of it and narrows the session like the
 /// Read rules do. Writing into one needs a `trusted` session, so it runs before untrusted
-/// content arrives and is refused after. The harness's own settings ask the person for
-/// each exact call.
+/// content arrives and is refused after, and so is writing a file a later process reads
+/// as instructions or runs as code. The files that can turn the protection off ask the
+/// person for each exact call.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
@@ -587,6 +595,23 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
     };
     assert_eq!(review.len(), 1, "the exact call is shown to the person");
     assert!(review[0].text.contains("settings.json"));
+    for (tool, path) in [
+        ("host/claude-code/Write", ".mcp.json"),
+        ("host/claude-code/Edit", "/home/me/.claude/hooks/guard.sh"),
+    ] {
+        let asked = propose(&runtime, call(tool, "file_path", path)).await;
+        let HookDecision::DenyCall { review, .. } = asked else {
+            panic!("{path}: a file that can turn the protection off asks the person, got {asked:?}");
+        };
+        assert_eq!(review.len(), 1, "{path}");
+    }
+    let instructions = call("host/claude-code/Edit", "file_path", "/repo/CLAUDE.md");
+    assert_eq!(
+        propose(&runtime, instructions.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a trusted session edits the agent's instructions"
+    );
+    ran(&runtime, instructions).await;
 
     // Reading a web page is offered as the drop to `suspicious`; the session accepts it.
     let page = call("host/claude-code/WebFetch", "url", "https://docs.example/page");
@@ -612,6 +637,21 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
     assert_eq!(offers.len(), 1, "the person can approve the exact call: {feedback}");
     assert_eq!(review.len(), 1);
     assert!(review[0].text.contains(".env"), "the review shows the exact call");
+    for (tool, path) in [
+        ("host/claude-code/Edit", "/repo/CLAUDE.md"),
+        ("host/claude-code/Write", ".claude/skills/review/SKILL.md"),
+        ("host/claude-code/Write", "/repo/.git/hooks/pre-commit"),
+        ("host/claude-code/Edit", "/home/me/.zshrc"),
+        ("host/claude-code/Write", "/home/me/Library/LaunchAgents/agent.plist"),
+    ] {
+        let refused = propose(&runtime, call(tool, "file_path", path)).await;
+        let HookDecision::DenyCall { offers, .. } = refused else {
+            panic!(
+                "{path}: a session that read untrusted content does not write what a later process runs, got {refused:?}"
+            );
+        };
+        assert_eq!(offers.len(), 1, "{path}: the person can approve the exact call");
+    }
     let note = call("host/claude-code/Write", "file_path", "notes.md");
     assert_eq!(
         propose(&runtime, note).await,
