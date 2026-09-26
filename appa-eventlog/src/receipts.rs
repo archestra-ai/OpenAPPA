@@ -510,6 +510,95 @@ mod tests {
         }
     }
 
+    /// Each receipt row records the caller of the claim that wrote it, or none, and a later
+    /// completion by another caller of the session leaves it as claimed.
+    #[test]
+    fn receipts_record_the_caller_that_claimed_them() {
+        let caller_of = |store: &LogStore, table: &str| -> Vec<Option<String>> {
+            let connection = store.lock();
+            let mut statement = connection
+                .prepare(&format!("SELECT caller_id FROM {table} ORDER BY rowid"))
+                .expect("the caller query prepares");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("the callers read")
+                .collect::<Result<_, _>>()
+                .expect("every caller reads")
+        };
+        for (store, _dir) in stores() {
+            let callerless = ReceiptScope {
+                caller_id: None,
+                ..scope(ReceiptBinding::Session, "caller")
+            };
+            for (operation_id, scope) in [
+                ("op-caller", scope(ReceiptBinding::Caller, "caller")),
+                ("op-session", scope(ReceiptBinding::Session, "session-caller")),
+                ("op-callerless", callerless.clone()),
+            ] {
+                let mut request = operation(scope);
+                request.key.operation_id = operation_id.to_owned();
+                store.claim_operation(request).expect("the operation claims");
+            }
+            let mut completed_elsewhere = operation(scope(ReceiptBinding::Session, "other"));
+            completed_elsewhere.key.operation_id = "op-session".to_owned();
+            store
+                .complete_operation(completed_elsewhere.key, serde_json::json!({"decision": "allow_call"}))
+                .expect("another caller in the session completes");
+            assert_eq!(
+                caller_of(&store, "operations"),
+                [Some("caller".to_owned()), Some("session-caller".to_owned()), None]
+            );
+
+            let mut callerless_result = result("caller");
+            callerless_result.key.caller_id = None;
+            callerless_result.key.tool_call_id = "call-callerless".to_owned();
+            for request in [result("caller"), callerless_result] {
+                store.claim_processed_result(request).expect("the result claims");
+            }
+            store
+                .complete_processed_result(
+                    result("other").key,
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "allow"}),
+                )
+                .expect("another caller in the session completes");
+            assert_eq!(
+                caller_of(&store, "processed_results"),
+                [Some("caller".to_owned()), None]
+            );
+        }
+    }
+
+    #[test]
+    fn pending_receipts_are_found_by_their_root_alone() {
+        for (store, _dir) in stores() {
+            let pending = |root: &str| store.has_pending_receipts(root.to_owned()).expect("the check reads");
+            assert!(!pending("root"));
+
+            let request = operation(scope(ReceiptBinding::Session, "caller"));
+            store.claim_operation(request.clone()).expect("the operation claims");
+            assert!(pending("root"), "a pending operation");
+            assert!(!pending("other-root"));
+            store
+                .complete_operation(request.key, serde_json::json!({"decision": "allow_call"}))
+                .expect("the operation completes");
+            assert!(!pending("root"));
+
+            let request = result("caller");
+            store.claim_processed_result(request.clone()).expect("the result claims");
+            assert!(pending("root"), "a pending processed result");
+            assert!(!pending("other-root"));
+            store
+                .complete_processed_result(
+                    request.key,
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "allow"}),
+                )
+                .expect("the result completes");
+            assert!(!pending("root"));
+        }
+    }
+
     #[test]
     fn processed_results_refuse_another_scope_without_writing() {
         for (store, _dir) in stores() {

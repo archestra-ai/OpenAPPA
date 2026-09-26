@@ -1872,6 +1872,43 @@ mod tests {
                 .expect("all receipts are terminal")
         );
 
+        let session_bound = OperationRequest {
+            key: OperationKey {
+                scope: ReceiptScope {
+                    caller_id: None,
+                    binding: ReceiptBinding::Session,
+                    ..scope.clone()
+                },
+                operation_id: "remedy-callerless".to_owned(),
+            },
+            ..request.clone()
+        };
+        pg.claim_operation(session_bound).expect("the session-bound operation claims");
+        let session = scope.session_id.clone();
+        let callers: Vec<(String, Option<String>)> = pg
+            .with_client(move |client| {
+                Ok(client
+                    .query(
+                        "SELECT operation_id, caller_id FROM openappa_operations WHERE session_id=$1 \
+                         UNION ALL SELECT tool_call_id, caller_id FROM openappa_processed_results WHERE session_id=$1 \
+                         ORDER BY 1",
+                        &[&session],
+                    )?
+                    .iter()
+                    .map(|row| (row.get(0), row.get(1)))
+                    .collect())
+            })
+            .expect("the stored callers read");
+        assert_eq!(
+            callers,
+            [
+                ("call-1".to_owned(), Some("caller".to_owned())),
+                ("remedy-1".to_owned(), Some("caller".to_owned())),
+                ("remedy-callerless".to_owned(), None),
+            ],
+            "each receipt records the caller that claimed it"
+        );
+
         let mut rollback_owner = owner.clone();
         rollback_owner.offer_id = "0f1e2d3c4b5a6978".to_owned();
         let rollback_request = OperationRequest {
