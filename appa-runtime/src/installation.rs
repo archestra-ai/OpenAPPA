@@ -1168,6 +1168,40 @@ mod tests {
         );
     }
 
+    /// The repository's marketplace as `scripts/appa-marketplace.sh` digests it:
+    /// the files Git lists, so what a test run leaves behind (a battery helper's
+    /// `__pycache__`) is not taken for package content.
+    pub(super) fn shipped_marketplace() -> tempfile::TempDir {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "marketplace",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git lists the marketplace");
+        let copy = tempfile::tempdir().unwrap();
+        for relative in output.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+            let relative = Path::new(std::str::from_utf8(relative).unwrap());
+            let source = repository.join(relative);
+            if !source.exists() {
+                continue;
+            }
+            let target = copy.path().join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(&source, &target).unwrap();
+        }
+        copy
+    }
+
     pub(super) fn selection() -> Selection {
         Selection::empty(generation(b"schema = 1\nname = 'appa'\n"), Platform::MacArm64)
     }
@@ -1230,7 +1264,8 @@ mod tests {
 
     #[test]
     fn shipped_github_battery_supports_both_plugins_together() {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
+        let shipped = shipped_marketplace();
+        let source = shipped.path().join("marketplace");
         let catalog = fs::read(source.join("marketplace.toml")).unwrap();
         let mut selected = Selection::empty(generation(&catalog), Platform::MacArm64);
         for plugin in ["claude-code", "kagent"] {
