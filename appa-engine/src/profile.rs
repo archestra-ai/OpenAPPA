@@ -1254,8 +1254,8 @@ mod tests {
         cfg.sanitizers = vec![output_sanitizer("redactor")];
         let profile = covering_profile(&cfg);
         let bare = identity(&cfg, &profile);
-        cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk"));
-        cfg.sanitizers[0].hint = Some(Hint::new("strips PII"));
+        cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk").expect("a short hint"));
+        cfg.sanitizers[0].hint = Some(Hint::new("strips PII").expect("a short hint"));
         assert_eq!(identity(&cfg, &profile), bare);
     }
 

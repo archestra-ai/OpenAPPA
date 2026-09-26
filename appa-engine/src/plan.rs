@@ -2944,7 +2944,10 @@ mod tests {
             tools: declared(vec![tool()]),
             authorities: vec![
                 officer("a", None),
-                officer("b", Some(Hint::new("the fast lane — prefer this desk"))),
+                officer(
+                    "b",
+                    Some(Hint::new("the fast lane — prefer this desk").expect("a short hint")),
+                ),
             ],
             sanitizers: vec![],
             audience: crate::audience::AudienceConfig::default(),

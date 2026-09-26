@@ -8,22 +8,42 @@ use crate::label::{
     Audience, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, SymbolicAtom, Trust,
 };
 use crate::names::{AuthorityName, MarkName, SanitizerName, TagName};
+use crate::registry::MAX_HINT_CHARS;
 
 /// Trusted deployer prose for a registered component. OpenAPPA includes an Authority or
 /// Sanitizer hint in remedy plans that reference the component. For model-backed components,
 /// the hint is included in the consult's system prompt declaration to guide model evaluation.
 /// Advisory only: a hint NEVER enters a check, enumeration, or ordering, and it cannot expand
-/// a mandate. The load lint bounds its length ([`crate::registry::MAX_HINT_CHARS`]).
+/// a mandate. Its length is bounded by [`MAX_HINT_CHARS`] characters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Hint(String);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("hint is {len} characters, over the maximum {MAX_HINT_CHARS}")]
+pub struct HintTooLong {
+    pub len: usize,
+}
+
 impl Hint {
-    pub fn new(text: impl Into<String>) -> Self {
-        Hint(text.into())
+    pub fn new(text: impl Into<String>) -> Result<Hint, HintTooLong> {
+        let text = text.into();
+        match text.chars().count() {
+            len if len > MAX_HINT_CHARS => Err(HintTooLong { len }),
+            _ => Ok(Hint(text)),
+        }
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for Hint {
+    type Error = HintTooLong;
+
+    fn try_from(text: String) -> Result<Hint, HintTooLong> {
+        Hint::new(text)
     }
 }
 
@@ -329,6 +349,28 @@ mod tests {
 
     fn readers(ids: &[&str]) -> Audience {
         Audience::restricted(ids.iter().copied().map(ReaderId::new))
+    }
+
+    #[test]
+    fn a_hint_is_bounded_in_characters_whichever_way_it_is_built() {
+        let longest = "é".repeat(MAX_HINT_CHARS);
+        let overlong = "é".repeat(MAX_HINT_CHARS + 1);
+        assert_eq!(
+            Hint::new(longest.clone()).map(|hint| hint.as_str().len()),
+            Ok(longest.len())
+        );
+        assert_eq!(
+            Hint::new(overlong.clone()),
+            Err(HintTooLong {
+                len: MAX_HINT_CHARS + 1
+            })
+        );
+        let decoded: Hint = serde_json::from_value(serde_json::json!(longest)).expect("the longest hint decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("a hint encodes"),
+            serde_json::json!(longest)
+        );
+        assert!(serde_json::from_value::<Hint>(serde_json::json!(overlong)).is_err());
     }
 
     #[test]

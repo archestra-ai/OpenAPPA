@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use appa_engine::authority::{
-    Attends, Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
+    Attends, Authority, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
@@ -12,7 +12,7 @@ use appa_engine::label::{Audience, DeclaredAudience, Label, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, SurfaceName, TagName};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{BindingMode, ExecutorClass, ProfileDeclaration, neutral_starting_label};
-use appa_engine::registry::{AudienceVocabulary, TrustChain};
+use appa_engine::registry::{AudienceVocabulary, LoadError, MAX_HINT_CHARS, TrustChain};
 use appa_engine::value::ToolName;
 
 use crate::error::ConfigError;
@@ -243,13 +243,14 @@ impl RawAuthority {
         refuse_inline_binding("authority", &self.name, self.implementation.as_ref())?;
         let ctx = format!("authority {}", self.name);
         let mandate = self.permits.convert(chain, &ctx)?;
+        let hint = parse_hint(self.hint, &ctx)?;
         Ok(Authority {
             name: AuthorityName::new(self.name),
             mandate,
             scope: Scope {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
-            hint: self.hint.map(Hint::new),
+            hint,
         })
     }
 }
@@ -286,6 +287,7 @@ impl RawSanitizer {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
         let on = parse_points(&self.on, &self.name)?;
         let transition = self.permits.convert(chain, &self.name)?;
+        let hint = parse_hint(self.hint, &format!("sanitizer {}", self.name))?;
         Ok(Sanitizer {
             name: SanitizerName::new(self.name),
             on,
@@ -293,7 +295,7 @@ impl RawSanitizer {
             scope: Scope {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
-            hint: self.hint.map(Hint::new),
+            hint,
         })
     }
 }
@@ -349,6 +351,16 @@ pub(crate) fn refuse_inline_binding(
         }),
         None => Ok(()),
     }
+}
+
+pub(crate) fn parse_hint(hint: Option<String>, context: &str) -> Result<Option<Hint>, ConfigError> {
+    hint.map(Hint::new).transpose().map_err(|HintTooLong { len }| {
+        ConfigError::Registry(LoadError::HintTooLong {
+            context: context.to_string(),
+            len,
+            max: MAX_HINT_CHARS,
+        })
+    })
 }
 
 /// A tool name split before its argument selector, if any: `send(to)` → (`send`, `(to)`).
