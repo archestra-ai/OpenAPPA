@@ -1256,7 +1256,7 @@ impl Inner {
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
         self.store
-            .log(&crate::engine::engine_id(root))
+            .log(root)
             .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
             .map_err(read_refused)
     }
@@ -1719,7 +1719,7 @@ impl Runtime {
     ) -> Result<(), EventError> {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
-        let scope = crate::engine::engine_id(actor.child.as_ref().unwrap_or(&actor.root));
+        let scope = actor.child.as_ref().unwrap_or(&actor.root);
         self.inner.append_host_with(&actor.root, |log| {
             let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
@@ -1768,12 +1768,12 @@ impl Runtime {
             Some(actor) => {
                 let log = self.inner.log(&actor.root)?;
                 let mut report = self.check_inventory_at(&log, adapter, inventory)?;
-                let scope = crate::engine::engine_id(acting_trajectory(actor));
+                let scope = acting_trajectory(actor);
                 report.actor_opened = log.facts().iter().any(|fact| {
                     matches!(
                         fact,
                         appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening { trajectory, .. })
-                        | appa_engine::fact::Fact::ForkOpened { trajectory, .. } if trajectory == &scope
+                        | appa_engine::fact::Fact::ForkOpened { trajectory, .. } if trajectory == scope
                     )
                 });
                 let previous = inventory_at(&log, actor, adapter)?;
@@ -1871,7 +1871,7 @@ impl Runtime {
         let standing = self
             .inner
             .store
-            .has_root(&crate::engine::engine_id(new_root))
+            .has_root(new_root)
             .inspect_err(|error| {
                 self.inner
                     .note_store_error(Some(new_root), crate::events::StoreOperation::Read, error)
@@ -1929,13 +1929,7 @@ impl Runtime {
             Some(appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
                 forked_from: Some(origin),
                 ..
-            })) if origin.is_from(
-                &crate::engine::engine_id(parent_root),
-                &crate::engine::engine_id(parent),
-            ) =>
-            {
-                Ok(())
-            }
+            })) if origin.is_from(parent_root, parent) => Ok(()),
             _ => Err(RootForkRefusal::RootIdConflict),
         }
     }
@@ -1959,7 +1953,6 @@ impl Runtime {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
             })?;
-        let root = TrajectoryId(root.as_str().to_string());
         Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
     }
 
@@ -1978,7 +1971,7 @@ impl Runtime {
         let known = self
             .inner
             .store
-            .has_root(&crate::engine::engine_id(root))
+            .has_root(root)
             .inspect_err(|error| {
                 self.inner
                     .note_store_error(Some(root), crate::events::StoreOperation::Read, error)
@@ -2722,8 +2715,7 @@ impl Runtime {
             }
         };
         let mut held: Option<TrajectoryId> = None;
-        for candidate in candidates {
-            let root = TrajectoryId(candidate.as_str().to_string());
+        for root in candidates {
             if folded == Some(&root) {
                 continue;
             }
@@ -2783,10 +2775,10 @@ impl Runtime {
     /// Whether a prompt reached this actor and nothing has settled what it left behind. A
     /// family with no log, or one the store cannot read, has been reached by nothing.
     pub(crate) fn prompted(&self, acting: &Actor) -> bool {
-        let marked = crate::engine::engine_id(acting_trajectory(acting));
+        let marked = acting_trajectory(acting);
         self.inner
             .log(&acting.root)
-            .is_ok_and(|log| host::prompted(log.host_records(), &marked))
+            .is_ok_and(|log| host::prompted(log.host_records(), marked))
     }
 
     /// One root's rebuilt view and the engine that decides for it, for
@@ -3849,10 +3841,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .await,
             appa_runtime_api::HookDecision::Ack
         );
-        let id = crate::engine::engine_id(&root);
-        assert!(other.has_root(&id).expect("the view's store reads"));
+        assert!(other.has_root(&root).expect("the view's store reads"));
         assert!(
-            !runtime.store().has_root(&id).expect("the runtime's store reads"),
+            !runtime.store().has_root(&root).expect("the runtime's store reads"),
             "a view writes nothing to the store of the runtime it was made from"
         );
 
@@ -3868,9 +3859,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             },
         )
         .await;
-        let opened_under = other
-            .log(&crate::engine::engine_id(&later))
-            .expect("the later root reads");
+        let opened_under = other.log(&later).expect("the later root reads");
         assert_eq!(
             crate::engine::policy_file_key(opened_under.policy_file()),
             reloaded.policy_key,
@@ -3895,7 +3884,6 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             Runtime::open_with_store(versioned_policy("leased"), Arc::clone(&store), None).expect("the runtime opens");
         let unique = tempfile::tempdir().expect("a unique root name exists");
         let root = TrajectoryId(format!("leased:{}", unique.path().display()));
-        let id = crate::engine::engine_id(&root);
 
         // A host serializes a trajectory across its replicas with a session-level lock on
         // the key an append locks too. Only the connection that holds it can append.
@@ -3934,7 +3922,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .await,
             appa_runtime_api::HookDecision::Ack
         );
-        assert!(store.has_root(&id).expect("the store reads"));
+        assert!(store.has_root(&root).expect("the store reads"));
 
         let key = root.0.clone();
         lease
@@ -4859,10 +4847,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
         // The writer that wins the consume's first compare-and-swap ends this actor's turn,
         // so the position the release would have landed at no longer has a standing to spend.
-        let engine_root = crate::engine::engine_id(&root);
         runtime.store().contend_next_append_with(
-            &engine_root,
-            &engine_root,
+            &root,
+            &root,
             &HostObservation::TurnEnded {
                 actor: host_actor(&actor),
             },
@@ -4911,8 +4898,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         // The writer that wins the consume's first compare-and-swap puts the second family
         // behind the same ticket, so the re-derivation meets two holders where one stood.
         runtime.store().contend_next_append_with(
-            &crate::engine::engine_id(&actors[0].root),
-            &crate::engine::engine_id(&actors[1].root),
+            &actors[0].root,
+            &actors[1].root,
             &HostObservation::Vouched {
                 actor: host_actor(&actors[1]),
                 key: ticket.wire(),
@@ -4936,7 +4923,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn released(runtime: &Runtime, root: &TrajectoryId) -> bool {
         runtime
             .store()
-            .log(&crate::engine::engine_id(root))
+            .log(root)
             .expect("the family reads")
             .host_records()
             .iter()
@@ -5073,19 +5060,16 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             },
         )
         .await;
-        let engine_root = crate::engine::engine_id(&damaged);
         let at = runtime
             .store()
-            .log(&engine_root)
+            .log(&damaged)
             .expect("the family's host records read")
             .host_records()
             .iter()
             .find(|record| matches!(&record.observation, HostObservation::PromptSeen { .. }))
             .expect("the prompt mark landed")
             .seq;
-        runtime
-            .store()
-            .corrupt_batch(&engine_root, at, br#"{"kind":"prompt_seen""#);
+        runtime.store().corrupt_batch(&damaged, at, br#"{"kind":"prompt_seen""#);
         assert!(
             !runtime
                 .store()

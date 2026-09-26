@@ -11,7 +11,6 @@ use crate::consult::{
 use crate::engine::{
     Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
     ForkStatus, InputRequest, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
-    engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -763,7 +762,7 @@ impl Session {
                 || policy.engine().canonical_bytes(&call),
                 &open,
                 log.call_bindings(),
-                &crate::engine::engine_id(&self.trajectory),
+                &self.trajectory,
             )
             .map_err(UnreportableOutcome::refusal)?;
             let key = super::files::key(&dispatch)?;
@@ -851,7 +850,7 @@ impl Session {
                 .map_err(|case| self.refuse_report(case, &call, &open))?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
-                ForkStatus::Bound(bound) if bound == engine_id(&child) => {}
+                ForkStatus::Bound(bound) if bound == child => {}
                 _ => return Err(EventError::BindingMismatch),
             }
             match context.policy.engine().liveness(context.view, &child) {
@@ -923,7 +922,7 @@ impl Session {
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
-                            (ForkStatus::Bound(bound), Some(child)) if engine_id(child) == bound => match &value {
+                            (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => SpawnPlan::Outcome,
                                 Some(said) if context.latest_return(child).as_deref() == Some(said.as_str()) => {
                                     SpawnPlan::Replay
@@ -1360,7 +1359,7 @@ impl Session {
             };
             let opens_dispatch = facts.iter().find_map(|fact| match fact {
                 appa_engine::fact::Fact::DispatchOpened { dispatch, .. }
-                    if dispatch.trajectory() == &crate::engine::engine_id(&self.trajectory) =>
+                    if dispatch.trajectory() == &self.trajectory =>
                 {
                     Some(dispatch.clone())
                 }
@@ -1390,10 +1389,9 @@ impl Session {
             let appended = match (opening_call_id, opens_dispatch) {
                 (Some(call_id), Some(dispatch)) => {
                     if call_id.is_empty()
-                        || log.call_bindings().any(|binding| {
-                            *binding.trajectory == crate::engine::engine_id(&self.trajectory)
-                                && binding.call_id == call_id
-                        })
+                        || log
+                            .call_bindings()
+                            .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
                     {
                         return Err(EventError::CallIdReused);
                     }
@@ -1401,7 +1399,7 @@ impl Session {
                         &log,
                         facts,
                         &appa_eventlog::HostObservation::CallBound {
-                            trajectory: crate::engine::engine_id(&self.trajectory),
+                            trajectory: self.trajectory.clone(),
                             call_id: call_id.to_string(),
                             dispatch,
                         },
@@ -1713,7 +1711,7 @@ impl Decided<'_> {
             || self.canonical_bytes(call),
             open,
             self.log.call_bindings(),
-            &crate::engine::engine_id(&self.session.trajectory),
+            &self.session.trajectory,
         )
     }
 
@@ -1721,12 +1719,11 @@ impl Decided<'_> {
     /// only be matched by tool and bytes, which cannot tell two calls apart, so nothing else may
     /// open beside it.
     fn has_unbound_open_dispatch(&self) -> bool {
-        let trajectory = crate::engine::engine_id(&self.session.trajectory);
         self.open_dispatches().iter().any(|open| {
             !self
                 .log
                 .call_bindings()
-                .any(|binding| *binding.trajectory == trajectory && *binding.dispatch == open.id)
+                .any(|binding| *binding.trajectory == self.session.trajectory && *binding.dispatch == open.id)
         })
     }
 
@@ -2781,9 +2778,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let tampered = serde_json::to_string(&runtime.log_facts(&root()))
             .expect("the opening serializes")
             .replace("cc:root", "cc:evil");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 0, tampered.as_bytes());
         let error = session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -2899,9 +2894,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root(), None).expect("a fresh id opens");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
+        runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
             Err(EventError::UntrustedLog(_)),
@@ -2926,9 +2919,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let tampered = serde_json::to_string(&released)
             .expect("the batch serializes")
             .replace("\"fetch\"", "\"wrench\"");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 1, tampered.as_bytes());
         assert!(matches!(
             session
                 .on_tool_result(
@@ -3009,9 +3000,7 @@ starting_label = { audience = ["alice@corp.example"] }
         );
         let tampered = persisted.replace("alice@corp.example", "mallory@evil.example");
         assert_ne!(tampered, persisted);
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 1, tampered.as_bytes());
         assert!(matches!(
             session.on_tool_call(send, false).await,
             Err(EventError::UntrustedLog(_)),
@@ -4907,9 +4896,7 @@ context_control = true
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
         runtime.create_session(root(), None).expect("a fresh id opens");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
+        runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(runtime.status(&root()).is_none());
     }
 

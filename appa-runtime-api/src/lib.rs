@@ -309,8 +309,31 @@ impl<'de> serde::Deserialize<'de> for CanonicalTool {
 /// Identity of one trajectory (root or child). The adapter constructs it
 /// from the harness's own ids with a harness prefix; there is no
 /// translation table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TrajectoryId(pub String);
+
+impl TrajectoryId {
+    pub fn new(id: impl Into<String>) -> Self {
+        TrajectoryId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod trajectory_id_tests {
+    use super::TrajectoryId;
+
+    #[test]
+    fn serializes_as_a_bare_string() {
+        let id = TrajectoryId::new("cc:s1");
+        let json = serde_json::to_string(&id).expect("serializes");
+        assert_eq!(json, "\"cc:s1\"");
+        assert_eq!(serde_json::from_str::<TrajectoryId>(&json).expect("deserializes"), id);
+    }
+}
 
 /// A model-directed tool call at the harness's execution boundary. The
 /// arguments are the JSON spelling the harness would execute. The engine
