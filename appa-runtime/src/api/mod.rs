@@ -5149,10 +5149,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[cfg(feature = "daemon")]
     #[test]
     fn daemon_sqlite_receipts_outlive_the_runtime_that_recorded_them() {
-        use appa_eventlog::{
-            OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ReceiptBinding,
-            ReceiptScope,
-        };
+        use appa_eventlog::{OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptScope};
 
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
@@ -5162,30 +5159,17 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             session_id: "session".to_owned(),
             binding: ReceiptBinding::Caller,
         };
-        let owner = OfferOwnerRecord {
-            scope: scope.clone(),
-            offer_id: "0123456789abcdef".to_owned(),
-            root: "cc:daemon-receipts".to_owned(),
-            parent_id: None,
-            arguments: None,
-            tool: None,
-            spelling: None,
-        };
         let request = OperationRequest {
             key: OperationKey {
-                scope: scope.clone(),
+                scope,
                 operation_id: "remedy-1".to_owned(),
             },
-            root: owner.root.clone(),
-            input: serde_json::json!({"offer_id": owner.offer_id}),
+            root: "cc:daemon-receipts".to_owned(),
+            input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
         {
             let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
-            runtime
-                .store()
-                .store_offer_owner(owner.clone())
-                .expect("the owner stores");
             assert!(matches!(
                 runtime.store().claim_operation(request.clone()),
                 Ok(OperationClaim::Claimed)
@@ -5196,21 +5180,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 .expect("the operation completes");
         }
         let reopened = Runtime::open(versioned_policy("first"), db, None).expect("the deployment reopens");
-        assert_eq!(
-            reopened
-                .store()
-                .offer_owner(OfferOwnerKey {
-                    organization_id: scope.organization_id,
-                    offer_id: owner.offer_id.clone(),
-                })
-                .expect("the owner reads"),
-            Some(owner),
+        assert!(
+            matches!(
+                reopened.store().claim_operation(request),
+                Ok(OperationClaim::Complete { .. })
+            ),
             "the daemon's SQLite receipts survive a process restart"
         );
-        assert!(matches!(
-            reopened.store().claim_operation(request),
-            Ok(OperationClaim::Complete { .. })
-        ));
     }
 
     #[cfg(feature = "daemon")]

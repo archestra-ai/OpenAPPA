@@ -1,9 +1,8 @@
-//! Typed offer-owner routing and idempotent operation receipts.
+//! Idempotent operation and processed-result receipts.
 //!
-//! These records are not engine facts. They are host integration state: which authenticated
-//! scope minted an offer, and whether an operation or processed result is claimed, pending, or
-//! complete. Offer validity still rehydrates from the log. SQLite and Memory keep the rows in
-//! the same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
+//! These records are not engine facts. They are host integration state: whether an operation
+//! or processed result is claimed, pending, or complete. SQLite and Memory keep the rows in the
+//! same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
 //! through their own migrations.
 
 use serde_json::Value;
@@ -25,25 +24,6 @@ pub struct ReceiptScope {
     pub binding: ReceiptBinding,
 }
 
-/// Routing metadata for a typed remedy offer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerRecord {
-    pub scope: ReceiptScope,
-    pub offer_id: String,
-    pub root: String,
-    pub parent_id: Option<String>,
-    pub arguments: Option<String>,
-    pub tool: Option<String>,
-    pub spelling: Option<String>,
-}
-
-/// The stable lookup key for a durable offer owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerKey {
-    pub organization_id: String,
-    pub offer_id: String,
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ReceiptStorageError(pub String);
@@ -52,8 +32,6 @@ pub struct ReceiptStorageError(pub String);
 pub enum ReceiptError {
     #[error("receipt storage failed: {0}")]
     Storage(ReceiptStorageError),
-    #[error("a different owner record already exists for this offer")]
-    Collision,
     #[error("receipt belongs to another authenticated scope")]
     ScopeMismatch,
     #[error("receipt key was reused with different input")]
@@ -193,33 +171,6 @@ pub(crate) enum Completion {
     Write,
     /// The receipt already holds this very completion.
     Unchanged,
-}
-
-pub(crate) fn binding_name(binding: ReceiptBinding) -> &'static str {
-    match binding {
-        ReceiptBinding::Session => "session",
-        ReceiptBinding::Caller => "caller",
-    }
-}
-
-pub(crate) fn parse_binding(value: &str) -> Result<ReceiptBinding, String> {
-    match value {
-        "session" => Ok(ReceiptBinding::Session),
-        "caller" => Ok(ReceiptBinding::Caller),
-        other => Err(format!("offer owner has an invalid binding {other}")),
-    }
-}
-
-/// An owner write that met a stored row: an identical record is a replay, any other collides.
-pub(crate) fn resolve_offer_owner(
-    existing: Option<OfferOwnerRecord>,
-    record: &OfferOwnerRecord,
-) -> Result<(), ReceiptError> {
-    match existing {
-        None => Err(ReceiptError::storage("offer owner disappeared after a conflict")),
-        Some(existing) if existing == *record => Ok(()),
-        Some(_) => Err(ReceiptError::Collision),
-    }
 }
 
 /// A claim on an absent receipt takes it: [`OperationClaim::Claimed`] tells the backend to
@@ -585,7 +536,9 @@ mod tests {
             assert!(!pending("root"));
 
             let request = result("caller");
-            store.claim_processed_result(request.clone()).expect("the result claims");
+            store
+                .claim_processed_result(request.clone())
+                .expect("the result claims");
             assert!(pending("root"), "a pending processed result");
             assert!(!pending("other-root"));
             store
@@ -648,37 +601,6 @@ mod tests {
                     decision,
                 }
             );
-        }
-    }
-
-    #[test]
-    fn an_offer_owner_with_other_data_collides() {
-        for (store, _dir) in stores() {
-            let record = OfferOwnerRecord {
-                scope: scope(ReceiptBinding::Caller, "caller"),
-                offer_id: "0123456789abcdef".to_owned(),
-                root: "root".to_owned(),
-                parent_id: None,
-                arguments: None,
-                tool: None,
-                spelling: None,
-            };
-            store.store_offer_owner(record.clone()).expect("the owner stores");
-            let mut other_root = record.clone();
-            other_root.root = "other-root".to_owned();
-            let mut other_caller = record.clone();
-            other_caller.scope.caller_id = Some("other".to_owned());
-            let mut other_tool = record.clone();
-            other_tool.tool = Some("wire".to_owned());
-            for colliding in [other_root, other_caller, other_tool] {
-                assert!(matches!(
-                    store.store_offer_owner(colliding),
-                    Err(ReceiptError::Collision)
-                ));
-            }
-            store
-                .store_offer_owner(record)
-                .expect("the stored owner is unchanged, so its replay is idempotent");
         }
     }
 
@@ -840,37 +762,6 @@ mod tests {
                     "{corruption}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn a_corrupt_offer_owner_binding_is_a_storage_failure() {
-        for (store, _dir) in stores() {
-            let record = OfferOwnerRecord {
-                scope: scope(ReceiptBinding::Caller, "caller"),
-                offer_id: "0123456789abcdef".to_owned(),
-                root: "root".to_owned(),
-                parent_id: None,
-                arguments: None,
-                tool: None,
-                spelling: None,
-            };
-            store.store_offer_owner(record.clone()).expect("the owner stores");
-            let stored: String = store
-                .lock()
-                .query_row("SELECT binding FROM offer_owners", [], |row| row.get(0))
-                .expect("the binding reads");
-            assert_eq!(stored, "caller");
-            execute(&store, "UPDATE offer_owners SET binding='bogus'");
-            assert!(
-                store
-                    .offer_owner(OfferOwnerKey {
-                        organization_id: "org".to_owned(),
-                        offer_id: record.offer_id.clone(),
-                    })
-                    .is_err()
-            );
-            assert!(matches!(store.store_offer_owner(record), Err(ReceiptError::Storage(_))));
         }
     }
 }

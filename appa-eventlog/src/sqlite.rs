@@ -16,14 +16,14 @@ use crate::HostObservation;
 use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
-    Completion, OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
-    ProcessedResultKey, ProcessedResultRequest, ReceiptError, ReceiptScope, ReceiptStorageError, StoredJson,
-    StoredOperation, StoredOperationInput, StoredResult, binding_name, parse_binding, resolve_offer_owner,
-    resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
+    Completion, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
+    ProcessedResultRequest, ReceiptError, ReceiptStorageError, StoredJson, StoredOperation, StoredOperationInput,
+    StoredResult, resolve_operation_claim, resolve_operation_completion, resolve_result_claim,
+    resolve_result_completion,
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
@@ -39,19 +39,6 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          key  TEXT NOT NULL,
                          root TEXT NOT NULL,
                          PRIMARY KEY (key, root)
-                     );
-                     CREATE TABLE offer_owners (
-                         organization_id TEXT NOT NULL,
-                         caller_id TEXT,
-                         session_id TEXT NOT NULL,
-                         binding TEXT NOT NULL,
-                         offer_id TEXT NOT NULL,
-                         root TEXT NOT NULL,
-                         parent_id TEXT,
-                         arguments TEXT,
-                         tool TEXT,
-                         spelling TEXT,
-                         PRIMARY KEY (organization_id, offer_id)
                      );
                      CREATE TABLE operations (
                          organization_id TEXT NOT NULL,
@@ -220,49 +207,6 @@ impl Sqlite {
             .query_map(params![key], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(roots.into_iter().map(TrajectoryId::new).collect())
-    }
-
-    pub(crate) fn store_offer_owner(&self, record: &OfferOwnerRecord) -> Result<(), ReceiptError> {
-        immediate(&mut self.connection(), |connection| {
-            let inserted = connection.execute(
-                "INSERT INTO offer_owners (organization_id, caller_id, session_id, binding, offer_id, root, parent_id, arguments, tool, spelling)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                 ON CONFLICT (organization_id, offer_id) DO NOTHING",
-                params![
-                    record.scope.organization_id,
-                    record.scope.caller_id,
-                    record.scope.session_id,
-                    binding_name(record.scope.binding),
-                    record.offer_id,
-                    record.root,
-                    record.parent_id,
-                    record.arguments,
-                    record.tool,
-                    record.spelling,
-                ],
-            )?;
-            if inserted == 1 {
-                return Ok(());
-            }
-            let key = OfferOwnerKey {
-                organization_id: record.scope.organization_id.clone(),
-                offer_id: record.offer_id.clone(),
-            };
-            resolve_offer_owner(read_offer_owner(connection, &key)?, record)
-        })
-    }
-
-    pub(crate) fn offer_owner(&self, key: &OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
-        read_offer_owner(&self.connection(), key)
-    }
-
-    pub(crate) fn expire_offer_owners(&self, scope: &ReceiptScope) -> Result<u64, ReceiptStorageError> {
-        immediate(&mut self.connection(), |connection| {
-            Ok(connection.execute(
-                "DELETE FROM offer_owners WHERE organization_id=?1 AND caller_id IS ?2 AND session_id=?3",
-                params![scope.organization_id, scope.caller_id, scope.session_id],
-            )? as u64)
-        })
     }
 
     pub(crate) fn claim_operation(&self, request: &OperationRequest) -> Result<OperationClaim, ReceiptError> {
@@ -506,11 +450,11 @@ fn is_taken(error: &rusqlite::Error) -> bool {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'offer_owners', 'operations', 'processed_results')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 6)
+    Ok(found == 5)
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -520,48 +464,6 @@ fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
         |row| row.get(0),
     )?;
     Ok(tables == 0)
-}
-
-fn read_offer_owner(
-    connection: &Connection,
-    key: &OfferOwnerKey,
-) -> Result<Option<OfferOwnerRecord>, ReceiptStorageError> {
-    let row = connection
-        .query_row(
-            "SELECT caller_id, session_id, binding, root, parent_id, arguments, tool, spelling
-             FROM offer_owners WHERE organization_id=?1 AND offer_id=?2",
-            params![key.organization_id, key.offer_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((caller_id, session_id, binding, root, parent_id, arguments, tool, spelling)) = row else {
-        return Ok(None);
-    };
-    Ok(Some(OfferOwnerRecord {
-        scope: ReceiptScope {
-            organization_id: key.organization_id.clone(),
-            caller_id,
-            session_id,
-            binding: parse_binding(&binding).map_err(ReceiptStorageError)?,
-        },
-        offer_id: key.offer_id.clone(),
-        root,
-        parent_id,
-        arguments,
-        tool,
-        spelling,
-    }))
 }
 
 fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
@@ -636,13 +538,11 @@ mod tests {
         let expected: Vec<(String, String, Option<String>)> = [
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
-            ("offer_owners", Some("CREATE TABLE offer_owners ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL, offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT, PRIMARY KEY (organization_id, offer_id) )")),
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
-            ("sqlite_autoindex_offer_owners_1", None),
             ("sqlite_autoindex_operations_1", None),
             ("sqlite_autoindex_policy_files_1", None),
             ("sqlite_autoindex_processed_results_1", None),
@@ -667,7 +567,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("the version reads");
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
             let mut statement = connection
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
                 .expect("the schema query prepares");
