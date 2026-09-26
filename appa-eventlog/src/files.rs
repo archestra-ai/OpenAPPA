@@ -189,14 +189,22 @@ pub struct FileVersion {
     pub dispatch: Option<DispatchId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileReceipt {
     pub path: String,
     pub operation: FileOperation,
-    pub success: bool,
+    pub dispatch: DispatchId,
     pub source_label: Option<Label>,
-    pub version: Option<FileVersion>,
-    pub dispatch: Option<DispatchId>,
+    pub outcome: FileOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// `version` is the one the call published; a Read publishes none.
+    Succeeded {
+        version: Option<FileVersion>,
+    },
+    Failed,
 }
 
 /// What releasing a call that never ran did to its reservation.
@@ -469,18 +477,11 @@ impl FileStore {
             PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => Some(source.version.label.clone()),
             basis => basis.predecessor().map(|version| version.label.clone()),
         };
-        let receipt = if !success {
+        let outcome = if !success {
             if !observed.undisturbed(&pin) {
                 return Err(FileStoreError::Quarantined);
             }
-            FileReceipt {
-                path: pin.path.clone(),
-                operation,
-                success: false,
-                source_label: source_label.clone(),
-                version: None,
-                dispatch: Some(dispatch),
-            }
+            FileOutcome::Failed
         } else {
             let dependencies = match &pin.basis {
                 PinnedBasis::Read(version) => {
@@ -534,14 +535,14 @@ impl FileStore {
                     Some(version)
                 }
             };
-            FileReceipt {
-                path: pin.path.clone(),
-                operation,
-                success: true,
-                source_label,
-                version,
-                dispatch: Some(dispatch),
-            }
+            FileOutcome::Succeeded { version }
+        };
+        let receipt = FileReceipt {
+            path: pin.path,
+            operation,
+            dispatch,
+            source_label,
+            outcome,
         };
         state.receipts.insert(key, receipt.clone());
         state.reservation = None;
@@ -832,6 +833,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn published(receipt: &FileReceipt) -> FileVersion {
+        match &receipt.outcome {
+            FileOutcome::Succeeded { version: Some(version) } => version.clone(),
+            outcome => panic!("the receipt published no version: {outcome:?}"),
+        }
+    }
+
     fn dispatch(occurrence: u32) -> DispatchId {
         DispatchId::new(
             appa_engine::value::TrajectoryId::new("a"),
@@ -927,21 +935,21 @@ mod tests {
         store.bind("a", "replace", &dispatch(1), &output).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "replacement").unwrap();
         let replaced = store.finish("a", "replace", true).unwrap();
-        assert_eq!(replaced.version.as_ref().unwrap().label, output);
+        assert_eq!(published(&replaced).label, output);
         assert_eq!(
-            replaced.version.as_ref().unwrap().previous,
+            published(&replaced).previous,
             first.basis.predecessor().map(|version| version.id)
         );
-        assert!(replaced.version.as_ref().unwrap().content_dependencies.is_empty());
+        assert!(published(&replaced).content_dependencies.is_empty());
         assert_eq!(store.finish("a", "replace", true).unwrap(), replaced);
 
         let pin = store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "edit", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
-        let edited = store.finish("a", "edit", true).unwrap().version.unwrap();
+        let edited = published(&store.finish("a", "edit", true).unwrap());
         assert_eq!(
             pin.basis.predecessor().map(|version| version.id),
-            Some(replaced.version.unwrap().id)
+            Some(published(&replaced).id)
         );
         assert_eq!(edited.previous, pin.basis.predecessor().map(|version| version.id));
         assert_eq!(
@@ -965,7 +973,7 @@ mod tests {
         fs::write(fixture.workspace.join("tracked.txt"), "old").unwrap();
         store.prepare("a", "fail", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "fail", &dispatch(0), &Label::top()).unwrap();
-        assert!(!store.finish("a", "fail", false).unwrap().success);
+        assert_eq!(store.finish("a", "fail", false).unwrap().outcome, FileOutcome::Failed);
 
         store
             .prepare("a", "partial", FileOperation::Edit, "tracked.txt")
@@ -1092,7 +1100,7 @@ mod tests {
         .unwrap();
         let receipt = store.finish("a", "copy", true).unwrap();
         assert_eq!(receipt.source_label, Some(source_label));
-        assert_eq!(receipt.version.unwrap().content_dependencies, vec![source.version.id]);
+        assert_eq!(published(&receipt).content_dependencies, vec![source.version.id]);
     }
 
     #[test]
@@ -1110,7 +1118,7 @@ mod tests {
         )
         .unwrap();
         let moved = store.finish("a", "move", true).unwrap();
-        assert_eq!(moved.version.unwrap().content_dependencies, vec![source_id]);
+        assert_eq!(published(&moved).content_dependencies, vec![source_id]);
         assert!(store.current("tracked.txt").unwrap().is_none());
         // The moved-away version stays in the ledger, so bytes reappearing out of band are
         // not adopted as a fresh first touch.
@@ -1165,7 +1173,7 @@ mod tests {
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
             .unwrap();
         store.bind("a", "copy", &dispatch(0), &Label::top()).unwrap();
-        assert!(!store.finish("a", "copy", false).unwrap().success);
+        assert_eq!(store.finish("a", "copy", false).unwrap().outcome, FileOutcome::Failed);
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
     }
 
@@ -1186,7 +1194,7 @@ mod tests {
         store.bind("a", "process", &dispatch(0), &output).unwrap();
         fs::write(fixture.workspace.join("output.bin"), [128, 2, 0, 255]).unwrap();
         let receipt = store.finish("a", "process", true).unwrap();
-        let version = receipt.version.unwrap();
+        let version = published(&receipt);
         assert_eq!(version.label, output);
         assert_eq!(version.previous, previous);
         assert_eq!(version.content_dependencies, dependencies);
@@ -1342,9 +1350,8 @@ mod tests {
         store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
         store.bind("a", "read", &dispatch(1), &trust(1)).unwrap();
         let read = store.finish("a", "read", true).unwrap();
-        assert!(read.success);
         assert_eq!(read.source_label, Some(secret()));
-        assert_eq!(read.version, None);
+        assert_eq!(read.outcome, FileOutcome::Succeeded { version: None });
 
         store
             .prepare("a", "create", FileOperation::Replace, "fresh.txt")
@@ -1353,7 +1360,7 @@ mod tests {
         fs::write(fixture.workspace.join("fresh.txt"), "fresh").unwrap();
         let created = store.finish("a", "create", true).unwrap();
         assert_eq!(created.source_label, None);
-        let version = created.version.unwrap();
+        let version = published(&created);
         assert_eq!(version.previous, None);
         assert_eq!(version.label, trust(2));
         assert_eq!(version.dispatch, Some(dispatch(2)));
@@ -1361,10 +1368,9 @@ mod tests {
         store.prepare("a", "edit", FileOperation::Edit, "fresh.txt").unwrap();
         store.bind("a", "edit", &dispatch(3), &trust(3)).unwrap();
         let failed = store.finish("a", "edit", false).unwrap();
-        assert!(!failed.success);
         assert_eq!(failed.source_label, Some(trust(2)));
-        assert_eq!(failed.version, None);
-        assert_eq!(failed.dispatch, Some(dispatch(3)));
+        assert_eq!(failed.outcome, FileOutcome::Failed);
+        assert_eq!(failed.dispatch, dispatch(3));
         assert_eq!(store.current("fresh.txt").unwrap(), Some(version));
 
         store
@@ -1396,7 +1402,7 @@ mod tests {
         ));
         assert!(matches!(store.cancel("a", "edit"), Err(FileStoreError::AlreadyBound)));
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
-        let version = store.finish("a", "edit", true).unwrap().version.unwrap();
+        let version = published(&store.finish("a", "edit", true).unwrap());
         assert_eq!(version.dispatch, Some(dispatch(0)));
     }
 
@@ -1427,7 +1433,10 @@ mod tests {
             Err(FileStoreError::Quarantined)
         ));
         fs::write(fixture.workspace.join("tracked.txt"), "old").unwrap();
-        assert!(!store.finish("a", "process", false).unwrap().success);
+        assert_eq!(
+            store.finish("a", "process", false).unwrap().outcome,
+            FileOutcome::Failed
+        );
     }
 
     #[test]
