@@ -294,9 +294,13 @@ mod tests {
     fn a_refused_address_falls_through_to_the_next_the_authority_resolves_to() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
         let live = listening.local_addr().expect("the listener has an address");
-        let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a second loopback port binds");
-        let closed = vacated.local_addr().expect("the listener has an address");
-        drop(vacated);
+        // The local end of a held connection: nothing listens there, so it refuses, and
+        // no bind to port 0 is handed it while the connection lasts.
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("a second loopback port binds");
+        let held = std::net::TcpStream::connect(holder.local_addr().expect("the listener has an address"))
+            .expect("the holder accepts");
+        let _accepted = holder.accept().expect("the connection is accepted");
+        let closed = held.local_addr().expect("the connection has an address");
 
         let deadline = Deadline::spanning(Duration::from_secs(5));
         let (socket, reached) = connect(&[closed, live], &deadline).expect("the second address answers");

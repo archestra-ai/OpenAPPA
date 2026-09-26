@@ -7,7 +7,7 @@ use std::process::Command;
 mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
-use common::{free_port, http, repo_root, serve_runtime};
+use common::{RefusingPort, http, repo_root, serve_runtime};
 use init_fixture::{Fixture, Installed, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
@@ -468,7 +468,8 @@ fn assert_profile_taken_back(fixture: &Fixture) {
 fn a_purge_with_no_runtime_running_deletes_the_deployment() {
     let fixture = Fixture::new();
     fixture.successful_activation();
-    let dead = format!("http://127.0.0.1:{}", free_port());
+    let refusing = RefusingPort::new();
+    let dead = refusing.url();
 
     let output = fixture.purge(&dead).output().expect("appa purges");
 

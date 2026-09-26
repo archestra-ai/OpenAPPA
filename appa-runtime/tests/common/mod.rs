@@ -54,7 +54,7 @@ pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u
     }
 }
 
-/// A served `appa runtime` process on a free loopback port, killed on drop.
+/// A served `appa runtime` process on a loopback port of its own choosing, killed on drop.
 pub struct ServedRuntime {
     child: Child,
     pub url: String,
@@ -74,11 +74,57 @@ impl Drop for ServedRuntime {
     }
 }
 
+/// A port free a moment ago, for the one case that has no better: a product path that
+/// binds a URL fixed before it starts (`--ensure-runtime`). Anything else binds port 0
+/// and reads back what it got, or holds a [`RefusingPort`].
 pub fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port binds");
-    let port = listener.local_addr().expect("the bound address is readable").port();
-    drop(listener);
-    port
+    listener.local_addr().expect("the bound address is readable").port()
+}
+
+/// A loopback port that refuses every connection for as long as this lives. It is the
+/// local end of a held connection: no socket listens there, so a connect is refused at
+/// once, and no bind to port 0 is handed it while the connection lasts. A socket bound
+/// without listening would not do: macOS drops the connect until it times out.
+pub struct RefusingPort {
+    local: std::net::TcpStream,
+    _remote: std::net::TcpStream,
+}
+
+impl RefusingPort {
+    pub fn new() -> RefusingPort {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port binds");
+        let local = std::net::TcpStream::connect(listener.local_addr().expect("the listener has an address"))
+            .expect("the listener accepts");
+        let (remote, _) = listener.accept().expect("the connection is accepted");
+        RefusingPort { local, _remote: remote }
+    }
+
+    pub fn url(&self) -> String {
+        format!(
+            "http://{}",
+            self.local.local_addr().expect("the connection has an address")
+        )
+    }
+}
+
+/// The URL `appa runtime --listen 127.0.0.1:0` prints once it listens, read from the
+/// child's piped stdout. The rest of stdout is drained so the runtime never blocks on it.
+pub fn served_url(child: &mut Child) -> String {
+    use std::io::BufRead;
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("the runtime's stdout is piped"));
+    let (sent, printed) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = stdout.read_line(&mut line);
+        let _ = sent.send(line);
+        let _ = std::io::copy(&mut stdout, &mut std::io::sink());
+    });
+    let line = printed
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the runtime printed its URL within the deadline");
+    assert!(!line.is_empty(), "the runtime exited before it listened");
+    line.trim_end().to_string()
 }
 
 /// Spawn `command` while no other spawn through here runs. Where the platform lacks
@@ -94,7 +140,6 @@ pub fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
 /// Start the built binary as `appa runtime` over `config` and `db`, and wait until
 /// `/health` answers.
 pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
-    let port = free_port();
     let child = spawn_child(
         Command::new(env!("CARGO_BIN_EXE_appa"))
             .arg("runtime")
@@ -103,15 +148,16 @@ pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
             .arg("--db")
             .arg(db)
             .arg("--listen")
-            .arg(format!("127.0.0.1:{port}"))
-            .stdout(Stdio::null())
+            .arg("127.0.0.1:0")
+            .stdout(Stdio::piped())
             .stderr(Stdio::null()),
     )
     .expect("the binary spawns");
     let mut served = ServedRuntime {
         child,
-        url: format!("http://127.0.0.1:{port}"),
+        url: String::new(),
     };
+    served.url = served_url(&mut served.child);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if let Some(status) = served.child.try_wait().expect("the child polls") {
