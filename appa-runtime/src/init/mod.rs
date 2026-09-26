@@ -196,10 +196,10 @@ fn install_claude(
     //    between two states. The install that completes re-arms it; so does a
     //    rollback that put everything back, and nothing else does. A launcher
     //    under that name that no install wrote is the user's, and refused.
-    let launcher = paths.install_dir.join(CLAPPA.0);
+    let launcher = paths.install_dir.join(CLAPPA);
     let launcher_before = file_before(&launcher)?;
     if let Some(bytes) = launcher_before.as_deref() {
-        if !launcher_is_owned(bytes) {
+        if !launcher_is_owned(bytes, &paths) {
             return Err(InitError::NativeState {
                 path: launcher,
                 message: "launcher was edited; resolve it before installing the plugin".to_owned(),
@@ -254,7 +254,7 @@ fn install_claude(
     };
 
     // Arm the launcher only after verification.
-    install_clappa(&paths.install_dir)?;
+    install_clappa(&paths)?;
 
     Ok(Receipt {
         adapter: origin.to_owned(),
@@ -335,7 +335,7 @@ fn switch_over(
     settings::install_hooks(paths, target, compensation)?;
     mcp::register(registered, target.url, compensation)?;
     skill::install(&paths.claude_dir, compensation)?;
-    settings::install_statusline(paths, target, compensation)?;
+    settings::install_clappa_settings(paths, target, compensation)?;
     progress("starting the runtime");
     // A runtime answering `ok` here was running before this install and stays
     // the user's; anything the start brings up after silence is ours to stop.
@@ -720,17 +720,33 @@ fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -
 }
 
 #[cfg(windows)]
-const CLAPPA: (&str, &str) = ("clappa.cmd", "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n");
+const CLAPPA: &str = "clappa.cmd";
 #[cfg(not(windows))]
-const CLAPPA: (&str, &str) = ("clappa", "#!/bin/sh\nexec env APPA_GATE=1 claude \"$@\"\n");
+const CLAPPA: &str = "clappa";
 
-fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
-    let path = install_dir.join(CLAPPA.0);
+/// The armed launcher: a gated Claude session that also loads the settings
+/// carrying APPA's status line.
+fn armed_clappa(paths: &DeploymentPaths) -> String {
+    let settings = settings::clappa_settings_path(paths);
+    let settings = settings.to_string_lossy();
+    if cfg!(windows) {
+        format!("@echo off\r\nset APPA_GATE=1\r\nclaude --settings \"{settings}\" %*\r\n")
+    } else {
+        format!(
+            "#!/bin/sh\nexec env APPA_GATE=1 claude --settings {} \"$@\"\n",
+            settings::sh_literal(&settings)
+        )
+    }
+}
+
+fn install_clappa(paths: &DeploymentPaths) -> Result<PathBuf, InitError> {
+    let path = paths.install_dir.join(CLAPPA);
+    let armed = armed_clappa(paths);
     let existing = crate::installation::optional_bytes(&path).map_err(|error| InitError::NativeState {
         path: path.clone(),
         message: error.to_string(),
     })?;
-    if existing.as_deref() == Some(CLAPPA.1.as_bytes()) {
+    if existing.as_deref() == Some(armed.as_bytes()) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -745,7 +761,7 @@ fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
         #[cfg(not(unix))]
         return Ok(path);
     }
-    fs::write(&path, CLAPPA.1).map_err(|source| InitError::WriteFile {
+    fs::write(&path, &armed).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
     })?;
@@ -768,14 +784,14 @@ const DISARMED_CLAPPA: &str =
 
 /// The launcher is an install's when it holds what an install or a removal
 /// writes: armed, or one of the two stubs either leaves mid-way.
-fn launcher_is_owned(bytes: &[u8]) -> bool {
-    [CLAPPA.1, DISARMED_CLAPPA, removal::REMOVING]
+fn launcher_is_owned(bytes: &[u8], paths: &DeploymentPaths) -> bool {
+    [armed_clappa(paths).as_str(), DISARMED_CLAPPA, removal::REMOVING]
         .iter()
         .any(|text| bytes == text.as_bytes())
 }
 
 fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
-    let path = install_dir.join(CLAPPA.0);
+    let path = install_dir.join(CLAPPA);
     fs::write(&path, DISARMED_CLAPPA).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
@@ -851,7 +867,13 @@ mod tests {
     #[test]
     fn launcher_reuse_preserves_mtime_but_repairs_disabled_contents_and_permissions() {
         let root = tempfile::tempdir().unwrap();
-        let path = install_clappa(root.path()).unwrap();
+        let paths = DeploymentPaths {
+            install_dir: root.path().to_path_buf(),
+            config_dir: root.path().join("config"),
+            data_dir: root.path().join("it's data"),
+            claude_dir: root.path().join("claude"),
+        };
+        let path = install_clappa(&paths).unwrap();
         let sentinel = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1234567890);
         fs::File::options()
             .write(true)
@@ -859,19 +881,58 @@ mod tests {
             .unwrap()
             .set_modified(sentinel)
             .unwrap();
-        install_clappa(root.path()).unwrap();
+        install_clappa(&paths).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), sentinel);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-            install_clappa(root.path()).unwrap();
+            install_clappa(&paths).unwrap();
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0o111);
         }
-        install_disabled_clappa(root.path()).unwrap();
-        assert_ne!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
-        install_clappa(root.path()).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
+        install_disabled_clappa(&paths.install_dir).unwrap();
+        assert!(launcher_is_owned(&fs::read(&path).unwrap(), &paths));
+        install_clappa(&paths).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), armed_clappa(&paths).as_bytes());
+    }
+
+    /// `clappa` starts Claude gated, with its settings file as one argument
+    /// whatever the data directory is called, and passes the user's arguments on.
+    #[cfg(unix)]
+    #[test]
+    fn clappa_starts_a_gated_claude_with_its_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let paths = DeploymentPaths {
+            install_dir: root.path().to_path_buf(),
+            config_dir: root.path().join("config"),
+            data_dir: root.path().join("it's data"),
+            claude_dir: root.path().join("claude"),
+        };
+        let launcher = install_clappa(&paths).unwrap();
+        let bin = root.path().join("fake-claude");
+        fs::create_dir(&bin).unwrap();
+        fs::write(
+            bin.join("claude"),
+            "#!/bin/sh\nprintf 'gate=%s\\n' \"$APPA_GATE\"\nfor argument; do printf '%s\\n' \"$argument\"; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(&launcher)
+            .arg("-p")
+            .arg("two words")
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env_remove("APPA_GATE")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!(
+                "gate=1\n--settings\n{}\n-p\ntwo words\n",
+                settings::clappa_settings_path(&paths).display()
+            )
+        );
     }
 
     #[test]

@@ -315,8 +315,8 @@ directory and writes that exact path into every hook entry of the user's
 Claude Code settings (`~/.claude/settings.json`), so a hook never resolves
 `appa` through `PATH`. It registers the runtime's `appa` MCP server in Claude
 Code's user scope, writes the `appa-guide` skill and its policy-review guide
-under `~/.claude/skills/appa-guide/`, installs `clappa`, preserves a custom
-Claude statusline, and starts the runtime through the deployed binary's own
+under `~/.claude/skills/appa-guide/`, installs `clappa` with the settings
+file that gives its sessions APPA's statusline, and starts the runtime through the deployed binary's own
 start, the one every protected session performs at SessionStart. A first
 install writes the starting policy; a later one keeps the file it finds. A
 successful command therefore proves that one runtime from the installed
@@ -343,7 +343,7 @@ the status line runs it through PowerShell.
 | Windows | `%LOCALAPPDATA%\appa\bin\appa.exe runtime` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
 
 The harness binary is APPA's own, not something you put on `PATH`: the hook
-entries and the status line name that absolute path. `clappa` stays where a
+entries and `clappa`'s status line name that absolute path. `clappa` stays where a
 shell can find it.
 
 The runtime creates the starting policy only when the policy path does
@@ -502,8 +502,8 @@ cargo uninstall appa   # checkout builds only
 ```
 
 `appa plugin remove claude-code` takes back only what an install wrote: its
-hook entries, its `statusLine`, the `appa` MCP server, the skill, and
-`clappa`. A statusline, hook entry or skill of your own survives untouched.
+hook entries, the `appa` MCP server, the skill, `clappa`, and `clappa`'s
+settings file. A hook entry or skill of your own survives untouched.
 The policy, database, and runtime stay at the locations in the table above.
 
 `--purge` goes on to stop the runtime and delete both directories in the
@@ -515,54 +515,15 @@ shell alias separately if you added one instead of the command.
 
 ## Statusline
 
-The install adds `appa statusline` to your global settings unless you
-already have a custom statusline. In a protected session it shows the APPA
-pixel mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an unprotected session it prints nothing and
-never queries the runtime, so regular `claude` has no APPA statusline. It
-fails open inside a protected session: runtime down, unknown trajectory, or
-malformed input prints the mascot alone, never a blocked action.
+`clappa` starts Claude Code with `--settings <data dir>/clappa.settings.json`.
+That file holds one setting, APPA's `statusLine`, so it applies to `clappa`
+sessions only, above your own `statusLine`. A plain `claude` session keeps
+yours, and the install never edits it.
 
-To set it manually, merge this into `~/.claude/settings.json`, naming the
-`appa` binary by its absolute path:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "'/path/to/appa' statusline --deployment-url 'http://127.0.0.1:8787'"
-  }
-}
-```
-
-On native Windows, run it through PowerShell, with forward slashes in the
-absolute path:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "powershell.exe -NoProfile -Command \"& 'C:/path/to/appa.exe' statusline --deployment-url 'http://127.0.0.1:8787'\""
-  }
-}
-```
-
-The setting applies to every session, protected or not; the `APPA_GATE`
-check keeps the two states distinguishable at a glance.
-
-On POSIX systems, keep an existing statusline such as claude-powerline and add
-the APPA rows beneath it by running both and teeing stdin. Pin the exact
-version you vetted. `@latest` would fetch and run new third-party code on
-every statusline refresh:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "input=$(cat); printf '%s' \"$input\" | npx -y @owloops/claude-powerline@1.4.0; printf '%s' \"$input\" | '/path/to/appa' statusline --deployment-url 'http://127.0.0.1:8787'"
-  }
-}
-```
+The status line shows the APPA pixel mascot plus the session's current Trust
+and Audience, read from the runtime's `GET /status`. It fails open: runtime
+down, unknown trajectory, or malformed input prints the mascot alone, never a
+blocked action.
 
 ## Things to know
 
