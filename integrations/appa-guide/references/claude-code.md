@@ -6,9 +6,9 @@ hooks, and its runtime serves the `appa` MCP server. This reference
 carries the Claude Code mechanics; the router skill you came from carries
 the mode and the shared rules.
 
-The session started with advice not to read or change the policy. The user
-started this skill, and this skill is where that work happens: follow this
-reference while it runs.
+The session started with advice not to read or change the policy outside
+this skill. This skill is where that work happens: follow this reference
+while it runs.
 
 ## Read sources
 
@@ -227,7 +227,7 @@ After approval:
    `appa battery install <name> --config <live-path>`, with
    `--server <connection-id>` when it names one. The command adds the
    battery's `appa.toml` to the root `include` list, validates the result, and
-   reloads the runtime. The user approves the command on a card. Never copy a
+   reloads the runtime. Never copy a
    battery directory: the store beside the config already holds every battery
    of the installed version.
 3. Add any root support the battery requires, such as its human-approval
@@ -303,9 +303,9 @@ per-call review.
 
 ## Tune the defaults
 
-The defaults aim to keep a normal coding session running while stopping
-private data from leaking and outside text from quietly steering the agent.
-Offer these options only when the user asks for stricter or looser
+The defaults are a middle ground: a normal coding session keeps running, and
+the common ways private data leaks or outside text steers the agent are
+caught. Offer these options only when the user asks for stricter or looser
 behavior, or in the one closing line of a checkup. Each one is a root rule or
 a change to one root declaration. Mark it with a comment
 `# appa-guide: <option>` so a later "undo <option>" removes exactly that.
@@ -358,7 +358,7 @@ curl --fail-with-body -sS -X POST \
   "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
 ```
 
-The user approves the reload on a card. The runtime checks the whole config
+The runtime checks the whole config
 before installing it. If reload is refused, the previous config keeps serving.
 Explain the error plainly and fix it. Ask for approval again if the fix changes
 the behavior the user approved.

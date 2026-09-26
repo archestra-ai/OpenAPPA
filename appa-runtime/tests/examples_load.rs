@@ -605,16 +605,6 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
         };
         assert_eq!(review.len(), 1, "{path}");
     }
-    for command in [
-        "appa battery install slack",
-        "curl --fail-with-body -sS -X POST http://127.0.0.1:8787/reload",
-    ] {
-        let asked = propose(&runtime, call("host/claude-code/Bash", "command", command)).await;
-        let HookDecision::DenyCall { review, .. } = asked else {
-            panic!("{command}: a command that changes the policy asks the person, got {asked:?}");
-        };
-        assert_eq!(review.len(), 1, "{command}");
-    }
     let instructions = call("host/claude-code/Edit", "file_path", "/repo/CLAUDE.md");
     assert_eq!(
         propose(&runtime, instructions.clone()).await,

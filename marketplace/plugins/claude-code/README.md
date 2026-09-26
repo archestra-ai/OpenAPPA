@@ -411,10 +411,7 @@ entries or maintained batteries, and marks which tools read data that must
 stay in the session or send data outward. It asks once about servers it cannot
 judge. You review the complete proposal before it writes anything. The same
 skill explains a blocked call (`/appa-guide why was that blocked?`) and makes
-the defaults stricter or looser on request. Only you can start it: the agent
-never loads it on its own, and a session outside it does not read or change
-the policy. Including or removing a battery, reinstalling the plugin, and
-reloading the runtime each ask you first, as a write to the policy file does.
+the defaults stricter or looser on request.
 
 For development from a source checkout, run the runtime on its own port
 so an installed runtime on 8787 is untouched, and point a session at it

@@ -89,8 +89,7 @@ The same skill explains a blocked call and tunes the defaults. The defaults
 trade safety against interruptions, so the skill offers named options either
 way, each with its cost: trusting a server or a set of documentation sites,
 refusing tools no rule covers, or marking folders that hold private data. Each
-option is one marked root rule, so undoing it removes that rule. Only you start
-the skill; outside it, the agent does not read or change the policy.
+option is one marked root rule, so undoing it removes that rule.
 
 Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any annotator definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
 

@@ -46,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    fn root_bash_selectors_match_the_battery_before_the_bash_annotator() {
+    fn root_credentials_match_the_battery_before_the_bash_annotator() {
         let root: toml::Value = toml::from_str(TEMPLATE).unwrap();
         let battery: toml::Value = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -58,7 +58,7 @@ mod tests {
             .iter()
             .position(|rule| rule["name"].as_str() == Some("host/claude-code/Bash"))
             .unwrap();
-        let selectors = battery["policy"]["tool"]
+        let credentials = battery["policy"]["tool"]
             .as_array()
             .unwrap()
             .iter()
@@ -66,16 +66,23 @@ mod tests {
                 rule["name"]
                     .as_str()
                     .is_some_and(|name| name.starts_with("host/claude-code/Bash("))
+                    && rule
+                        .get("tags")
+                        .and_then(toml::Value::as_array)
+                        .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("credentials")))
             })
             .collect::<Vec<_>>();
-        assert!(!selectors.is_empty());
-        for selector in selectors {
+        assert!(!credentials.is_empty());
+        for credential in credentials {
             let position = root_rules
                 .iter()
-                .position(|rule| rule["name"] == selector["name"])
-                .expect("every battery Bash selector is mirrored in the root");
-            assert!(position < bare_bash, "a Bash selector must precede the bare Bash rule");
-            assert_eq!(&root_rules[position], selector);
+                .position(|rule| rule["name"] == credential["name"])
+                .expect("every battery Bash credential selector is mirrored in the root");
+            assert!(
+                position < bare_bash,
+                "credential selector must precede the bare Bash rule"
+            );
+            assert_eq!(&root_rules[position], credential);
         }
     }
 

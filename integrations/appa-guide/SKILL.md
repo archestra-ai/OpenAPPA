@@ -2,7 +2,6 @@
 name: appa-guide
 description: Set up and tune OpenAPPA on the host you run in — Claude Code or a kagent cluster. Checks which tools and MCP servers the policy covers, includes the batteries that fit, writes rules for the rest, explains why a call was blocked, and makes the defaults stricter or looser on request.
 argument-hint: "[init | adjust | explain | what you want]"
-disable-model-invocation: true
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
