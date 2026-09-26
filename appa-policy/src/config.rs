@@ -84,7 +84,9 @@ impl Config {
                 .filter_map(ToolDeclaration::declared)
                 .flat_map(|annotation| annotation.referenced_providers()),
         );
-        audience.sources.retain(|source| referenced.contains(&source.provider));
+        audience
+            .sources
+            .retain(|source| referenced.contains(source.provider.as_str()));
         validate_annotator_inputs(&tools, &annotators)?;
 
         let mut authorities = Vec::new();

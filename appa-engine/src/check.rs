@@ -509,8 +509,11 @@ mod tests {
             sanitizers: vec![],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
-                    provider: "slack".to_string(),
-                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                    provider: crate::names::ProviderName::new("slack"),
+                    templates: vec![
+                        crate::audience::DeclaredTemplate::named("user-group/<handle>")
+                            .expect("a well-formed template"),
+                    ],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: GroupName::new("team"),

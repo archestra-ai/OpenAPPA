@@ -11288,8 +11288,10 @@ mod tests {
     fn slack_groups(handles: &[&str]) -> crate::audience::AudienceConfig {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: handles
                 .iter()
@@ -14579,8 +14581,10 @@ mod tests {
     fn channel_source() -> crate::audience::AudienceConfig {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("channel/<id>").expect("a well-formed template"),
+                ],
             }],
             ..crate::audience::AudienceConfig::default()
         }

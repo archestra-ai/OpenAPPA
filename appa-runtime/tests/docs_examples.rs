@@ -1,7 +1,7 @@
 //! The policy reference's TOML examples are held to the loader.
 //!
 //! `website/content/docs/contracts.md` is a golden file: what it shows a reader typing has to
-//! be what this crate accepts. Nothing else in the test suite reads it, so a dialect change
+//! be what the loader accepts. Nothing else in the test suite reads it, so a dialect change
 //! that landed in the loader and not in the guide would otherwise ship unnoticed.
 
 use std::path::PathBuf;
@@ -93,7 +93,7 @@ fn every_toml_fence_in_the_policy_reference_loads() {
         let table: toml::Table = fence
             .parse()
             .unwrap_or_else(|error| panic!("a fence is not valid TOML: {error}\n{fence}"));
-        let sources = appa_policy::declared_sources(&toml::Value::Table(table.clone()))
+        let sources = appa_runtime::config::source_registrations_of(&toml::Value::Table(table.clone()))
             .unwrap_or_else(|error| panic!("a fence declares its audience sources badly: {error}\n{fence}"));
         let Some(policy) = as_policy(table) else { continue };
         if let Err(error) = Config::from_toml_str_routed(&policy, std::collections::BTreeMap::new(), sources) {

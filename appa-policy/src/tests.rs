@@ -14,33 +14,34 @@ use crate::{AnnotatorBuiltin, Config, ConfigError, InputSource};
 /// The sources the shipped batteries declare, as a deployment's bindings would supply them.
 fn declared_sources() -> Vec<SourceRegistration> {
     let source = |provider: &str, templates: Vec<DeclaredTemplate>| SourceRegistration {
-        provider: provider.to_string(),
+        provider: appa_engine::names::ProviderName::new(provider),
         templates,
     };
     vec![
         source(
             "google-workspace",
             vec![
-                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-                DeclaredTemplate::named("group/<group-address>"),
+                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)).expect("a well-formed template"),
+                DeclaredTemplate::named("group/<group-address>").expect("a well-formed template"),
             ],
         ),
         source(
             "slack",
             vec![
-                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-                DeclaredTemplate::named("user-group/<handle>"),
-                DeclaredTemplate::named("channel/<id>"),
+                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)).expect("a well-formed template"),
+                DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                DeclaredTemplate::named("channel/<id>").expect("a well-formed template"),
             ],
         ),
         source(
             "github",
             vec![
-                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                DeclaredTemplate::new("org/<org>/members", Some(ChainAudience::Internal)),
-                DeclaredTemplate::named("org/<org>/team/<team>"),
+                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                DeclaredTemplate::new("org/<org>/members", Some(ChainAudience::Internal))
+                    .expect("a well-formed template"),
+                DeclaredTemplate::named("org/<org>/team/<team>").expect("a well-formed template"),
             ],
         ),
     ]

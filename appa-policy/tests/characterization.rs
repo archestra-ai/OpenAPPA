@@ -1,19 +1,14 @@
 //! Load outcomes at the policy entry points that no other test pins: the refusals of each
-//! structural and semantic check, the selector-template declarations a deployment supplies,
-//! the input-source spellings, a custom trust chain, and the `[boundary]` and `[deployment]`
+//! structural and semantic check, the input-source spellings, a custom trust chain, and the `[boundary]` and `[deployment]`
 //! fields as the compiled engine reads them.
 
-use appa_engine::audience::DeclaredTemplate;
 use appa_engine::contract::{Delta, DeltaAudience, SelectorPlaceholder, ToolAnnotation};
-use appa_engine::label::{Audience, ChainAudience, DeclaredAudience, ReaderId, Trust};
+use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
 use appa_engine::names::SurfaceName;
 use appa_engine::params::ParamsError;
 use appa_engine::profile::{BindingMode, OpenVector, SurfaceMode};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS, TrustChain};
-use appa_policy::{
-    Config, ConfigError, InputSource, SelectorDeclaration, ToolCallSource, declare_templates, declared_sources,
-    parse_delta,
-};
+use appa_policy::{Config, ConfigError, InputSource, ToolCallSource, parse_delta};
 
 fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
@@ -368,105 +363,4 @@ fn every_input_source_spelling_round_trips_through_parse() {
         }
     }
     assert_eq!(ToolCallSource::parse("$input.repo"), None);
-}
-
-// --- selector-template declarations --------------------------------------------
-
-fn selector(template: &str, feeds: Option<&str>) -> SelectorDeclaration {
-    SelectorDeclaration {
-        template: template.to_string(),
-        feeds: feeds.map(str::to_string),
-    }
-}
-
-#[test]
-fn declare_templates_carries_each_template_and_what_it_feeds() {
-    let templates = declare_templates(
-        "slack",
-        &[
-            selector("viewer", Some("self")),
-            selector("full-members", Some("internal")),
-            selector("channel/<id>", None),
-        ],
-    )
-    .expect("the templates declare");
-    assert_eq!(
-        templates,
-        [
-            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-            DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-            DeclaredTemplate::named("channel/<id>"),
-        ]
-    );
-}
-
-#[test]
-fn declare_templates_refuses_every_malformed_list() {
-    for (case, selectors) in [
-        ("an empty list", vec![]),
-        ("an empty template", vec![selector("", None)]),
-        ("an empty segment", vec![selector("channel//x", None)]),
-        ("a trailing slash", vec![selector("channel/", None)]),
-        ("a `$` segment", vec![selector("channel/$id", None)]),
-        ("an empty variable", vec![selector("channel/<>", None)]),
-        ("an unclosed variable", vec![selector("channel/<id", None)]),
-        ("an unopened variable", vec![selector("channel/id>", None)]),
-        ("`feeds = public`", vec![selector("viewer", Some("public"))]),
-        ("an unknown `feeds`", vec![selector("viewer", Some("everyone"))]),
-        (
-            "a duplicate template",
-            vec![selector("channel/<id>", None), selector("channel/<id>", None)],
-        ),
-    ] {
-        assert!(
-            matches!(
-                declare_templates("slack", &selectors),
-                Err(ConfigError::BadSelectorDeclaration { provider, .. }) if provider == "slack"
-            ),
-            "{case} must be refused"
-        );
-    }
-}
-
-#[test]
-fn declared_sources_reads_every_audience_entry_with_selectors() {
-    let document: toml::Value = toml::from_str(
-        "[externals.audience.slack]\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n\
-         [externals.audience.roster]\nurl = \"https://roster.invalid\"\n",
-    )
-    .expect("the document parses");
-    let sources = declared_sources(&document).expect("the sources declare");
-    assert_eq!(
-        sources
-            .iter()
-            .map(|source| (source.provider.as_str(), source.templates.clone()))
-            .collect::<Vec<_>>(),
-        [(
-            "slack",
-            vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))]
-        )],
-        "an entry without `selectors` declares no source"
-    );
-    let empty: toml::Value = toml::from_str("version = 2\n").expect("the document parses");
-    assert!(declared_sources(&empty).expect("no externals").is_empty());
-}
-
-#[test]
-fn declared_sources_refuses_a_selectors_value_that_is_not_a_table_list() {
-    for selectors in [
-        "\"viewer\"",
-        "[\"viewer\"]",
-        "[{ template = \"viewer\", surprise = 1 }]",
-        "[{ template = \"viewer/$x\" }]",
-    ] {
-        let document: toml::Value = toml::from_str(&format!("[externals.audience.slack]\nselectors = {selectors}\n"))
-            .expect("the document parses");
-        assert!(
-            matches!(
-                declared_sources(&document),
-                Err(ConfigError::BadSelectorDeclaration { provider, .. }) if provider == "slack"
-            ),
-            "selectors = {selectors} must be refused"
-        );
-    }
 }

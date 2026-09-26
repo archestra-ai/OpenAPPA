@@ -89,12 +89,6 @@ pub enum ConfigError {
         "audience source {provider:?} in {context} declares no selectors: bind it under [externals.audience.{provider}] with `selectors`"
     )]
     UndeclaredProvider { context: String, provider: String },
-    #[error("bad selector declaration for audience source {provider:?}: {template:?} {reason}")]
-    BadSelectorDeclaration {
-        provider: String,
-        template: String,
-        reason: String,
-    },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }
