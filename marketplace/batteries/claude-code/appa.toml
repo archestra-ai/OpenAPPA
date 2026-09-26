@@ -9,6 +9,36 @@
 [policy]
 version = 2
 
+# --- Bash: commands that change the protection itself ask the person ---
+
+# Including or removing a battery, reinstalling the plugin, and reloading the
+# runtime change the policy every later session runs under. The person
+# running the session approves the exact call, as they do a write to the
+# policy file below.
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa battery install*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa battery remove*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa plugin *)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*/reload*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
 # --- Bash: commands naming requester credentials are `self` data, masked ---
 
 # A command naming a credential path narrows the session to `self`, the

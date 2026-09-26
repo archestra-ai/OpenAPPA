@@ -9,6 +9,9 @@ It covers five built-in tools, which the policy names `host/claude-code/Bash`,
 `host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write`
 and `host/claude-code/Edit`:
 
+- **Bash, policy changes** — `appa battery install`, `appa battery remove`,
+  `appa plugin ...` and a request to the runtime's `/reload` ask the person
+  running the session first, as a write to the policy file does.
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows the session
   to `self`, the requester. The battery withholds the command's result and

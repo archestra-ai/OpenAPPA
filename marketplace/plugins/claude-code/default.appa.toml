@@ -238,8 +238,34 @@ name = "mcp/appa/yell"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
-# Root rules precede included batteries. Mirror the battery's credential
-# selectors here so they narrow to `self` before the root's bare Bash rule.
+# Root rules precede included batteries. Mirror the battery's Bash selectors
+# here so they apply before the root's bare Bash rule: commands that change
+# the protection ask the person, and commands naming credentials narrow to
+# `self`.
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa battery install*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa battery remove*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*appa plugin *)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*/reload*)"
+requires = { attention = ["hitl"] }
+delta = {}
+tags = ["protection"]
+
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.env*)"
 delta = { audience = ["self"] }

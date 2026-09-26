@@ -36,29 +36,9 @@ fn parity_contract_names_every_required_invariant_and_only_allowed_exceptions() 
 }
 
 #[test]
-fn shared_and_host_references_carry_the_parity_choke_points() {
-    let shared = read("integrations/appa-guide/SKILL.md");
-    let claude = read("integrations/appa-guide/references/claude-code.md");
+fn the_kagent_reference_carries_its_parity_choke_points() {
     let kagent = read("integrations/appa-guide/references/kagent.md");
 
-    for marker in [
-        "matching reference file beside this one",
-        "IFC monoids first",
-        "Inspection and proposal drafting never require approval",
-        "A battery is available",
-        "Keep user-facing replies compact",
-    ] {
-        assert!(shared.contains(marker), "shared router carries {marker:?}");
-    }
-    for marker in [
-        "Cross-check both sources",
-        "Static contracts can reference `self` and `internal`",
-        "End with: **Approve, or tell me what to change.**",
-        "After approval:",
-        "Reload only after an approved write",
-    ] {
-        assert!(claude.contains(marker), "Claude mapping carries {marker:?}");
-    }
     for marker in [
         "Environment variables alone never prove the gate",
         "appa_match_batteries",

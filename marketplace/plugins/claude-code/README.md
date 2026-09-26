@@ -273,13 +273,16 @@ current project's local and project scopes, and prints the batteries that
 cover them as the commands that include them:
 
 ```text
-MCP servers configured here have batteries; include them with:
+MCP servers here have batteries; include them with:
   appa battery install github linear
-MCP servers without a battery: fetch. Their tools are annotated call by call until the appa-guide skill writes rules for them.
+MCP servers without a battery: fetch. Their tools are annotated call by call until `/appa-guide` writes rules for them.
+Next: run `clappa`, then `/appa-guide` to check your MCP servers and tune the defaults.
 ```
 
-Connectors from claude.ai are not in those files; the `appa-guide` skill
-sees them in a session. `appa battery list` shows what is included;
+Connectors from claude.ai and plugin servers are not in those files. In a
+session, `appa describe --session-tools <names>` adds the servers the
+session's tools belong to and matches them the same way; `/appa-guide` runs
+it for you. `appa battery list` shows what is included;
 `appa battery install <name>...` and `appa battery remove <name>` add and
 remove lines.
 
@@ -402,11 +405,16 @@ session start replaces the process.
 The default policy names Claude Code's built-in tools and sends every other
 tool through a bounded, fail-closed Claude annotator. That compatibility net
 keeps a newly installed MCP tool usable, but it is not a substitute for a
-reviewed connector contract. Start `clappa` and run `/appa-guide init` from
+reviewed connector contract. Start `clappa` and run `/appa-guide` from
 that protected session. It inventories MCP servers, proposes exact policy
 entries or maintained batteries, and marks which tools read data that must
 stay in the session or send data outward. It asks once about servers it cannot
-judge. You review the complete proposal before it writes anything.
+judge. You review the complete proposal before it writes anything. The same
+skill explains a blocked call (`/appa-guide why was that blocked?`) and makes
+the defaults stricter or looser on request. Only you can start it: the agent
+never loads it on its own, and a session outside it does not read or change
+the policy. Including or removing a battery, reinstalling the plugin, and
+reloading the runtime each ask you first, as a write to the policy file does.
 
 For development from a source checkout, run the runtime on its own port
 so an installed runtime on 8787 is untouched, and point a session at it

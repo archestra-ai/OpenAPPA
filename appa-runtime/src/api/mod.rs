@@ -544,7 +544,7 @@ pub(crate) enum EventError {
 impl EventError {
     fn annotation_refused(annotator: String, reason: String) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
-            "; this tool has no exact policy contract; run /appa-guide init to sync installed MCP tools"
+            "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
         } else {
             ""
         };
@@ -3325,10 +3325,10 @@ mod deployment_tests {
             "non_success status=1".to_string(),
         )
         .to_string();
-        assert!(fallback.contains("run /appa-guide init"), "{fallback}");
+        assert!(fallback.contains("run /appa-guide"), "{fallback}");
 
         let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
-        assert!(!exact.contains("/appa-guide init"), "{exact}");
+        assert!(!exact.contains("/appa-guide"), "{exact}");
     }
 
     /// The served adapter's inverse is what the runtime says where it addresses that

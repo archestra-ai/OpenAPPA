@@ -719,33 +719,13 @@ pub fn install(args: Install) -> ExitCode {
                 Vec::new()
             }),
         };
-        let coverage = discover::coverage(&servers, &available, &included_now, &bindings);
-        // A suggested battery's setup is named beside the command that includes
-        // it, so the person knows what it takes before running the command.
-        let setup = setup_notices(
-            coverage.suggestions.iter().filter_map(|suggestion| {
-                let suggested = match suggestion {
-                    discover::Suggestion::Plain(battery) | discover::Suggestion::Bound { battery, .. } => battery,
-                };
-                available
-                    .iter()
-                    .find(|(name, _)| name == suggested)
-                    .map(|(name, battery)| (name, battery))
-            }),
-            credential_is_set,
+        let mut coverage = coverage_result(
+            &servers,
+            &available,
+            &included_now,
+            &bindings,
+            args.target.config.as_deref(),
         );
-        let suggestions: Vec<serde_json::Value> = coverage
-            .suggestions
-            .iter()
-            .map(|suggestion| match suggestion {
-                discover::Suggestion::Plain(battery) => serde_json::json!({"battery": battery.as_str()}),
-                discover::Suggestion::Bound { battery, server } => {
-                    serde_json::json!({"battery": battery.as_str(), "server": server.as_str()})
-                }
-            })
-            .collect();
-        let commands = suggestion_commands(&coverage, args.target.config.as_deref());
-        let uncovered: Vec<&str> = coverage.uncovered.iter().map(Namespace::as_str).collect();
         let mut result = if name == "kagent" {
             let installed = installation
                 .selection()?
@@ -757,10 +737,9 @@ pub fn install(args: Install) -> ExitCode {
         } else {
             serde_json::json!({"plugin": name, "state": "registered", "batteries": batteries, "runtime": "verified"})
         };
-        result["suggestions"] = serde_json::Value::from(suggestions);
-        result["commands"] = serde_json::Value::from(commands);
-        result["setup"] = setup;
-        result["uncovered_servers"] = serde_json::Value::from(uncovered);
+        for key in ["suggestions", "commands", "setup", "uncovered_servers"] {
+            result[key] = coverage[key].take();
+        }
         if let Some(warning) = warning {
             result["warning"] = serde_json::Value::from(warning);
         }
@@ -768,6 +747,82 @@ pub fn install(args: Install) -> ExitCode {
     })();
     finish(&args.target, "plugin.install".into(), result)
 }
+
+/// How `available` covers `servers`, as the install receipt and `appa describe` both report
+/// it: the batteries to include, the commands that include them, what each needs set up, and
+/// the servers no battery covers.
+fn coverage_result(
+    servers: &std::collections::BTreeSet<Namespace>,
+    available: &[(PackageName, Battery)],
+    included: &std::collections::BTreeSet<String>,
+    bindings: &crate::config::ServerBindings,
+    config: Option<&Path>,
+) -> serde_json::Value {
+    let coverage = discover::coverage(servers, available, included, bindings);
+    // A suggested battery's setup is named beside the command that includes
+    // it, so the person knows what it takes before running the command.
+    let setup = setup_notices(
+        coverage.suggestions.iter().filter_map(|suggestion| {
+            let suggested = match suggestion {
+                discover::Suggestion::Plain(battery) | discover::Suggestion::Bound { battery, .. } => battery,
+            };
+            available
+                .iter()
+                .find(|(name, _)| name == suggested)
+                .map(|(name, battery)| (name, battery))
+        }),
+        credential_is_set,
+    );
+    let suggestions: Vec<serde_json::Value> = coverage
+        .suggestions
+        .iter()
+        .map(|suggestion| match suggestion {
+            discover::Suggestion::Plain(battery) => serde_json::json!({"battery": battery.as_str()}),
+            discover::Suggestion::Bound { battery, server } => {
+                serde_json::json!({"battery": battery.as_str(), "server": server.as_str()})
+            }
+        })
+        .collect();
+    let uncovered: Vec<&str> = coverage.uncovered.iter().map(Namespace::as_str).collect();
+    serde_json::json!({
+        "suggestions": suggestions,
+        "commands": suggestion_commands(&coverage, config),
+        "setup": setup,
+        "uncovered_servers": uncovered,
+    })
+}
+
+/// The batteries of the deployment's installed version that would cover `servers`, printed
+/// as an install prints its suggestions. A deployment with no installed version has no
+/// catalog to match against, and says so.
+pub(crate) fn render_server_coverage(
+    output: &mut impl Write,
+    config: &Path,
+    servers: &std::collections::BTreeSet<Namespace>,
+) -> Result<(), InstallError> {
+    let Some(selection) = Installation::inspect(config)? else {
+        writeln!(
+            output,
+            "Battery matches: unavailable (no installed version beside this config)"
+        )
+        .map_err(|error| super::io("write", Path::new("stdout"), error))?;
+        return Ok(());
+    };
+    let marketplace = Installation::retained_marketplace(config, &selection)?;
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let available = discover::batteries(&marketplace, &catalog, appa_package::Host::ClaudeCode)?;
+    let text = super::optional_bytes(config)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let (included, bindings) = includes::batteries(&text)?;
+    let result = coverage_result(servers, &available, &included, &bindings, Some(config));
+    render_coverage(output, &result).map_err(|error| super::io("write", Path::new("stdout"), error))
+}
+
+/// Where a person goes next after a Claude Code install: the guide fits the default to what
+/// this machine has connected.
+const GUIDE_NEXT: &str = "Next: run `clappa`, then `/appa-guide` to check your MCP servers and tune the defaults.";
 
 /// A release build carries the tag whose generation the marketplace can fetch.
 pub(crate) fn is_published_build() -> bool {
@@ -1013,7 +1068,7 @@ fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::R
         .filter_map(serde_json::Value::as_str)
         .collect();
     if !commands.is_empty() {
-        writeln!(output, "MCP servers configured here have batteries; include them with:")?;
+        writeln!(output, "MCP servers here have batteries; include them with:")?;
         for command in commands {
             writeln!(output, "  {command}")?;
         }
@@ -1028,7 +1083,7 @@ fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::R
     if !uncovered.is_empty() {
         writeln!(
             output,
-            "MCP servers without a battery: {}. Their tools are annotated call by call until the appa-guide skill writes rules for them.",
+            "MCP servers without a battery: {}. Their tools are annotated call by call until `/appa-guide` writes rules for them.",
             uncovered.join(", ")
         )?;
     }
@@ -1266,6 +1321,7 @@ fn finish(
                     .unwrap_or_else(|| "unknown version".to_owned())
             )
             .and_then(|()| render_coverage(&mut output, result))
+            .and_then(|()| writeln!(output, "{GUIDE_NEXT}"))
         }
     } else if let Some(batteries) = receipt.result.as_ref().and_then(|result| result.get("batteries")) {
         (|| {

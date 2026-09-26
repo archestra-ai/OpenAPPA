@@ -1,7 +1,8 @@
 ---
 name: appa-guide
-description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
-argument-hint: "init|adjust"
+description: Set up and tune OpenAPPA on the host you run in — Claude Code or a kagent cluster. Checks which tools and MCP servers the policy covers, includes the batteries that fit, writes rules for the rest, explains why a call was blocked, and makes the defaults stricter or looser on request.
+argument-hint: "[init | adjust | explain | what you want]"
+disable-model-invocation: true
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
@@ -37,18 +38,26 @@ guess its content.
 
 Use one mode:
 
-- **`init`** — inspect the installed tools and build a useful starting
-  config.
-- **`adjust`** — help the operator make changes to an existing config.
+- **`init`** — check what the host has connected and how the policy
+  covers it, then propose a starting config: batteries to include, what
+  they need set up, and rules for tools nothing covers. It is also the
+  checkup to run after MCP servers change.
+- **`adjust`** — change how OpenAPPA treats a tool, data source,
+  destination, battery, or approval, including making the defaults
+  stricter or looser.
+- **`explain`** — say why a call was blocked, or what the current policy
+  does. Read-only: it proposes nothing unless the operator then asks for
+  a change, which continues as `adjust`.
 
-If the request already makes the mode clear, start there. Otherwise show
-these two choices in one short message and wait. Do not run both modes
-together. Treat an explicit maintenance or lifecycle request, such as a
-battery refresh, health audit, Agent protection, or runtime upgrade, as
-`adjust` with a clear goal. Do not ask the operator to select a mode in
-that case. If the operator asks to view or explain the current policy (e.g. `show policy`, `explain policy`, `what is the current policy?`), inspect the serving policy with the host's read-only tool (`appa describe` on Claude Code, `appa_get_runtime_state` on kagent), then summarize the active rules, protected tools, and included batteries in plain, accessible language without proposing any mutations.
-If the operator chooses `adjust` without describing the change,
-ask what they want OpenAPPA to do differently.
+With no request, run `init`. Otherwise start in the mode the request
+makes clear, and ask only when two modes fit it equally. Do not run two
+modes together. Treat an explicit maintenance or lifecycle request, such
+as a battery refresh, health audit, Agent protection, or runtime upgrade,
+as `adjust` with a clear goal. Treat "why was this blocked", "show
+policy", or "what does the policy do" as `explain`, on the host's
+read-only tools (`appa describe` on Claude Code, `appa_get_runtime_state`
+on kagent). If the operator chooses `adjust` without describing the
+change, ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
 proposal. Do not ask whether to continue before the proposal. Start with one
@@ -65,6 +74,12 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   Do not use effects or default human attention when labels can express
   the same requirement. Trusted data flowing within its audience stays
   autonomous.
+- The shipped defaults trade safety against interruptions, and the
+  operator may move that line either way. When they ask for stricter or
+  looser behavior, offer the matching options from the host reference,
+  each with what it changes and what it costs. Make every such change a
+  root rule marked with a comment naming the option, so undoing it means
+  removing that rule.
 - A battery supplies maintained defaults. Never edit a battery. Override
   a tool contract with a root rule. Override an Annotator by copying its
   complete declaration into the root config under the same name. Preserve

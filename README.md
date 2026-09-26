@@ -83,7 +83,8 @@ server, the `appa-guide` skill, and the `clappa` launcher, which adds APPA's
 status line to the sessions it starts. Rerunning it rewrites only what it wrote
 and preserves an existing policy. Fresh policies use a fail-closed Claude annotator as a compatibility
 net for MCP tools they do not yet name. Start `clappa`, then run
-`/appa-guide init` to replace that fallback with exact connector contracts.
+`/appa-guide` to replace that fallback with exact connector contracts; the
+same skill explains blocks and tunes the defaults.
 Plain `claude` sessions stay untouched.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)

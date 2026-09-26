@@ -350,14 +350,14 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
                     .retain(|battery| seen_batteries.insert(battery.clone()));
 
                 if let Some(root_policy) = root.get("policy") {
-                    describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
+                    let _ = describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
                 match Config::load_from(path, battery_dirs) {
                     Ok(loaded) => {
                         config.state = ConfigState::Loadable;
                         config.diagnostic = None;
-                        describe_policy_value(
+                        let _ = describe_policy_value(
                             loaded.policy_file().value(),
                             Bindings::Loaded(&loaded.externals),
                             &mut policy,
@@ -375,7 +375,11 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
     (config, policy, loaded_config)
 }
 
-fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out: &mut PolicyDescription) {
+fn describe_policy_value(
+    policy_value: &toml::Value,
+    bindings: Bindings<'_>,
+    out: &mut PolicyDescription,
+) -> Option<appa_policy::Config> {
     out.tools = policy_value
         .get("tool")
         .and_then(toml::Value::as_array)
@@ -395,13 +399,17 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
             appa_policy::Config::from_toml_str_routed(&source, bindings.lookup_targets(), sources)
                 .map_err(|error| error.to_string())
         });
-    out.audience = match compiled {
+    match compiled {
         Ok(compiled) => {
             out.authorities = authority_descriptions(&compiled, bindings);
-            AudienceSide::Declared(audience_description(&compiled, bindings))
+            out.audience = AudienceSide::Declared(audience_description(&compiled, bindings));
+            Some(compiled)
         }
-        Err(error) => AudienceSide::Uncompiled(error),
-    };
+        Err(error) => {
+            out.audience = AudienceSide::Uncompiled(error);
+            None
+        }
+    }
 }
 
 pub struct Description {
@@ -409,8 +417,12 @@ pub struct Description {
     pub valid: bool,
 }
 
-pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> Description {
+/// `session_tools` are the tool names the configuring agent's own session sees, in the host's
+/// spelling or as canonical ids. No standalone process can list them, so the agent hands them
+/// over; without them the description says they are unavailable.
+pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, session_tools: &[String]) -> Description {
     let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
+    let mut served_policy = None;
     let served = match adapter {
         "claude-code" => Some(appa_adapter_claude_code::adapter()),
         "kagent" => Some(appa_adapter_kagent::adapter()),
@@ -426,7 +438,7 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
             &loaded.server_aliases,
         );
         let authored_tools = policy.tools.clone();
-        describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
+        served_policy = describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
         policy.tools = authored_tools;
     }
     let validation = match (loaded, served) {
@@ -527,10 +539,26 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
             let _ = writeln!(output, "Audience configuration: unavailable (no policy)");
         }
     }
-    let _ = writeln!(
-        output,
-        "Session integrations/tools/accounts: unavailable to this command"
-    );
+    let session = served.map(|served| SessionCoverage::of(session_tools, served, served_policy.as_ref()));
+    if adapter == "claude-code" {
+        let servers = std::env::current_dir()
+            .map(|cwd| crate::installation::discover::servers(appa_package::Host::ClaudeCode, &cwd))
+            .unwrap_or_default()
+            .into_iter()
+            .chain(session.iter().flat_map(|session| session.servers.iter().cloned()))
+            .collect::<BTreeSet<_>>();
+        render_servers(&mut output, path, &servers);
+    }
+    match session.filter(|_| !session_tools.is_empty()) {
+        Some(session) => session.render(&mut output),
+        None => {
+            let _ = writeln!(
+                output,
+                "Session tools: unavailable to this command; pass the names this session sees with --session-tools"
+            );
+        }
+    }
+    let _ = writeln!(output, "Connector accounts: unavailable to this command");
     match validation {
         Ok(report) => {
             let _ = writeln!(output, "Validation: {}", report.summary());
@@ -566,6 +594,95 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
         }
     }
     Description { text: output, valid }
+}
+
+/// The MCP servers this machine configures or the session reports, and the batteries of the
+/// installed version that cover them.
+fn render_servers(output: &mut String, config: &Path, servers: &BTreeSet<appa_package::Namespace>) {
+    let names: Vec<String> = servers.iter().map(|server| server.as_str().to_owned()).collect();
+    let _ = writeln!(output, "MCP servers: {}", list_or_none(&names));
+    if servers.is_empty() {
+        return;
+    }
+    let mut rendered = Vec::new();
+    match crate::installation::cli::render_server_coverage(&mut rendered, config, servers) {
+        Ok(()) => output.push_str(&String::from_utf8_lossy(&rendered)),
+        Err(error) => {
+            let _ = writeln!(output, "Battery matches: unavailable ({error})");
+        }
+    }
+}
+
+/// How the served policy covers each tool the session reported.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SessionCoverage {
+    /// Tools a contract names, exactly or by an argument selector.
+    declared: usize,
+    /// Tools only the wildcard rule covers: an Annotator judges each call.
+    wildcard: Vec<String>,
+    /// Tools no rule covers: every call is refused.
+    refused: Vec<String>,
+    /// Names that spell no tool of this host.
+    unrecognized: Vec<String>,
+    /// The MCP servers the reported tools belong to.
+    servers: BTreeSet<appa_package::Namespace>,
+}
+
+impl SessionCoverage {
+    fn of(tools: &[String], adapter: appa_runtime_api::Adapter, policy: Option<&appa_policy::Config>) -> Self {
+        let mut coverage = SessionCoverage::default();
+        for name in tools.iter().map(|name| name.trim()).filter(|name| !name.is_empty()) {
+            let Some(canonical) = crate::tool_validation::precise_name(name, adapter) else {
+                coverage.unrecognized.push(name.to_owned());
+                continue;
+            };
+            if canonical.is_control() {
+                continue;
+            }
+            if let Some(server) = canonical
+                .as_str()
+                .strip_prefix("mcp/")
+                .and_then(|rest| rest.split_once('/'))
+                .and_then(|(server, _)| appa_package::Namespace::parse(server).ok())
+                .filter(|server| server.as_str() != crate::init::RUNTIME_SERVER)
+            {
+                coverage.servers.insert(server);
+            }
+            let kind = policy.and_then(|policy| {
+                policy
+                    .engine()
+                    .registry()
+                    .classify(&appa_engine::value::ToolName::new(canonical.as_str()))
+            });
+            match kind {
+                Some(appa_engine::registry::ToolKind::Declared | appa_engine::registry::ToolKind::ProviderRun) => {
+                    coverage.declared += 1
+                }
+                Some(appa_engine::registry::ToolKind::Wildcard) => coverage.wildcard.push(canonical.into_string()),
+                None => coverage.refused.push(canonical.into_string()),
+            }
+        }
+        coverage
+    }
+
+    fn render(&self, output: &mut String) {
+        let _ = writeln!(
+            output,
+            "Session tools: {} with a rule, {} annotated call by call, {} refused",
+            self.declared,
+            self.wildcard.len(),
+            self.refused.len()
+        );
+        if !self.wildcard.is_empty() {
+            let _ = writeln!(output, "  annotated call by call: {}", self.wildcard.join(", "));
+        }
+        if !self.refused.is_empty() {
+            let _ = writeln!(output, "  refused, no rule: {}", self.refused.join(", "));
+        }
+        if !self.unrecognized.is_empty() {
+            let _ = writeln!(output, "  not a tool name: {}", self.unrecognized.join(", "));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -610,7 +727,7 @@ mod tests {
             report.tools[0].status,
             crate::tool_validation::ToolStatus::Unknown { .. }
         ));
-        let description = render(&path, &[], "kagent");
+        let description = render(&path, &[], "kagent", &[]);
         assert!(description.valid);
         assert!(
             description.text.contains("1 declared tools have no host observation"),
@@ -624,7 +741,7 @@ mod tests {
             format!("{policy}\n[[appa_inventory.tools]]\nname = \"write_secret\"\ntool = \"mcp:demo/write_secret\"\n"),
         )
         .unwrap();
-        assert!(!render(&path, &[], "kagent").valid);
+        assert!(!render(&path, &[], "kagent", &[]).valid);
     }
 
     #[test]
@@ -633,7 +750,59 @@ mod tests {
         let path = directory.path().join("appa.toml");
         std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\nannotator = \"missing\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
         assert!(Config::load_from(&path, &[]).is_ok());
-        assert!(!render(&path, &[], "kagent").valid);
+        assert!(!render(&path, &[], "kagent", &[]).valid);
+    }
+
+    /// Each tool the session reports lands in exactly one bucket of the served policy: a rule,
+    /// the wildcard's Annotator, or refusal. The session's own MCP servers are collected for
+    /// battery matching; the runtime's control tool is neither.
+    #[test]
+    fn session_tools_are_classified_against_the_served_policy() {
+        let policy = |wildcard: &str| {
+            appa_policy::Config::from_toml_str_routed(
+                &format!(
+                    "version = 2\n[[tool]]\nname = \"host/claude-code/Bash\"\ndelta = {{}}\n[[tool]]\nname = \"mcp/github/get_issue\"\ndelta = {{ trust = \"suspicious\" }}\n{wildcard}"
+                ),
+                BTreeMap::new(),
+                Vec::new(),
+            )
+            .unwrap_or_else(|error| panic!("fixture must compile: {error}"))
+        };
+        let tools: Vec<String> = [
+            "Bash",
+            "mcp__github__get_issue",
+            "mcp__notes__read",
+            "mcp__appa__execute_remedy_plan",
+            "not a tool",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let adapter = appa_adapter_claude_code::adapter();
+
+        let with_wildcard = SessionCoverage::of(
+            &tools,
+            adapter,
+            Some(&policy(
+                "[[annotator]]\nname = \"judge\"\nranks = [\"suspicious\"]\n[[tool]]\nname = \"*\"\nannotator = \"judge\"\n",
+            )),
+        );
+        assert_eq!(
+            with_wildcard,
+            SessionCoverage {
+                declared: 2,
+                wildcard: vec!["mcp/notes/read".to_owned()],
+                refused: vec![],
+                unrecognized: vec!["not a tool".to_owned()],
+                servers: ["github", "notes"]
+                    .into_iter()
+                    .map(|server| appa_package::Namespace::parse(server).unwrap())
+                    .collect(),
+            }
+        );
+
+        let without_wildcard = SessionCoverage::of(&tools, adapter, Some(&policy("")));
+        assert_eq!(without_wildcard.refused, ["mcp/notes/read"]);
+        assert!(without_wildcard.wildcard.is_empty());
     }
 
     #[test]
@@ -713,7 +882,7 @@ mod tests {
                 from: vec!["slack:user-group/finance".to_string()],
             }]
         );
-        let rendered = render(&root, &[batteries], "claude-code").text;
+        let rendered = render(&root, &[batteries], "claude-code", &[]).text;
         assert!(rendered.contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
@@ -732,7 +901,7 @@ mod tests {
         std::fs::write(&path, format!("token = \\\"{secret}")).expect("malformed config");
 
         let (config, _, _) = inspect(&path, &[]);
-        let output = render(&path, &[], "claude-code").text;
+        let output = render(&path, &[], "claude-code", &[]).text;
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
@@ -746,7 +915,7 @@ mod tests {
         std::fs::write(&path, "[policy]\nversion = 2\n[externals]\nmax_body_bytes = 65536\n").expect("config");
 
         let (config, _, _) = inspect(&path, &[]);
-        let output = render(&path, &[], "claude-code").text;
+        let output = render(&path, &[], "claude-code", &[]).text;
 
         assert_eq!(config.state, ConfigState::Invalid);
         assert!(output.contains("configuration does not load: "), "{output}");
@@ -756,10 +925,10 @@ mod tests {
     #[test]
     fn human_output_is_small_and_explicit_about_unknown_session_facts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let output = render(&directory.path().join("appa.toml"), &[], "claude-code").text;
+        let output = render(&directory.path().join("appa.toml"), &[], "claude-code", &[]).text;
 
         assert!(output.contains("Config:"));
         assert!(output.contains("Batteries: none"));
-        assert!(output.contains("Session integrations/tools/accounts: unavailable"));
+        assert!(output.contains("Session tools: unavailable"));
     }
 }

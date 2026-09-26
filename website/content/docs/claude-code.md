@@ -70,18 +70,27 @@ clappa
 ```
 
 ```text
-/appa-guide init
+/appa-guide
 ```
 
 The skill inspects the MCP servers and tools available to Claude Code. It uses their declared purpose to identify what they read and which actions can send data outside the session. When a data boundary is unclear, it asks you one focused question.
 
 Before this sync, a fresh installation routes unnamed tools through a bounded Claude annotator. The fallback fails closed and keeps newly installed tools from becoming an immediate configuration outage; exact contracts and maintained batteries produced by the skill take precedence over it.
 
-The skill begins with `appa describe`, which reports the current config,
-included batteries, policy tools, referenced groups, and membership wiring.
-The command does not guess at session-only tools or connector accounts; the
-skill merges those from the active Claude session and asks when an identity or
-boundary is unavailable.
+The skill begins with `appa describe --session-tools <names>`, handing it the
+tools the session sees. The command reports the current config, included
+batteries, referenced groups, and membership wiring. It lists every MCP server
+configured on the machine or seen in the session, the batteries that cover
+them, and which session tools a rule covers, which the annotator judges call
+by call, and which are refused. It does not guess at connector accounts; the
+skill asks when an identity or boundary is unavailable.
+
+The same skill explains a blocked call and tunes the defaults. The defaults
+trade safety against interruptions, so the skill offers named options either
+way, each with its cost: trusting a server or a set of documentation sites,
+refusing tools no rule covers, or marking folders that hold private data. Each
+option is one marked root rule, so undoing it removes that rule. Only you start
+the skill; outside it, the agent does not read or change the policy.
 
 Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any annotator definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
 
