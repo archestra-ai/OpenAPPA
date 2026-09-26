@@ -73,10 +73,10 @@
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
 #[cfg(feature = "daemon")]
-use appa_eventlog::files::PinnedBasis;
+use crate::file_ledger::PinnedBasis;
 #[cfg(feature = "daemon")]
-use appa_eventlog::files::beneath::{self, Entry};
-use appa_eventlog::files::{FileOperation, FileStore};
+use crate::file_ledger::beneath::{self, Entry};
+use crate::file_ledger::{FileOperation, FileStore};
 use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::path::Path;
@@ -104,7 +104,7 @@ impl FileTracking {
         &self,
         root: &super::TrajectoryId,
         workspace: &str,
-    ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+    ) -> Result<std::sync::Arc<FileStore>, crate::file_ledger::FileStoreError> {
         let workspace = std::fs::canonicalize(workspace)?;
         if let Some(store) = self.bound(root, &workspace)? {
             return Ok(store);
@@ -115,7 +115,7 @@ impl FileTracking {
                 .as_ref()
                 .is_some_and(|path| path.starts_with(&workspace))
         {
-            return Err(appa_eventlog::files::FileStoreError::Configuration(
+            return Err(crate::file_ledger::FileStoreError::Configuration(
                 "runtime state, configuration, and process backends must be outside the tracked workspace".into(),
             ));
         }
@@ -128,7 +128,7 @@ impl FileTracking {
         &self,
         root: &super::TrajectoryId,
         workspace: &std::path::Path,
-    ) -> Result<Option<std::sync::Arc<FileStore>>, appa_eventlog::files::FileStoreError> {
+    ) -> Result<Option<std::sync::Arc<FileStore>>, crate::file_ledger::FileStoreError> {
         self.lock_stores()?
             .get(&root.0)
             .map(|store| same_workspace(store, workspace))
@@ -137,21 +137,19 @@ impl FileTracking {
 
     fn lock_stores(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>,
-        appa_eventlog::files::FileStoreError,
-    > {
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>, crate::file_ledger::FileStoreError>
+    {
         self.stores
             .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))
+            .map_err(|_| crate::file_ledger::FileStoreError::Corrupt("file store map lock poisoned".into()))
     }
 
     pub(super) fn store(
         &self,
         root: &super::TrajectoryId,
-    ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+    ) -> Result<std::sync::Arc<FileStore>, crate::file_ledger::FileStoreError> {
         self.lock_stores()?.get(&root.0).cloned().ok_or_else(|| {
-            appa_eventlog::files::FileStoreError::Configuration(
+            crate::file_ledger::FileStoreError::Configuration(
                 "the session has not supplied a working directory for file tracking".into(),
             )
         })
@@ -161,9 +159,9 @@ impl FileTracking {
 fn same_workspace(
     store: &std::sync::Arc<FileStore>,
     workspace: &std::path::Path,
-) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+) -> Result<std::sync::Arc<FileStore>, crate::file_ledger::FileStoreError> {
     if store.workspace() != workspace {
-        return Err(appa_eventlog::files::FileStoreError::Configuration(
+        return Err(crate::file_ledger::FileStoreError::Configuration(
             "a session cannot change its tracked workspace".into(),
         ));
     }
@@ -265,7 +263,7 @@ pub(super) fn perform(
     files: &FileTracking,
     workspace: &Path,
     call: &ProposedCall,
-    pin: &appa_eventlog::files::FilePin,
+    pin: &crate::file_ledger::FilePin,
 ) -> Result<String, String> {
     match &pin.basis {
         PinnedBasis::Process { .. } => process::perform(files, workspace, call, pin),
@@ -414,9 +412,9 @@ mod tests {
     use crate::api::{OutcomeBody, RemedyDecision, Runtime, ToolCallDecision, ToolOutcome, TrajectoryId};
     use crate::config::Config;
     use crate::engine::RemedyArguments;
+    use crate::file_ledger::{FilePin, PinnedVersion};
     use appa_engine::label::{Audience, Label, Trust};
     use appa_engine::value::{FileBasis, FileSource};
-    use appa_eventlog::files::{FilePin, PinnedVersion};
     use std::path::Path;
 
     fn open(dir: &Path) -> Runtime {

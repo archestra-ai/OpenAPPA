@@ -374,7 +374,7 @@ Unit and integration tests cover the mediated contract, not the unmediated paths
 | Pinned path execution | `managed_files_execute_the_pinned_path_not_the_argument_path` |
 | Quarantine and release | `managed_files_failures_quarantine_only_the_live_session_ledger`, `managed_files_release_a_released_call_the_harness_never_ran` |
 | Process Labels and dependencies | `managed_files_process_results_and_failures_keep_input_labels` |
-| In-memory ledger invariants and store isolation | `appa-eventlog/src/files.rs` unit tests |
+| In-memory ledger invariants and store isolation | `src/file_ledger.rs` unit tests |
 | Isolation: allowed processing, input immutability, control files, sockets, keyrings, inherited descriptors, parent memory, descendant teardown, the process ceiling | `integrations/agentsh/test_live.py` on a built backend |
 
 Live Claude Code 2.1.268 exercises through the installed plugin — run by hand, not part of
@@ -414,7 +414,7 @@ and restart behavior under a fresh session ledger.
 | [`src/api/files.rs`](src/api/files.rs) | the six tools, the reservation protocol, execution and admission |
 | [`src/api/process.rs`](src/api/process.rs) | the staged-input contract and output import |
 | [`src/claude_files.rs`](src/claude_files.rs) | the constrained launcher and its private stdio server |
-| [`../appa-eventlog/src/files.rs`](../appa-eventlog/src/files.rs) | the in-memory version ledger |
+| [`src/file_ledger.rs`](src/file_ledger.rs) | the in-memory version ledger |
 | [`../appa-engine/src/value.rs`](../appa-engine/src/value.rs) | `FileBasis`, the two output labels |
 | [`../appa-engine/src/check.rs`](../appa-engine/src/check.rs) | requirement checking over a resolved call |
 | [`../integrations/agentsh`](../integrations/agentsh) | the pinned, patched isolation backend |

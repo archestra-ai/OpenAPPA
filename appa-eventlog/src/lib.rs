@@ -64,7 +64,6 @@ use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
 mod encoding;
-pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod receipts;

@@ -13,7 +13,7 @@ use appa_engine::value::{DispatchId, FileBasis, FileSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub mod beneath;
+pub(crate) mod beneath;
 
 const ABSENT: &str = "-";
 /// How many input snapshots one Process call may declare. Every one of them is hashed at
@@ -21,7 +21,7 @@ const ABSENT: &str = "-";
 const MAX_PROCESS_INPUTS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
-pub enum FileStoreError {
+pub(crate) enum FileStoreError {
     #[error("invalid file tracking configuration: {0}")]
     Configuration(String),
     #[error("invalid workspace path: {0}")]
@@ -46,7 +46,7 @@ pub enum FileStoreError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FileOperation {
+pub(crate) enum FileOperation {
     Read,
     Replace,
     Edit,
@@ -57,23 +57,23 @@ pub enum FileOperation {
 
 /// One tracked version as a reservation pinned it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PinnedVersion {
-    pub id: i64,
-    pub digest: String,
-    pub label: Label,
+pub(crate) struct PinnedVersion {
+    pub(crate) id: i64,
+    pub(crate) digest: String,
+    pub(crate) label: Label,
 }
 
 /// A pinned version at another path whose bytes the operation consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PinnedSource {
-    pub path: String,
-    pub version: PinnedVersion,
+pub(crate) struct PinnedSource {
+    pub(crate) path: String,
+    pub(crate) version: PinnedVersion,
 }
 
 /// What a reserved operation reads and replaces. `replaced` is the destination's version
 /// before the operation, absent when the destination does not exist yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PinnedBasis {
+pub(crate) enum PinnedBasis {
     Read(PinnedVersion),
     Replace(Option<PinnedVersion>),
     Edit(PinnedVersion),
@@ -92,9 +92,9 @@ pub enum PinnedBasis {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FilePin {
-    pub path: String,
-    pub basis: PinnedBasis,
+pub(crate) struct FilePin {
+    pub(crate) path: String,
+    pub(crate) basis: PinnedBasis,
 }
 
 impl PinnedVersion {
@@ -144,7 +144,7 @@ impl PinnedBasis {
 
 impl FilePin {
     /// The engine's view of this pin: what the call's flow check rules on.
-    pub fn file_basis(&self) -> FileBasis {
+    pub(crate) fn file_basis(&self) -> FileBasis {
         let pinned = |replaced: &Option<PinnedVersion>| replaced.as_ref().map(PinnedVersion::file_source);
         match &self.basis {
             PinnedBasis::Read(version) => FileBasis::Read(version.file_source()),
@@ -167,26 +167,26 @@ impl FilePin {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileVersion {
-    pub id: i64,
-    pub path: String,
-    pub digest: String,
-    pub label: Label,
-    pub previous: Option<i64>,
+pub(crate) struct FileVersion {
+    pub(crate) id: i64,
+    pub(crate) path: String,
+    pub(crate) digest: String,
+    pub(crate) label: Label,
+    pub(crate) previous: Option<i64>,
     /// The versions whose bytes contributed to this content.
-    pub content_dependencies: Vec<i64>,
-    pub dispatch: Option<DispatchId>,
+    pub(crate) content_dependencies: Vec<i64>,
+    pub(crate) dispatch: Option<DispatchId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileReceipt {
-    pub dispatch: DispatchId,
-    pub source_label: Option<Label>,
-    pub outcome: FileOutcome,
+pub(crate) struct FileReceipt {
+    pub(crate) dispatch: DispatchId,
+    pub(crate) source_label: Option<Label>,
+    pub(crate) outcome: FileOutcome,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FileOutcome {
+pub(crate) enum FileOutcome {
     /// `version` is the one the call published; a Read publishes none.
     Succeeded {
         version: Option<FileVersion>,
@@ -196,7 +196,7 @@ pub enum FileOutcome {
 
 /// What releasing a call that never ran did to its reservation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AbandonOutcome {
+pub(crate) enum AbandonOutcome {
     /// The call held no reservation.
     Absent,
     /// The workspace still showed the pinned state; the reservation is released.
@@ -206,7 +206,7 @@ pub enum AbandonOutcome {
     Quarantined,
 }
 
-pub struct FileStore {
+pub(crate) struct FileStore {
     state: Mutex<State>,
     workspace: PathBuf,
 }
@@ -236,7 +236,7 @@ struct Bound {
 }
 
 impl FileStore {
-    pub fn new(workspace: &Path, initial: &Label) -> Result<Self, FileStoreError> {
+    pub(crate) fn new(workspace: &Path, initial: &Label) -> Result<Self, FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
         check_links(&workspace)?;
         Ok(Self {
@@ -252,7 +252,7 @@ impl FileStore {
         })
     }
 
-    pub fn prepare(
+    pub(crate) fn prepare(
         &self,
         actor: &str,
         call_key: &str,
@@ -293,7 +293,7 @@ impl FileStore {
         Ok(pin)
     }
 
-    pub fn prepare_transfer(
+    pub(crate) fn prepare_transfer(
         &self,
         actor: &str,
         call_key: &str,
@@ -356,7 +356,7 @@ impl FileStore {
         Ok(pin)
     }
 
-    pub fn prepare_process(
+    pub(crate) fn prepare_process(
         &self,
         actor: &str,
         call_key: &str,
@@ -414,7 +414,7 @@ impl FileStore {
         Ok(pin)
     }
 
-    pub fn bind(
+    pub(crate) fn bind(
         &self,
         actor: &str,
         call_key: &str,
@@ -433,7 +433,7 @@ impl FileStore {
         Ok(())
     }
 
-    pub fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
+    pub(crate) fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
         let mut state = self.lock();
         if matching_reservation(&state, actor, call_key)?.bound.is_some() {
             return Err(FileStoreError::AlreadyBound);
@@ -442,7 +442,7 @@ impl FileStore {
         Ok(())
     }
 
-    pub fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
+    pub(crate) fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
         let mut state = self.lock();
         let key = (actor.to_owned(), call_key.to_owned());
         if let Some(receipt) = state.receipts.get(&key) {
@@ -538,7 +538,7 @@ impl FileStore {
     /// workspace still shows its pinned state. The runtime cannot tell an unrun call from one
     /// whose report was lost, so anything else keeps the reservation: a workspace that moved
     /// is never released by guessing here.
-    pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
+    pub(crate) fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
         let mut state = self.lock();
         let Some(reservation) = state.reservation.as_ref() else {
             return Ok(AbandonOutcome::Absent);
@@ -556,7 +556,7 @@ impl FileStore {
     /// The pin a live reservation holds for this exact call, if it holds one. What an
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
-    pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
+    pub(crate) fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
         let state = self.lock();
         Ok(state
             .reservation
@@ -566,11 +566,12 @@ impl FileStore {
     }
 
     /// The workspace this ledger is bound to.
-    pub fn workspace(&self) -> &Path {
+    pub(crate) fn workspace(&self) -> &Path {
         &self.workspace
     }
 
-    pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
+    #[cfg(test)]
+    pub(crate) fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
         let state = self.lock();
         Ok(current_state(&state, &relative))

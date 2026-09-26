@@ -78,14 +78,14 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
 async fn ledger<T: Send + 'static>(
     inner: std::sync::Arc<super::Inner>,
     root: super::TrajectoryId,
-    work: impl FnOnce(&appa_eventlog::files::FileStore) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
+    work: impl FnOnce(&crate::file_ledger::FileStore) -> Result<T, crate::file_ledger::FileStoreError> + Send + 'static,
 ) -> Result<T, EventError> {
     let joined = tokio::task::spawn_blocking(move || {
         let files = inner
             .shared
             .files
             .as_ref()
-            .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
+            .ok_or_else(|| crate::file_ledger::FileStoreError::Corrupt("file tools are not enabled".into()))?;
         let store = files.store(&root)?;
         work(&store)
     })
@@ -383,12 +383,12 @@ impl Session {
         })
         .await;
         match released {
-            Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
-            Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
+            Ok(crate::file_ledger::AbandonOutcome::Absent) => {}
+            Ok(crate::file_ledger::AbandonOutcome::Released) => tracing::info!(
                 trajectory = %self.trajectory.0,
                 "released the reservation of a file call the harness never ran"
             ),
-            Ok(appa_eventlog::files::AbandonOutcome::Quarantined) => tracing::warn!(
+            Ok(crate::file_ledger::AbandonOutcome::Quarantined) => tracing::warn!(
                 trajectory = %self.trajectory.0,
                 "a released file call left the workspace inconsistent; the reservation stands and file calls stay refused"
             ),
@@ -486,7 +486,7 @@ impl Session {
         let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
         let key = super::files::key(&expected)?;
         let pin = match operation {
-            appa_eventlog::files::FileOperation::Process => {
+            crate::file_ledger::FileOperation::Process => {
                 if files.process_backend.is_none() {
                     return Err(super::files::refused("isolated processing is not enabled"));
                 }
@@ -499,7 +499,7 @@ impl Session {
                 })
                 .await?
             }
-            appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
+            crate::file_ledger::FileOperation::Copy | crate::file_ledger::FileOperation::Move => {
                 let args: super::files::FileTransferArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
                 ledger(self.inner.clone(), self.root.clone(), {
@@ -520,10 +520,10 @@ impl Session {
         // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
         // Claude loads instruction files implicitly, outside the file-tool observation path.
         let moved_from = match &pin.basis {
-            appa_eventlog::files::PinnedBasis::Move { source, .. } => Some(source.path.as_str()),
+            crate::file_ledger::PinnedBasis::Move { source, .. } => Some(source.path.as_str()),
             _ => None,
         };
-        if operation != appa_eventlog::files::FileOperation::Read
+        if operation != crate::file_ledger::FileOperation::Read
             && std::iter::once(pin.path.as_str())
                 .chain(moved_from)
                 .flat_map(|path| path.split('/'))

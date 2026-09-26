@@ -2,7 +2,7 @@
 //!
 //! The prototype this drives lives in [`appa_runtime::managed_files`] — a teaching simulator
 //! with a volatile ledger and its own toy semantics, not the runtime's file tracking. The
-//! shipped tools are `appa-eventlog::files` (the durable ledger) and `appa-runtime::api::files`
+//! shipped tools are `appa-runtime::file_ledger` (the in-memory ledger) and `appa-runtime::api::files`
 //! (the mediated Read/Write/Edit/Copy/Move/Process tools), and they go through engine
 //! admission. Use this lab to show label propagation to a person, never to check a boundary.
 //!

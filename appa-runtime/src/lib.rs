@@ -51,6 +51,9 @@ mod elicit;
 mod engine;
 mod events;
 mod external;
+// The ledger's write half and `pin_for` are driven only by the daemon's file tools.
+#[cfg_attr(not(feature = "daemon"), allow(dead_code))]
+mod file_ledger;
 mod label_guide;
 mod model;
 mod recorder;

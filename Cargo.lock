@@ -134,6 +134,7 @@ dependencies = [
  "rig-agent",
  "rig-core",
  "rmcp 3.4.0",
+ "rustix",
  "rustls",
  "schemars",
  "serde",
@@ -222,10 +223,8 @@ dependencies = [
  "postgres",
  "postgres-native-tls",
  "rusqlite",
- "rustix",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror",
 ]

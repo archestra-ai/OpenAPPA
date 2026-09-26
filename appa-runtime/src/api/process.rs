@@ -12,7 +12,7 @@
 //! this subprocess contract. No sanitizer or declassification occurs here.
 
 use super::{FileTracking, ProcessArgs, ProposedCall, existing};
-use appa_eventlog::files::beneath::Entry;
+use crate::file_ledger::beneath::Entry;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -35,9 +35,9 @@ pub(super) fn perform(
     files: &FileTracking,
     workspace: &Path,
     call: &ProposedCall,
-    pin: &appa_eventlog::files::FilePin,
+    pin: &crate::file_ledger::FilePin,
 ) -> Result<String, String> {
-    let appa_eventlog::files::PinnedBasis::Process { inputs, .. } = &pin.basis else {
+    let crate::file_ledger::PinnedBasis::Process { inputs, .. } = &pin.basis else {
         return Err("the file reservation is not a process".into());
     };
     let backend = files
