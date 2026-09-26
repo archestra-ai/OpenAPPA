@@ -556,7 +556,7 @@ impl Session {
                 files
                     .store(&self.root)
                     .map_err(super::files::refused)?
-                    .bind(&self.trajectory.0, &key, &key, &label)
+                    .bind(&self.trajectory.0, &key, dispatch, &label)
                     .map_err(super::files::refused)?;
             }
             _ => {
