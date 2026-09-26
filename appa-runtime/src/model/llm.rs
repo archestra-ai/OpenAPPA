@@ -16,7 +16,7 @@ use rig_core::completion::{CompletionError, CompletionModel};
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
 use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
-use crate::config::{LlmProfile, LlmProvider, Token};
+use crate::config::{LlmProfile, LlmProvider, ProfileKey, Token};
 use crate::consult::ModelPrompt;
 use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 use appa_policy::AnnotatorBuiltin;
@@ -41,7 +41,8 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 /// `builtin = "llm"` entry of the deployment. Its permit pool is the runtime's `llm` gate.
 #[derive(Clone)]
 pub struct LlmBackend {
-    client: LlmClient,
+    /// `None` for a deferred key: its configuration never serves, and no consult is sent.
+    client: Option<LlmClient>,
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
@@ -78,27 +79,31 @@ impl LlmBackend {
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
         let token = match &profile.key {
-            Some(key) => key.token().map(Token::reveal).unwrap_or_default(),
-            None => "",
+            Some(ProfileKey::Deferred) => None,
+            Some(key) => Some(key.token().map(Token::reveal).unwrap_or_default()),
+            None => Some(""),
         };
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
             detail: error.to_string(),
         };
         macro_rules! client {
-            ($provider:ident) => {{
-                let mut builder = $provider::Client::builder().api_key(token);
+            ($provider:ident, $token:expr) => {{
+                let mut builder = $provider::Client::builder().api_key($token);
                 if let Some(url) = &profile.url {
                     builder = builder.base_url(url);
                 }
                 builder.build().map_err(failed)?
             }};
         }
-        let client = match profile.provider {
-            LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic)),
-            LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai).completions_api()),
-            LlmProvider::Gemini => LlmClient::Gemini(client!(gemini)),
-            LlmProvider::Ollama => LlmClient::Ollama(client!(ollama)),
+        let client = match token {
+            None => None,
+            Some(token) => Some(match profile.provider {
+                LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic, token)),
+                LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai, token).completions_api()),
+                LlmProvider::Gemini => LlmClient::Gemini(client!(gemini, token)),
+                LlmProvider::Ollama => LlmClient::Ollama(client!(ollama, token)),
+            }),
         };
         Ok(LlmBackend {
             client,
@@ -119,12 +124,15 @@ impl LlmBackend {
         name: &str,
         mut seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
+        let Some(client) = &self.client else {
+            return Err(NoAnswerReason::Unregistered);
+        };
         let deadline = tokio::time::Instant::now() + self.timeout;
         let gate = self.gates.model(AnnotatorBuiltin::Llm);
         let mut attempts = 1;
         loop {
             let permit = acquire_within(&gate, deadline, "llm", name).await?;
-            let answered = self.attempt(prompt, deadline, seen.as_deref_mut()).await;
+            let answered = self.attempt(client, prompt, deadline, seen.as_deref_mut()).await;
             drop(permit);
             let retryable = matches!(
                 answered,
@@ -148,12 +156,13 @@ impl LlmBackend {
     /// One request; `seen` keeps the model's answer text, capped, or the provider's status.
     async fn attempt(
         &self,
+        client: &LlmClient,
         prompt: &ModelPrompt,
         deadline: tokio::time::Instant,
         seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let mut raw_response = None;
-        let answered = match tokio::time::timeout_at(deadline, self.prompt(prompt)).await {
+        let answered = match tokio::time::timeout_at(deadline, self.prompt(client, prompt)).await {
             Err(_) => Err(NoAnswerReason::Timeout),
             Ok(Err(error)) => {
                 tracing::debug!(%error, "the llm consult failed");
@@ -179,9 +188,9 @@ impl LlmBackend {
         answered
     }
 
-    async fn prompt(&self, prompt: &ModelPrompt) -> Result<String, PromptError> {
+    async fn prompt(&self, client: &LlmClient, prompt: &ModelPrompt) -> Result<String, PromptError> {
         let max_tokens = answer_budget(&prompt.input, self.max_body_bytes);
-        match &self.client {
+        match client {
             LlmClient::Anthropic(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
             LlmClient::OpenAi(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
             LlmClient::Gemini(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
@@ -239,7 +248,6 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    use crate::config::ProfileKey;
 
     #[derive(Clone)]
     enum StubAnswer {
@@ -392,6 +400,22 @@ mod tests {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// A backend built from a deferred key sends nothing: its configuration never serves,
+    /// and a consult that reaches it anyway has no answer.
+    #[tokio::test]
+    async fn a_deferred_key_sends_no_consult() {
+        let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::ZERO).await;
+        let mut deferred = profile(LlmProvider::Anthropic, Some(format!("http://{addr}")), None, 4);
+        deferred.key = Some(ProfileKey::Deferred);
+        let backend = LlmBackend::new(&deferred, 65_536, &ConsultGates::per_runtime()).expect("the backend builds");
+
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::Unregistered)
+        );
+        assert!(stub.requests().is_empty());
     }
 
     #[tokio::test]

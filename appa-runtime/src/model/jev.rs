@@ -29,7 +29,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use super::MAX_ATTEMPTS;
-use crate::config::{Endpoint, EndpointHost, JevProfile, Token};
+use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{Consult, ConsultBody};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
@@ -78,7 +78,8 @@ impl JevTiming {
 #[derive(Clone)]
 pub(crate) struct JevBackend {
     url: String,
-    key: Token,
+    /// `None` for a deferred key: its configuration never serves, and no consult is sent.
+    key: Option<Token>,
     budget: Duration,
     max_body_bytes: usize,
     timing: JevTiming,
@@ -104,7 +105,11 @@ impl JevBackend {
     ) -> Option<JevBackend> {
         Some(JevBackend {
             url: profile.url.clone(),
-            key: profile.key.token().ok()?.clone(),
+            key: match &profile.key {
+                ProfileKey::Set(token) => Some(token.clone()),
+                ProfileKey::Deferred => None,
+                ProfileKey::Unset { .. } => return None,
+            },
             budget: profile.limits.timeout.saturating_sub(timing.budget_margin),
             max_body_bytes,
             timing,
@@ -167,7 +172,11 @@ impl JevBackend {
         }
         let args = crate::secrets::redact_args(&artifact.args);
         let state = State::of(&args).ok_or(unsupported)?;
-        let key = self.key.reveal();
+        let key = self
+            .key
+            .as_ref()
+            .ok_or((JevFailure::NoAnswer, NoAnswerReason::Unregistered))?
+            .reveal();
         let request = JevRequest {
             state,
             model: MODEL,
@@ -709,7 +718,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{JEV_DEFAULT_URL, ModelLimits, ProfileKey};
+    use crate::config::{JEV_DEFAULT_URL, ModelLimits};
     use crate::consult::{AnnotationArtifact, AnnotationDeclaration};
     use appa_engine::registry::AudienceVocabulary;
 
@@ -1189,6 +1198,26 @@ mod tests {
             json!({"probability": 0.7, "threshold": 0.5, "decision": true})
         );
         assert_eq!(diagnostics.get("error"), None);
+    }
+
+    /// A backend built from a deferred key sends nothing: its configuration never serves,
+    /// and a consult that reaches it anyway has no answer.
+    #[tokio::test]
+    async fn a_deferred_key_sends_no_consult() {
+        let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
+        let profile = JevProfile {
+            url,
+            key: ProfileKey::Deferred,
+            limits: ModelLimits {
+                timeout: Duration::from_secs(2),
+                max_concurrent: TEST_PERMITS,
+            },
+        };
+        let backend = JevBackend::new(&profile, 65_536, &crate::external::ConsultGates::per_runtime(), FAST)
+            .expect("a deferred key builds a backend");
+        let (answered, _) = backend.consult(&call()).await;
+        assert_eq!(answered, Err(NoAnswerReason::Unregistered));
+        assert!(stub.requests().is_empty());
     }
 
     #[tokio::test]

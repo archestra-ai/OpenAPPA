@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals,
-    Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
+    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
+    Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
@@ -676,8 +676,11 @@ impl ExternalServices {
             EndpointHost::Remote => &self.http,
         };
         let mut builder = http.post(&endpoint.url).json(consult);
-        if let Some(token) = &endpoint.token {
-            builder = builder.bearer_auth(token.reveal());
+        match &endpoint.token {
+            Some(EndpointToken::Set(token)) => builder = builder.bearer_auth(token.reveal()),
+            // A deferred configuration never serves; a request without its key is not sent.
+            Some(EndpointToken::Deferred) => return Err(NoAnswerReason::Unregistered),
+            None => {}
         }
         let mut response = builder.send().await.map_err(classify_transport)?;
         let status = response.status();
@@ -2378,7 +2381,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65536);
         config.authorities.insert(
             "security".to_string(),
-            Implementation::Resolver(Endpoint::new(url, Some(Token::new("sekret".to_string())))),
+            Implementation::Resolver(Endpoint::new(
+                url,
+                Some(EndpointToken::Set(Token::new("sekret".to_string()))),
+            )),
         );
         let services = services_over(config);
         let outcome = services
