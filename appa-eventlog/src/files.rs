@@ -1218,6 +1218,123 @@ mod tests {
         ));
     }
 
+    fn trust(level: u8) -> Label {
+        Label::new(
+            appa_engine::label::Trust::new(level),
+            appa_engine::label::Audience::public(),
+        )
+    }
+
+    #[test]
+    fn receipts_carry_the_label_of_what_each_operation_consumed() {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join("second.txt"), "second").unwrap();
+        let store = fixture.store(&secret());
+
+        store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        store.bind("a", "read", "dispatch-1", &trust(1)).unwrap();
+        let read = store.finish("a", "read", true).unwrap();
+        assert!(read.success);
+        assert_eq!(read.source_label, Some(secret()));
+        assert_eq!(read.version, None);
+
+        store
+            .prepare("a", "create", FileOperation::Replace, "fresh.txt")
+            .unwrap();
+        store.bind("a", "create", "dispatch-2", &trust(2)).unwrap();
+        fs::write(fixture.workspace.join("fresh.txt"), "fresh").unwrap();
+        let created = store.finish("a", "create", true).unwrap();
+        assert_eq!(created.source_label, None);
+        let version = created.version.unwrap();
+        assert_eq!(version.previous, None);
+        assert_eq!(version.label, trust(2));
+        assert_eq!(version.dispatch.as_deref(), Some("dispatch-2"));
+
+        store.prepare("a", "edit", FileOperation::Edit, "fresh.txt").unwrap();
+        store.bind("a", "edit", "dispatch-3", &trust(3)).unwrap();
+        let failed = store.finish("a", "edit", false).unwrap();
+        assert!(!failed.success);
+        assert_eq!(failed.source_label, Some(trust(2)));
+        assert_eq!(failed.version, None);
+        assert_eq!(failed.dispatch.as_deref(), Some("dispatch-3"));
+        assert_eq!(store.current("fresh.txt").unwrap(), Some(version));
+
+        store
+            .prepare_process("a", "process", &["tracked.txt".into(), "fresh.txt".into()], "out.txt")
+            .unwrap();
+        store.bind("a", "process", "dispatch-4", &trust(0)).unwrap();
+        fs::write(fixture.workspace.join("out.txt"), "derived").unwrap();
+        let processed = store.finish("a", "process", true).unwrap();
+        assert_eq!(processed.source_label, Some(secret().combine(&trust(2))));
+    }
+
+    #[test]
+    fn a_reservation_binds_once_and_finishes_only_after_binding() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
+        assert!(matches!(
+            store.finish("a", "edit", true),
+            Err(FileStoreError::UnknownReservation)
+        ));
+        assert!(matches!(
+            store.bind("a", "other", "dispatch", &Label::top()),
+            Err(FileStoreError::UnknownReservation)
+        ));
+        store.bind("a", "edit", "dispatch", &Label::top()).unwrap();
+        assert!(matches!(
+            store.bind("a", "edit", "dispatch-2", &Label::top()),
+            Err(FileStoreError::AlreadyBound)
+        ));
+        assert!(matches!(store.cancel("a", "edit"), Err(FileStoreError::AlreadyBound)));
+        fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
+        let version = store.finish("a", "edit", true).unwrap().version.unwrap();
+        assert_eq!(version.dispatch.as_deref(), Some("dispatch"));
+    }
+
+    #[test]
+    fn a_failed_call_whose_source_or_input_changed_is_quarantined() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
+            .unwrap();
+        store.bind("a", "copy", "dispatch", &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert!(matches!(
+            store.finish("a", "copy", false),
+            Err(FileStoreError::Quarantined)
+        ));
+
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store
+            .prepare_process("a", "process", &["tracked.txt".into()], "out.txt")
+            .unwrap();
+        store.bind("a", "process", "dispatch", &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert_eq!(store.abandon("a", "process").unwrap(), AbandonOutcome::Quarantined);
+        assert!(matches!(
+            store.finish("a", "process", false),
+            Err(FileStoreError::Quarantined)
+        ));
+        fs::write(fixture.workspace.join("tracked.txt"), "old").unwrap();
+        assert!(!store.finish("a", "process", false).unwrap().success);
+    }
+
+    #[test]
+    fn a_read_whose_file_changed_during_the_call_is_refused() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        store.bind("a", "read", "dispatch", &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert!(matches!(
+            store.finish("a", "read", true),
+            Err(FileStoreError::DigestMismatch)
+        ));
+    }
+
     #[test]
     fn transfers_and_process_from_untouched_sources_carry_the_initial_label() {
         let fixture = Fixture::new();

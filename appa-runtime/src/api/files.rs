@@ -1233,6 +1233,78 @@ else:
         );
     }
 
+    #[test]
+    fn ledger_pins_derive_the_file_basis_the_engine_rules_on() {
+        let dir = fixture();
+        let work = dir.path().join("work");
+        std::fs::write(work.join("second.txt"), "second").unwrap();
+        std::fs::write(work.join("occupied.txt"), "occupied").unwrap();
+        let store = FileStore::new(&work, &Label::top()).unwrap();
+        let pinned = |path: &str| {
+            let version = store.current(path).unwrap().unwrap();
+            FileSource {
+                version: version.id.to_string(),
+                digest: version.digest,
+                label: version.label,
+            }
+        };
+        let derive = |key: &str, pin: FilePin| {
+            store.cancel("a", key).unwrap();
+            basis(pin).unwrap()
+        };
+
+        let read = store.prepare("a", "read", FileOperation::Read, "source.txt").unwrap();
+        assert_eq!(derive("read", read), FileBasis::Read(pinned("source.txt")));
+        let edit = store.prepare("a", "edit", FileOperation::Edit, "source.txt").unwrap();
+        assert_eq!(derive("edit", edit), FileBasis::Edit(pinned("source.txt")));
+        let create = store
+            .prepare("a", "create", FileOperation::Replace, "fresh.txt")
+            .unwrap();
+        assert_eq!(derive("create", create), FileBasis::Replace(None));
+        let replace = store
+            .prepare("a", "replace", FileOperation::Replace, "source.txt")
+            .unwrap();
+        assert_eq!(
+            derive("replace", replace),
+            FileBasis::Replace(Some(pinned("source.txt")))
+        );
+        let copy = store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "source.txt", "occupied.txt")
+            .unwrap();
+        assert_eq!(
+            derive("copy", copy),
+            FileBasis::Copy {
+                source: pinned("source.txt"),
+                replaced: Some(pinned("occupied.txt")),
+            }
+        );
+        let moved = store
+            .prepare_transfer("a", "move", FileOperation::Move, "source.txt", "moved.txt")
+            .unwrap();
+        assert_eq!(
+            derive("move", moved),
+            FileBasis::Move {
+                source: pinned("source.txt"),
+                replaced: None,
+            }
+        );
+        let process = store
+            .prepare_process(
+                "a",
+                "process",
+                &["second.txt".into(), "source.txt".into()],
+                "occupied.txt",
+            )
+            .unwrap();
+        assert_eq!(
+            derive("process", process),
+            FileBasis::Process {
+                inputs: vec![pinned("second.txt"), pinned("source.txt")],
+                replaced: Some(pinned("occupied.txt")),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn managed_files_execute_the_pinned_path_not_the_argument_path() {
         let dir = fixture();
