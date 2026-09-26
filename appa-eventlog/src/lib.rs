@@ -406,13 +406,13 @@ pub enum AppendError {
 }
 
 impl LogStore {
-    /// Coordinate host-owned receipts with the connection that writes event batches: on a
-    /// leased store, this is the lease's connection.
+    /// The connection a leased PostgreSQL store runs on, for host SQL beside its event batches
+    /// and receipts. `None` for a SQLite store and for a store that is not leased.
     #[cfg(feature = "postgres")]
-    pub fn postgres(&self) -> Option<&postgres::PostgresStore> {
+    pub fn postgres(&self) -> Option<&postgres::LeasedPostgres> {
         match &self.store {
             Store::Sqlite(_) => None,
-            Store::Postgres(pg) => Some(pg),
+            Store::Postgres(pg) => pg.leased(),
         }
     }
 
@@ -1652,18 +1652,20 @@ mod tests {
             context: None,
         };
         assert!(matches!(
-            pg.claim_operation(request.clone()),
+            store.claim_operation(request.clone()),
             Ok(OperationClaim::Claimed)
         ));
         assert!(matches!(
-            pg.claim_operation(request.clone()),
+            store.claim_operation(request.clone()),
             Err(ReceiptError::Pending)
         ));
         let decision = serde_json::json!({"decision":"mcp_result"});
-        pg.complete_operation(request.key.clone(), decision.clone())
+        store
+            .complete_operation(request.key.clone(), decision.clone())
             .expect("the claimed operation completes");
         assert_eq!(
-            pg.claim_operation(request.clone())
+            store
+                .claim_operation(request.clone())
                 .expect("the completed operation replays"),
             OperationClaim::Complete {
                 decision: decision.clone()
@@ -1671,7 +1673,10 @@ mod tests {
         );
         let mut changed = request.clone();
         changed.input = serde_json::json!({"offer_id": "other"});
-        assert!(matches!(pg.claim_operation(changed), Err(ReceiptError::InputMismatch)));
+        assert!(matches!(
+            store.claim_operation(changed),
+            Err(ReceiptError::InputMismatch)
+        ));
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
@@ -1682,20 +1687,23 @@ mod tests {
             root: root.clone(),
         };
         assert!(matches!(
-            pg.claim_processed_result(result.clone()),
+            store.claim_processed_result(result.clone()),
             Ok(ProcessedResultClaim::Claimed)
         ));
-        assert!(pg.has_pending_receipts(&root).expect("the pending receipt checks"));
-        pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
+        assert!(store.has_pending_receipts(&root).expect("the pending receipt checks"));
+        store
+            .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
             .expect("the processed result completes");
         assert_eq!(
-            pg.claim_processed_result(result).expect("the processed result replays"),
+            store
+                .claim_processed_result(result)
+                .expect("the processed result replays"),
             ProcessedResultClaim::Complete {
                 approved_output: "approved".to_owned(),
                 decision,
             }
         );
-        assert!(!pg.has_pending_receipts(&root).expect("all receipts are terminal"));
+        assert!(!store.has_pending_receipts(&root).expect("all receipts are terminal"));
 
         let session_bound = OperationRequest {
             key: OperationKey {
@@ -1705,7 +1713,8 @@ mod tests {
             },
             ..request.clone()
         };
-        pg.claim_operation(session_bound)
+        store
+            .claim_operation(session_bound)
             .expect("the session-bound operation claims");
         let session_id = session.session_id.clone();
         let callers: Vec<(String, Option<String>)> = pg
@@ -1744,6 +1753,14 @@ mod tests {
             Ok(())
         })
         .expect("the isolated test receipts clean up");
+    }
+
+    #[cfg(all(feature = "postgres", feature = "fault-injection"))]
+    fn pool(store: &LogStore) -> &postgres::PostgresStore {
+        match &store.store {
+            Store::Postgres(pg) => pg,
+            Store::Sqlite(_) => panic!("PostgreSQL-only operation"),
+        }
     }
 
     #[cfg(feature = "postgres")]
@@ -1841,10 +1858,20 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
-    fn postgres_an_unleased_store_refuses_host_sql() {
+    fn postgres_only_a_leased_store_runs_host_sql() {
+        let store = postgres_store(1);
         assert!(
-            postgres_store(1).postgres().unwrap().with_client(|_| Ok(())).is_err(),
+            store.postgres().is_none(),
             "a store without a connection of its own runs nothing a host's SQL would leave on one"
+        );
+        assert!(memory().postgres().is_none());
+        let leased = store.lease().expect("the connection leases");
+        assert!(
+            leased
+                .postgres()
+                .expect("a leased store hands out its connection")
+                .with_client(|client| Ok(client.query_one("SELECT 1", &[])?.get::<_, i32>(0)))
+                .is_ok_and(|one| one == 1)
         );
     }
 
@@ -1895,7 +1922,7 @@ mod tests {
                 .map(|lease| {
                     scope.spawn(move || {
                         barrier.wait();
-                        lease.postgres().unwrap().claim_operation(request.clone())
+                        lease.claim_operation(request.clone())
                     })
                 })
                 .map(|claim| claim.join().unwrap())
@@ -1915,12 +1942,10 @@ mod tests {
             1
         );
         let decision = serde_json::json!({"decision": "allow_call"});
-        a.postgres()
-            .unwrap()
-            .complete_operation(request.key.clone(), decision.clone())
+        a.complete_operation(request.key.clone(), decision.clone())
             .expect("the claim completes");
         assert_eq!(
-            b.postgres().unwrap().claim_operation(request.clone()).unwrap(),
+            b.claim_operation(request.clone()).unwrap(),
             OperationClaim::Complete { decision },
             "the other lease replays what the first completed"
         );
@@ -2019,18 +2044,22 @@ mod tests {
         let key = format!("openappa-operation:{organization}:{session_id}:op-1");
         hold(&key, true);
         assert!(matches!(
-            pg.claim_operation(request.clone()),
+            writer.claim_operation(request.clone()),
             Err(ReceiptError::Storage(_))
         ));
         hold(&key, false);
-        assert_eq!(pg.claim_operation(request.clone()).unwrap(), OperationClaim::Claimed);
+        assert_eq!(
+            writer.claim_operation(request.clone()).unwrap(),
+            OperationClaim::Claimed
+        );
         hold(&key, true);
         assert!(matches!(
-            pg.complete_operation(request.key.clone(), decision.clone()),
+            writer.complete_operation(request.key.clone(), decision.clone()),
             Err(ReceiptError::Storage(_))
         ));
         hold(&key, false);
-        pg.complete_operation(request.key, decision.clone())
+        writer
+            .complete_operation(request.key, decision.clone())
             .expect("the released operation completes");
 
         let result = ProcessedResultRequest {
@@ -2044,21 +2073,22 @@ mod tests {
         let key = format!("openappa-result:{organization}:{session_id}:call-1");
         hold(&key, true);
         assert!(matches!(
-            pg.claim_processed_result(result.clone()),
+            writer.claim_processed_result(result.clone()),
             Err(ReceiptError::Storage(_))
         ));
         hold(&key, false);
         assert_eq!(
-            pg.claim_processed_result(result.clone()).unwrap(),
+            writer.claim_processed_result(result.clone()).unwrap(),
             ProcessedResultClaim::Claimed
         );
         hold(&key, true);
         assert!(matches!(
-            pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone()),
+            writer.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone()),
             Err(ReceiptError::Storage(_))
         ));
         hold(&key, false);
-        pg.complete_processed_result(result.key, "approved".to_owned(), decision)
+        writer
+            .complete_processed_result(result.key, "approved".to_owned(), decision)
             .expect("the released result completes");
 
         pg.with_client(move |client| {
@@ -2187,7 +2217,7 @@ mod tests {
         let checkout = Duration::from_secs(5);
         let reset = Duration::from_millis(200);
         let store = postgres_store(1);
-        let pg = store.postgres().unwrap();
+        let pg = pool(&store);
         pg.set_waits(checkout, reset);
         let lease = store.lease().unwrap();
         let pid = backend_pid(&lease);
@@ -2222,7 +2252,7 @@ mod tests {
         let checkout = Duration::from_secs(2);
         let reset = Duration::from_millis(100);
         let store = postgres_store(1);
-        let pg = store.postgres().unwrap();
+        let pg = pool(&store);
         pg.set_waits(checkout, reset);
         let lease = store.lease().unwrap();
         let (leased, waited) = std::thread::scope(|scope| {

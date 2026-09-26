@@ -4,9 +4,11 @@
 //! usable from async hooks.
 //!
 //! A host that needs several statements on one connection — a session-level
-//! advisory lock around a hook dispatch — leases one ([`PostgresStore::lease`]). Work on different leases runs concurrently.
-//! A connection that returns to the pool closed, or that does not answer its
-//! reset, is dropped, and a later checkout opens another in its place.
+//! advisory lock around a hook dispatch — leases one ([`LogStore::lease`]) and
+//! runs its own SQL there through [`LeasedPostgres::with_client`]. Work on
+//! different leases runs concurrently. A connection that returns to the pool
+//! closed, or that does not answer its reset, is dropped, and a later checkout
+//! opens another in its place.
 //!
 //! The host's migrations provide the schema: `openappa_events`, `openappa_policy_files`,
 //! `openappa_host_keys`, and the receipt tables `openappa_operations` and
@@ -25,11 +27,6 @@ use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
     Completion, SessionScope, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
     resolve_operation_completion, resolve_result_claim, resolve_result_completion,
-};
-
-pub use crate::receipts::{
-    OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
-    ReceiptBinding, ReceiptError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -280,8 +277,8 @@ impl Pool {
     }
 }
 
-/// One pooled connection, held by every store clone derived from the lease. The connection
-/// goes back to the pool when the last of them drops.
+/// One pooled connection, held by a leased store. It goes back to the pool when the store
+/// drops.
 struct Lease {
     pool: Arc<Pool>,
     worker: Option<Worker>,
@@ -301,10 +298,29 @@ impl Drop for Lease {
     }
 }
 
-#[derive(Clone)]
-pub struct PostgresStore {
+pub(crate) struct PostgresStore {
     pool: Arc<Pool>,
-    lease: Option<Arc<Lease>>,
+    lease: Option<LeasedPostgres>,
+}
+
+/// The connection a leased store runs on, for the host's own SQL. Only a leased store hands
+/// one out ([`LogStore::postgres`]).
+pub struct LeasedPostgres {
+    lease: Lease,
+}
+
+impl LeasedPostgres {
+    /// Host integration SQL (its own tables, advisory locks) runs on the leased connection, the
+    /// one the event log and receipts use. Never expose this capability to clients.
+    pub fn with_client<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
+    ) -> Result<T, PostgresError> {
+        self.lease.worker().run(move |state| {
+            state.host_sql = true;
+            operation(&mut state.client)
+        })
+    }
 }
 
 impl PostgresStore {
@@ -327,17 +343,23 @@ impl PostgresStore {
         Ok(Self { pool, lease: None })
     }
 
-    /// A store pinned to one pooled connection. Every clone of it runs on that connection;
-    /// an unleased store takes a connection per operation.
+    /// A store pinned to one pooled connection; an unleased store takes a connection per
+    /// operation.
     ///
     /// A full pool blocks the calling thread until a connection returns, and refuses with
     /// [`LeaseError::Exhausted`] after the checkout wait. A host that must not block admits
     /// no more concurrent work than `max_connections` before it asks for a lease.
-    pub fn lease(&self) -> Result<PostgresStore, LeaseError> {
+    pub(crate) fn lease(&self) -> Result<PostgresStore, LeaseError> {
         Ok(PostgresStore {
             pool: Arc::clone(&self.pool),
-            lease: Some(Arc::new(self.pool.checkout()?)),
+            lease: Some(LeasedPostgres {
+                lease: self.pool.checkout()?,
+            }),
         })
+    }
+
+    pub(crate) fn leased(&self) -> Option<&LeasedPostgres> {
+        self.lease.as_ref()
     }
 
     fn run<T: Send + 'static>(
@@ -345,26 +367,9 @@ impl PostgresStore {
         operation: impl FnOnce(&mut ConnectionState) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
         match &self.lease {
-            Some(lease) => lease.worker().run(operation),
+            Some(leased) => leased.lease.worker().run(operation),
             None => self.pool.checkout()?.worker().run(operation),
         }
-    }
-
-    /// Host integration SQL (receipts, advisory locks) runs on the leased connection, the
-    /// one the event log uses. It is refused without a lease: whatever it left on a
-    /// per-operation connection, a session-level lock above all, would be gone the moment
-    /// the call returned. Never expose this capability to clients.
-    pub fn with_client<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
-    ) -> Result<T, PostgresError> {
-        if self.lease.is_none() {
-            return Err(PostgresError("host SQL requires a leased connection".into()));
-        }
-        self.run(move |state| {
-            state.host_sql = true;
-            operation(&mut state.client)
-        })
     }
 
     /// The library's own statements, which take no session-level lock.
@@ -377,27 +382,27 @@ impl PostgresStore {
 
     /// How long a checkout waits for a free connection, and how long a returned connection
     /// has to answer its reset.
-    #[cfg(feature = "fault-injection")]
-    pub fn set_waits(&self, checkout: Duration, reset: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn set_waits(&self, checkout: Duration, reset: Duration) {
         let mut state = self.pool.state();
         state.checkout_wait = checkout;
         state.reset_wait = reset;
     }
 
     /// Arm the fail point: the next returned connection takes `stall` to answer its reset.
-    #[cfg(feature = "fault-injection")]
-    pub fn stall_next_reset(&self, stall: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn stall_next_reset(&self, stall: Duration) {
         self.pool.state().stall_next_reset = Some(stall);
     }
 
     /// Arm the fail point: the next connection the pool opens takes `stall` before connecting.
-    #[cfg(feature = "fault-injection")]
-    pub fn stall_next_connect(&self, stall: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn stall_next_connect(&self, stall: Duration) {
         self.pool.state().stall_next_connect = Some(stall);
     }
 
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
-    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
+    pub(crate) fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
         let lock = operation_lock(&request.key);
         self.serialized(lock, move |client| {
             let claim = resolve_operation_claim(read_operation(client, &request.key)?, &request)?;
@@ -422,7 +427,7 @@ impl PostgresStore {
     }
 
     /// Completes a claimed operation receipt with its final decision.
-    pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
+    pub(crate) fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
         let lock = operation_lock(&key);
         self.serialized(lock, move |client| {
             let existing = read_operation(client, &key)?;
@@ -443,7 +448,7 @@ impl PostgresStore {
     }
 
     /// Claims a durable processed-result receipt before result processing.
-    pub fn claim_processed_result(
+    pub(crate) fn claim_processed_result(
         &self,
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
@@ -468,7 +473,7 @@ impl PostgresStore {
     }
 
     /// Completes a processed-result receipt with its approved output and decision.
-    pub fn complete_processed_result(
+    pub(crate) fn complete_processed_result(
         &self,
         key: ProcessedResultKey,
         approved_output: String,
@@ -495,7 +500,7 @@ impl PostgresStore {
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
-    pub fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
+    pub(crate) fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
         let root = root.as_str().to_owned();
         self.query(move |client| {
             Ok(client
