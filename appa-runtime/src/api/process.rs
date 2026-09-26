@@ -37,6 +37,9 @@ pub(super) fn perform(
     call: &ProposedCall,
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
+    let appa_eventlog::files::PinnedBasis::Process { inputs, .. } = &pin.basis else {
+        return Err("the file reservation is not a process".into());
+    };
     let backend = files
         .process_backend
         .as_ref()
@@ -46,7 +49,7 @@ pub(super) fn perform(
     let prepare = || -> std::io::Result<()> {
         fs::create_dir(job.path().join("inputs"))?;
         fs::create_dir(job.path().join("output"))?;
-        for input in &pin.inputs {
+        for input in inputs {
             let target = job.path().join("inputs").join(&input.path);
             fs::create_dir_all(target.parent().expect("input paths have the staging parent"))?;
             std::io::copy(&mut existing(workspace, &input.path)?, &mut fs::File::create(target)?)?;
