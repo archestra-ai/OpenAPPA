@@ -1,39 +1,35 @@
-# Example deployment for protecting a Claude Code session.
+# The policy `appa plugin install claude-code` writes for a Claude Code session.
 #
-# The stable built-in tools of the harness are named. Read, Grep, Write
-# and Edit are left to the Claude Code battery, which `appa plugin install
-# claude-code` includes with this file; a deployment that removed the battery
-# sends them to the bounded Claude fallback on Unix. Off Unix, unlisted calls
-# remain fail-closed. Other tools the policy does not name get the same per-call
-# fallback on Unix until `/appa-guide init` gives them an exact contract.
-# A named tool without a `delta` key restricts nothing, the
-# same statement as `delta = {}`: the result's label is the combination of its
-# sources, unchanged.
+# It names Claude Code's built-in tools, and it includes the Claude Code
+# battery, which carries the Read, Grep, Write and Edit rules and the Bash
+# credential selectors. A named tool without a `delta` restricts nothing: the
+# result's label is the combination of its sources, unchanged.
 #
-# Tools that bring outside content into the session — the web tools —
-# carry `delta = { trust = "suspicious" }` instead: their results
-# enter at the low rank of the default trust chain
-# (suspicious < trusted), so a `requires = { trust = "trusted" }` sink
-# never receives them undeclared.
+# Two questions decide each tool's rule. As a source: can someone other than
+# this user write the text it returns? Then it carries
+# `delta = { trust = "suspicious" }`. As a sink: who can end up reading its
+# arguments? Its `requires` names that reader. A reader the session cannot see
+# is `public`.
 #
-# Who may see a value is the built-in audience chain `self` ⊆ `internal`
-# ⊆ `public`: `self` is the person running this session, `internal` their
-# organization, `public` the unrestricted state every session starts in.
-# The tools that publish or transmit beyond this machine require `public`,
-# so a session narrowed by a battery's reads — the Claude Code battery
-# labels the requester's credentials `self`, the Slack battery labels
-# channel history `internal` — cannot reach them. The chain works without a
-# directory: `self` and `internal` are symbolic, and only a rule naming an
-# individual recipient needs a source to check them (see the end of this
-# file). Bash, Read, Grep, Write and Edit are not named here on purpose: the
-# root's declarations are checked before an included file's, so a bare rule
-# here would shadow the battery's argument selectors, and a name written with
-# a selector is declared, so a call no selector matches is refused rather than
-# sent to the `*` fallback. Their rules live in the battery, selectors first
-# and the bare rule last.
+# Who may see a value is the built-in audience chain `self` ⊆ `internal` ⊆
+# `public`: `self` is the person running this session, `internal` their
+# organization, `public` the unrestricted state every session starts in. The
+# chain works without a directory: `self` and `internal` are symbolic, and only
+# a rule naming an individual recipient needs a source to check them (see the
+# end of this file).
 #
-# The built-in tool set varies by Claude Code version; regenerate the
-# list from a live session when it drifts.
+# Rules match in order and the first match wins, and the root's rules precede
+# an included battery's. The Bash credential selectors are repeated here, above
+# this file's bare Bash rule, so that they narrow the session before the Bash
+# Annotator is asked. On Unix, a tool this policy does not name gets a per-call
+# contract from the `*` Annotator at the end; off Unix, it is refused.
+#
+# `clappa` starts Claude Code with `SendMessage` denied: a message to a peer
+# session leaves this trajectory without its label. The agent starts a
+# subagent with `Agent` instead, whose final message is checked.
+#
+# The built-in tool set varies by Claude Code version; regenerate the list from
+# a live session when it drifts.
 
 [policy]
 version = 2
@@ -56,10 +52,18 @@ delta = {}
 name = "host/claude-code/AskUserQuestion"
 delta = {}
 
-# Publishes a page on claude.ai: a public sink.
+# An artifact is private to this user until they share it from claude.ai, so
+# publishing, its data and its comments reach `self`.
 [[policy.tool]]
 name = "host/claude-code/Artifact"
-requires = { audience = { contains = ["public"] } }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ArtifactComments"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ArtifactData"
 delta = {}
 
 [[policy.tool]]
@@ -76,6 +80,10 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/CronList"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/EndConversation"
 delta = {}
 
 [[policy.tool]]
@@ -115,10 +123,6 @@ name = "host/claude-code/ListMcpResourcesTool"
 delta = {}
 
 [[policy.tool]]
-name = "host/claude-code/Monitor"
-delta = {}
-
-[[policy.tool]]
 name = "host/claude-code/NotebookEdit"
 delta = {}
 
@@ -131,19 +135,11 @@ name = "host/claude-code/ReadMcpResourceDirTool"
 delta = {}
 
 [[policy.tool]]
-name = "host/claude-code/ReadMcpResourceTool"
-delta = {}
-
-[[policy.tool]]
 name = "host/claude-code/ReportFindings"
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/ScheduleWakeup"
-delta = {}
-
-[[policy.tool]]
-name = "host/claude-code/SendMessage"
 delta = {}
 
 [[policy.tool]]
@@ -213,6 +209,21 @@ name = "host/claude-code/WebSearch"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
+# Another session's message and a resource of any MCP server arrive without
+# the label of whoever wrote them. GitHub notifications carry comments anyone
+# can write.
+[[policy.tool]]
+name = "host/claude-code/FetchInboxMessage"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/ReadMcpResourceTool"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/ReadNotifications"
+delta = { trust = "suspicious" }
+
 # Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime
 # itself, and gated by the same algebra as any other sink that leaves this
 # machine: the report carries this session's APPA decisions, so a session
@@ -250,7 +261,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:*.aws/credentials*)"
+name = "host/claude-code/Bash(command:*.aws/*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -260,7 +271,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:*.config/gh/hosts.yml*)"
+name = "host/claude-code/Bash(command:*.config/gh/*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -306,6 +317,31 @@ tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.pypirc*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.azure/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.gnupg/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.config/gcloud/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.password-store/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.vault-token*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -400,6 +436,14 @@ builtin = "claude-code"
 [[policy.tool]]
 name = "host/claude-code/Bash"
 description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-requirements"
+
+# Monitor runs a shell command, or opens a WebSocket, and its output reaches
+# the model as later notifications that no tool result carries. Its Annotator
+# labels the call before it runs.
+[[policy.tool]]
+name = "host/claude-code/Monitor"
+description = "Runs a shell command or opens a WebSocket and streams each output line to the agent."
 annotator = "claude-code.bash-requirements"
 
 [[policy.annotator]]

@@ -513,12 +513,17 @@ a deployment an install refuses. `appa` on PATH stays, so the next
 `appa plugin install claude-code` starts from nothing. Remove a `clappa`
 shell alias separately if you added one instead of the command.
 
-## Statusline
+## Statusline and SendMessage
 
 `clappa` starts Claude Code with `--settings <data dir>/clappa.settings.json`.
-That file holds one setting, APPA's `statusLine`, so it applies to `clappa`
-sessions only, above your own `statusLine`. A plain `claude` session keeps
-yours, and the install never edits it.
+That file holds two settings, so they apply to `clappa` sessions only, above
+your own. A plain `claude` session keeps yours, and the install never edits
+them.
+
+- APPA's `statusLine`.
+- `permissions.deny: ["SendMessage"]`. A message to another session leaves
+  this trajectory without its label. The agent starts a subagent with `Agent`
+  instead, and the runtime checks that subagent's final message.
 
 The status line shows the APPA pixel mascot plus the session's current Trust
 and Audience, read from the runtime's `GET /status`. It fails open: runtime

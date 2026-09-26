@@ -48,7 +48,6 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         "awaiting approval to propose",
         "exactly one state",
         "Keep user-facing replies compact",
-        "If the request says `diagnose` and `inspect only`",
         "Do not narrate inspection calls",
         "including `appa_update_policy`",
         "`appa-guide-*` executable",

@@ -38,7 +38,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:*.aws/credentials*)"
+name = "host/claude-code/Bash(command:*.aws/*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -48,7 +48,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:*.config/gh/hosts.yml*)"
+name = "host/claude-code/Bash(command:*.config/gh/*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -94,6 +94,31 @@ tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.pypirc*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.azure/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.gnupg/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.config/gcloud/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.password-store/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.vault-token*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -631,12 +656,16 @@ delta = {}
 
 # --- Write and Edit: the requester's secrets and the harness are sinks ---
 
-# Writing into a credential path requires a `trusted` session: content that
-# arrived at `suspicious`, from a web page or an unvetted command, reaches a
-# file the next process trusts only when the person running the session
-# approves the exact call. The harness's own settings, where the protecting
-# hooks are registered, and the deployment's policy ask that person every
-# time. Every other path takes the session's label as it is.
+# Writing into a credential path, or into a file a later process reads as
+# instructions or runs as code (CLAUDE.md, skills, agents, commands, git hooks,
+# shell startup files, launch agents), requires a `trusted` session: content
+# that arrived at `suspicious`, from a web page or an unvetted command, lands
+# there only when the person running the session approves the exact call. The
+# files that can turn the protection off ask that person every time: the
+# harness's settings and hooks, its MCP server list, and the deployment's
+# policy. A selector matches the path as written and is case-sensitive, so
+# a write through a symlink or an alias reads under its written name. Every
+# other path takes the session's label as it is.
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/.claude/settings*)"
 requires = { attention = ["hitl"] }
@@ -1218,8 +1247,148 @@ requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
+name = "host/claude-code/Write(file_path:*.mcp.json)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.claude/hooks/*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*CLAUDE.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*CLAUDE.local.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.claude/skills/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.claude/agents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.claude/commands/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.git/hooks/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.zshrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.zprofile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.bashrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.bash_profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/Library/LaunchAgents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
 name = "host/claude-code/Write"
 description = "Writes a file."
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.mcp.json)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.claude/hooks/*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*CLAUDE.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*CLAUDE.local.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.claude/skills/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.claude/agents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.claude/commands/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.git/hooks/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.zshrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.zprofile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.bashrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.bash_profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/Library/LaunchAgents/*)"
+requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]

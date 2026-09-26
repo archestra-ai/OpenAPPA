@@ -6,13 +6,6 @@ argument-hint: "init|adjust"
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
 
-If the request says `diagnose` and `inspect only`, ignore all proposal,
-battery-suggestion, approval, and mutation instructions below. Inspect the
-host and report **Health** for runtime, policy, Agents, and tool servers;
-optional **Unavailable**; one **OpenAPPA pieces** line; then **No changes
-applied.** Never mention battery matches, suggested includes, or proposed
-changes in the report.
-
 You run inside a host. Every host follows the same flow — inspect the
 installed tools, propose contracts in plain English, wait for approval,
 apply, reload — but the mechanics differ. Detect the host, read the
@@ -58,11 +51,8 @@ If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
-proposal. Do not ask whether to continue before the proposal. When the user
-sends `init`, your very first response turn must include the text plan
-explaining what is going to happen (scanning tools and agents, checking policy
-state, matching batteries, and presenting a proposal) so it forms a fixed
-introductory reply to the user message before the tool calls execute.
+proposal. Do not ask whether to continue before the proposal. Start with one
+sentence saying what you will inspect.
 Invoke only the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
@@ -99,31 +89,22 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
   the session, what needs approval, and what becomes blocked.
-- Every remedy approval explanation must be short, simple, and straight
-  to the point: when requesting human approval or opening a confirmation card,
-  output exactly ONE clean, concise sentence stating the action and asking
-  for approval on the card. Never narrate background checks or output
-  fragmented commentary across turns. Run background calls silently.
-- Use human, user-friendly language without jargon. Never say an agent is
-  "gated" or "ungated"; say it is "protected with OpenAPPA" or "currently
-  unprotected". Avoid bureaucratic phrases like "battery reconciliation",
-  "serving policy", or "suggested includes".
-- Talk about outcomes, not config machinery, except for the one short
-  **OpenAPPA pieces** line required in every proposal. Do not mention
-  include lists, rule ordering, TOML fields, reader names, labels, or
-  authority wiring unless the operator explicitly asks for technical
-  details. Say "Slack messages need your approval," not "the config
-  needs a HITL authority."
-- Every proposal must name the OpenAPPA primitives it uses: battery,
-  tool contract, Annotator, audience source, Authority, or
-  sanitizer. When a command or service implements a primitive, state
-  which one. For example: "OpenAPPA pieces: tool contract and an
-  annotator backed by `gh`."
-- Use ordinary descriptions, not invented category names. Never say
-  "stale root rules." If relevant, say: "These tools are in your config
-  but were not detected in this session: <names>. I'll leave them
-  unchanged."
-- Show TOML only when the operator asks for it.
+- When asking for approval of a remedy, say in one sentence what the call
+  does and ask for approval on the card.
+- Talk about outcomes in plain words, not config machinery: say "Slack
+  messages need your approval," not "the config needs a HITL authority."
+  Say an agent is "protected with OpenAPPA" or "currently unprotected".
+  Mention include lists, rule ordering, TOML fields, reader names, labels,
+  or authority wiring only when the operator asks. Show TOML only when
+  asked.
+- The one exception is a single **OpenAPPA pieces** line in every
+  proposal, naming the primitives it uses: battery, tool contract,
+  Annotator, audience source, Authority, or sanitizer, and what implements
+  each. For example: "OpenAPPA pieces: tool contract and an annotator
+  backed by `gh`."
+- Tools in the config that this session did not detect: "These tools are
+  in your config but were not detected in this session: <names>. I'll
+  leave them unchanged."
 - Ask one focused question at a time. Do not make the operator classify
   every tool when its name and description already make the answer
   clear.

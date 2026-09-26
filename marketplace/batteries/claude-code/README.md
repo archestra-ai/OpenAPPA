@@ -10,7 +10,7 @@ It covers five built-in tools, which the policy names `host/claude-code/Bash`,
 and `host/claude-code/Edit`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
-  `.claude.json`, `.aws/credentials`, a private key, ...) narrows the session
+  `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows the session
   to `self`, the requester. The battery withholds the command's result and
   offers the stock `redact-secrets` sanitizer, which masks private-key blocks,
   tokens of well-known shapes, the AWS secret access key, passwords inside
@@ -67,15 +67,20 @@ and `host/claude-code/Edit`:
 - **Grep** — A search inside one of the same paths is a read of it and
   narrows the session to `self`. A search over a directory that holds such
   a file is not matched; only the path as written is.
-- **Write, Edit** — Writing into one of the same paths requires a `trusted`
-  session: content that arrived at `suspicious` reaches a file the next
-  process trusts only when the person running the session approves the exact
-  call. Writing the harness's own settings (`.claude/settings*`) or the
-  deployment's policy (`appa/appa.toml`, `appa/batteries/`) asks that person
-  every time. Every other path takes the session's label as it is.
+- **Write, Edit** — Writing into one of the same paths, or into a file a
+  later process reads as instructions or runs as code (`CLAUDE.md`,
+  `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, `.git/hooks/`,
+  shell startup files, `Library/LaunchAgents/`), requires a `trusted`
+  session: content that arrived at `suspicious` lands there only when the
+  person running the session approves the exact call. Writing a file that can
+  turn the protection off asks that person every time: the harness's settings
+  (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server list
+  (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
+  `appa/batteries/`). Every other path takes the session's label as it is.
 
 On Unix, the default config `appa plugin install claude-code` writes declares
-the Bash Annotators, the GitHub publishing selectors, and the wildcard fallback.
+the Bash Annotators, the GitHub publishing selectors, the Monitor rule, and the
+wildcard fallback.
 It resolves `repository.py` from the included battery's installed directory.
 On Windows, the installer omits these Unix-only declarations. Bash calls that
 have no static rule remain fail-closed. The battery still labels credential

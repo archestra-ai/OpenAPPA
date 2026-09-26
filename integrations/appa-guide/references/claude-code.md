@@ -121,15 +121,12 @@ proposal configures an audience source for it.
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- **IFC monoids first**: Always express security guarantees using Information
-  Flow Control (IFC) monoids (`trust` lattice and `self` ⊆ `internal` ⊆ `public`
-  audience chain). Effects (`emits`, `requires.history`) are a hacky workaround
-  for event sequencing, not the primary algebra; avoid them when label bounding
-  suffices. Do not add attention marks or default `hitl` to fake a boundary;
-  keep autonomous execution unblocked for trusted data flowing within its
-  legitimate audience. The reserved `blocked` mark denies a call outright and
-  no Authority can permit it; use it only where a sanitizer that would make
-  the flow safe does not exist.
+- The reserved `blocked` mark denies a call outright and no Authority can
+  permit it; use it only where a sanitizer that would make the flow safe does
+  not exist.
+- A tool whose result someone other than the requester can write (a web page,
+  a public issue, another session's message) uses
+  `delta = { trust = "suspicious" }`.
 - The built-in audience chain is `self` ⊆ `internal` ⊆ `public`: `self` is the
   person running the session, `internal` their organization.
 - A tool that reads the requester's private data uses
@@ -153,6 +150,8 @@ matched battery covers.
   `audiences`. Omitted, the mandate admits every audience the policy writes.
 - A tool that publishes, posts, sends, shares, or uploads beyond the machine
   requires data that may be public: `requires = { audience = { contains = ["public"] } }`.
+  A destination that stays private to the requester until they share it
+  themselves reaches `self` and needs no `requires`.
 - A tool that communicates within the organization (e.g. posting internal Slack
   messages or workspace items) requires trusted data that includes `internal`:
   `requires = { trust = "trusted", audience = { contains = ["internal"] } }`. This
@@ -289,13 +288,11 @@ argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
 
 For an exact Bash command pattern, add a narrow, ordered
-`host/claude-code/Bash(command:...)` root contract before its fallback. For
-semantic command interpretation, copy the complete
-`claude-code.bash-requirements` Annotator declaration into the root config and
-modify its `hint`. Preserve its implementation, inputs, and mandate unless the
-approved behavior requires a change. Do not add a broad root
-`host/claude-code/Bash` contract that bypasses the battery's credential-path
-protections.
+`host/claude-code/Bash(command:...)` root contract before the root's bare
+`host/claude-code/Bash` rule. For semantic command interpretation, edit the
+`hint` of the root's `claude-code.bash-requirements` Annotator. Preserve its
+implementation, inputs, and mandate unless the approved behavior requires a
+change. Keep the root's Bash credential selectors above the bare Bash rule.
 
 To make an audience mismatch reviewable, permit the intended Authority to
 review that audience expansion. Do not add attention only to route the review.
