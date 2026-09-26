@@ -32,24 +32,6 @@ CREATE TABLE openappa_sessions (
 );
 CREATE INDEX openappa_sessions_root_idx ON openappa_sessions (root);
 
-CREATE TABLE openappa_offer_owners (
-    organization_id text NOT NULL,
-    caller_id text,
-    session_id text NOT NULL,
-    binding text NOT NULL,
-    offer_id text NOT NULL,
-    root text NOT NULL,
-    parent_id text,
-    arguments text,
-    tool text,
-    spelling text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_offer_owners_pk PRIMARY KEY (organization_id, offer_id)
-);
-CREATE INDEX openappa_offer_owners_created_at_idx ON openappa_offer_owners (created_at);
-CREATE INDEX openappa_offer_owners_root_idx ON openappa_offer_owners (root);
-CREATE INDEX openappa_offer_owners_session_idx ON openappa_offer_owners (organization_id, session_id, caller_id);
-
 CREATE TABLE openappa_operations (
     organization_id text NOT NULL,
     caller_id text,

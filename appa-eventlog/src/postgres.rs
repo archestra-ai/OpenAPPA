@@ -3,15 +3,16 @@
 //! connection has a dedicated thread, which keeps the synchronous log API
 //! usable from async hooks.
 //!
-//! A host that needs several statements on one connection — an outer
-//! transaction around a hook dispatch, a session-level advisory lock — leases
-//! one ([`PostgresStore::lease`]). Work on different leases runs concurrently.
-//! A connection that returns to the pool closed, or that does not answer its
-//! reset, is dropped, and a later checkout opens another in its place.
+//! A host that needs several statements on one connection — a session-level
+//! advisory lock around a hook dispatch — leases one ([`LogStore::lease`]) and
+//! runs its own SQL there through [`LeasedPostgres::with_client`]. Work on
+//! different leases runs concurrently. A connection that returns to the pool
+//! closed, or that does not answer its reset, is dropped, and a later checkout
+//! opens another in its place.
 //!
 //! The host's migrations provide the schema: `openappa_events`, `openappa_policy_files`,
-//! `openappa_host_keys`, and the receipt tables `openappa_offer_owners`, `openappa_operations`
-//! and `openappa_processed_results`. `tests/fixtures/host_schema.sql` holds the full DDL.
+//! `openappa_host_keys`, and the receipt tables `openappa_operations` and
+//! `openappa_processed_results`. `tests/fixtures/host_schema.sql` holds the full DDL.
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -24,13 +25,8 @@ use serde_json::Value;
 use super::*;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
-    Completion, StoredOperation, StoredOperationInput, StoredResult, binding_name, parse_binding, resolve_offer_owner,
-    resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
-};
-
-pub use crate::receipts::{
-    OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
-    ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
+    Completion, SessionScope, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
+    resolve_operation_completion, resolve_result_claim, resolve_result_completion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -40,12 +36,6 @@ pub struct PostgresError(pub String);
 impl From<::postgres::Error> for PostgresError {
     fn from(error: ::postgres::Error) -> Self {
         Self(error.to_string())
-    }
-}
-
-impl From<PostgresError> for ReceiptStorageError {
-    fn from(error: PostgresError) -> Self {
-        Self(error.0)
     }
 }
 
@@ -71,7 +61,6 @@ impl From<LeaseError> for PostgresError {
 
 struct ConnectionState {
     client: Client,
-    transaction: bool,
     /// Host SQL ran on this connection, so it may hold session-level advisory locks.
     host_sql: bool,
 }
@@ -117,7 +106,6 @@ impl Worker {
                         let _ = ready.send(Ok(()));
                         let mut state = ConnectionState {
                             client,
-                            transaction: false,
                             host_sql: false,
                         };
                         for job in receiver {
@@ -163,8 +151,7 @@ impl Worker {
             .ok_or_else(|| PostgresError("connection worker stopped".into()))?
     }
 
-    /// Leave the connection as a fresh one would be: no open transaction, no session-level
-    /// advisory lock. `false` means the connection cannot be reused, and an answer that does
+    /// Leave the connection as a fresh one would be: no session-level advisory lock. `false` means the connection cannot be reused, and an answer that does
     /// not come within `wait` counts as one.
     fn reset(&self, wait: Duration, stall: Option<Duration>) -> bool {
         self.ask(Some(wait), move |state| {
@@ -172,10 +159,6 @@ impl Worker {
                 std::thread::sleep(stall);
             }
             let mut reset = || -> Result<(), ::postgres::Error> {
-                if state.transaction {
-                    state.transaction = false;
-                    state.client.batch_execute("ROLLBACK")?;
-                }
                 if state.host_sql {
                     state.host_sql = false;
                     state.client.batch_execute("SELECT pg_advisory_unlock_all()")?;
@@ -294,9 +277,8 @@ impl Pool {
     }
 }
 
-/// One pooled connection, held by every store clone derived from the lease. The connection
-/// goes back to the pool when the last of them drops, so a transaction always ends before
-/// its connection is reset and reused.
+/// One pooled connection, held by a leased store. It goes back to the pool when the store
+/// drops.
 struct Lease {
     pool: Arc<Pool>,
     worker: Option<Worker>,
@@ -316,10 +298,29 @@ impl Drop for Lease {
     }
 }
 
-#[derive(Clone)]
-pub struct PostgresStore {
+pub(crate) struct PostgresStore {
     pool: Arc<Pool>,
-    lease: Option<Arc<Lease>>,
+    lease: Option<LeasedPostgres>,
+}
+
+/// The connection a leased store runs on, for the host's own SQL. Only a leased store hands
+/// one out ([`LogStore::postgres`]).
+pub struct LeasedPostgres {
+    lease: Lease,
+}
+
+impl LeasedPostgres {
+    /// Host integration SQL (its own tables, advisory locks) runs on the leased connection, the
+    /// one the event log and receipts use. Never expose this capability to clients.
+    pub fn with_client<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
+    ) -> Result<T, PostgresError> {
+        self.lease.worker().run(move |state| {
+            state.host_sql = true;
+            operation(&mut state.client)
+        })
+    }
 }
 
 impl PostgresStore {
@@ -342,17 +343,23 @@ impl PostgresStore {
         Ok(Self { pool, lease: None })
     }
 
-    /// A store pinned to one pooled connection. Every clone of it, and every transaction it
-    /// begins, runs on that connection; an unleased store takes a connection per operation.
+    /// A store pinned to one pooled connection; an unleased store takes a connection per
+    /// operation.
     ///
     /// A full pool blocks the calling thread until a connection returns, and refuses with
     /// [`LeaseError::Exhausted`] after the checkout wait. A host that must not block admits
     /// no more concurrent work than `max_connections` before it asks for a lease.
-    pub fn lease(&self) -> Result<PostgresStore, LeaseError> {
+    pub(crate) fn lease(&self) -> Result<PostgresStore, LeaseError> {
         Ok(PostgresStore {
             pool: Arc::clone(&self.pool),
-            lease: Some(Arc::new(self.pool.checkout()?)),
+            lease: Some(LeasedPostgres {
+                lease: self.pool.checkout()?,
+            }),
         })
+    }
+
+    pub(crate) fn leased(&self) -> Option<&LeasedPostgres> {
+        self.lease.as_ref()
     }
 
     fn run<T: Send + 'static>(
@@ -360,26 +367,9 @@ impl PostgresStore {
         operation: impl FnOnce(&mut ConnectionState) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
         match &self.lease {
-            Some(lease) => lease.worker().run(operation),
+            Some(leased) => leased.lease.worker().run(operation),
             None => self.pool.checkout()?.worker().run(operation),
         }
-    }
-
-    /// Host integration SQL (receipts, advisory locks) runs on the leased connection, the
-    /// one the event log uses. It is refused without a lease: whatever it left on a
-    /// per-operation connection, a session-level lock above all, would be gone the moment
-    /// the call returned. Never expose this capability to clients.
-    pub fn with_client<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
-    ) -> Result<T, PostgresError> {
-        if self.lease.is_none() {
-            return Err(PostgresError("host SQL requires a leased connection".into()));
-        }
-        self.run(move |state| {
-            state.host_sql = true;
-            operation(&mut state.client)
-        })
     }
 
     /// The library's own statements, which take no session-level lock.
@@ -392,79 +382,27 @@ impl PostgresStore {
 
     /// How long a checkout waits for a free connection, and how long a returned connection
     /// has to answer its reset.
-    #[cfg(feature = "fault-injection")]
-    pub fn set_waits(&self, checkout: Duration, reset: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn set_waits(&self, checkout: Duration, reset: Duration) {
         let mut state = self.pool.state();
         state.checkout_wait = checkout;
         state.reset_wait = reset;
     }
 
     /// Arm the fail point: the next returned connection takes `stall` to answer its reset.
-    #[cfg(feature = "fault-injection")]
-    pub fn stall_next_reset(&self, stall: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn stall_next_reset(&self, stall: Duration) {
         self.pool.state().stall_next_reset = Some(stall);
     }
 
     /// Arm the fail point: the next connection the pool opens takes `stall` before connecting.
-    #[cfg(feature = "fault-injection")]
-    pub fn stall_next_connect(&self, stall: Duration) {
+    #[cfg(all(test, feature = "fault-injection"))]
+    pub(crate) fn stall_next_connect(&self, stall: Duration) {
         self.pool.state().stall_next_connect = Some(stall);
     }
 
-    /// Stores an offer owner record. Repeated writes with identical data are idempotent.
-    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
-        let lock = offer_owner_lock(&record.scope.organization_id, &record.offer_id);
-        self.serialized(lock, move |client| {
-            let binding = binding_name(record.scope.binding).to_owned();
-            let inserted = client
-                .query_opt(
-                    "INSERT INTO openappa_offer_owners (organization_id, caller_id, session_id, binding, offer_id, root, parent_id, arguments, tool, spelling) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) \
-                     ON CONFLICT (organization_id, offer_id) DO NOTHING \
-                     RETURNING organization_id",
-                    &[
-                        &record.scope.organization_id,
-                        &record.scope.caller_id,
-                        &record.scope.session_id,
-                        &binding,
-                        &record.offer_id,
-                        &record.root,
-                        &record.parent_id,
-                        &record.arguments,
-                        &record.tool,
-                        &record.spelling,
-                    ],
-                )?
-                .is_some();
-            if inserted {
-                return Ok(());
-            }
-            let existing = read_offer_owner(client, &OfferOwnerKey {
-                organization_id: record.scope.organization_id.clone(),
-                offer_id: record.offer_id.clone(),
-            })?;
-            resolve_offer_owner(existing, &record)
-        })
-    }
-
-    /// Reads an offer owner record by key.
-    pub fn offer_owner(&self, key: OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, PostgresError> {
-        self.query(move |client| read_offer_owner(client, &key))
-    }
-
-    /// Deletes stored offer owner records for a session scope.
-    pub fn expire_offer_owners(&self, scope: ReceiptScope) -> Result<u64, PostgresError> {
-        let lock = session_lock(&scope);
-        self.serialized(lock, move |client| {
-            Ok(client.execute(
-                "DELETE FROM openappa_offer_owners WHERE organization_id=$1 AND caller_id IS NOT DISTINCT FROM $2 AND session_id=$3",
-                &[&scope.organization_id, &scope.caller_id, &scope.session_id],
-            )?)
-        })
-    }
-
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
-    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
+    pub(crate) fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
         let lock = operation_lock(&request.key);
         self.serialized(lock, move |client| {
             let claim = resolve_operation_claim(read_operation(client, &request.key)?, &request)?;
@@ -475,11 +413,11 @@ impl PostgresStore {
                     "INSERT INTO openappa_operations (organization_id, caller_id, session_id, operation_id, root, input, status) \
                      VALUES ($1,$2,$3,$4,$5,$6,'pending')",
                     &[
-                        &request.key.scope.organization_id,
-                        &request.key.scope.caller_id,
-                        &request.key.scope.session_id,
+                        &request.key.session.organization_id,
+                        &request.key.binding.caller_id(),
+                        &request.key.session.session_id,
                         &request.key.operation_id,
-                        &request.root,
+                        &request.root.as_str(),
                         &stored,
                     ],
                 )?;
@@ -489,7 +427,7 @@ impl PostgresStore {
     }
 
     /// Completes a claimed operation receipt with its final decision.
-    pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
+    pub(crate) fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
         let lock = operation_lock(&key);
         self.serialized(lock, move |client| {
             let existing = read_operation(client, &key)?;
@@ -498,8 +436,8 @@ impl PostgresStore {
                     "UPDATE openappa_operations SET status='complete', decision=$4 \
                      WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3",
                     &[
-                        &key.scope.organization_id,
-                        &key.scope.session_id,
+                        &key.session.organization_id,
+                        &key.session.session_id,
                         &key.operation_id,
                         &decision,
                     ],
@@ -510,7 +448,7 @@ impl PostgresStore {
     }
 
     /// Claims a durable processed-result receipt before result processing.
-    pub fn claim_processed_result(
+    pub(crate) fn claim_processed_result(
         &self,
         request: ProcessedResultRequest,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
@@ -522,11 +460,11 @@ impl PostgresStore {
                     "INSERT INTO openappa_processed_results (organization_id, caller_id, session_id, tool_call_id, root, status) \
                      VALUES ($1,$2,$3,$4,$5,'pending')",
                     &[
-                        &request.key.organization_id,
+                        &request.key.session.organization_id,
                         &request.key.caller_id,
-                        &request.key.session_id,
+                        &request.key.session.session_id,
                         &request.key.tool_call_id,
-                        &request.root,
+                        &request.root.as_str(),
                     ],
                 )?;
             }
@@ -535,7 +473,7 @@ impl PostgresStore {
     }
 
     /// Completes a processed-result receipt with its approved output and decision.
-    pub fn complete_processed_result(
+    pub(crate) fn complete_processed_result(
         &self,
         key: ProcessedResultKey,
         approved_output: String,
@@ -549,8 +487,8 @@ impl PostgresStore {
                     "UPDATE openappa_processed_results SET status='complete', approved_output=$4, decision=$5 \
                      WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3",
                     &[
-                        &key.organization_id,
-                        &key.session_id,
+                        &key.session.organization_id,
+                        &key.session.session_id,
                         &key.tool_call_id,
                         &approved_output,
                         &decision,
@@ -562,7 +500,8 @@ impl PostgresStore {
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
-    pub fn has_pending_receipts(&self, root: String) -> Result<bool, PostgresError> {
+    pub(crate) fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
+        let root = root.as_str().to_owned();
         self.query(move |client| {
             Ok(client
                 .query_opt(
@@ -576,29 +515,7 @@ impl PostgresStore {
         })
     }
 
-    /// Starts an outer transaction across hook dispatches. Only a leased store holds one:
-    /// the transaction belongs to the lease's connection, and no other store can join it.
-    pub fn begin(&self) -> Result<PostgresTransaction, PostgresError> {
-        if self.lease.is_none() {
-            return Err(PostgresError("a transaction requires a leased connection".into()));
-        }
-        self.run(|state| {
-            if state.transaction {
-                return Err(PostgresError("transaction already active".into()));
-            }
-            state.client.batch_execute("BEGIN")?;
-            state.transaction = true;
-            Ok(())
-        })?;
-        Ok(PostgresTransaction {
-            store: self.clone(),
-            finished: false,
-        })
-    }
-
-    /// Run `operation` in a transaction, serialized against other writers of `lock`. The host's
-    /// own transaction is the one used when it holds one: a transaction opened inside that one
-    /// would end the host's on the way out.
+    /// Run `operation` in a transaction, serialized against other writers of `lock`.
     fn serialized<T, E>(
         &self,
         lock: String,
@@ -608,23 +525,13 @@ impl PostgresStore {
         T: Send + 'static,
         E: From<PostgresError> + Send + 'static,
     {
-        self.run(move |state| {
-            let outer = state.transaction;
-            if !outer {
-                state.client.batch_execute("BEGIN")?;
-            }
-            let result = match state
-                .client
-                .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&lock])
-            {
-                Ok(_) => operation(&mut state.client),
+        self.query(move |client| {
+            client.batch_execute("BEGIN")?;
+            let result = match client.query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&lock]) {
+                Ok(_) => operation(client),
                 Err(error) => Err(PostgresError::from(error).into()),
             };
-            if !outer {
-                state
-                    .client
-                    .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
-            }
+            client.batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
             Ok(result)
         })?
     }
@@ -751,7 +658,7 @@ impl PostgresStore {
 
 impl From<PostgresError> for ReceiptError {
     fn from(error: PostgresError) -> Self {
-        Self::Storage(error.into())
+        Self::Storage(error.0)
     }
 }
 
@@ -766,15 +673,18 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
         .query_opt(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision \
              FROM openappa_operations WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3 FOR UPDATE",
-            &[&key.scope.organization_id, &key.scope.session_id, &key.operation_id],
+            &[&key.session.organization_id, &key.session.session_id, &key.operation_id],
         )?
         .map(|row| {
+            let input = StoredOperationInput::decode(row.get(4))?;
             Ok(StoredOperation {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
+                session: SessionScope {
+                    organization_id: row.get(0),
+                    session_id: row.get(2),
+                },
+                binding: input.binding(row.get(1))?,
                 root: row.get(3),
-                input: StoredOperationInput::decode(row.get(4)).map_err(ReceiptStorageError)?,
+                semantic: input.semantic,
                 status: row.get(5),
                 decision: row.get::<_, Option<Value>>(6).map(Ok),
             })
@@ -787,42 +697,18 @@ fn read_result(client: &mut Client, key: &ProcessedResultKey) -> Result<Option<S
         .query_opt(
             "SELECT organization_id, session_id, root, status, approved_output, decision \
              FROM openappa_processed_results WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 FOR UPDATE",
-            &[&key.organization_id, &key.session_id, &key.tool_call_id],
+            &[&key.session.organization_id, &key.session.session_id, &key.tool_call_id],
         )?
         .map(|row| StoredResult {
-            organization_id: row.get(0),
-            session_id: row.get(1),
+            session: SessionScope {
+                organization_id: row.get(0),
+                session_id: row.get(1),
+            },
             root: row.get(2),
             status: row.get(3),
             approved_output: row.get(4),
             decision: row.get::<_, Option<Value>>(5).map(Ok),
         }))
-}
-
-fn read_offer_owner(client: &mut Client, key: &OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, PostgresError> {
-    let row = client.query_opt(
-        "SELECT caller_id, session_id, binding, root, parent_id, arguments, tool, spelling \
-         FROM openappa_offer_owners WHERE organization_id=$1 AND offer_id=$2",
-        &[&key.organization_id, &key.offer_id],
-    )?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let binding = parse_binding(row.get::<_, String>(2).as_str()).map_err(PostgresError)?;
-    Ok(Some(OfferOwnerRecord {
-        scope: ReceiptScope {
-            organization_id: key.organization_id.clone(),
-            caller_id: row.get(0),
-            session_id: row.get(1),
-            binding,
-        },
-        offer_id: key.offer_id.clone(),
-        root: row.get(3),
-        parent_id: row.get(4),
-        arguments: row.get(5),
-        tool: row.get(6),
-        spelling: row.get(7),
-    }))
 }
 
 /// The primary key each receipt table must carry, column for column. A host on another key
@@ -864,62 +750,18 @@ fn check_receipt_keys(client: &mut Client) -> Result<(), PostgresError> {
     Ok(())
 }
 
-fn offer_owner_lock(organization_id: &str, offer_id: &str) -> String {
-    format!("openappa-offer-owner:{organization_id}:{offer_id}")
-}
-
 fn operation_lock(key: &OperationKey) -> String {
     format!(
         "openappa-operation:{}:{}:{}",
-        key.scope.organization_id, key.scope.session_id, key.operation_id
+        key.session.organization_id, key.session.session_id, key.operation_id
     )
 }
 
 fn result_lock(key: &ProcessedResultKey) -> String {
     format!(
         "openappa-result:{}:{}:{}",
-        key.organization_id, key.session_id, key.tool_call_id
+        key.session.organization_id, key.session.session_id, key.tool_call_id
     )
-}
-
-fn session_lock(scope: &ReceiptScope) -> String {
-    format!(
-        "openappa-offer-session:{}:{}:{}",
-        scope.organization_id,
-        scope.caller_id.as_deref().unwrap_or(""),
-        scope.session_id
-    )
-}
-
-pub struct PostgresTransaction {
-    store: PostgresStore,
-    finished: bool,
-}
-
-impl PostgresTransaction {
-    pub fn commit(mut self) -> Result<(), PostgresError> {
-        self.store.run(|state| {
-            state.client.batch_execute("COMMIT")?;
-            state.transaction = false;
-            Ok(())
-        })?;
-        self.finished = true;
-        Ok(())
-    }
-}
-
-impl Drop for PostgresTransaction {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = self.store.run(|state| {
-                // A rollback that failed leaves the flag up, so the pool retries it and
-                // drops the connection rather than reusing one still inside a transaction.
-                state.client.batch_execute("ROLLBACK")?;
-                state.transaction = false;
-                Ok(())
-            });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -930,29 +772,23 @@ mod tests {
     /// so their spelling is a wire format.
     #[test]
     fn advisory_lock_keys_are_frozen() {
-        let scope = |caller_id: Option<&str>| ReceiptScope {
+        let session = SessionScope {
             organization_id: "org".to_owned(),
-            caller_id: caller_id.map(str::to_owned),
             session_id: "session".to_owned(),
-            binding: ReceiptBinding::Caller,
         };
-        assert_eq!(offer_owner_lock("org", "offer"), "openappa-offer-owner:org:offer");
         let operation = OperationKey {
-            scope: scope(Some("caller")),
+            session: session.clone(),
+            binding: ReceiptBinding::Caller {
+                caller_id: "caller".to_owned(),
+            },
             operation_id: "op".to_owned(),
         };
         assert_eq!(operation_lock(&operation), "openappa-operation:org:session:op");
         let result = ProcessedResultKey {
-            organization_id: "org".to_owned(),
+            session,
             caller_id: Some("caller".to_owned()),
-            session_id: "session".to_owned(),
             tool_call_id: "call".to_owned(),
         };
         assert_eq!(result_lock(&result), "openappa-result:org:session:call");
-        assert_eq!(
-            session_lock(&scope(Some("caller"))),
-            "openappa-offer-session:org:caller:session"
-        );
-        assert_eq!(session_lock(&scope(None)), "openappa-offer-session:org::session");
     }
 }

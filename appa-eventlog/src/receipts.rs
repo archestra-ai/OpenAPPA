@@ -1,59 +1,65 @@
-//! Typed offer-owner routing and idempotent operation receipts.
+//! Idempotent operation and processed-result receipts.
 //!
-//! These records are not engine facts. They are host integration state: which authenticated
-//! scope minted an offer, and whether an operation or processed result is claimed, pending, or
-//! complete. Offer validity still rehydrates from the log. SQLite and Memory keep the rows in
-//! the same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
+//! These records are not engine facts. They are host integration state: whether an operation
+//! or processed result is claimed, pending, or complete. SQLite and Memory keep the rows in the
+//! same database as the log; PostgreSQL hosts install the equivalent `openappa_*` tables
 //! through their own migrations.
 
+use appa_engine::value::TrajectoryId;
 use serde_json::Value;
 
-/// Scope binding for a durable receipt: conversation session or authenticated caller.
+/// The organization and conversation session a receipt belongs to. Session ids are unique only
+/// within an organization, so the organization is part of every receipt key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionScope {
+    pub organization_id: String,
+    pub session_id: String,
+}
+
+/// Who besides the session may act on an operation receipt. A session-bound receipt records
+/// its caller but never compares it; a caller-bound one admits only the caller that claimed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptBinding {
+    Session { caller_id: Option<String> },
+    Caller { caller_id: String },
+}
+
+impl ReceiptBinding {
+    pub(crate) fn caller_id(&self) -> Option<&str> {
+        match self {
+            Self::Session { caller_id } => caller_id.as_deref(),
+            Self::Caller { caller_id } => Some(caller_id),
+        }
+    }
+
+    fn kind(&self) -> BindingKind {
+        match self {
+            Self::Session { .. } => BindingKind::Session,
+            Self::Caller { .. } => BindingKind::Caller,
+        }
+    }
+
+    fn admits(&self, requested: &ReceiptBinding) -> bool {
+        match (self, requested) {
+            (Self::Session { .. }, Self::Session { .. }) => true,
+            (Self::Caller { caller_id: stored }, Self::Caller { caller_id: requested }) => stored == requested,
+            (Self::Session { .. }, Self::Caller { .. }) | (Self::Caller { .. }, Self::Session { .. }) => false,
+        }
+    }
+}
+
+/// A binding as the stored input envelope spells it; the caller lives in its own column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReceiptBinding {
+enum BindingKind {
     Session,
     Caller,
 }
 
-/// Authenticated scope associated with a durable integration receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiptScope {
-    pub organization_id: String,
-    pub caller_id: Option<String>,
-    pub session_id: String,
-    pub binding: ReceiptBinding,
-}
-
-/// Routing metadata for a typed remedy offer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerRecord {
-    pub scope: ReceiptScope,
-    pub offer_id: String,
-    pub root: String,
-    pub parent_id: Option<String>,
-    pub arguments: Option<String>,
-    pub tool: Option<String>,
-    pub spelling: Option<String>,
-}
-
-/// The stable lookup key for a durable offer owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerKey {
-    pub organization_id: String,
-    pub offer_id: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct ReceiptStorageError(pub String);
-
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
     #[error("receipt storage failed: {0}")]
-    Storage(ReceiptStorageError),
-    #[error("a different owner record already exists for this offer")]
-    Collision,
+    Storage(String),
     #[error("receipt belongs to another authenticated scope")]
     ScopeMismatch,
     #[error("receipt key was reused with different input")]
@@ -69,7 +75,8 @@ pub enum ReceiptError {
 /// The durable request key for an operation receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationKey {
-    pub scope: ReceiptScope,
+    pub session: SessionScope,
+    pub binding: ReceiptBinding,
     pub operation_id: String,
 }
 
@@ -77,7 +84,7 @@ pub struct OperationKey {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperationRequest {
     pub key: OperationKey,
-    pub root: String,
+    pub root: TrajectoryId,
     /// The stable part used to detect a conflicting retry.
     pub input: Value,
     /// Optional non-semantic host context retained for a later result hook.
@@ -96,22 +103,15 @@ pub enum OperationClaim {
 /// caller is recorded but never compared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedResultKey {
-    pub organization_id: String,
+    pub session: SessionScope,
     pub caller_id: Option<String>,
-    pub session_id: String,
     pub tool_call_id: String,
-}
-
-impl ProcessedResultKey {
-    pub(crate) fn owns(&self, organization_id: &str, session_id: &str) -> bool {
-        self.organization_id == organization_id && self.session_id == session_id
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedResultRequest {
     pub key: ProcessedResultKey,
-    pub root: String,
+    pub root: TrajectoryId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,64 +123,70 @@ pub enum ProcessedResultClaim {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredOperationInput {
-    pub(crate) version: u8,
-    pub(crate) binding: ReceiptBinding,
+    version: u8,
+    binding: BindingKind,
     pub(crate) semantic: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) context: Option<Value>,
+    context: Option<Value>,
 }
 
 impl StoredOperationInput {
     pub(crate) fn from_request(request: &OperationRequest) -> Self {
         Self {
             version: 1,
-            binding: request.key.scope.binding,
+            binding: request.key.binding.kind(),
             semantic: request.input.clone(),
             context: request.context.clone(),
         }
     }
 
-    pub(crate) fn decode(value: Value) -> Result<Self, String> {
+    pub(crate) fn decode(value: Value) -> Result<Self, ReceiptError> {
         match serde_json::from_value::<Self>(value) {
             Ok(stored) if stored.version == 1 => Ok(stored),
-            Ok(stored) => Err(format!("operation receipt has unsupported version {}", stored.version)),
-            Err(error) => Err(format!("operation receipt input is not a v1 envelope: {error}")),
+            Ok(stored) => Err(ReceiptError::storage(format!(
+                "operation receipt has unsupported version {}",
+                stored.version
+            ))),
+            Err(error) => Err(ReceiptError::storage(format!(
+                "operation receipt input is not a v1 envelope: {error}"
+            ))),
+        }
+    }
+
+    /// The binding this envelope names, with the caller its row records.
+    pub(crate) fn binding(&self, caller_id: Option<String>) -> Result<ReceiptBinding, ReceiptError> {
+        match (self.binding, caller_id) {
+            (BindingKind::Session, caller_id) => Ok(ReceiptBinding::Session { caller_id }),
+            (BindingKind::Caller, Some(caller_id)) => Ok(ReceiptBinding::Caller { caller_id }),
+            (BindingKind::Caller, None) => Err(ReceiptError::storage("caller-bound operation receipt lacks a caller")),
         }
     }
 }
 
 /// A stored JSON column, decoded when read but refused only where a check reaches it.
-pub(crate) type StoredJson = Result<Value, ReceiptStorageError>;
+pub(crate) type StoredJson = Result<Value, ReceiptError>;
 
 /// One operation receipt row, its input envelope decoded.
 pub(crate) struct StoredOperation {
-    pub(crate) organization_id: String,
-    pub(crate) caller_id: Option<String>,
-    pub(crate) session_id: String,
+    pub(crate) session: SessionScope,
+    pub(crate) binding: ReceiptBinding,
     pub(crate) root: String,
-    pub(crate) input: StoredOperationInput,
+    pub(crate) semantic: Value,
     pub(crate) status: String,
     pub(crate) decision: Option<StoredJson>,
 }
 
 impl StoredOperation {
-    /// Whether `requested` may act on this receipt: the same organization, session and binding,
-    /// and for a caller-bound receipt the same caller.
-    fn owned_by(&self, requested: &ReceiptScope) -> bool {
-        self.organization_id == requested.organization_id
-            && self.session_id == requested.session_id
-            && self.input.binding == requested.binding
-            && match self.input.binding {
-                ReceiptBinding::Session => true,
-                ReceiptBinding::Caller => self.caller_id == requested.caller_id,
-            }
+    /// Whether `requested` may act on this receipt: the same session and binding, and for a
+    /// caller-bound receipt the same caller.
+    fn owned_by(&self, requested: &OperationKey) -> bool {
+        self.session == requested.session && self.binding.admits(&requested.binding)
     }
 }
 
 /// One processed-result receipt row.
 pub(crate) struct StoredResult {
-    pub(crate) organization_id: String,
-    pub(crate) session_id: String,
+    pub(crate) session: SessionScope,
     pub(crate) root: String,
     pub(crate) status: String,
     pub(crate) approved_output: Option<String>,
@@ -195,33 +201,6 @@ pub(crate) enum Completion {
     Unchanged,
 }
 
-pub(crate) fn binding_name(binding: ReceiptBinding) -> &'static str {
-    match binding {
-        ReceiptBinding::Session => "session",
-        ReceiptBinding::Caller => "caller",
-    }
-}
-
-pub(crate) fn parse_binding(value: &str) -> Result<ReceiptBinding, String> {
-    match value {
-        "session" => Ok(ReceiptBinding::Session),
-        "caller" => Ok(ReceiptBinding::Caller),
-        other => Err(format!("offer owner has an invalid binding {other}")),
-    }
-}
-
-/// An owner write that met a stored row: an identical record is a replay, any other collides.
-pub(crate) fn resolve_offer_owner(
-    existing: Option<OfferOwnerRecord>,
-    record: &OfferOwnerRecord,
-) -> Result<(), ReceiptError> {
-    match existing {
-        None => Err(ReceiptError::storage("offer owner disappeared after a conflict")),
-        Some(existing) if existing == *record => Ok(()),
-        Some(_) => Err(ReceiptError::Collision),
-    }
-}
-
 /// A claim on an absent receipt takes it: [`OperationClaim::Claimed`] tells the backend to
 /// write the pending row. A completed one replays its decision.
 pub(crate) fn resolve_operation_claim(
@@ -231,10 +210,10 @@ pub(crate) fn resolve_operation_claim(
     let Some(stored) = existing else {
         return Ok(OperationClaim::Claimed);
     };
-    if !stored.owned_by(&request.key.scope) || stored.root != request.root {
+    if !stored.owned_by(&request.key) || stored.root != request.root.as_str() {
         return Err(ReceiptError::ScopeMismatch);
     }
-    if stored.input.semantic != request.input {
+    if stored.semantic != request.input {
         return Err(ReceiptError::InputMismatch);
     }
     match stored.status.as_str() {
@@ -256,7 +235,7 @@ pub(crate) fn resolve_operation_completion(
     let Some(stored) = existing else {
         return Err(ReceiptError::NotPending);
     };
-    if !stored.owned_by(&key.scope) {
+    if !stored.owned_by(key) {
         return Err(ReceiptError::ScopeMismatch);
     }
     match stored.status.as_str() {
@@ -277,7 +256,7 @@ pub(crate) fn resolve_result_claim(
     let Some(stored) = existing else {
         return Ok(ProcessedResultClaim::Claimed);
     };
-    if !request.key.owns(&stored.organization_id, &stored.session_id) || stored.root != request.root {
+    if stored.session != request.key.session || stored.root != request.root.as_str() {
         return Err(ReceiptError::ScopeMismatch);
     }
     match stored.status.as_str() {
@@ -303,7 +282,7 @@ pub(crate) fn resolve_result_completion(
     let Some(stored) = existing else {
         return Err(ReceiptError::NotPending);
     };
-    if !key.owns(&stored.organization_id, &stored.session_id) {
+    if stored.session != key.session {
         return Err(ReceiptError::ScopeMismatch);
     }
     match stored.status.as_str() {
@@ -320,13 +299,7 @@ pub(crate) fn resolve_result_completion(
 
 impl ReceiptError {
     pub(crate) fn storage(detail: impl Into<String>) -> Self {
-        Self::Storage(ReceiptStorageError(detail.into()))
-    }
-}
-
-impl From<ReceiptStorageError> for ReceiptError {
-    fn from(error: ReceiptStorageError) -> Self {
-        Self::Storage(error)
+        Self::Storage(detail.into())
     }
 }
 
@@ -346,22 +319,33 @@ mod tests {
         vec![(file, Some(dir)), (memory, None)]
     }
 
-    fn scope(binding: ReceiptBinding, caller: &str) -> ReceiptScope {
-        ReceiptScope {
+    fn session() -> SessionScope {
+        SessionScope {
             organization_id: "org".to_owned(),
-            caller_id: Some(caller.to_owned()),
             session_id: "session".to_owned(),
-            binding,
         }
     }
 
-    fn operation(scope: ReceiptScope) -> OperationRequest {
+    fn caller_bound(caller: &str) -> ReceiptBinding {
+        ReceiptBinding::Caller {
+            caller_id: caller.to_owned(),
+        }
+    }
+
+    fn session_bound(caller: &str) -> ReceiptBinding {
+        ReceiptBinding::Session {
+            caller_id: Some(caller.to_owned()),
+        }
+    }
+
+    fn operation(binding: ReceiptBinding) -> OperationRequest {
         OperationRequest {
             key: OperationKey {
-                scope,
+                session: session(),
+                binding,
                 operation_id: "op-1".to_owned(),
             },
-            root: "root".to_owned(),
+            root: TrajectoryId::new("root"),
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         }
@@ -370,12 +354,11 @@ mod tests {
     fn result(caller: &str) -> ProcessedResultRequest {
         ProcessedResultRequest {
             key: ProcessedResultKey {
-                organization_id: "org".to_owned(),
+                session: session(),
                 caller_id: Some(caller.to_owned()),
-                session_id: "session".to_owned(),
                 tool_call_id: "call-1".to_owned(),
             },
-            root: "root".to_owned(),
+            root: TrajectoryId::new("root"),
         }
     }
 
@@ -399,7 +382,7 @@ mod tests {
         let envelope =
             r#"{"version":1,"binding":"caller","semantic":{"offer_id":"0123456789abcdef"},"context":{"hook":"pre"}}"#;
         for (store, _dir) in stores() {
-            let mut request = operation(scope(ReceiptBinding::Caller, "caller"));
+            let mut request = operation(caller_bound("caller"));
             request.context = Some(serde_json::json!({"hook": "pre"}));
             store.claim_operation(request.clone()).expect("the operation claims");
             assert_eq!(operation_row(&store), (envelope.to_owned(), "pending".to_owned(), None));
@@ -417,7 +400,7 @@ mod tests {
 
             execute(&store, "DELETE FROM operations");
             store
-                .claim_operation(operation(scope(ReceiptBinding::Session, "caller")))
+                .claim_operation(operation(session_bound("caller")))
                 .expect("the operation claims");
             assert_eq!(
                 operation_row(&store).0,
@@ -445,7 +428,7 @@ mod tests {
                         [input],
                     )
                     .expect("the fixture row inserts");
-                let request = operation(scope(ReceiptBinding::Session, "caller"));
+                let request = operation(session_bound("caller"));
                 assert!(
                     matches!(store.claim_operation(request.clone()), Err(ReceiptError::Storage(_))),
                     "{input}"
@@ -462,15 +445,38 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_bound_operation_row_without_a_caller_is_a_storage_failure() {
+        for (store, _dir) in stores() {
+            store
+                .lock()
+                .execute(
+                    "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
+                     VALUES ('org', NULL, 'session', 'op-1', 'root', ?1, 'pending')",
+                    [r#"{"version":1,"binding":"caller","semantic":{"offer_id":"0123456789abcdef"}}"#],
+                )
+                .expect("the fixture row inserts");
+            let request = operation(caller_bound("caller"));
+            assert!(matches!(
+                store.claim_operation(request.clone()),
+                Err(ReceiptError::Storage(_))
+            ));
+            assert!(matches!(
+                store.complete_operation(request.key, serde_json::json!({"decision": "allow_call"})),
+                Err(ReceiptError::Storage(_))
+            ));
+        }
+    }
+
+    #[test]
     fn operation_receipts_refuse_another_scope_without_writing() {
         for (store, _dir) in stores() {
-            let owned = operation(scope(ReceiptBinding::Caller, "caller"));
+            let owned = operation(caller_bound("caller"));
             store.claim_operation(owned.clone()).expect("the operation claims");
 
-            let other_caller = operation(scope(ReceiptBinding::Caller, "other"));
-            let session_bound = operation(scope(ReceiptBinding::Session, "caller"));
+            let other_caller = operation(caller_bound("other"));
+            let session_bound = operation(session_bound("caller"));
             let mut other_root = owned.clone();
-            other_root.root = "other-root".to_owned();
+            other_root.root = TrajectoryId::new("other-root");
             for request in [&other_caller, &session_bound, &other_root] {
                 assert!(matches!(
                     store.claim_operation(request.clone()),
@@ -495,18 +501,109 @@ mod tests {
     fn a_session_bound_operation_ignores_the_caller() {
         for (store, _dir) in stores() {
             store
-                .claim_operation(operation(scope(ReceiptBinding::Session, "caller")))
+                .claim_operation(operation(session_bound("caller")))
                 .expect("the operation claims");
             assert!(matches!(
-                store.claim_operation(operation(scope(ReceiptBinding::Session, "other"))),
+                store.claim_operation(operation(session_bound("other"))),
                 Err(ReceiptError::Pending)
             ));
             store
                 .complete_operation(
-                    operation(scope(ReceiptBinding::Session, "other")).key,
+                    operation(session_bound("other")).key,
                     serde_json::json!({"decision": "allow_call"}),
                 )
                 .expect("another caller in the session completes");
+        }
+    }
+
+    /// Each receipt row records the caller of the claim that wrote it, or none, and a later
+    /// completion by another caller of the session leaves it as claimed.
+    #[test]
+    fn receipts_record_the_caller_that_claimed_them() {
+        let caller_of = |store: &LogStore, table: &str| -> Vec<Option<String>> {
+            let connection = store.lock();
+            let mut statement = connection
+                .prepare(&format!("SELECT caller_id FROM {table} ORDER BY rowid"))
+                .expect("the caller query prepares");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("the callers read")
+                .collect::<Result<_, _>>()
+                .expect("every caller reads")
+        };
+        for (store, _dir) in stores() {
+            for (operation_id, binding) in [
+                ("op-caller", caller_bound("caller")),
+                ("op-session", session_bound("session-caller")),
+                ("op-callerless", ReceiptBinding::Session { caller_id: None }),
+            ] {
+                let mut request = operation(binding);
+                request.key.operation_id = operation_id.to_owned();
+                store.claim_operation(request).expect("the operation claims");
+            }
+            let mut completed_elsewhere = operation(session_bound("other"));
+            completed_elsewhere.key.operation_id = "op-session".to_owned();
+            store
+                .complete_operation(completed_elsewhere.key, serde_json::json!({"decision": "allow_call"}))
+                .expect("another caller in the session completes");
+            assert_eq!(
+                caller_of(&store, "operations"),
+                [Some("caller".to_owned()), Some("session-caller".to_owned()), None]
+            );
+
+            let mut callerless_result = result("caller");
+            callerless_result.key.caller_id = None;
+            callerless_result.key.tool_call_id = "call-callerless".to_owned();
+            for request in [result("caller"), callerless_result] {
+                store.claim_processed_result(request).expect("the result claims");
+            }
+            store
+                .complete_processed_result(
+                    result("other").key,
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "allow"}),
+                )
+                .expect("another caller in the session completes");
+            assert_eq!(
+                caller_of(&store, "processed_results"),
+                [Some("caller".to_owned()), None]
+            );
+        }
+    }
+
+    #[test]
+    fn pending_receipts_are_found_by_their_root_alone() {
+        for (store, _dir) in stores() {
+            let pending = |root: &str| {
+                store
+                    .has_pending_receipts(&TrajectoryId::new(root))
+                    .expect("the check reads")
+            };
+            assert!(!pending("root"));
+
+            let request = operation(session_bound("caller"));
+            store.claim_operation(request.clone()).expect("the operation claims");
+            assert!(pending("root"), "a pending operation");
+            assert!(!pending("other-root"));
+            store
+                .complete_operation(request.key, serde_json::json!({"decision": "allow_call"}))
+                .expect("the operation completes");
+            assert!(!pending("root"));
+
+            let request = result("caller");
+            store
+                .claim_processed_result(request.clone())
+                .expect("the result claims");
+            assert!(pending("root"), "a pending processed result");
+            assert!(!pending("other-root"));
+            store
+                .complete_processed_result(
+                    request.key,
+                    "approved".to_owned(),
+                    serde_json::json!({"decision": "allow"}),
+                )
+                .expect("the result completes");
+            assert!(!pending("root"));
         }
     }
 
@@ -517,7 +614,7 @@ mod tests {
             store.claim_processed_result(owned.clone()).expect("the result claims");
 
             let mut other_root = owned.clone();
-            other_root.root = "other-root".to_owned();
+            other_root.root = TrajectoryId::new("other-root");
             assert!(matches!(
                 store.claim_processed_result(other_root),
                 Err(ReceiptError::ScopeMismatch)
@@ -563,40 +660,9 @@ mod tests {
     }
 
     #[test]
-    fn an_offer_owner_with_other_data_collides() {
-        for (store, _dir) in stores() {
-            let record = OfferOwnerRecord {
-                scope: scope(ReceiptBinding::Caller, "caller"),
-                offer_id: "0123456789abcdef".to_owned(),
-                root: "root".to_owned(),
-                parent_id: None,
-                arguments: None,
-                tool: None,
-                spelling: None,
-            };
-            store.store_offer_owner(record.clone()).expect("the owner stores");
-            let mut other_root = record.clone();
-            other_root.root = "other-root".to_owned();
-            let mut other_caller = record.clone();
-            other_caller.scope.caller_id = Some("other".to_owned());
-            let mut other_tool = record.clone();
-            other_tool.tool = Some("wire".to_owned());
-            for colliding in [other_root, other_caller, other_tool] {
-                assert!(matches!(
-                    store.store_offer_owner(colliding),
-                    Err(ReceiptError::Collision)
-                ));
-            }
-            store
-                .store_offer_owner(record)
-                .expect("the stored owner is unchanged, so its replay is idempotent");
-        }
-    }
-
-    #[test]
     fn a_claimed_receipt_refuses_a_second_claim_and_other_input() {
         for (store, _dir) in stores() {
-            let request = operation(scope(ReceiptBinding::Caller, "caller"));
+            let request = operation(caller_bound("caller"));
             store.claim_operation(request.clone()).expect("the operation claims");
             let mut changed = request.clone();
             changed.input = serde_json::json!({"offer_id": "other"});
@@ -627,10 +693,7 @@ mod tests {
     fn completing_an_absent_receipt_is_not_pending() {
         for (store, _dir) in stores() {
             assert!(matches!(
-                store.complete_operation(
-                    operation(scope(ReceiptBinding::Session, "caller")).key,
-                    serde_json::json!({})
-                ),
+                store.complete_operation(operation(session_bound("caller")).key, serde_json::json!({})),
                 Err(ReceiptError::NotPending)
             ));
             assert!(matches!(
@@ -646,7 +709,7 @@ mod tests {
             let decision = serde_json::json!({"decision": "allow_call"});
             let other = serde_json::json!({"decision": "deny"});
 
-            let request = operation(scope(ReceiptBinding::Caller, "caller"));
+            let request = operation(caller_bound("caller"));
             store.claim_operation(request.clone()).expect("the operation claims");
             store
                 .complete_operation(request.key.clone(), decision.clone())
@@ -682,7 +745,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_operation_row_is_a_storage_failure() {
-        let request = || operation(scope(ReceiptBinding::Session, "caller"));
+        let request = || operation(session_bound("caller"));
         let decision = serde_json::json!({"decision": "allow_call"});
         for corruption in [
             "UPDATE operations SET status='bogus'",
@@ -751,37 +814,6 @@ mod tests {
                     "{corruption}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn a_corrupt_offer_owner_binding_is_a_storage_failure() {
-        for (store, _dir) in stores() {
-            let record = OfferOwnerRecord {
-                scope: scope(ReceiptBinding::Caller, "caller"),
-                offer_id: "0123456789abcdef".to_owned(),
-                root: "root".to_owned(),
-                parent_id: None,
-                arguments: None,
-                tool: None,
-                spelling: None,
-            };
-            store.store_offer_owner(record.clone()).expect("the owner stores");
-            let stored: String = store
-                .lock()
-                .query_row("SELECT binding FROM offer_owners", [], |row| row.get(0))
-                .expect("the binding reads");
-            assert_eq!(stored, "caller");
-            execute(&store, "UPDATE offer_owners SET binding='bogus'");
-            assert!(
-                store
-                    .offer_owner(OfferOwnerKey {
-                        organization_id: "org".to_owned(),
-                        offer_id: record.offer_id.clone(),
-                    })
-                    .is_err()
-            );
-            assert!(matches!(store.store_offer_owner(record), Err(ReceiptError::Storage(_))));
         }
     }
 }
