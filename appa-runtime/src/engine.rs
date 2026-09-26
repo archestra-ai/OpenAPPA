@@ -4369,7 +4369,7 @@ mod tests {
                 ranks: String::new(),
             },
             BARE_CONTROL_TOOL,
-            Some(policy.registry()),
+            Some(policy.engine().registry()),
             "shell",
             false,
         );
@@ -4566,7 +4566,7 @@ mod tests {
         let feedback = block_feedback(
             &planned,
             &[(OfferId("0123456789abcdef".to_string()), PlanId::new(1))],
-            policy.registry(),
+            policy.engine().registry(),
             &ReturnBounds {
                 label: appa_engine::label::Label::top(),
                 lowest: Trust::new(0),
@@ -4626,7 +4626,7 @@ mod tests {
             block_feedback(
                 &planned,
                 &[],
-                policy.registry(),
+                policy.engine().registry(),
                 &ReturnBounds {
                     label: appa_engine::label::Label::top(),
                     lowest: Trust::new(0),

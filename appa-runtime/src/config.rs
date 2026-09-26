@@ -3667,7 +3667,9 @@ mod tests {
                 "[externals.audience] bad selector declaration for audience source \"slack\": \"\" `selectors` declares no template",
             ),
         ] {
-            let document = format!("{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n");
+            let document = format!(
+                "{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n"
+            );
             let refused = parse(&document).expect_err("a malformed selector declaration refuses the load");
             assert_eq!(refused.to_string(), expected);
             let value: toml::Value = toml::from_str(&document).expect("the document is TOML");

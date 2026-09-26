@@ -17,6 +17,7 @@ use appa_policy::{
 
 fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
+        .engine()
         .registry()
         .tools()
         .find(|tool| tool.name().as_str() == name)
@@ -204,7 +205,7 @@ fn a_custom_trust_chain_replaces_the_default_ranks() {
                   [[tool]]\nname = \"t\"\ndelta = { trust = \"reviewed\" }\nrequires = { trust = \"trusted\" }\n";
     let config = Config::from_toml_str(policy).expect("a custom chain loads");
     assert_eq!(
-        config.registry().trust_chain().names().collect::<Vec<_>>(),
+        config.engine().registry().trust_chain().names().collect::<Vec<_>>(),
         ["untrusted", "reviewed", "trusted"]
     );
     let t = contract(&config, "t");

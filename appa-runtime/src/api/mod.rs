@@ -2968,7 +2968,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             "[deployment] provider_surfaces — this runtime never sees provider requests, so it can neither mediate a surface nor strip an undeclared one".to_string(),
         ));
     }
-    if policy.registry().provider_run_annotations().next().is_some() {
+    if policy.engine().registry().provider_run_annotations().next().is_some() {
         return Err(OpenError::UnsupportedPolicy(
             "[deployment] provider_run_tools — this runtime never sees inference responses, so it cannot admit a provider-run result".to_string(),
         ));
@@ -3047,6 +3047,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             }
             appa_policy::AnnotatorBuiltin::Jev
                 if policy
+                    .engine()
                     .registry()
                     .annotator_mandate(annotator)
                     .is_none_or(|mandate| mandate.trust_ranks().count() < 2) =>

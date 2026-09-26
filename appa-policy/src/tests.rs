@@ -88,10 +88,36 @@ confined_results = ["lookup"]
 #[test]
 fn declaration_only_policy_builds_the_engine_registry() {
     let config = load(DECLARATIONS).expect("the policy compiles");
-    assert!(config.registry().variants(&ToolName::new("lookup")).next().is_some());
-    assert!(config.registry().variants(&ToolName::new("send")).next().is_some());
-    assert!(config.registry().authority(&AuthorityName::new("approver")).is_some());
-    assert!(config.registry().sanitizer(&SanitizerName::new("pii")).is_some());
+    assert!(
+        config
+            .engine()
+            .registry()
+            .variants(&ToolName::new("lookup"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        config
+            .engine()
+            .registry()
+            .variants(&ToolName::new("send"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        config
+            .engine()
+            .registry()
+            .authority(&AuthorityName::new("approver"))
+            .is_some()
+    );
+    assert!(
+        config
+            .engine()
+            .registry()
+            .sanitizer(&SanitizerName::new("pii"))
+            .is_some()
+    );
     assert_eq!(config.registry_config().tools.len(), 2);
 }
 
@@ -202,6 +228,7 @@ fn an_input_sanitizer_registers_with_its_scope_and_refuses_a_trust_mandate() {
     let config = load(&policy("audience = { from = [\"insider\"], to = [\"partner\"] }"))
         .expect("an input substitution compiles");
     let sanitizer = config
+        .engine()
         .registry()
         .sanitizer(&SanitizerName::new("redact"))
         .expect("the input point registers the sanitizer");
@@ -395,15 +422,25 @@ fn the_wildcard_tool_loads_with_an_annotator_and_nothing_else() {
                   [[tool]]\nname = \"*\"\nannotator = \"any\"\n";
     let config = load(policy).expect("the wildcard loads");
     assert_eq!(
-        config.registry().classify(&appa_engine::value::ToolName::new("ghost")),
+        config
+            .engine()
+            .registry()
+            .classify(&appa_engine::value::ToolName::new("ghost")),
         Some(appa_engine::registry::ToolKind::Wildcard)
     );
     assert_ne!(
-        config.registry().classify(&appa_engine::value::ToolName::new("*")),
+        config
+            .engine()
+            .registry()
+            .classify(&appa_engine::value::ToolName::new("*")),
         Some(appa_engine::registry::ToolKind::Declared),
         "the wildcard's spelling names no tool"
     );
-    assert_eq!(config.registry().tools().count(), 0, "the wildcard is in no listing");
+    assert_eq!(
+        config.engine().registry().tools().count(),
+        0,
+        "the wildcard is in no listing"
+    );
 }
 
 #[test]
@@ -457,6 +494,7 @@ fn a_catch_all_attention_permit_loads_and_the_wildcard_never_mixes_with_names() 
     let catch_all = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"*\"]\n";
     let config = load(catch_all).expect("a catch-all permit loads");
     let anyone = config
+        .engine()
         .registry()
         .authority(&AuthorityName::new("anyone"))
         .expect("the catch-all registers");
@@ -510,7 +548,7 @@ name = "reviewer"
 attention = ["operator-signoff", "legal-review"]
 "#;
     let config = load(policy).expect("annotator bounds load");
-    let registry = config.registry();
+    let registry = config.engine().registry();
 
     let open = registry
         .annotator_mandate(&AnnotatorName::new("open"))
@@ -598,6 +636,7 @@ annotator = "acl"
 "#;
     let config = load(policy).expect("the public-only mandate loads");
     let mandate = config
+        .engine()
         .registry()
         .annotator_mandate(&AnnotatorName::new("acl"))
         .expect("acl registers");
@@ -636,6 +675,7 @@ fn an_annotator_audience_bound_lists_symbolic_audiences_and_readers() {
     .expect("a symbolic bound loads");
     assert_eq!(
         config
+            .engine()
             .registry()
             .annotator_mandate(&AnnotatorName::new("acl"))
             .expect("acl registers")
@@ -803,6 +843,7 @@ fn an_audience_argument_binding_implies_a_required_string_in_parameters() {
     ] {
         let config = load(&policy(parameters)).unwrap_or_else(|error| panic!("must load: {error}\n{parameters}"));
         let schema = config
+            .engine()
             .registry()
             .variants(&ToolName::new("send"))
             .next()
@@ -844,7 +885,7 @@ fn the_deployment_table_compiles_into_the_validated_profile() {
     assert!(!profile.context_control());
     assert_eq!(
         profile.starting_label(),
-        &neutral_starting_label(config.registry().trust_chain())
+        &neutral_starting_label(config.engine().registry().trust_chain())
     );
 }
 
@@ -934,6 +975,7 @@ fn compiled_tool_parameters_are_normalized_in_policy_identity() {
     )
     .expect("the schema compiles");
     let tool = config
+        .engine()
         .registry()
         .variants(&ToolName::new("t"))
         .next()
@@ -1002,7 +1044,7 @@ confined_results = ["read", "send"]
         )
     };
     let config = load(policy).expect("routed group mentions load");
-    let registry = config.registry();
+    let registry = config.engine().registry();
     assert_eq!(
         registry
             .audience()
@@ -1121,7 +1163,7 @@ fn a_sanitizer_transition_and_a_component_tag_list_keep_every_member() {
          [authority.permits]\naudience_missing = [\"alice\", \"bob\"]\n\
          [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"read\"]\n";
     let config = load(policy).expect("lists of more than one member load");
-    let registry = config.registry();
+    let registry = config.engine().registry();
     let redact = registry
         .sanitizer(&SanitizerName::new("redact"))
         .expect("redact registers");
@@ -1166,6 +1208,7 @@ fn a_selector_placeholder_reads_one_declared_collection_per_call() {
 
     let config = load(&tool(channel, delta)).expect("a placeholder delta loads");
     let read = config
+        .engine()
         .registry()
         .variants(&ToolName::new("read_channel"))
         .next()
@@ -1173,13 +1216,20 @@ fn a_selector_placeholder_reads_one_declared_collection_per_call() {
         .expect("read_channel is declared");
     assert_eq!(read.delta.audience, Some(DeltaAudience::Selector(placeholder.clone())));
     assert_eq!(
-        config.registry().audience().providers().iter().collect::<Vec<_>>(),
+        config
+            .engine()
+            .registry()
+            .audience()
+            .providers()
+            .iter()
+            .collect::<Vec<_>>(),
         ["slack"],
         "a placeholder names its provider into the policy"
     );
     let floor = "requires = { audience = { contains = [\"@slack:channel/$channel_id\"] } }";
     let send = load(&tool(channel, floor)).expect("a placeholder floor loads");
     let send = send
+        .engine()
         .registry()
         .variants(&ToolName::new("read_channel"))
         .next()
@@ -1281,6 +1331,7 @@ fn an_annotator_mandate_placeholder_binds_to_each_routed_tools_arguments() {
     let routed = "[[tool]]\nname = \"read_channel\"\nparameters = { type = \"object\", properties = { channel_id = { type = \"string\" } }, required = [\"channel_id\"] }\nannotator = \"acl\"\n";
     let config = load(&policy(routed)).expect("a mandate placeholder loads");
     let mandate = config
+        .engine()
         .registry()
         .annotator_mandate(&AnnotatorName::new("acl"))
         .expect("acl registers");
@@ -1297,12 +1348,15 @@ fn an_annotator_mandate_placeholder_binds_to_each_routed_tools_arguments() {
             .collect::<Vec<_>>(),
         ["@slack:channel/C1"]
     );
-    assert!(config.registry().audience().providers().contains("slack"));
+    assert!(config.engine().registry().audience().providers().contains("slack"));
 
     let unbound = "[[tool]]\nname = \"read_channel\"\nannotator = \"acl\"\n";
     let implied = load(&policy(unbound)).expect("the mandate's argument implies its schema");
-    let Some(ToolDeclaration::Annotated { parameters, .. }) =
-        implied.registry().variants(&ToolName::new("read_channel")).next()
+    let Some(ToolDeclaration::Annotated { parameters, .. }) = implied
+        .engine()
+        .registry()
+        .variants(&ToolName::new("read_channel"))
+        .next()
     else {
         panic!("read_channel is Annotator-routed");
     };
@@ -1324,6 +1378,7 @@ fn a_provider_enters_the_policy_when_a_contract_or_mandate_names_it() {
     let providers = |policy: &str| {
         load(policy)
             .expect("the policy loads")
+            .engine()
             .registry()
             .audience()
             .providers()
