@@ -58,14 +58,15 @@ pub(super) fn perform(
         Ok(())
     };
     prepare().map_err(|error| error.to_string())?;
-    let output = Command::new("/usr/bin/python3")
-        .arg("-I")
-        .arg(backend.join("run.py"))
-        .arg(backend)
-        .arg(job.path())
-        .env_clear()
-        .output()
-        .map_err(|_| "isolated process launcher failed")?;
+    let output = crate::child_process::output(
+        Command::new("/usr/bin/python3")
+            .arg("-I")
+            .arg(backend.join("run.py"))
+            .arg(backend)
+            .arg(job.path())
+            .env_clear(),
+    )
+    .map_err(|_| "isolated process launcher failed")?;
     if !output.status.success() {
         // The launcher's own diagnostics: the operator's, not the model's. The message the
         // model sees stays generic, because a launcher failure is not about its content.

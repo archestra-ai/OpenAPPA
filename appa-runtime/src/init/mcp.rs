@@ -37,9 +37,7 @@ pub(super) enum Registered {
 /// only default an install writes, so a template reported without one is read
 /// as the template of `endpoint`, this deployment's.
 pub(super) fn current(endpoint: &str) -> Result<Registered, InitError> {
-    let output = Command::new("claude")
-        .args(["mcp", "get", SERVER])
-        .output()
+    let output = crate::child_process::output(Command::new("claude").args(["mcp", "get", SERVER]))
         .map_err(InitError::ClaudeUnavailable)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -150,10 +148,8 @@ fn message(stdout: &str, stderr: &str) -> String {
 
 /// Run one `claude` command, answering with its stdout only when it succeeded.
 fn run<A: AsRef<OsStr>, const N: usize>(arguments: [A; N]) -> Result<String, InitError> {
-    let output = Command::new("claude")
-        .args(&arguments)
-        .output()
-        .map_err(InitError::ClaudeUnavailable)?;
+    let output =
+        crate::child_process::output(Command::new("claude").args(&arguments)).map_err(InitError::ClaudeUnavailable)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() {
         return Ok(stdout.into_owned());

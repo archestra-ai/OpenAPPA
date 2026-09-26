@@ -215,7 +215,7 @@ fn launch(args: Args) -> Result<std::process::ExitStatus, String> {
     std::fs::create_dir(&cwd).map_err(|error| error.to_string())?;
     let binary = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = command(&binary, &deployment, &workspace, &cwd, &args)?;
-    command.status().map_err(|error| error.to_string())
+    crate::child_process::status(&mut command).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

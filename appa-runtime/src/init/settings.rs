@@ -595,11 +595,12 @@ mod tests {
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(statusline_command(&binary, "http://127.0.0.1:1"))
-            .output()
-            .unwrap();
+        let output = crate::child_process::output(
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(statusline_command(&binary, "http://127.0.0.1:1")),
+        )
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),

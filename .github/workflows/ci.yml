@@ -568,15 +568,15 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Only what is platform-specific here: the config and data directory
-      # rules, the process ownership check init stops a runtime with, and the
-      # hook entries an activation writes. Not a second full workspace
-      # check, clippy and test run.
+      # rules, the process ownership check init stops a runtime with, the
+      # hook entries an activation writes, and the spawn lock only macOS
+      # compiles. Not a second full workspace check, clippy and test run.
       - name: Deployment tests
         run: |
           cargo test --locked --package appa --lib -- init:: installation::
           cargo test --locked --package appa \
             --test init_cli --test marketplace_cli \
-            --test hook_client --test settings_hooks
+            --test hook_client --test settings_hooks --test child_process
 
   windows-deployment-checks:
     name: Windows Deployment Checks

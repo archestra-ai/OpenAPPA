@@ -383,13 +383,14 @@ fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
     let stderr = output
         .try_clone()
         .map_err(|error| InitError::Starter(error.to_string()))?;
-    let status = command
-        .env_remove("APPA_RUNTIME_URL")
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .status()
-        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let status = crate::child_process::status(
+        command
+            .env_remove("APPA_RUNTIME_URL")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr),
+    )
+    .map_err(|error| InitError::Starter(error.to_string()))?;
     if status.success() {
         return Ok(());
     }
@@ -709,9 +710,7 @@ fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -
     for (name, value) in environment {
         process.env(name, value);
     }
-    let output = process
-        .output()
-        .map_err(|error| InitError::Starter(error.to_string()))?;
+    let output = crate::child_process::output(&mut process).map_err(|error| InitError::Starter(error.to_string()))?;
     if !output.status.success() {
         return Err(InitError::Starter(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),

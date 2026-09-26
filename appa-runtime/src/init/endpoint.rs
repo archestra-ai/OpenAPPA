@@ -124,7 +124,7 @@ const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// decide how long init waits and whether curl reports its own failure have one
 /// definition rather than one per question.
 fn ask_endpoint(endpoint: &Endpoint, path: &str, arguments: &[&str]) -> std::io::Result<Output> {
-    Command::new("curl").args(arguments).arg(endpoint.join(path)).output()
+    crate::child_process::output(Command::new("curl").args(arguments).arg(endpoint.join(path)))
 }
 
 pub(super) fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
@@ -254,10 +254,8 @@ pub(crate) fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
         return Ok(false);
     }
     let query = |field: &str| -> Option<String> {
-        let output = Command::new("ps")
-            .args(["-o", field, "-p", &pid.to_string()])
-            .output()
-            .ok()?;
+        let output =
+            crate::child_process::output(Command::new("ps").args(["-o", field, "-p", &pid.to_string()])).ok()?;
         output
             .status
             .success()
@@ -584,12 +582,7 @@ mod tests {
         let script = "open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30";
         let spawn_deadline = std::time::Instant::now() + STOP_DEADLINE;
         let mut child = loop {
-            match Command::new(at)
-                .args(["-e", script])
-                .arg(&ready)
-                .args(arguments)
-                .spawn()
-            {
+            match crate::child_process::spawn(Command::new(at).args(["-e", script]).arg(&ready).args(arguments)) {
                 Ok(child) => break child,
                 Err(source)
                     if source.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < spawn_deadline =>

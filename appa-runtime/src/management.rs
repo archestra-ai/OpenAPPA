@@ -9,9 +9,8 @@ pub(crate) async fn run<T: serde::Serialize>(command: &str, input: Option<&T>) -
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = process
-        .spawn()
-        .map_err(|error| format!("cannot start {command}: {error}"))?;
+    let mut child =
+        crate::child_process::spawn_async(&mut process).map_err(|error| format!("cannot start {command}: {error}"))?;
     if let Some(input) = input {
         let bytes = serde_json::to_vec(input).map_err(|error| format!("cannot encode {command} input: {error}"))?;
         child

@@ -613,11 +613,12 @@ mod tests {
             let crate::config::Implementation::Command(command) = &config.externals.authorities[name] else {
                 panic!("expected command")
             };
-            let result = std::process::Command::new(&command.argv[0])
-                .args(&command.argv[1..])
-                .current_dir(&command.cwd)
-                .output()
-                .unwrap();
+            let result = crate::child_process::output(
+                std::process::Command::new(&command.argv[0])
+                    .args(&command.argv[1..])
+                    .current_dir(&command.cwd),
+            )
+            .unwrap();
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
             assert_eq!(result.stdout, b"declared data");
         }
