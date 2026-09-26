@@ -5149,22 +5149,22 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[cfg(feature = "daemon")]
     #[test]
     fn daemon_sqlite_receipts_outlive_the_runtime_that_recorded_them() {
-        use appa_eventlog::{OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptScope};
+        use appa_eventlog::{OperationClaim, OperationKey, OperationRequest, ReceiptBinding, SessionScope};
 
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        let scope = ReceiptScope {
-            organization_id: "daemon".to_owned(),
-            caller_id: Some("caller".to_owned()),
-            session_id: "session".to_owned(),
-            binding: ReceiptBinding::Caller,
-        };
         let request = OperationRequest {
             key: OperationKey {
-                scope,
+                session: SessionScope {
+                    organization_id: "daemon".to_owned(),
+                    session_id: "session".to_owned(),
+                },
+                binding: ReceiptBinding::Caller {
+                    caller_id: "caller".to_owned(),
+                },
                 operation_id: "remedy-1".to_owned(),
             },
-            root: "cc:daemon-receipts".to_owned(),
+            root: appa_engine::value::TrajectoryId::new("cc:daemon-receipts"),
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };

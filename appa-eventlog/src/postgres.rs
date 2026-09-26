@@ -23,13 +23,13 @@ use serde_json::Value;
 use super::*;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
-    Completion, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
+    Completion, SessionScope, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
     resolve_operation_completion, resolve_result_claim, resolve_result_completion,
 };
 
 pub use crate::receipts::{
     OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
-    ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
+    ReceiptBinding, ReceiptError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -39,12 +39,6 @@ pub struct PostgresError(pub String);
 impl From<::postgres::Error> for PostgresError {
     fn from(error: ::postgres::Error) -> Self {
         Self(error.to_string())
-    }
-}
-
-impl From<PostgresError> for ReceiptStorageError {
-    fn from(error: PostgresError) -> Self {
-        Self(error.0)
     }
 }
 
@@ -414,11 +408,11 @@ impl PostgresStore {
                     "INSERT INTO openappa_operations (organization_id, caller_id, session_id, operation_id, root, input, status) \
                      VALUES ($1,$2,$3,$4,$5,$6,'pending')",
                     &[
-                        &request.key.scope.organization_id,
-                        &request.key.scope.caller_id,
-                        &request.key.scope.session_id,
+                        &request.key.session.organization_id,
+                        &request.key.binding.caller_id(),
+                        &request.key.session.session_id,
                         &request.key.operation_id,
-                        &request.root,
+                        &request.root.as_str(),
                         &stored,
                     ],
                 )?;
@@ -437,8 +431,8 @@ impl PostgresStore {
                     "UPDATE openappa_operations SET status='complete', decision=$4 \
                      WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3",
                     &[
-                        &key.scope.organization_id,
-                        &key.scope.session_id,
+                        &key.session.organization_id,
+                        &key.session.session_id,
                         &key.operation_id,
                         &decision,
                     ],
@@ -461,11 +455,11 @@ impl PostgresStore {
                     "INSERT INTO openappa_processed_results (organization_id, caller_id, session_id, tool_call_id, root, status) \
                      VALUES ($1,$2,$3,$4,$5,'pending')",
                     &[
-                        &request.key.organization_id,
+                        &request.key.session.organization_id,
                         &request.key.caller_id,
-                        &request.key.session_id,
+                        &request.key.session.session_id,
                         &request.key.tool_call_id,
-                        &request.root,
+                        &request.root.as_str(),
                     ],
                 )?;
             }
@@ -488,8 +482,8 @@ impl PostgresStore {
                     "UPDATE openappa_processed_results SET status='complete', approved_output=$4, decision=$5 \
                      WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3",
                     &[
-                        &key.organization_id,
-                        &key.session_id,
+                        &key.session.organization_id,
+                        &key.session.session_id,
                         &key.tool_call_id,
                         &approved_output,
                         &decision,
@@ -501,7 +495,8 @@ impl PostgresStore {
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
-    pub fn has_pending_receipts(&self, root: String) -> Result<bool, PostgresError> {
+    pub fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
+        let root = root.as_str().to_owned();
         self.query(move |client| {
             Ok(client
                 .query_opt(
@@ -658,7 +653,7 @@ impl PostgresStore {
 
 impl From<PostgresError> for ReceiptError {
     fn from(error: PostgresError) -> Self {
-        Self::Storage(error.into())
+        Self::Storage(error.0)
     }
 }
 
@@ -673,15 +668,18 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
         .query_opt(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision \
              FROM openappa_operations WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3 FOR UPDATE",
-            &[&key.scope.organization_id, &key.scope.session_id, &key.operation_id],
+            &[&key.session.organization_id, &key.session.session_id, &key.operation_id],
         )?
         .map(|row| {
+            let input = StoredOperationInput::decode(row.get(4))?;
             Ok(StoredOperation {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
+                session: SessionScope {
+                    organization_id: row.get(0),
+                    session_id: row.get(2),
+                },
+                binding: input.binding(row.get(1))?,
                 root: row.get(3),
-                input: StoredOperationInput::decode(row.get(4)).map_err(ReceiptStorageError)?,
+                semantic: input.semantic,
                 status: row.get(5),
                 decision: row.get::<_, Option<Value>>(6).map(Ok),
             })
@@ -694,11 +692,13 @@ fn read_result(client: &mut Client, key: &ProcessedResultKey) -> Result<Option<S
         .query_opt(
             "SELECT organization_id, session_id, root, status, approved_output, decision \
              FROM openappa_processed_results WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 FOR UPDATE",
-            &[&key.organization_id, &key.session_id, &key.tool_call_id],
+            &[&key.session.organization_id, &key.session.session_id, &key.tool_call_id],
         )?
         .map(|row| StoredResult {
-            organization_id: row.get(0),
-            session_id: row.get(1),
+            session: SessionScope {
+                organization_id: row.get(0),
+                session_id: row.get(1),
+            },
             root: row.get(2),
             status: row.get(3),
             approved_output: row.get(4),
@@ -748,14 +748,14 @@ fn check_receipt_keys(client: &mut Client) -> Result<(), PostgresError> {
 fn operation_lock(key: &OperationKey) -> String {
     format!(
         "openappa-operation:{}:{}:{}",
-        key.scope.organization_id, key.scope.session_id, key.operation_id
+        key.session.organization_id, key.session.session_id, key.operation_id
     )
 }
 
 fn result_lock(key: &ProcessedResultKey) -> String {
     format!(
         "openappa-result:{}:{}:{}",
-        key.organization_id, key.session_id, key.tool_call_id
+        key.session.organization_id, key.session.session_id, key.tool_call_id
     )
 }
 
@@ -767,21 +767,21 @@ mod tests {
     /// so their spelling is a wire format.
     #[test]
     fn advisory_lock_keys_are_frozen() {
-        let scope = |caller_id: Option<&str>| ReceiptScope {
+        let session = SessionScope {
             organization_id: "org".to_owned(),
-            caller_id: caller_id.map(str::to_owned),
             session_id: "session".to_owned(),
-            binding: ReceiptBinding::Caller,
         };
         let operation = OperationKey {
-            scope: scope(Some("caller")),
+            session: session.clone(),
+            binding: ReceiptBinding::Caller {
+                caller_id: "caller".to_owned(),
+            },
             operation_id: "op".to_owned(),
         };
         assert_eq!(operation_lock(&operation), "openappa-operation:org:session:op");
         let result = ProcessedResultKey {
-            organization_id: "org".to_owned(),
+            session,
             caller_id: Some("caller".to_owned()),
-            session_id: "session".to_owned(),
             tool_call_id: "call".to_owned(),
         };
         assert_eq!(result_lock(&result), "openappa-result:org:session:call");

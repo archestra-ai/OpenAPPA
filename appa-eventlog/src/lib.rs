@@ -72,7 +72,7 @@ use sqlite::Sqlite;
 
 pub use receipts::{
     OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
-    ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
+    ReceiptBinding, ReceiptError, SessionScope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,9 +606,9 @@ impl LogStore {
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
-    pub fn has_pending_receipts(&self, root: String) -> Result<bool, ReceiptStorageError> {
+    pub fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, ReceiptError> {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.has_pending_receipts(&root),
+            Store::Sqlite(sqlite) => sqlite.has_pending_receipts(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
         }
@@ -1225,21 +1225,26 @@ mod tests {
         assert!(matches!(memory().log(&root()), Err(ReadError::UnknownRoot { .. })));
     }
 
-    fn receipt_scope(suffix: &str) -> ReceiptScope {
-        ReceiptScope {
+    fn receipt_session(suffix: &str) -> SessionScope {
+        SessionScope {
             organization_id: format!("receipt-org:{suffix}"),
-            caller_id: Some("caller".to_owned()),
             session_id: format!("receipt-session:{suffix}"),
-            binding: ReceiptBinding::Caller,
+        }
+    }
+
+    fn caller_binding() -> ReceiptBinding {
+        ReceiptBinding::Caller {
+            caller_id: "caller".to_owned(),
         }
     }
 
     fn typed_receipts_are_idempotent_and_fail_closed(store: &LogStore, suffix: &str) {
-        let scope = receipt_scope(suffix);
-        let root = format!("receipt-root:{suffix}");
+        let session = receipt_session(suffix);
+        let root = TrajectoryId::new(format!("receipt-root:{suffix}"));
         let request = OperationRequest {
             key: OperationKey {
-                scope: scope.clone(),
+                session: session.clone(),
+                binding: caller_binding(),
                 operation_id: "remedy-1".to_owned(),
             },
             root: root.clone(),
@@ -1275,9 +1280,8 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                organization_id: scope.organization_id.clone(),
-                caller_id: scope.caller_id.clone(),
-                session_id: scope.session_id.clone(),
+                session: session.clone(),
+                caller_id: Some("caller".to_owned()),
                 tool_call_id: "call-1".to_owned(),
             },
             root: root.clone(),
@@ -1286,11 +1290,7 @@ mod tests {
             store.claim_processed_result(result.clone()),
             Ok(ProcessedResultClaim::Claimed)
         ));
-        assert!(
-            store
-                .has_pending_receipts(root.clone())
-                .expect("the pending receipt checks")
-        );
+        assert!(store.has_pending_receipts(&root).expect("the pending receipt checks"));
         store
             .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
             .expect("the processed result completes");
@@ -1303,7 +1303,7 @@ mod tests {
                 decision,
             }
         );
-        assert!(!store.has_pending_receipts(root).expect("all receipts are terminal"));
+        assert!(!store.has_pending_receipts(&root).expect("all receipts are terminal"));
     }
 
     #[test]
@@ -1322,10 +1322,11 @@ mod tests {
         assert!(matches!(
             reopened.claim_operation(OperationRequest {
                 key: OperationKey {
-                    scope: receipt_scope("sqlite"),
+                    session: receipt_session("sqlite"),
+                    binding: caller_binding(),
                     operation_id: "remedy-1".to_owned(),
                 },
-                root: "receipt-root:sqlite".to_owned(),
+                root: TrajectoryId::new("receipt-root:sqlite"),
                 input: serde_json::json!({"offer_id": "0123456789abcdef"}),
                 context: None,
             }),
@@ -1337,10 +1338,11 @@ mod tests {
     fn memory_receipts_do_not_leak_across_stores() {
         let request = OperationRequest {
             key: OperationKey {
-                scope: receipt_scope("private"),
+                session: receipt_session("private"),
+                binding: caller_binding(),
                 operation_id: "remedy-1".to_owned(),
             },
-            root: "receipt-root:private".to_owned(),
+            root: TrajectoryId::new("receipt-root:private"),
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
@@ -1359,30 +1361,30 @@ mod tests {
     /// organization, so two organizations may present the same session, operation and tool
     /// call ids. Each must claim, complete and replay its own receipt.
     fn organizations_sharing_a_session_id_keep_their_receipts_apart(store: &LogStore, session_id: &str) {
-        let scope = |organization: &str| ReceiptScope {
+        let scope = |organization: &str| SessionScope {
             organization_id: format!("{organization}:{session_id}"),
-            caller_id: Some("user:1".to_owned()),
             session_id: session_id.to_owned(),
-            binding: ReceiptBinding::Caller,
         };
         let (first, second) = (scope("org-a"), scope("org-b"));
-        let operation = |scope: &ReceiptScope| OperationRequest {
+        let operation = |scope: &SessionScope| OperationRequest {
             key: OperationKey {
-                scope: scope.clone(),
+                session: scope.clone(),
+                binding: ReceiptBinding::Caller {
+                    caller_id: "user:1".to_owned(),
+                },
                 operation_id: "op-1".to_owned(),
             },
-            root: format!("receipt-root:{session_id}"),
+            root: TrajectoryId::new(format!("receipt-root:{session_id}")),
             input: serde_json::json!({"tool": "wire"}),
             context: None,
         };
-        let result = |scope: &ReceiptScope| ProcessedResultRequest {
+        let result = |scope: &SessionScope| ProcessedResultRequest {
             key: ProcessedResultKey {
-                organization_id: scope.organization_id.clone(),
-                caller_id: scope.caller_id.clone(),
-                session_id: scope.session_id.clone(),
+                session: scope.clone(),
+                caller_id: Some("user:1".to_owned()),
                 tool_call_id: "call-1".to_owned(),
             },
-            root: format!("receipt-root:{session_id}"),
+            root: TrajectoryId::new(format!("receipt-root:{session_id}")),
         };
 
         for scope in [&first, &second] {
@@ -1395,7 +1397,7 @@ mod tests {
                 ProcessedResultClaim::Claimed
             );
         }
-        let decided = |scope: &ReceiptScope| serde_json::json!({"decision": scope.organization_id});
+        let decided = |scope: &SessionScope| serde_json::json!({"decision": scope.organization_id});
         store
             .complete_operation(operation(&first).key, decided(&first))
             .expect("the first organization completes its operation");
@@ -1636,17 +1638,13 @@ mod tests {
         let pg = store.postgres().expect("the PostgreSQL API is present");
         let unique = tempfile::tempdir().expect("a unique receipt namespace exists");
         let suffix = unique.path().display().to_string();
-        let scope = ReceiptScope {
-            organization_id: format!("receipt-org:{suffix}"),
-            caller_id: Some("caller".to_owned()),
-            session_id: format!("receipt-session:{suffix}"),
-            binding: ReceiptBinding::Caller,
-        };
-        let root = format!("receipt-root:{suffix}");
+        let session = receipt_session(&suffix);
+        let root = TrajectoryId::new(format!("receipt-root:{suffix}"));
 
         let request = OperationRequest {
             key: OperationKey {
-                scope: scope.clone(),
+                session: session.clone(),
+                binding: caller_binding(),
                 operation_id: "remedy-1".to_owned(),
             },
             root: root.clone(),
@@ -1677,9 +1675,8 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                organization_id: scope.organization_id.clone(),
-                caller_id: scope.caller_id.clone(),
-                session_id: scope.session_id.clone(),
+                session: session.clone(),
+                caller_id: Some("caller".to_owned()),
                 tool_call_id: "call-1".to_owned(),
             },
             root: root.clone(),
@@ -1688,10 +1685,7 @@ mod tests {
             pg.claim_processed_result(result.clone()),
             Ok(ProcessedResultClaim::Claimed)
         ));
-        assert!(
-            pg.has_pending_receipts(root.clone())
-                .expect("the pending receipt checks")
-        );
+        assert!(pg.has_pending_receipts(&root).expect("the pending receipt checks"));
         pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
             .expect("the processed result completes");
         assert_eq!(
@@ -1701,25 +1695,19 @@ mod tests {
                 decision,
             }
         );
-        assert!(
-            !pg.has_pending_receipts(root.clone())
-                .expect("all receipts are terminal")
-        );
+        assert!(!pg.has_pending_receipts(&root).expect("all receipts are terminal"));
 
         let session_bound = OperationRequest {
             key: OperationKey {
-                scope: ReceiptScope {
-                    caller_id: None,
-                    binding: ReceiptBinding::Session,
-                    ..scope.clone()
-                },
+                session: session.clone(),
+                binding: ReceiptBinding::Session { caller_id: None },
                 operation_id: "remedy-callerless".to_owned(),
             },
             ..request.clone()
         };
         pg.claim_operation(session_bound)
             .expect("the session-bound operation claims");
-        let session = scope.session_id.clone();
+        let session_id = session.session_id.clone();
         let callers: Vec<(String, Option<String>)> = pg
             .with_client(move |client| {
                 Ok(client
@@ -1727,7 +1715,7 @@ mod tests {
                         "SELECT operation_id, caller_id FROM openappa_operations WHERE session_id=$1 \
                          UNION ALL SELECT tool_call_id, caller_id FROM openappa_processed_results WHERE session_id=$1 \
                          ORDER BY 1",
-                        &[&session],
+                        &[&session_id],
                     )?
                     .iter()
                     .map(|row| (row.get(0), row.get(1)))
@@ -1747,11 +1735,11 @@ mod tests {
         pg.with_client(move |client| {
             client.execute(
                 "DELETE FROM openappa_operations WHERE session_id=$1",
-                &[&scope.session_id],
+                &[&session.session_id],
             )?;
             client.execute(
                 "DELETE FROM openappa_processed_results WHERE session_id=$1",
-                &[&scope.session_id],
+                &[&session.session_id],
             )?;
             Ok(())
         })
@@ -1864,10 +1852,6 @@ mod tests {
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
     fn postgres_session_locks_and_receipt_keys_contend_across_leases() {
-        use crate::postgres::{
-            OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptError, ReceiptScope,
-        };
-
         let store = postgres_store(2);
         let unique = tempfile::tempdir().expect("a unique namespace exists");
         let suffix = unique.path().display().to_string();
@@ -1892,15 +1876,14 @@ mod tests {
 
         let request = OperationRequest {
             key: OperationKey {
-                scope: ReceiptScope {
+                session: SessionScope {
                     organization_id: format!("lease-org:{suffix}"),
-                    caller_id: None,
                     session_id: format!("lease-session:{suffix}"),
-                    binding: ReceiptBinding::Session,
                 },
+                binding: ReceiptBinding::Session { caller_id: None },
                 operation_id: "call:contended".to_owned(),
             },
-            root: format!("lease-root:{suffix}"),
+            root: TrajectoryId::new(format!("lease-root:{suffix}")),
             input: serde_json::json!({"tool": "wire"}),
             context: None,
         };
@@ -1942,7 +1925,7 @@ mod tests {
             "the other lease replays what the first completed"
         );
 
-        let session = request.key.scope.session_id;
+        let session = request.key.session.session_id;
         a.postgres()
             .unwrap()
             .with_client(move |client| {
@@ -1959,11 +1942,6 @@ mod tests {
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
     fn postgres_writers_serialize_on_their_advisory_lock_keys() {
-        use crate::postgres::{
-            OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
-            ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope,
-        };
-
         let store = postgres_store(2);
         let unique = tempfile::tempdir().expect("a unique namespace exists");
         let suffix = unique.path().display().to_string();
@@ -2019,20 +1997,18 @@ mod tests {
             .expect("the released root opens");
 
         let organization = format!("lock-org:{suffix}");
-        let session = format!("lock-session:{suffix}");
-        let scope = ReceiptScope {
+        let session_id = format!("lock-session:{suffix}");
+        let session = SessionScope {
             organization_id: organization.clone(),
-            caller_id: Some("caller".to_owned()),
-            session_id: session.clone(),
-            binding: ReceiptBinding::Caller,
+            session_id: session_id.clone(),
         };
         let pg = writer.postgres().unwrap();
-
-        let receipt_root = format!("lock-root:{suffix}");
+        let receipt_root = TrajectoryId::new(format!("lock-root:{suffix}"));
 
         let request = OperationRequest {
             key: OperationKey {
-                scope: scope.clone(),
+                session: session.clone(),
+                binding: caller_binding(),
                 operation_id: "op-1".to_owned(),
             },
             root: receipt_root.clone(),
@@ -2040,7 +2016,7 @@ mod tests {
             context: None,
         };
         let decision = serde_json::json!({"decision": "allow_call"});
-        let key = format!("openappa-operation:{organization}:{session}:op-1");
+        let key = format!("openappa-operation:{organization}:{session_id}:op-1");
         hold(&key, true);
         assert!(matches!(
             pg.claim_operation(request.clone()),
@@ -2059,14 +2035,13 @@ mod tests {
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                organization_id: scope.organization_id.clone(),
-                caller_id: scope.caller_id.clone(),
-                session_id: scope.session_id.clone(),
+                session: session.clone(),
+                caller_id: Some("caller".to_owned()),
                 tool_call_id: "call-1".to_owned(),
             },
             root: receipt_root,
         };
-        let key = format!("openappa-result:{organization}:{session}:call-1");
+        let key = format!("openappa-result:{organization}:{session_id}:call-1");
         hold(&key, true);
         assert!(matches!(
             pg.claim_processed_result(result.clone()),
@@ -2087,10 +2062,10 @@ mod tests {
             .expect("the released result completes");
 
         pg.with_client(move |client| {
-            client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+            client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session_id])?;
             client.execute(
                 "DELETE FROM openappa_processed_results WHERE session_id=$1",
-                &[&session],
+                &[&session_id],
             )?;
             Ok(())
         })

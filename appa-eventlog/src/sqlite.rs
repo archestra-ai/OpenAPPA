@@ -17,7 +17,7 @@ use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::receipts::{
     Completion, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
-    ProcessedResultRequest, ReceiptError, ReceiptStorageError, StoredJson, StoredOperation, StoredOperationInput,
+    ProcessedResultRequest, ReceiptError, SessionScope, StoredJson, StoredOperation, StoredOperationInput,
     StoredResult, resolve_operation_claim, resolve_operation_completion, resolve_result_claim,
     resolve_result_completion,
 };
@@ -219,11 +219,11 @@ impl Sqlite {
                     "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
                      VALUES (?1,?2,?3,?4,?5,?6,'pending')",
                     params![
-                        request.key.scope.organization_id,
-                        request.key.scope.caller_id,
-                        request.key.scope.session_id,
+                        request.key.session.organization_id,
+                        request.key.binding.caller_id(),
+                        request.key.session.session_id,
                         request.key.operation_id,
-                        request.root,
+                        request.root.as_str(),
                         stored,
                     ],
                 )?;
@@ -242,8 +242,8 @@ impl Sqlite {
                     "UPDATE operations SET status='complete', decision=?4
                      WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
                     params![
-                        key.scope.organization_id,
-                        key.scope.session_id,
+                        key.session.organization_id,
+                        key.session.session_id,
                         key.operation_id,
                         encoded
                     ],
@@ -264,11 +264,11 @@ impl Sqlite {
                     "INSERT INTO processed_results (organization_id, caller_id, session_id, tool_call_id, root, status)
                      VALUES (?1,?2,?3,?4,?5,'pending')",
                     params![
-                        request.key.organization_id,
+                        request.key.session.organization_id,
                         request.key.caller_id,
-                        request.key.session_id,
+                        request.key.session.session_id,
                         request.key.tool_call_id,
-                        request.root,
+                        request.root.as_str(),
                     ],
                 )?;
             }
@@ -291,8 +291,8 @@ impl Sqlite {
                     "UPDATE processed_results SET status='complete', approved_output=?4, decision=?5
                      WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
                     params![
-                        key.organization_id,
-                        key.session_id,
+                        key.session.organization_id,
+                        key.session.session_id,
                         key.tool_call_id,
                         approved_output,
                         encoded
@@ -303,7 +303,7 @@ impl Sqlite {
         })
     }
 
-    pub(crate) fn has_pending_receipts(&self, root: &str) -> Result<bool, ReceiptStorageError> {
+    pub(crate) fn has_pending_receipts(&self, root: &TrajectoryId) -> Result<bool, ReceiptError> {
         let found: Option<i64> = self
             .connection()
             .query_row(
@@ -311,7 +311,7 @@ impl Sqlite {
                  UNION ALL
                  SELECT 1 FROM processed_results WHERE root=?1 AND status='pending'
                  LIMIT 1",
-                params![root],
+                params![root.as_str()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -387,15 +387,9 @@ impl Sqlite {
     }
 }
 
-impl From<rusqlite::Error> for ReceiptStorageError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self(error.to_string())
-    }
-}
-
 impl From<rusqlite::Error> for ReceiptError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
+        Self::Storage(error.to_string())
     }
 }
 
@@ -471,7 +465,7 @@ fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<
         .query_row(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision
              FROM operations WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
-            params![key.scope.organization_id, key.scope.session_id, key.operation_id],
+            params![key.session.organization_id, key.session.session_id, key.operation_id],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -487,12 +481,15 @@ fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<
         .optional()?
         .map(
             |(organization_id, caller_id, session_id, root, input, status, decision)| {
+                let input = StoredOperationInput::decode(json(&input)?)?;
                 Ok(StoredOperation {
-                    organization_id,
-                    caller_id,
-                    session_id,
+                    session: SessionScope {
+                        organization_id,
+                        session_id,
+                    },
+                    binding: input.binding(caller_id)?,
                     root,
-                    input: StoredOperationInput::decode(json(&input)?).map_err(ReceiptStorageError)?,
+                    semantic: input.semantic,
                     status,
                     decision: decision.as_deref().map(json),
                 })
@@ -506,11 +503,13 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
         .query_row(
             "SELECT organization_id, session_id, root, status, approved_output, decision
              FROM processed_results WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
-            params![key.organization_id, key.session_id, key.tool_call_id],
+            params![key.session.organization_id, key.session.session_id, key.tool_call_id],
             |row| {
                 Ok(StoredResult {
-                    organization_id: row.get(0)?,
-                    session_id: row.get(1)?,
+                    session: SessionScope {
+                        organization_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                    },
                     root: row.get(2)?,
                     status: row.get(3)?,
                     approved_output: row.get(4)?,
@@ -522,7 +521,7 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
 }
 
 fn json(raw: &str) -> StoredJson {
-    serde_json::from_str(raw).map_err(|error| ReceiptStorageError(error.to_string()))
+    serde_json::from_str(raw).map_err(|error| ReceiptError::storage(error.to_string()))
 }
 
 #[cfg(test)]
