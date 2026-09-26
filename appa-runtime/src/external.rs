@@ -1285,8 +1285,9 @@ mod tests {
                     implementation: AudienceImplementation::Resolver(Endpoint::new(url.to_string(), None)),
                     lookup: None,
                     templates: vec![
-                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal))
+                            .expect("a well-formed template"),
                     ],
                 };
                 ("slack".to_string(), binding)

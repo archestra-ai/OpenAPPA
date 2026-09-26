@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
-use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
+use crate::authority::{Authority, DeclaredTransition, Sanitizer};
 use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
@@ -1072,7 +1072,6 @@ impl Registry {
                     direct.extend(check_declared(&audience, to, || format!("{} to", context()))?);
                 }
             }
-            check_hint(sanitizer.hint.as_ref(), context)?;
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
                 return Err(LoadError::DuplicateSanitizer(sanitizer.name.as_str().to_string()));
             }
@@ -1230,9 +1229,6 @@ impl Registry {
                     format!("authority {} reader ceiling", authority.name.as_str())
                 })?);
             }
-            check_hint(authority.hint.as_ref(), || {
-                format!("authority {}", authority.name.as_str())
-            })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
@@ -1780,11 +1776,12 @@ fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegist
         // leading `@` makes its members non-literal readers, and an empty name owns no
         // namespace at all. The one qualification rule (`ReaderId::provider_prefix`) stays
         // unambiguous only over names this shape.
-        if source.provider.is_empty() || source.provider.contains(':') || source.provider.starts_with('@') {
-            return Err(LoadError::MalformedAudienceProvider(source.provider.clone()));
+        let provider = source.provider.as_str();
+        if provider.is_empty() || provider.contains(':') || provider.starts_with('@') {
+            return Err(LoadError::MalformedAudienceProvider(provider.to_string()));
         }
-        if !providers.insert(source.provider.as_str()) {
-            return Err(LoadError::DuplicateAudienceProvider(source.provider.clone()));
+        if !providers.insert(provider) {
+            return Err(LoadError::DuplicateAudienceProvider(provider.to_string()));
         }
     }
     let mut named = BTreeSet::new();
@@ -1890,17 +1887,6 @@ fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> 
             reader: reader.as_str().to_string(),
         }),
         None => Ok(()),
-    }
-}
-
-fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), LoadError> {
-    match hint {
-        Some(hint) if hint.as_str().chars().count() > MAX_HINT_CHARS => Err(LoadError::HintTooLong {
-            context: context(),
-            len: hint.as_str().chars().count(),
-            max: MAX_HINT_CHARS,
-        }),
-        _ => Ok(()),
     }
 }
 
@@ -2020,8 +2006,10 @@ mod tests {
     fn slack_groups(handles: &[&str]) -> crate::audience::AudienceConfig {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: handles
                 .iter()
@@ -2220,11 +2208,11 @@ mod tests {
     fn audience_provider_and_group_names_are_shaped_at_load() {
         use crate::audience::{NamedAudience, SourceRegistration};
         let source = |provider: &str| SourceRegistration {
-            provider: provider.to_string(),
-            templates: vec![crate::audience::DeclaredTemplate::new(
-                "viewer",
-                Some(ChainAudience::Self_),
-            )],
+            provider: crate::names::ProviderName::new(provider),
+            templates: vec![
+                crate::audience::DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))
+                    .expect("a well-formed template"),
+            ],
         };
         // A `:` makes one member id qualified under two providers, `@` makes members
         // non-literal, and an empty name owns no namespace.
@@ -2592,8 +2580,10 @@ mod tests {
         let mut cfg = base();
         cfg.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("channel/<id>").expect("a well-formed template"),
+                ],
             }],
             ..crate::audience::AudienceConfig::default()
         };
@@ -3374,8 +3364,10 @@ mod tests {
             .collect();
         grouped.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("desk"),

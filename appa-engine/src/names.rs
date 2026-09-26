@@ -37,6 +37,11 @@ impl SanitizerName {
 
 name_newtype!(AnnotatorName);
 name_newtype!(GroupName);
+name_newtype!(
+    /// An audience provider: the namespace of one registered audience source, and the prefix
+    /// of every member id that source qualifies.
+    ProviderName
+);
 
 impl std::fmt::Display for GroupName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

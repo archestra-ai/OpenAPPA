@@ -179,8 +179,9 @@ impl Bindings<'_> {
 }
 
 fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> Vec<AuthorityDescription> {
-    let chain = compiled.registry().trust_chain();
+    let chain = compiled.engine().registry().trust_chain();
     let mut authorities = compiled
+        .engine()
         .registry()
         .authorities()
         .iter()
@@ -236,7 +237,7 @@ impl Bindings<'_> {
 
 /// The declared audience configuration, with each source's binding status.
 fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> AudienceDescription {
-    let audience = compiled.registry().audience();
+    let audience = compiled.engine().registry().audience();
     let spelled = |spec: &appa_engine::audience::SelectorSpec| spec.to_string();
     AudienceDescription {
         sources: audience

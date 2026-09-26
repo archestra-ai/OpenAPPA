@@ -177,6 +177,7 @@ fn the_shipped_annotators_admit_every_audience_the_policy_writes() {
 
     for annotator in ["claude-code.bash-requirements", "claude-code.undeclared-tool"] {
         let entries: Vec<String> = policy
+            .engine()
             .registry()
             .annotator_mandate(&appa_engine::names::AnnotatorName::new(annotator))
             .unwrap_or_else(|| panic!("{annotator} registers"))

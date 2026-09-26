@@ -8,8 +8,9 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_reader};
-use appa_engine::label::ReaderId;
+use appa_engine::audience::{DeclaredTemplate, SelectorTemplate, SourceRegistration, well_formed_reader};
+use appa_engine::label::{ChainAudience, ReaderId};
+use appa_engine::names::ProviderName;
 use appa_policy::AnnotatorBuiltin;
 use serde::Deserialize;
 
@@ -238,7 +239,7 @@ impl Externals {
             .iter()
             .filter(|(_, binding)| !binding.templates.is_empty())
             .map(|(name, binding)| SourceRegistration {
-                provider: name.clone(),
+                provider: ProviderName::new(name.clone()),
                 templates: binding.templates.clone(),
             })
             .collect()
@@ -247,9 +248,77 @@ impl Externals {
 
 /// The audience sources a composed document declares, read from its `[externals.audience]`
 /// table: what a stored policy file compiles under at replay, and what a file that does not
-/// load is described with.
-pub(crate) fn source_registrations_of(document: &toml::Value) -> Result<Vec<SourceRegistration>, ConfigError> {
-    appa_policy::declared_sources(document).map_err(|error| ConfigError::SelectorDeclaration(Box::new(error)))
+/// load is described with. An entry without `selectors` — a roster — declares no source.
+pub fn source_registrations_of(document: &toml::Value) -> Result<Vec<SourceRegistration>, ConfigError> {
+    let Some(entries) = document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut sources = Vec::new();
+    for (provider, entry) in entries {
+        let Some(selectors) = entry.get("selectors") else {
+            continue;
+        };
+        let selectors: Vec<SelectorDeclaration> =
+            selectors
+                .clone()
+                .try_into()
+                .map_err(|error: toml::de::Error| ConfigError::SelectorDeclaration {
+                    provider: provider.clone(),
+                    template: String::new(),
+                    reason: format!("`selectors` is a list of `{{ template, feeds }}` tables: {error}"),
+                })?;
+        sources.push(SourceRegistration {
+            provider: ProviderName::new(provider.clone()),
+            templates: declare_templates(provider, &selectors)?,
+        });
+    }
+    Ok(sources)
+}
+
+/// One `selectors` entry of an `[externals.audience.<provider>]` binding, as written: the
+/// template the source serves and what its collections may feed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectorDeclaration {
+    template: String,
+    feeds: Option<String>,
+}
+
+/// The templates one source declares under `selectors`. `feeds` names what the collections
+/// may feed beyond named audiences and direct mentions: `self` or `internal`. A source
+/// declares at least one template and none twice.
+fn declare_templates(provider: &str, selectors: &[SelectorDeclaration]) -> Result<Vec<DeclaredTemplate>, ConfigError> {
+    let refused = |template: &str, reason: String| ConfigError::SelectorDeclaration {
+        provider: provider.to_string(),
+        template: template.to_string(),
+        reason,
+    };
+    let mut templates: Vec<DeclaredTemplate> = Vec::new();
+    for selector in selectors {
+        let spelled = selector.template.as_str();
+        let template = SelectorTemplate::new(spelled).map_err(|malformed| refused(spelled, malformed.to_string()))?;
+        let feeds = match &selector.feeds {
+            None => None,
+            Some(level) => Some(ChainAudience::parse(level).ok_or_else(|| {
+                refused(
+                    spelled,
+                    "`feeds` names a built-in audience: `self` or `internal`".to_string(),
+                )
+            })?),
+        };
+        if templates.iter().any(|known| known.template == template) {
+            return Err(refused(spelled, "is declared twice".to_string()));
+        }
+        templates.push(DeclaredTemplate { template, feeds });
+    }
+    if templates.is_empty() {
+        return Err(refused("", "`selectors` declares no template".to_string()));
+    }
+    Ok(templates)
 }
 
 /// The lookup routing a composed document declares, read from its `[externals.audience]`
@@ -572,8 +641,12 @@ pub enum ConfigError {
     IncludedConfinesForeignTool { path: String, tool: String },
     #[error("included config {path} cannot set externals field {field:?}")]
     IncludedExternalsField { path: String, field: String },
-    #[error("[externals.audience] {0}")]
-    SelectorDeclaration(Box<appa_policy::ConfigError>),
+    #[error("[externals.audience] bad selector declaration for audience source {provider:?}: {template:?} {reason}")]
+    SelectorDeclaration {
+        provider: String,
+        template: String,
+        reason: String,
+    },
     #[error("included config {path} uses policy version {found}, but the root uses {root}")]
     IncludedVersion { path: String, root: i64, found: i64 },
     #[error("included config {path} repeats [externals.jev] field {field:?}, which a deployment declares once")]
@@ -950,7 +1023,7 @@ struct RawAudienceBinding {
     readers: Option<BTreeMap<String, String>>,
     lookup: Option<String>,
     /// The selector templates this source serves, with what each may feed.
-    selectors: Option<Vec<appa_policy::SelectorDeclaration>>,
+    selectors: Option<Vec<SelectorDeclaration>>,
 }
 
 fn default_review_timeout_ms() -> u64 {
@@ -1939,8 +2012,7 @@ fn resolve_audience_bindings(
         } = entry;
         let templates = match &selectors {
             None => Vec::new(),
-            Some(selectors) => appa_policy::declare_templates(&name, selectors)
-                .map_err(|error| ConfigError::SelectorDeclaration(Box::new(error)))?,
+            Some(selectors) => declare_templates(&name, selectors)?,
         };
         // A roster answers lookups only and a source declares what it serves, so a roster
         // with `selectors` is neither.
@@ -3649,6 +3721,133 @@ mod tests {
             config.externals.audience["people"].implementation,
             AudienceImplementation::Readers(_)
         ));
+    }
+
+    fn selector(template: &str, feeds: Option<&str>) -> SelectorDeclaration {
+        SelectorDeclaration {
+            template: template.to_string(),
+            feeds: feeds.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn declare_templates_carries_each_template_and_what_it_feeds() {
+        let templates = declare_templates(
+            "slack",
+            &[
+                selector("viewer", Some("self")),
+                selector("full-members", Some("internal")),
+                selector("channel/<id>", None),
+            ],
+        )
+        .expect("the templates declare");
+        assert_eq!(
+            templates,
+            [
+                DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)).expect("a well-formed template"),
+                DeclaredTemplate::named("channel/<id>").expect("a well-formed template"),
+            ]
+        );
+    }
+
+    #[test]
+    fn declare_templates_refuses_every_malformed_list() {
+        for (case, selectors) in [
+            ("an empty list", vec![]),
+            ("an empty template", vec![selector("", None)]),
+            ("an empty segment", vec![selector("channel//x", None)]),
+            ("a trailing slash", vec![selector("channel/", None)]),
+            ("a `$` segment", vec![selector("channel/$id", None)]),
+            ("an empty variable", vec![selector("channel/<>", None)]),
+            ("an unclosed variable", vec![selector("channel/<id", None)]),
+            ("an unopened variable", vec![selector("channel/id>", None)]),
+            ("`feeds = public`", vec![selector("viewer", Some("public"))]),
+            ("an unknown `feeds`", vec![selector("viewer", Some("everyone"))]),
+            (
+                "a duplicate template",
+                vec![selector("channel/<id>", None), selector("channel/<id>", None)],
+            ),
+        ] {
+            assert!(
+                matches!(
+                    declare_templates("slack", &selectors),
+                    Err(ConfigError::SelectorDeclaration { provider, .. }) if provider == "slack"
+                ),
+                "{case} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn source_registrations_of_reads_every_audience_entry_with_selectors() {
+        let document: toml::Value = toml::from_str(
+            "[externals.audience.slack]\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n\
+             [externals.audience.roster]\nurl = \"https://roster.invalid\"\n",
+        )
+        .expect("the document parses");
+        let sources = source_registrations_of(&document).expect("the sources declare");
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| (source.provider.as_str(), source.templates.clone()))
+                .collect::<Vec<_>>(),
+            [(
+                "slack",
+                vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template")]
+            )],
+            "an entry without `selectors` declares no source"
+        );
+        let empty: toml::Value = toml::from_str("version = 2\n").expect("the document parses");
+        assert!(source_registrations_of(&empty).expect("no externals").is_empty());
+    }
+
+    #[test]
+    fn source_registrations_of_refuses_a_selectors_value_that_is_not_a_table_list() {
+        for selectors in [
+            "\"viewer\"",
+            "[\"viewer\"]",
+            "[{ template = \"viewer\", surprise = 1 }]",
+            "[{ template = \"viewer/$x\" }]",
+        ] {
+            let document: toml::Value =
+                toml::from_str(&format!("[externals.audience.slack]\nselectors = {selectors}\n"))
+                    .expect("the document parses");
+            assert!(
+                matches!(
+                    source_registrations_of(&document),
+                    Err(ConfigError::SelectorDeclaration { provider, .. }) if provider == "slack"
+                ),
+                "selectors = {selectors} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_selector_declaration_is_refused_at_load_naming_the_source_and_template() {
+        for (selectors, expected) in [
+            (
+                "[{ template = \"channel//x\" }]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"channel//x\" has an empty segment",
+            ),
+            (
+                "[{ template = \"viewer\", feeds = \"public\" }]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"viewer\" `feeds` names a built-in audience: `self` or `internal`",
+            ),
+            (
+                "[]",
+                "[externals.audience] bad selector declaration for audience source \"slack\": \"\" `selectors` declares no template",
+            ),
+        ] {
+            let document = format!(
+                "{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n"
+            );
+            let refused = parse(&document).expect_err("a malformed selector declaration refuses the load");
+            assert_eq!(refused.to_string(), expected);
+            let value: toml::Value = toml::from_str(&document).expect("the document is TOML");
+            let described = source_registrations_of(&value).expect_err("the document's sources are refused");
+            assert_eq!(described.to_string(), expected);
+        }
     }
 
     /// Everything outside `[policy]` and `[externals]` describes the deployment the host

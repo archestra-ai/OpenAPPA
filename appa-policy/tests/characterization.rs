@@ -1,22 +1,18 @@
 //! Load outcomes at the policy entry points that no other test pins: the refusals of each
-//! structural and semantic check, the selector-template declarations a deployment supplies,
-//! the input-source spellings, a custom trust chain, and the `[boundary]` and `[deployment]`
+//! structural and semantic check, the input-source spellings, a custom trust chain, and the `[boundary]` and `[deployment]`
 //! fields as the compiled engine reads them.
 
-use appa_engine::audience::DeclaredTemplate;
 use appa_engine::contract::{Delta, DeltaAudience, SelectorPlaceholder, ToolAnnotation};
-use appa_engine::label::{Audience, ChainAudience, DeclaredAudience, ReaderId, Trust};
+use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
 use appa_engine::names::SurfaceName;
 use appa_engine::params::ParamsError;
 use appa_engine::profile::{BindingMode, OpenVector, SurfaceMode};
-use appa_engine::registry::{LoadError, TrustChain};
-use appa_policy::{
-    Config, ConfigError, InputSource, SelectorDeclaration, ToolCallSource, declare_templates, declared_sources,
-    parse_delta,
-};
+use appa_engine::registry::{LoadError, MAX_HINT_CHARS, TrustChain};
+use appa_policy::{Config, ConfigError, InputSource, ToolCallSource, parse_delta};
 
 fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
+        .engine()
         .registry()
         .tools()
         .find(|tool| tool.name().as_str() == name)
@@ -164,6 +160,38 @@ fn a_zero_planner_cap_is_refused() {
     ));
 }
 
+// --- hints ---------------------------------------------------------------------
+
+fn hinted(kind: &str, hint: &str) -> String {
+    match kind {
+        "authority" => format!(
+            "version = 2\n[[authority]]\nname = \"desk\"\nhint = \"{hint}\"\n[authority.permits]\ntrust_below = \"trusted\"\n"
+        ),
+        "sanitizer" => format!(
+            "version = 2\n[[sanitizer]]\nname = \"desk\"\non = [\"tool_input\"]\nhint = \"{hint}\"\n\
+             [sanitizer.permits]\naudience = {{ from = [\"insider\"], to = [\"partner\"] }}\n"
+        ),
+        "annotator" => format!("version = 2\n[[annotator]]\nname = \"desk\"\nhint = \"{hint}\"\n"),
+        _ => unreachable!("a hinted component kind"),
+    }
+}
+
+#[test]
+fn a_hint_is_bounded_in_characters_for_every_component_kind() {
+    for kind in ["authority", "sanitizer", "annotator"] {
+        Config::from_toml_str(&hinted(kind, &"é".repeat(MAX_HINT_CHARS)))
+            .unwrap_or_else(|error| panic!("a {kind} hint of the maximum length loads: {error}"));
+        assert!(
+            matches!(
+                Config::from_toml_str(&hinted(kind, &"é".repeat(MAX_HINT_CHARS + 1))),
+                Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
+                    if context == format!("{kind} desk") && len == MAX_HINT_CHARS + 1 && max == MAX_HINT_CHARS
+            ),
+            "an overlong {kind} hint must be refused naming the {kind}"
+        );
+    }
+}
+
 // --- trust chain ---------------------------------------------------------------
 
 #[test]
@@ -172,7 +200,7 @@ fn a_custom_trust_chain_replaces_the_default_ranks() {
                   [[tool]]\nname = \"t\"\ndelta = { trust = \"reviewed\" }\nrequires = { trust = \"trusted\" }\n";
     let config = Config::from_toml_str(policy).expect("a custom chain loads");
     assert_eq!(
-        config.registry().trust_chain().names().collect::<Vec<_>>(),
+        config.engine().registry().trust_chain().names().collect::<Vec<_>>(),
         ["untrusted", "reviewed", "trusted"]
     );
     let t = contract(&config, "t");
@@ -335,105 +363,4 @@ fn every_input_source_spelling_round_trips_through_parse() {
         }
     }
     assert_eq!(ToolCallSource::parse("$input.repo"), None);
-}
-
-// --- selector-template declarations --------------------------------------------
-
-fn selector(template: &str, feeds: Option<&str>) -> SelectorDeclaration {
-    SelectorDeclaration {
-        template: template.to_string(),
-        feeds: feeds.map(str::to_string),
-    }
-}
-
-#[test]
-fn declare_templates_carries_each_template_and_what_it_feeds() {
-    let templates = declare_templates(
-        "slack",
-        &[
-            selector("viewer", Some("self")),
-            selector("full-members", Some("internal")),
-            selector("channel/<id>", None),
-        ],
-    )
-    .expect("the templates declare");
-    assert_eq!(
-        templates,
-        [
-            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-            DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-            DeclaredTemplate::named("channel/<id>"),
-        ]
-    );
-}
-
-#[test]
-fn declare_templates_refuses_every_malformed_list() {
-    for (case, selectors) in [
-        ("an empty list", vec![]),
-        ("an empty template", vec![selector("", None)]),
-        ("an empty segment", vec![selector("channel//x", None)]),
-        ("a trailing slash", vec![selector("channel/", None)]),
-        ("a `$` segment", vec![selector("channel/$id", None)]),
-        ("an empty variable", vec![selector("channel/<>", None)]),
-        ("an unclosed variable", vec![selector("channel/<id", None)]),
-        ("an unopened variable", vec![selector("channel/id>", None)]),
-        ("`feeds = public`", vec![selector("viewer", Some("public"))]),
-        ("an unknown `feeds`", vec![selector("viewer", Some("everyone"))]),
-        (
-            "a duplicate template",
-            vec![selector("channel/<id>", None), selector("channel/<id>", None)],
-        ),
-    ] {
-        assert!(
-            matches!(
-                declare_templates("slack", &selectors),
-                Err(ConfigError::BadSelectorDeclaration { provider, .. }) if provider == "slack"
-            ),
-            "{case} must be refused"
-        );
-    }
-}
-
-#[test]
-fn declared_sources_reads_every_audience_entry_with_selectors() {
-    let document: toml::Value = toml::from_str(
-        "[externals.audience.slack]\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n\
-         [externals.audience.roster]\nurl = \"https://roster.invalid\"\n",
-    )
-    .expect("the document parses");
-    let sources = declared_sources(&document).expect("the sources declare");
-    assert_eq!(
-        sources
-            .iter()
-            .map(|source| (source.provider.as_str(), source.templates.clone()))
-            .collect::<Vec<_>>(),
-        [(
-            "slack",
-            vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))]
-        )],
-        "an entry without `selectors` declares no source"
-    );
-    let empty: toml::Value = toml::from_str("version = 2\n").expect("the document parses");
-    assert!(declared_sources(&empty).expect("no externals").is_empty());
-}
-
-#[test]
-fn declared_sources_refuses_a_selectors_value_that_is_not_a_table_list() {
-    for selectors in [
-        "\"viewer\"",
-        "[\"viewer\"]",
-        "[{ template = \"viewer\", surprise = 1 }]",
-        "[{ template = \"viewer/$x\" }]",
-    ] {
-        let document: toml::Value = toml::from_str(&format!("[externals.audience.slack]\nselectors = {selectors}\n"))
-            .expect("the document parses");
-        assert!(
-            matches!(
-                declared_sources(&document),
-                Err(ConfigError::BadSelectorDeclaration { provider, .. }) if provider == "slack"
-            ),
-            "selectors = {selectors} must be refused"
-        );
-    }
 }

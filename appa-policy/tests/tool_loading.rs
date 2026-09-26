@@ -13,6 +13,7 @@ fn tool_policy(name: &str, body: &str) -> String {
 /// and every tool here is statically declared.
 fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
+        .engine()
         .registry()
         .tools()
         .find(|tool| tool.name().as_str() == name)

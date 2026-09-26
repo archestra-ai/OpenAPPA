@@ -6,7 +6,7 @@ use appa_engine::engine::Engine;
 use appa_engine::label::Label;
 use appa_engine::names::AnnotatorName;
 use appa_engine::profile::{DeploymentPolicy, PolicyDialectVersion, ProfileDeclaration};
-use appa_engine::registry::{AudienceVocabulary, PlannerCap, Registry, RegistryConfig, TrustChain};
+use appa_engine::registry::{AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
 use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
@@ -84,7 +84,9 @@ impl Config {
                 .filter_map(ToolDeclaration::declared)
                 .flat_map(|annotation| annotation.referenced_providers()),
         );
-        audience.sources.retain(|source| referenced.contains(&source.provider));
+        audience
+            .sources
+            .retain(|source| referenced.contains(source.provider.as_str()));
         validate_annotator_inputs(&tools, &annotators)?;
 
         let mut authorities = Vec::new();
@@ -149,10 +151,6 @@ impl Config {
         &self.engine
     }
 
-    pub fn registry(&self) -> &Registry {
-        self.engine.registry()
-    }
-
     /// The label assigned to every north user turn (RP1) — a server policy default, never client
     /// supplied. Defaults to the neutral `L0`: top trust (the user is the trust boundary), public.
     pub fn boundary_label(&self) -> &Label {
@@ -170,12 +168,6 @@ impl Config {
         self.deployment_tools
             .iter()
             .map(|(field, name)| (*field, name.as_str()))
-    }
-
-    /// Every `[[annotator]]` the policy registers — the validated superset of every annotator
-    /// name a tool declaration routes through.
-    pub fn annotator_names(&self) -> impl Iterator<Item = &AnnotatorName> {
-        self.annotators.keys()
     }
 
     /// Every `[[annotator]]` with its runtime-owned binding: its hint, the stock builtin it names

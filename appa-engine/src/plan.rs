@@ -2274,8 +2274,11 @@ mod tests {
             sanitizers: vec![],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
-                    provider: "slack".to_string(),
-                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                    provider: crate::names::ProviderName::new("slack"),
+                    templates: vec![
+                        crate::audience::DeclaredTemplate::named("user-group/<handle>")
+                            .expect("a well-formed template"),
+                    ],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -2407,8 +2410,11 @@ mod tests {
                 ],
                 audience: crate::audience::AudienceConfig {
                     sources: vec![crate::audience::SourceRegistration {
-                        provider: "slack".to_string(),
-                        templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                        provider: crate::names::ProviderName::new("slack"),
+                        templates: vec![
+                            crate::audience::DeclaredTemplate::named("user-group/<handle>")
+                                .expect("a well-formed template"),
+                        ],
                     }],
                     groups: vec![named("team"), named("legal"), named("press")],
                     ..crate::audience::AudienceConfig::default()
@@ -2577,8 +2583,11 @@ mod tests {
             sanitizers: vec![],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
-                    provider: "slack".to_string(),
-                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                    provider: crate::names::ProviderName::new("slack"),
+                    templates: vec![
+                        crate::audience::DeclaredTemplate::named("user-group/<handle>")
+                            .expect("a well-formed template"),
+                    ],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -2944,7 +2953,10 @@ mod tests {
             tools: declared(vec![tool()]),
             authorities: vec![
                 officer("a", None),
-                officer("b", Some(Hint::new("the fast lane — prefer this desk"))),
+                officer(
+                    "b",
+                    Some(Hint::new("the fast lane — prefer this desk").expect("a short hint")),
+                ),
             ],
             sanitizers: vec![],
             audience: crate::audience::AudienceConfig::default(),

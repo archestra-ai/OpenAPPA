@@ -267,8 +267,9 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
             &std::fs::read_to_string(installed.path().join(battery.policy.as_str())).expect("the battery policy reads"),
         )
         .expect("the battery policy is TOML");
-        for source in appa_policy::declared_sources(&policy).expect("the battery declares its sources") {
-            let provider = &source.provider;
+        for source in appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")
+        {
+            let provider = source.provider.as_str();
             let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
                 .as_array()
                 .expect("a battery binds its source by a command")

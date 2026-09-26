@@ -4,9 +4,9 @@ use appa_engine::authority::Hint;
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::fact::EffectKind;
 use appa_engine::names::{AnnotatorName, MarkName};
-use appa_engine::registry::{AnnotatorDeclaration, LoadError, MAX_HINT_CHARS, TrustChain};
+use appa_engine::registry::{AnnotatorDeclaration, TrustChain};
 
-use crate::convert::{parse_annotator_audiences, parse_trust, refuse_inline_binding};
+use crate::convert::{parse_annotator_audiences, parse_hint, parse_trust, refuse_inline_binding};
 use crate::error::ConfigError;
 use crate::raw::RawAnnotator;
 
@@ -151,16 +151,7 @@ pub(crate) fn compile_annotators(
             },
             None => None,
         };
-        let hint = annotator.hint.map(Hint::new);
-        if let Some(hint) = &hint
-            && hint.as_str().chars().count() > MAX_HINT_CHARS
-        {
-            return Err(ConfigError::Registry(LoadError::HintTooLong {
-                context: format!("annotator {}", name.as_str()),
-                len: hint.as_str().chars().count(),
-                max: MAX_HINT_CHARS,
-            }));
-        }
+        let hint = parse_hint(annotator.hint, &format!("annotator {}", name.as_str()))?;
         let mut inputs = BTreeMap::new();
         for (input, spelling) in annotator.inputs.unwrap_or_default() {
             let Some(source) = InputSource::parse(&spelling) else {

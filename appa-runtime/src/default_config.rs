@@ -92,6 +92,7 @@ mod tests {
         let policy = toml::to_string(&root["policy"]).expect("the default policy renders");
         let compiled = appa_policy::Config::from_toml_str(&policy).expect("the default policy compiles");
         let authority = compiled
+            .engine()
             .registry()
             .authority(&appa_engine::names::AuthorityName::new("hitl"))
             .expect("the default registers the human authority");
@@ -102,6 +103,7 @@ mod tests {
         ));
         assert_eq!(authority.mandate.attends, appa_engine::authority::Attends::Any);
         let trusted = compiled
+            .engine()
             .registry()
             .trust_chain()
             .rank_of("trusted")

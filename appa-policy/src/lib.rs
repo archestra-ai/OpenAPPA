@@ -11,7 +11,6 @@ mod raw;
 mod tests;
 
 pub use annotator::{AnnotatorBinding, AnnotatorBuiltin, InputSource, ToolCallSource};
-pub use audience::{SelectorDeclaration, declare_templates, declared_sources};
 pub use config::Config;
 pub use convert::parse_delta;
 pub use error::ConfigError;

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::label::{ChainAudience, Expansions, GroupRef, ReaderId, SymbolicAtom, address_parts};
-use crate::names::GroupName;
+use crate::names::{GroupName, ProviderName};
 
 /// One selector's validated answer from its provider's source, as the record pins it. Each
 /// member is the reader the source reports: an address or a `<provider>:<id>` under the
@@ -212,15 +212,37 @@ impl SelectorSpec {
     }
 }
 
-/// One selector template a source advertises: literal segments and `<placeholder>` segments,
-/// split on `/`. `group/<group-address>` matches `group/finance@corp.com` and nothing with
-/// another segment count.
+/// One selector template a source advertises: non-empty literal segments and `<placeholder>`
+/// segments, split on `/`. `group/<group-address>` matches `group/finance@corp.com` and nothing
+/// with another segment count. No segment starts with `$`, which marks an argument placeholder
+/// in a policy's spelling of a selector.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct SelectorTemplate(String);
 
+/// Why a spelling is not a [`SelectorTemplate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MalformedTemplate {
+    #[error("is empty")]
+    Empty,
+    #[error("has an empty segment")]
+    EmptySegment,
+    #[error("has a segment starting with `$`, which marks an argument placeholder")]
+    ArgumentSegment,
+    #[error("has a malformed `<variable>` segment")]
+    MalformedVariable,
+}
+
 impl SelectorTemplate {
-    pub fn new(template: impl Into<String>) -> SelectorTemplate {
-        SelectorTemplate(template.into())
+    pub fn new(template: impl Into<String>) -> Result<SelectorTemplate, MalformedTemplate> {
+        let template = template.into();
+        if template.is_empty() {
+            return Err(MalformedTemplate::Empty);
+        }
+        match template.split('/').find_map(segment_fault) {
+            Some(fault) => Err(fault),
+            None => Ok(SelectorTemplate(template)),
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -242,6 +264,25 @@ impl SelectorTemplate {
     }
 }
 
+fn segment_fault(segment: &str) -> Option<MalformedTemplate> {
+    let opens = segment.starts_with('<');
+    let closes = segment.ends_with('>');
+    match segment {
+        "" => Some(MalformedTemplate::EmptySegment),
+        _ if segment.starts_with('$') => Some(MalformedTemplate::ArgumentSegment),
+        _ if (opens || closes) && !(opens && closes && segment.len() > 2) => Some(MalformedTemplate::MalformedVariable),
+        _ => None,
+    }
+}
+
+impl TryFrom<String> for SelectorTemplate {
+    type Error = MalformedTemplate;
+
+    fn try_from(template: String) -> Result<SelectorTemplate, MalformedTemplate> {
+        SelectorTemplate::new(template)
+    }
+}
+
 /// One template a source declares, with what its collections may feed beyond named
 /// audiences and direct mentions: `Some(Self_)` names the requesting principal and feeds
 /// `self`; `Some(Internal)` is a full membership and feeds `internal`; `None` feeds neither.
@@ -253,15 +294,18 @@ pub struct DeclaredTemplate {
 }
 
 impl DeclaredTemplate {
-    pub fn new(template: impl Into<String>, feeds: Option<ChainAudience>) -> DeclaredTemplate {
-        DeclaredTemplate {
-            template: SelectorTemplate::new(template),
+    pub fn new(
+        template: impl Into<String>,
+        feeds: Option<ChainAudience>,
+    ) -> Result<DeclaredTemplate, MalformedTemplate> {
+        Ok(DeclaredTemplate {
+            template: SelectorTemplate::new(template)?,
             feeds,
-        }
+        })
     }
 
     /// A template feeding neither built-in audience: named groups and direct mentions only.
-    pub fn named(template: impl Into<String>) -> DeclaredTemplate {
+    pub fn named(template: impl Into<String>) -> Result<DeclaredTemplate, MalformedTemplate> {
         DeclaredTemplate::new(template, None)
     }
 }
@@ -270,7 +314,7 @@ impl DeclaredTemplate {
 /// beside its binding. One provider is registered exactly once per deployment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRegistration {
-    pub provider: String,
+    pub provider: ProviderName,
     pub templates: Vec<DeclaredTemplate>,
 }
 
@@ -358,7 +402,7 @@ impl AudienceRegistry {
             providers: config
                 .sources
                 .iter()
-                .map(|source| (source.provider.clone(), source.templates.clone()))
+                .map(|source| (source.provider.as_str().to_string(), source.templates.clone()))
                 .collect(),
             self_from: config.self_from.iter().cloned().collect(),
             internal_from: config.internal_from.iter().cloned().collect(),
@@ -367,7 +411,11 @@ impl AudienceRegistry {
                 .iter()
                 .map(|group| (group.name.clone(), group.clone()))
                 .collect(),
-            provider_names: config.sources.iter().map(|source| source.provider.clone()).collect(),
+            provider_names: config
+                .sources
+                .iter()
+                .map(|source| source.provider.as_str().to_string())
+                .collect(),
             lookup_targets: config.lookup_targets.clone(),
             within: crate::label::WithinAssertions::new(
                 config
@@ -841,19 +889,21 @@ mod tests {
         AudienceConfig {
             sources: vec![
                 SourceRegistration {
-                    provider: "google-workspace".into(),
+                    provider: ProviderName::new("google-workspace"),
                     templates: vec![
-                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-                        DeclaredTemplate::named("group/<group-address>"),
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal))
+                            .expect("a well-formed template"),
+                        DeclaredTemplate::named("group/<group-address>").expect("a well-formed template"),
                     ],
                 },
                 SourceRegistration {
-                    provider: "slack".into(),
+                    provider: ProviderName::new("slack"),
                     templates: vec![
-                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
-                        DeclaredTemplate::named("user-group/<handle>"),
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal))
+                            .expect("a well-formed template"),
+                        DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
                     ],
                 },
             ],
@@ -1025,13 +1075,36 @@ mod tests {
 
     #[test]
     fn templates_match_segment_wise() {
-        let template = SelectorTemplate::new("org/<org>/team/<team>");
+        let template = SelectorTemplate::new("org/<org>/team/<team>").expect("a well-formed template");
         assert!(template.matches("org/archestra-ai/team/finance"));
         assert!(!template.matches("org/archestra-ai/team"));
         assert!(!template.matches("org/archestra-ai/team/"));
         assert!(!template.matches("org/archestra-ai/members"));
-        assert!(SelectorTemplate::new("viewer").matches("viewer"));
-        assert!(!SelectorTemplate::new("viewer").matches("full-members"));
+        let viewer = SelectorTemplate::new("viewer").expect("a well-formed template");
+        assert!(viewer.matches("viewer"));
+        assert!(!viewer.matches("full-members"));
+    }
+
+    #[test]
+    fn a_malformed_template_is_unrepresentable() {
+        for (spelling, fault) in [
+            ("", MalformedTemplate::Empty),
+            ("channel//x", MalformedTemplate::EmptySegment),
+            ("channel/", MalformedTemplate::EmptySegment),
+            ("channel/$id", MalformedTemplate::ArgumentSegment),
+            ("channel/<>", MalformedTemplate::MalformedVariable),
+            ("channel/<id", MalformedTemplate::MalformedVariable),
+            ("channel/id>", MalformedTemplate::MalformedVariable),
+        ] {
+            assert_eq!(SelectorTemplate::new(spelling), Err(fault), "{spelling:?}");
+            assert!(
+                serde_json::from_value::<SelectorTemplate>(serde_json::json!(spelling)).is_err(),
+                "{spelling:?} must not decode"
+            );
+        }
+        let decoded: SelectorTemplate =
+            serde_json::from_value(serde_json::json!("org/<org>/members")).expect("a well-formed template decodes");
+        assert_eq!(decoded.as_str(), "org/<org>/members");
     }
 
     #[test]

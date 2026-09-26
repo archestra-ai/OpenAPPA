@@ -103,6 +103,7 @@ mod tests {
         assert!(checked.defaulted.is_empty(), "the preset contracts every tool");
         let invoices = checked
             .config
+            .engine()
             .registry()
             .variants(&ToolName::new("list_invoices"))
             .next()
@@ -119,6 +120,7 @@ mod tests {
         );
         let email = checked
             .config
+            .engine()
             .registry()
             .variants(&ToolName::new("send_email"))
             .next()
