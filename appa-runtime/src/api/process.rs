@@ -35,7 +35,8 @@ pub(super) fn perform(
     files: &FileTracking,
     workspace: &Path,
     call: &ProposedCall,
-    pin: &appa_eventlog::files::FilePin,
+    destination: &str,
+    inputs: &[appa_eventlog::files::PinnedSource],
 ) -> Result<String, String> {
     let backend = files
         .process_backend
@@ -46,7 +47,7 @@ pub(super) fn perform(
     let prepare = || -> std::io::Result<()> {
         fs::create_dir(job.path().join("inputs"))?;
         fs::create_dir(job.path().join("output"))?;
-        for input in &pin.inputs {
+        for input in inputs {
             let target = job.path().join("inputs").join(&input.path);
             fs::create_dir_all(target.parent().expect("input paths have the staging parent"))?;
             std::io::copy(&mut existing(workspace, &input.path)?, &mut fs::File::create(target)?)?;
@@ -82,7 +83,7 @@ pub(super) fn perform(
     if response.result.exit_code != 0 {
         return Err(text);
     }
-    Entry::create(workspace, &pin.path)
+    Entry::create(workspace, destination)
         .and_then(|destination| publish(&job.path().join("output/result"), &destination, MAX_OUTPUT_BYTES))
         .map_err(|error| format!("isolated output not published: {error}"))?;
     Ok(text)

@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use appa_engine::label::Label;
+use appa_engine::value::{FileBasis, FileSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -54,25 +55,126 @@ pub enum FileOperation {
     Process,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileSourcePin {
-    pub path: String,
-    pub version: i64,
-    pub label: Label,
+/// One tracked version as a reservation pinned it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedVersion {
+    pub id: i64,
     pub digest: String,
+    pub label: Label,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A pinned version at another path whose bytes the operation consumes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedSource {
+    pub path: String,
+    pub version: PinnedVersion,
+}
+
+/// What a reserved operation reads and replaces. `replaced` is the destination's version
+/// before the operation, absent when the destination does not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinnedBasis {
+    Read(PinnedVersion),
+    Replace(Option<PinnedVersion>),
+    Edit(PinnedVersion),
+    Copy {
+        source: PinnedSource,
+        replaced: Option<PinnedVersion>,
+    },
+    Move {
+        source: PinnedSource,
+        replaced: Option<PinnedVersion>,
+    },
+    Process {
+        inputs: Vec<PinnedSource>,
+        replaced: Option<PinnedVersion>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilePin {
     pub path: String,
-    pub operation: FileOperation,
-    pub predecessor_version: Option<i64>,
-    pub predecessor_label: Option<Label>,
-    pub predecessor_digest: Option<String>,
-    /// The source bytes consumed by a Copy or Move.
-    pub source: Option<FileSourcePin>,
-    /// The source bytes consumed by a Process. Empty for all other operations.
-    pub inputs: Vec<FileSourcePin>,
+    pub basis: PinnedBasis,
+}
+
+impl PinnedVersion {
+    fn of(version: FileVersion) -> Self {
+        Self {
+            id: version.id,
+            digest: version.digest,
+            label: version.label,
+        }
+    }
+
+    fn file_source(&self) -> FileSource {
+        FileSource {
+            version: self.id.to_string(),
+            digest: self.digest.clone(),
+            label: self.label.clone(),
+        }
+    }
+}
+
+impl PinnedBasis {
+    fn operation(&self) -> FileOperation {
+        match self {
+            PinnedBasis::Read(_) => FileOperation::Read,
+            PinnedBasis::Replace(_) => FileOperation::Replace,
+            PinnedBasis::Edit(_) => FileOperation::Edit,
+            PinnedBasis::Copy { .. } => FileOperation::Copy,
+            PinnedBasis::Move { .. } => FileOperation::Move,
+            PinnedBasis::Process { .. } => FileOperation::Process,
+        }
+    }
+
+    /// The version the destination held when the reservation was taken.
+    fn predecessor(&self) -> Option<&PinnedVersion> {
+        match self {
+            PinnedBasis::Read(version) | PinnedBasis::Edit(version) => Some(version),
+            PinnedBasis::Replace(replaced)
+            | PinnedBasis::Copy { replaced, .. }
+            | PinnedBasis::Move { replaced, .. }
+            | PinnedBasis::Process { replaced, .. } => replaced.as_ref(),
+        }
+    }
+
+    fn transferred(&self) -> Option<&PinnedSource> {
+        match self {
+            PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
+    fn inputs(&self) -> &[PinnedSource] {
+        match self {
+            PinnedBasis::Process { inputs, .. } => inputs,
+            _ => &[],
+        }
+    }
+}
+
+impl FilePin {
+    /// The engine's view of this pin: what the call's flow check rules on.
+    pub fn file_basis(&self) -> FileBasis {
+        let pinned = |replaced: &Option<PinnedVersion>| replaced.as_ref().map(PinnedVersion::file_source);
+        match &self.basis {
+            PinnedBasis::Read(version) => FileBasis::Read(version.file_source()),
+            PinnedBasis::Replace(replaced) => FileBasis::Replace(pinned(replaced)),
+            PinnedBasis::Edit(version) => FileBasis::Edit(version.file_source()),
+            PinnedBasis::Copy { source, replaced } => FileBasis::Copy {
+                source: source.version.file_source(),
+                replaced: pinned(replaced),
+            },
+            PinnedBasis::Move { source, replaced } => FileBasis::Move {
+                source: source.version.file_source(),
+                replaced: pinned(replaced),
+            },
+            PinnedBasis::Process { inputs, replaced } => FileBasis::Process {
+                inputs: inputs.iter().map(|input| input.version.file_source()).collect(),
+                replaced: pinned(replaced),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,31 +275,19 @@ impl FileStore {
             version: predecessor,
             actual,
         } = touch(&mut state, &self.workspace, &relative)?;
-        match operation {
-            FileOperation::Read | FileOperation::Edit if predecessor.is_none() => {
-                return Err(FileStoreError::Untracked);
-            }
-            _ => {}
-        }
-        if actual != ABSENT {
-            let Some(version) = &predecessor else {
-                return Err(FileStoreError::Untracked);
-            };
-            if actual != version.digest {
-                return Err(FileStoreError::DigestMismatch);
-            }
-        } else if predecessor.is_some() || operation != FileOperation::Replace {
-            return Err(FileStoreError::DigestMismatch);
-        }
-        let pin = FilePin {
-            path: relative.clone(),
-            operation,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: None,
-            inputs: vec![],
+        let basis = match (operation, predecessor.map(PinnedVersion::of)) {
+            (FileOperation::Replace, predecessor) => PinnedBasis::Replace(predecessor),
+            (FileOperation::Read, Some(version)) => PinnedBasis::Read(version),
+            (FileOperation::Edit, Some(version)) => PinnedBasis::Edit(version),
+            _ => return Err(FileStoreError::Untracked),
         };
+        match (actual.as_str(), basis.predecessor()) {
+            (ABSENT, None) => {}
+            (_, None) => return Err(FileStoreError::Untracked),
+            (actual, Some(version)) if actual == version.digest => {}
+            (_, Some(_)) => return Err(FileStoreError::DigestMismatch),
+        }
+        let pin = FilePin { path: relative, basis };
         state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
@@ -248,19 +338,18 @@ impl FileStore {
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
         }
+        let source = PinnedSource {
+            path: source,
+            version: PinnedVersion::of(source_version),
+        };
+        let replaced = predecessor.map(PinnedVersion::of);
+        let basis = match operation {
+            FileOperation::Copy => PinnedBasis::Copy { source, replaced },
+            _ => PinnedBasis::Move { source, replaced },
+        };
         let pin = FilePin {
             path: destination,
-            operation,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: Some(FileSourcePin {
-                path: source,
-                version: source_version.id,
-                label: source_version.label,
-                digest: source_version.digest,
-            }),
-            inputs: vec![],
+            basis,
         };
         state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
@@ -301,11 +390,9 @@ impl FileStore {
             if actual != version.digest {
                 return Err(FileStoreError::DigestMismatch);
             }
-            pinned.push(FileSourcePin {
+            pinned.push(PinnedSource {
                 path,
-                version: version.id,
-                label: version.label,
-                digest: version.digest,
+                version: PinnedVersion::of(version),
             });
         }
         let Touched {
@@ -317,12 +404,10 @@ impl FileStore {
         }
         let pin = FilePin {
             path: destination,
-            operation: FileOperation::Process,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: None,
-            inputs: pinned,
+            basis: PinnedBasis::Process {
+                inputs: pinned,
+                replaced: predecessor.map(PinnedVersion::of),
+            },
         };
         state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
@@ -371,17 +456,14 @@ impl FileStore {
             .clone()
             .ok_or(FileStoreError::UnknownReservation)?;
         let observed = Observed::of(&self.workspace, &pin)?;
-        let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
-        let source_label = if pin.operation == FileOperation::Process {
-            pin.inputs
+        let operation = pin.basis.operation();
+        let source_label = match &pin.basis {
+            PinnedBasis::Process { inputs, .. } => inputs
                 .iter()
-                .map(|input| input.label.clone())
-                .reduce(|label, next| label.combine(&next))
-        } else {
-            pin.source
-                .as_ref()
-                .map(|source| source.label.clone())
-                .or_else(|| pin.predecessor_label.clone())
+                .map(|input| input.version.label.clone())
+                .reduce(|label, next| label.combine(&next)),
+            PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => Some(source.version.label.clone()),
+            basis => basis.predecessor().map(|version| version.label.clone()),
         };
         let receipt = if !success {
             if !observed.undisturbed(&pin) {
@@ -389,81 +471,71 @@ impl FileStore {
             }
             FileReceipt {
                 path: pin.path.clone(),
-                operation: pin.operation,
+                operation,
                 success: false,
                 source_label: source_label.clone(),
                 version: None,
                 dispatch: Some(dispatch),
             }
-        } else if pin.operation == FileOperation::Read {
-            if observed.destination != expected {
-                return Err(FileStoreError::DigestMismatch);
-            }
-            FileReceipt {
-                path: pin.path.clone(),
-                operation: pin.operation,
-                success: true,
-                source_label: source_label.clone(),
-                version: None,
-                dispatch: Some(dispatch),
-            }
         } else {
-            let dependencies = match pin.operation {
-                FileOperation::Edit => pin.predecessor_version.into_iter().collect(),
-                FileOperation::Copy | FileOperation::Move => {
-                    let source = pin
-                        .source
-                        .as_ref()
-                        .ok_or_else(|| FileStoreError::Corrupt("transfer has no source pin".into()))?;
-                    let source_ok = if pin.operation == FileOperation::Move {
-                        observed.source.as_deref() == Some(ABSENT)
-                    } else {
-                        observed.source.as_deref() == Some(source.digest.as_str())
-                    };
-                    if !source_ok || observed.destination != source.digest {
+            let dependencies = match &pin.basis {
+                PinnedBasis::Read(version) => {
+                    if observed.destination != version.digest {
                         return Err(FileStoreError::DigestMismatch);
                     }
-                    vec![source.version]
+                    None
                 }
-                FileOperation::Process => {
+                PinnedBasis::Replace(_) => Some(vec![]),
+                PinnedBasis::Edit(version) => Some(vec![version.id]),
+                PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => {
+                    let source_after = match operation {
+                        FileOperation::Move => ABSENT,
+                        _ => source.version.digest.as_str(),
+                    };
+                    if observed.source.as_deref() != Some(source_after) || observed.destination != source.version.digest
+                    {
+                        return Err(FileStoreError::DigestMismatch);
+                    }
+                    Some(vec![source.version.id])
+                }
+                PinnedBasis::Process { inputs, .. } => {
                     if !observed.inputs_unchanged {
                         return Err(FileStoreError::DigestMismatch);
                     }
-                    pin.inputs.iter().map(|input| input.version).collect()
+                    Some(inputs.iter().map(|input| input.version.id).collect())
                 }
-                FileOperation::Replace => vec![],
-                FileOperation::Read => unreachable!(),
             };
-            if observed.destination == ABSENT {
-                return Err(FileStoreError::DigestMismatch);
-            }
-            let id = state.next_id;
-            state.next_id += 1;
-            if pin.operation == FileOperation::Move {
-                state.current.remove(
-                    &pin.source
-                        .as_ref()
-                        .expect("successful Move validated its source pin")
-                        .path,
-                );
-            }
-            let version = FileVersion {
-                id,
-                path: pin.path.clone(),
-                digest: observed.destination,
-                label: output,
-                previous: pin.predecessor_version,
-                content_dependencies: dependencies,
-                dispatch: Some(dispatch.clone()),
+            let version = match dependencies {
+                None => None,
+                Some(dependencies) => {
+                    if observed.destination == ABSENT {
+                        return Err(FileStoreError::DigestMismatch);
+                    }
+                    let id = state.next_id;
+                    state.next_id += 1;
+                    if let PinnedBasis::Move { source, .. } = &pin.basis {
+                        state.current.remove(&source.path);
+                    }
+                    let version = FileVersion {
+                        id,
+                        path: pin.path.clone(),
+                        digest: observed.destination,
+                        label: output,
+                        previous: pin.basis.predecessor().map(|version| version.id),
+                        content_dependencies: dependencies,
+                        dispatch: Some(dispatch.clone()),
+                    };
+                    state.versions.insert(id, version.clone());
+                    state.current.insert(pin.path.clone(), id);
+                    Some(version)
+                }
             };
-            state.versions.insert(id, version.clone());
-            state.current.insert(pin.path.clone(), id);
             FileReceipt {
                 path: pin.path.clone(),
-                operation: pin.operation,
+                operation,
                 success: true,
                 source_label,
-                version: Some(version),
+                version,
                 dispatch: Some(dispatch),
             }
         };
@@ -654,13 +726,13 @@ impl Observed {
     fn of(workspace: &Path, pin: &FilePin) -> Result<Self, FileStoreError> {
         let destination = state_digest(workspace, &pin.path)?;
         let source = pin
-            .source
-            .as_ref()
+            .basis
+            .transferred()
             .map(|source| state_digest(workspace, &source.path))
             .transpose()?;
         let mut inputs_unchanged = true;
-        for input in &pin.inputs {
-            inputs_unchanged &= state_digest(workspace, &input.path)? == input.digest;
+        for input in pin.basis.inputs() {
+            inputs_unchanged &= state_digest(workspace, &input.path)? == input.version.digest;
         }
         Ok(Self {
             destination,
@@ -673,11 +745,15 @@ impl Observed {
     /// operation would have replaced, a transfer's source is where the operation would have
     /// left it, and every declared input is unchanged.
     fn undisturbed(&self, pin: &FilePin) -> bool {
-        self.destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
+        self.destination
+            == pin
+                .basis
+                .predecessor()
+                .map_or(ABSENT, |version| version.digest.as_str())
             && pin
-                .source
-                .as_ref()
-                .is_none_or(|source| self.source.as_deref() == Some(source.digest.as_str()))
+                .basis
+                .transferred()
+                .is_none_or(|source| self.source.as_deref() == Some(source.version.digest.as_str()))
             && self.inputs_unchanged
     }
 }
@@ -841,7 +917,10 @@ mod tests {
         fs::write(fixture.workspace.join("tracked.txt"), "replacement").unwrap();
         let replaced = store.finish("a", "replace", true).unwrap();
         assert_eq!(replaced.version.as_ref().unwrap().label, output);
-        assert_eq!(replaced.version.as_ref().unwrap().previous, first.predecessor_version);
+        assert_eq!(
+            replaced.version.as_ref().unwrap().previous,
+            first.basis.predecessor().map(|version| version.id)
+        );
         assert!(replaced.version.as_ref().unwrap().content_dependencies.is_empty());
         assert_eq!(store.finish("a", "replace", true).unwrap(), replaced);
 
@@ -849,9 +928,15 @@ mod tests {
         store.bind("a", "edit", "dispatch-2", &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
         let edited = store.finish("a", "edit", true).unwrap().version.unwrap();
-        assert_eq!(pin.predecessor_version, Some(replaced.version.unwrap().id));
-        assert_eq!(edited.previous, pin.predecessor_version);
-        assert_eq!(edited.content_dependencies, vec![pin.predecessor_version.unwrap()]);
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.id),
+            Some(replaced.version.unwrap().id)
+        );
+        assert_eq!(edited.previous, pin.basis.predecessor().map(|version| version.id));
+        assert_eq!(
+            edited.content_dependencies,
+            vec![pin.basis.predecessor().map(|version| version.id).unwrap()]
+        );
         assert_eq!(store.current("tracked.txt").unwrap(), Some(edited));
     }
 
@@ -978,10 +1063,16 @@ mod tests {
         let pin = store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "destination.bin")
             .unwrap();
-        let source = pin.source.as_ref().unwrap();
-        assert_ne!(Some(source.version), pin.predecessor_version);
-        assert_eq!(source.label, source_label);
-        assert_eq!(pin.predecessor_label, Some(destination_label));
+        let source = pin.basis.transferred().unwrap();
+        assert_ne!(
+            Some(source.version.id),
+            pin.basis.predecessor().map(|version| version.id)
+        );
+        assert_eq!(source.version.label, source_label);
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.label.clone()),
+            Some(destination_label)
+        );
         store.bind("a", "copy", "dispatch", &source_label).unwrap();
         fs::copy(
             fixture.workspace.join("tracked.txt"),
@@ -990,7 +1081,7 @@ mod tests {
         .unwrap();
         let receipt = store.finish("a", "copy", true).unwrap();
         assert_eq!(receipt.source_label, Some(source_label));
-        assert_eq!(receipt.version.unwrap().content_dependencies, vec![source.version]);
+        assert_eq!(receipt.version.unwrap().content_dependencies, vec![source.version.id]);
     }
 
     #[test]
@@ -1075,8 +1166,8 @@ mod tests {
         let store = fixture.store(&Label::top());
         let inputs = vec!["tracked.txt".to_string(), "second.bin".to_string()];
         let pin = store.prepare_process("a", "process", &inputs, "output.bin").unwrap();
-        let dependencies: Vec<_> = pin.inputs.iter().map(|input| input.version).collect();
-        let previous = pin.predecessor_version;
+        let dependencies: Vec<_> = pin.basis.inputs().iter().map(|input| input.version.id).collect();
+        let previous = pin.basis.predecessor().map(|version| version.id);
         let output = Label::new(
             appa_engine::label::Trust::new(3),
             appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("result")]),
@@ -1182,9 +1273,15 @@ mod tests {
         fs::write(fixture.workspace.join("tracked.txt"), "edited before first touch").unwrap();
         let pin = store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
         let adopted = store.current("tracked.txt").unwrap().unwrap();
-        assert_eq!(pin.predecessor_label, Some(secret()));
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.label.clone()),
+            Some(secret())
+        );
         assert_eq!(adopted.label, secret());
-        assert_eq!(pin.predecessor_digest, Some(adopted.digest));
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.digest.clone()),
+            Some(adopted.digest)
+        );
         assert_eq!(adopted.previous, None);
         store.cancel("a", "read").unwrap();
 
@@ -1345,7 +1442,7 @@ mod tests {
         let copy = store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
             .unwrap();
-        assert_eq!(copy.source.as_ref().unwrap().label, secret());
+        assert_eq!(copy.basis.transferred().unwrap().version.label, secret());
         store.bind("a", "copy", "dispatch-1", &secret()).unwrap();
         fs::copy(
             fixture.workspace.join("tracked.txt"),
@@ -1357,7 +1454,7 @@ mod tests {
         let moved = store
             .prepare_transfer("a", "move", FileOperation::Move, "second.txt", "moved.txt")
             .unwrap();
-        assert_eq!(moved.source.as_ref().unwrap().label, secret());
+        assert_eq!(moved.basis.transferred().unwrap().version.label, secret());
         store.bind("a", "move", "dispatch-2", &secret()).unwrap();
         fs::rename(
             fixture.workspace.join("second.txt"),
@@ -1370,7 +1467,7 @@ mod tests {
         let process = store
             .prepare_process("a", "process", &["third.txt".into()], "output.txt")
             .unwrap();
-        assert_eq!(process.inputs[0].label, secret());
+        assert_eq!(process.basis.inputs()[0].version.label, secret());
         store.bind("a", "process", "dispatch-3", &secret()).unwrap();
         fs::write(fixture.workspace.join("output.txt"), "derived").unwrap();
         assert_eq!(store.finish("a", "process", true).unwrap().source_label, Some(secret()));

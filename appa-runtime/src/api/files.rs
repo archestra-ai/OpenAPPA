@@ -72,10 +72,11 @@
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
-use appa_engine::value::{FileBasis, FileSource};
+#[cfg(feature = "daemon")]
+use appa_eventlog::files::PinnedBasis;
 #[cfg(feature = "daemon")]
 use appa_eventlog::files::beneath::{self, Entry};
-use appa_eventlog::files::{FileOperation, FilePin, FileStore};
+use appa_eventlog::files::{FileOperation, FileStore};
 use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::path::Path;
@@ -266,17 +267,16 @@ pub(super) fn perform(
     call: &ProposedCall,
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
-    let (operation, _) = operation(call).map_err(|error| error.to_string())?;
-    match operation {
-        FileOperation::Process => process::perform(files, workspace, call, pin),
-        FileOperation::Read => read(workspace, &pin.path).map_err(|error| error.to_string()),
-        FileOperation::Replace => {
+    match &pin.basis {
+        PinnedBasis::Process { inputs, .. } => process::perform(files, workspace, call, &pin.path, inputs),
+        PinnedBasis::Read(_) => read(workspace, &pin.path).map_err(|error| error.to_string()),
+        PinnedBasis::Replace(_) => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
             replace(workspace, &pin.path, &args.content)
                 .map(|()| "file written".into())
                 .map_err(|error| error.to_string())
         }
-        FileOperation::Edit => {
+        PinnedBasis::Edit(_) => {
             let args: EditArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
             if args.old_string.is_empty() {
                 return Err("old_string must not be empty".into());
@@ -293,11 +293,10 @@ pub(super) fn perform(
             .map(|()| "file edited".into())
             .map_err(|error| error.to_string())
         }
-        FileOperation::Copy | FileOperation::Move => {
-            let source = pin.source.as_ref().ok_or("the transfer pin carries no source")?;
+        PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => {
             let result = (|| -> std::io::Result<()> {
                 let destination = Entry::create(workspace, &pin.path)?;
-                if operation == FileOperation::Move {
+                if matches!(pin.basis, PinnedBasis::Move { .. }) {
                     Entry::locate(workspace, &source.path)?
                         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
                         .rename_to(&destination)
@@ -399,53 +398,6 @@ impl super::Runtime {
     }
 }
 
-pub(super) fn basis(pin: FilePin) -> Result<FileBasis, EventError> {
-    let source = match (pin.predecessor_version, pin.predecessor_digest, pin.predecessor_label) {
-        (Some(version), Some(digest), Some(label)) => Some(FileSource {
-            version: version.to_string(),
-            digest,
-            label,
-        }),
-        (None, None, None) => None,
-        _ => return Err(refused("incomplete file ledger pin")),
-    };
-    Ok(match pin.operation {
-        FileOperation::Process => FileBasis::Process {
-            inputs: pin
-                .inputs
-                .into_iter()
-                .map(|input| FileSource {
-                    version: input.version.to_string(),
-                    digest: input.digest,
-                    label: input.label,
-                })
-                .collect(),
-            replaced: source,
-        },
-        FileOperation::Read => FileBasis::Read(source.ok_or_else(|| refused("missing read source"))?),
-        FileOperation::Edit => FileBasis::Edit(source.ok_or_else(|| refused("missing edit source"))?),
-        FileOperation::Replace => FileBasis::Replace(source),
-        FileOperation::Copy | FileOperation::Move => {
-            let input = pin.source.ok_or_else(|| refused("missing transfer source"))?;
-            let input = FileSource {
-                version: input.version.to_string(),
-                digest: input.digest,
-                label: input.label,
-            };
-            match pin.operation {
-                FileOperation::Copy => FileBasis::Copy {
-                    source: input,
-                    replaced: source,
-                },
-                _ => FileBasis::Move {
-                    source: input,
-                    replaced: source,
-                },
-            }
-        }
-    })
-}
-
 pub(super) fn refused(message: impl ToString) -> EventError {
     EventError::RemedyArguments {
         detail: format!("file tracking: {}", message.to_string()),
@@ -463,6 +415,8 @@ mod tests {
     use crate::config::Config;
     use crate::engine::RemedyArguments;
     use appa_engine::label::{Audience, Label, Trust};
+    use appa_engine::value::{FileBasis, FileSource};
+    use appa_eventlog::files::{FilePin, PinnedVersion};
     use std::path::Path;
 
     fn open(dir: &Path) -> Runtime {
@@ -1250,7 +1204,7 @@ else:
         };
         let derive = |key: &str, pin: FilePin| {
             store.cancel("a", key).unwrap();
-            basis(pin).unwrap()
+            pin.file_basis()
         };
 
         let read = store.prepare("a", "read", FileOperation::Read, "source.txt").unwrap();
@@ -1325,12 +1279,7 @@ else:
             .unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
-            operation: FileOperation::Replace,
-            predecessor_version: None,
-            predecessor_label: None,
-            predecessor_digest: None,
-            source: None,
-            inputs: vec![],
+            basis: PinnedBasis::Replace(None),
         };
         assert_eq!(
             perform(files, &workspace, &call, &pin).unwrap(),
@@ -1356,14 +1305,9 @@ else:
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("target.txt"), "outside bytes").unwrap();
         std::os::unix::fs::symlink(&outside, workspace.join("sub")).unwrap();
-        let pin = |operation| FilePin {
+        let pin = |basis| FilePin {
             path: "sub/target.txt".into(),
-            operation,
-            predecessor_version: None,
-            predecessor_label: None,
-            predecessor_digest: None,
-            source: None,
-            inputs: vec![],
+            basis,
         };
         let write = ProposedCall {
             tool: format!("{PREFIX}appa_write_file"),
@@ -1377,8 +1321,13 @@ else:
             arguments: super::super::session::raw(serde_json::json!({"file_path": "sub/target.txt"})),
             cwd: None,
         };
-        assert!(perform(files, &workspace, &write, &pin(FileOperation::Replace)).is_err());
-        assert!(perform(files, &workspace, &read, &pin(FileOperation::Read)).is_err());
+        let outside_version = PinnedVersion {
+            id: 1,
+            digest: "unhashed".into(),
+            label: Label::top(),
+        };
+        assert!(perform(files, &workspace, &write, &pin(PinnedBasis::Replace(None))).is_err());
+        assert!(perform(files, &workspace, &read, &pin(PinnedBasis::Read(outside_version))).is_err());
         assert_eq!(
             std::fs::read_to_string(outside.join("target.txt")).unwrap(),
             "outside bytes"

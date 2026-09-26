@@ -519,14 +519,13 @@ impl Session {
         };
         // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
         // Claude loads instruction files implicitly, outside the file-tool observation path.
+        let moved_from = match &pin.basis {
+            appa_eventlog::files::PinnedBasis::Move { source, .. } => Some(source.path.as_str()),
+            _ => None,
+        };
         if operation != appa_eventlog::files::FileOperation::Read
             && std::iter::once(pin.path.as_str())
-                .chain(
-                    pin.source
-                        .as_ref()
-                        .filter(|_| operation == appa_eventlog::files::FileOperation::Move)
-                        .map(|source| source.path.as_str()),
-                )
+                .chain(moved_from)
                 .flat_map(|path| path.split('/'))
                 .any(|part| {
                     matches!(
@@ -544,7 +543,7 @@ impl Session {
                 "execution-control files are not writable in file-tracking mode",
             ));
         }
-        let basis = super::files::basis(pin)?;
+        let basis = pin.file_basis();
         let decision = self.propose_tool_call(call, call_id, spawn, Some(basis)).await;
         match &decision {
             Ok(ToolCallDecision::Allow { dispatch, .. }) => {
