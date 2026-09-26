@@ -87,7 +87,7 @@ tempfile = "3"
 tokio = { workspace = true }
 toml = { workspace = true }
 toml_edit = "0.25"
-zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
