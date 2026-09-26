@@ -39,13 +39,14 @@ Initialization installs `clappa` beside `appa` so the short command works below.
 The installed binary is the only host-side code. The install deploys it under
 APPA's data directory and registers it in your user-level Claude Code
 settings: one hook entry per session event, each naming that binary by its
-absolute path, and the status line. It registers the runtime's `appa` MCP
+absolute path. It registers the runtime's `appa` MCP
 server in Claude Code's user scope, writes the `appa-guide` skill to your
 user skills directory, and installs `clappa`, a protected way to start Claude
-Code. Rerunning the install updates only OpenAPPA-managed files. Custom hooks,
+Code that also shows APPA's status line: the session's current trust and
+audience. Rerunning the install updates only OpenAPPA-managed files. Custom hooks,
 MCP servers, and skills are preserved. If the installer detects unmanaged `appa`
 entries, it halts to avoid overwriting your setup.
-It preserves an existing policy and custom status line. It does not replace
+It preserves an existing policy and never edits your own status line. It does not replace
 `claude` or change how ordinary sessions start.
 
 The install keeps a copy of every battery of its version beside the

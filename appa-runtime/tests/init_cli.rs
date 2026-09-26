@@ -251,7 +251,11 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             fixture.data,
         ])
     );
-    let statusline = fixture.settings_value()["statusLine"]["command"]
+    assert!(fixture.settings_value().get("statusLine").is_none());
+    let clappa_settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.data.join("clappa.settings.json")).expect("clappa's settings"))
+            .expect("clappa's settings are JSON");
+    let statusline = clappa_settings["statusLine"]["command"]
         .as_str()
         .expect("the status line is a command")
         .to_owned();
@@ -597,6 +601,7 @@ fn foreign_settings_survive_activation_and_removal() {
         "the skill directory goes with its files"
     );
     assert!(!fixture.launcher().exists());
+    assert!(!fixture.data.join("clappa.settings.json").exists());
     assert!(
         fixture.deployed_binary().is_file(),
         "removal takes back the profile, not the runtime"

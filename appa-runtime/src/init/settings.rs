@@ -151,37 +151,38 @@ pub(super) fn remove_hooks(paths: &DeploymentPaths, binary: &Path) -> Result<(),
     })
 }
 
-/// Point the status line at the deployed binary, unless a status line that is
-/// not this deployment's is configured, which is the user's and left alone.
-pub(super) fn install_statusline(
+/// The settings `clappa` loads for its sessions alone: APPA's status line. The
+/// user's `statusLine` stays theirs in every session `clappa` does not start.
+pub(super) fn clappa_settings_path(paths: &DeploymentPaths) -> PathBuf {
+    paths.data_dir.join("clappa.settings.json")
+}
+
+pub(super) fn install_clappa_settings(
     paths: &DeploymentPaths,
     target: &HookTarget<'_>,
     compensation: &mut Compensation,
 ) -> Result<(), InitError> {
-    let path = path(paths);
-    let command = statusline_command(target.binary, target.url);
-    edit(&path, Some(compensation), |settings| {
-        if let Some(line) = settings.get("statusLine")
-            && !names_binary(line, target.binary)
-        {
-            return Ok(());
-        }
-        settings.insert("statusLine".to_owned(), json!({"type": "command", "command": command}));
-        Ok(())
-    })
+    let path = clappa_settings_path(paths);
+    let settings = json!({"statusLine": {"type": "command", "command": statusline_command(target.binary, target.url)}});
+    let bytes = serde_json::to_vec_pretty(&settings).expect("a JSON value serializes");
+    let before = file_before(&path)?;
+    if before.as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+    compensation.record(Undo::File {
+        path: path.clone(),
+        before,
+    });
+    write_state(&path, &bytes)
 }
 
-pub(super) fn remove_statusline(paths: &DeploymentPaths, binary: &Path) -> Result<(), InitError> {
-    let path = path(paths);
-    edit(&path, None, |settings| {
-        if settings
-            .get("statusLine")
-            .is_some_and(|line| names_binary(line, binary))
-        {
-            settings.remove("statusLine");
-        }
-        Ok(())
-    })
+pub(super) fn remove_clappa_settings(paths: &DeploymentPaths) -> Result<(), InitError> {
+    let path = clappa_settings_path(paths);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(InitError::WriteFile { path, source }),
+    }
 }
 
 /// The status line is a shell string, the one place Claude Code gives no exec
@@ -207,35 +208,6 @@ fn statusline_head(binary: &Path) -> String {
     } else {
         format!("{} statusline", sh_literal(&binary))
     }
-}
-
-/// A status line is this deployment's when its command is exactly the deployed
-/// binary run as the status line against one endpoint, whatever endpoint an
-/// earlier install gave it. A command of the user's own that runs the binary
-/// among other things, before or after it, is theirs.
-fn names_binary(line: &Value, binary: &Path) -> bool {
-    let head = statusline_head(binary);
-    line.get("command")
-        .and_then(Value::as_str)
-        .and_then(|command| command.strip_prefix(&head))
-        .and_then(|rest| rest.strip_prefix(" --deployment-url "))
-        .is_some_and(is_one_literal)
-}
-
-/// One quoted argument and nothing after it: the endpoint as
-/// `statusline_command` spells it, closed by the PowerShell quote on Windows.
-fn is_one_literal(argument: &str) -> bool {
-    let argument = match cfg!(windows) {
-        true => match argument.strip_suffix('"') {
-            Some(inner) => inner,
-            None => return false,
-        },
-        false => argument,
-    };
-    argument
-        .strip_prefix('\'')
-        .and_then(|rest| rest.strip_suffix('\''))
-        .is_some_and(|inner| !inner.contains('\''))
 }
 
 /// Total for any UTF-8 path: single-quoted, with embedded `'` closed, escaped
@@ -490,8 +462,10 @@ mod tests {
         assert_eq!(settings(&paths), Map::new());
     }
 
+    /// The status line reaches `clappa` sessions only: the user's own
+    /// `statusLine` is never touched, and removal takes the file away.
     #[test]
-    fn a_status_line_that_is_not_this_deployments_is_left_alone() {
+    fn the_status_line_lives_in_clappas_settings_not_the_users() {
         let root = tempfile::tempdir().unwrap();
         let (paths, binary) = fixture(root.path());
         let target = HookTarget {
@@ -500,41 +474,25 @@ mod tests {
             config: &paths.config_dir.join("appa.toml"),
             data_dir: &paths.data_dir,
         };
+        let user = write(
+            &paths,
+            json!({"statusLine": {"type": "command", "command": "my-status"}}),
+        );
         let mut compensation = Compensation::default();
-        // A command of the user's own, and one of theirs that runs this deployment's
-        // status line among other things: both are left alone.
-        let composed = format!(
-            "input=$(cat); printf '%s' \"$input\" | my-status; printf '%s' \"$input\" | {}",
-            statusline_command(&binary, "http://127.0.0.1:1")
-        );
-        let filtered = format!("{} | my-filter", statusline_command(&binary, "http://127.0.0.1:1"));
-        for command in ["my-status", composed.as_str(), filtered.as_str()] {
-            let custom = json!({"statusLine": {"type": "command", "command": command, "padding": 0}});
-            let bytes = write(&paths, custom.clone());
-            install_statusline(&paths, &target, &mut compensation).unwrap();
-            assert!(compensation.done.is_empty(), "{command}");
-            assert_eq!(fs::read(path(&paths)).unwrap(), bytes, "{command}");
-            remove_statusline(&paths, &binary).unwrap();
-            assert_eq!(fs::read(path(&paths)).unwrap(), bytes, "{command}");
-        }
-
-        // Absent, then this deployment's under an earlier URL: written, then repaired.
-        write(&paths, json!({}));
-        install_statusline(&paths, &target, &mut compensation).unwrap();
-        let command = settings(&paths)["statusLine"]["command"].as_str().unwrap().to_owned();
-        assert_eq!(command, statusline_command(&binary, "http://127.0.0.1:1"));
-        let earlier = HookTarget {
-            url: "http://127.0.0.1:2",
-            ..target
-        };
-        install_statusline(&paths, &earlier, &mut compensation).unwrap();
+        install_clappa_settings(&paths, &target, &mut compensation).unwrap();
+        install_clappa_settings(&paths, &target, &mut compensation).unwrap();
+        assert_eq!(compensation.done.len(), 1, "an unchanged file is not rewritten");
+        let written: Value = serde_json::from_slice(&fs::read(clappa_settings_path(&paths)).unwrap()).unwrap();
         assert_eq!(
-            settings(&paths)["statusLine"]["command"],
-            statusline_command(&binary, "http://127.0.0.1:2")
+            written,
+            json!({"statusLine": {"type": "command", "command": statusline_command(&binary, "http://127.0.0.1:1")}})
         );
-        assert_eq!(compensation.done.len(), 2);
-        remove_statusline(&paths, &binary).unwrap();
-        assert!(settings(&paths).get("statusLine").is_none());
+        assert_eq!(fs::read(path(&paths)).unwrap(), user);
+
+        remove_clappa_settings(&paths).unwrap();
+        remove_clappa_settings(&paths).unwrap();
+        assert!(!clappa_settings_path(&paths).exists());
+        assert_eq!(fs::read(path(&paths)).unwrap(), user);
     }
 
     #[test]
