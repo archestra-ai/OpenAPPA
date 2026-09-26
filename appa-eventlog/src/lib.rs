@@ -57,7 +57,8 @@ use std::time::SystemTime;
 
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
-use appa_engine::value::{DispatchId, TrajectoryId};
+use appa_engine::value::DispatchId;
+pub use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
 mod encoding;
