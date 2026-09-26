@@ -22,8 +22,33 @@ pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
 /// [`Config::credentials`].
 pub(crate) type CredentialBindings = BTreeMap<String, String>;
 
+/// Whether a configuration holds the secrets it names. A deferred one was parsed without
+/// them, for a structural check: it never serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keys {
+    Resolved,
+    Deferred,
+}
+
+/// Where a document's secrets come from while it parses.
+#[derive(Clone, Copy)]
+enum KeySource<'a> {
+    Lookup(&'a dyn Fn(&str) -> Option<String>),
+    Deferred,
+}
+
+impl KeySource<'_> {
+    fn keys(self) -> Keys {
+        match self {
+            KeySource::Lookup(_) => Keys::Resolved,
+            KeySource::Deferred => Keys::Deferred,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    keys: Keys,
     policy: PolicyFile,
     /// Each policy namespace bound to the connection identities the host reports for it.
     pub(crate) server_aliases: ServerBindings,
@@ -428,7 +453,7 @@ impl LlmProfile {
     /// not set, or it names none and its provider needs a key.
     pub fn missing_key(&self) -> Option<MissingKey> {
         match &self.key {
-            Some(key) => key.token().err(),
+            Some(key) => key.missing(),
             None if self.provider == LlmProvider::Ollama => None,
             None => Some(MissingKey::Undeclared {
                 provider: self.provider.as_str(),
@@ -459,25 +484,39 @@ pub struct JevProfile {
 
 /// A model profile's key as the configuration read it. A profile whose variable is not set
 /// still loads, so a battery installs before its key is exported; a deployment that
-/// consults the profile refuses to open until the variable is set.
+/// consults the profile refuses to open until the variable is set. A deferred key was
+/// never asked for: its configuration only validates.
 #[derive(Debug, Clone)]
 pub enum ProfileKey {
     Set(Token),
     Unset { var: String },
+    Deferred,
 }
 
 impl ProfileKey {
-    fn read(var: String, lookup: &impl Fn(&str) -> Option<String>) -> ProfileKey {
+    fn read(var: String, keys: KeySource<'_>) -> ProfileKey {
+        let KeySource::Lookup(lookup) = keys else {
+            return ProfileKey::Deferred;
+        };
         match lookup(&var) {
             Some(value) if !value.is_empty() => ProfileKey::Set(Token::new(value)),
             _ => ProfileKey::Unset { var },
         }
     }
 
-    pub fn token(&self) -> Result<&Token, MissingKey> {
+    pub fn token(&self) -> Option<&Token> {
         match self {
-            ProfileKey::Set(token) => Ok(token),
-            ProfileKey::Unset { var } => Err(MissingKey::Unset { var: var.clone() }),
+            ProfileKey::Set(token) => Some(token),
+            ProfileKey::Unset { .. } | ProfileKey::Deferred => None,
+        }
+    }
+
+    /// Why this key cannot serve a consult. A deferred key is not missing: its
+    /// configuration never serves one.
+    pub fn missing(&self) -> Option<MissingKey> {
+        match self {
+            ProfileKey::Unset { var } => Some(MissingKey::Unset { var: var.clone() }),
+            ProfileKey::Set(_) | ProfileKey::Deferred => None,
         }
     }
 }
@@ -557,8 +596,16 @@ pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     pub url: String,
-    pub token: Option<Token>,
+    pub token: Option<EndpointToken>,
     host: EndpointHost,
+}
+
+/// The bearer token an endpoint names. A deferred one was never asked for: its
+/// configuration only validates, and no request carries it.
+#[derive(Debug, Clone)]
+pub enum EndpointToken {
+    Set(Token),
+    Deferred,
 }
 
 /// Where an endpoint's host is. A request to `Loopback` must not leave this
@@ -573,7 +620,7 @@ pub enum EndpointHost {
 impl Endpoint {
     /// The endpoint at `url`. The host is derived here rather than taken from the
     /// caller, so no endpoint can name a reach that disagrees with its own URL.
-    pub fn new(url: String, token: Option<Token>) -> Endpoint {
+    pub fn new(url: String, token: Option<EndpointToken>) -> Endpoint {
         // An unparsable URL never reaches this far — `validated_url` refuses it — and a
         // request to one fails anyway. Withholding the proxy is the safe reading of it.
         let remote = reqwest::Url::parse(&url).is_ok_and(|parsed| !is_loopback(&parsed));
@@ -1152,7 +1199,7 @@ impl Config {
             file_tracking,
             origins,
             included_batteries.into_iter().collect(),
-            |var| std::env::var(var).ok(),
+            KeySource::Lookup(&|var| std::env::var(var).ok()),
         )
     }
 
@@ -1193,7 +1240,7 @@ impl Config {
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         let document = hosted_root(root, IncludeAdmission::Refused)?;
-        Config::compose_hosted(document, batteries, defaults, lookup)
+        Config::compose_hosted(document, batteries, defaults, KeySource::Lookup(&lookup))
     }
 
     /// [`Config::hosted_composed`] where the root document's own `include` list says which
@@ -1210,6 +1257,26 @@ impl Config {
         resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
+        Config::include_hosted(root, defaults, resolve, KeySource::Lookup(&lookup))
+    }
+
+    /// [`Config::hosted_included`] without the secrets the document names: every check that
+    /// does not need a secret's value runs, and the configuration only validates
+    /// ([`crate::api::Runtime::check_hosted`]). Every open path refuses it.
+    pub fn hosted_included_deferred<'a>(
+        root: &str,
+        defaults: HostDefaults,
+        resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
+    ) -> Result<Config, ConfigError> {
+        Config::include_hosted(root, defaults, resolve, KeySource::Deferred)
+    }
+
+    fn include_hosted<'a>(
+        root: &str,
+        defaults: HostDefaults,
+        resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
+        keys: KeySource<'_>,
+    ) -> Result<Config, ConfigError> {
         let mut document = hosted_root(root, IncludeAdmission::Consumed)?;
         let entries = take_include(&mut document)?;
         let batteries = entries
@@ -1224,14 +1291,14 @@ impl Config {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Config::compose_hosted(document, &batteries, defaults, lookup)
+        Config::compose_hosted(document, &batteries, defaults, keys)
     }
 
     fn compose_hosted(
         mut document: toml::Value,
         batteries: &[HostedBattery<'_>],
         defaults: HostDefaults,
-        lookup: impl Fn(&str) -> Option<String>,
+        keys: KeySource<'_>,
     ) -> Result<Config, ConfigError> {
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
@@ -1302,8 +1369,12 @@ impl Config {
             None,
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
-            lookup,
+            keys,
         )
+    }
+
+    pub(crate) fn keys_deferred(&self) -> bool {
+        self.keys == Keys::Deferred
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
@@ -1377,7 +1448,7 @@ impl Config {
             file_tracking,
             origins,
             Vec::new(),
-            lookup,
+            KeySource::Lookup(&lookup),
         )
     }
 
@@ -1388,7 +1459,7 @@ impl Config {
         file_tracking: Option<FileTrackingConfig>,
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
-        lookup: impl Fn(&str) -> Option<String>,
+        keys: KeySource<'_>,
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
         let RawExternals {
@@ -1413,21 +1484,22 @@ impl Config {
         if max_body_bytes == 0 {
             return Err(ConfigError::ZeroByteCap);
         }
-        let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
+        let llm = llm.map(|raw| resolve_llm(raw, keys)).transpose()?;
         let jev = jev
             .map(|raw| {
                 resolve_jev(
                     raw,
                     Duration::from_millis(timeout_ms),
-                    &lookup,
+                    keys,
                     std::env::var(JEV_URL_VARIABLE).ok(),
                 )
             })
             .transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
-            resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
+            resolve_bindings(section, entries, &origins, keys, llm.is_some())
         };
         Ok(Config {
+            keys: keys.keys(),
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
             server_aliases: raw.server_aliases,
             credentials: raw.credentials,
@@ -1445,7 +1517,7 @@ impl Config {
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
-                audience: resolve_audience_bindings(audience, &origins, &lookup)?,
+                audience: resolve_audience_bindings(audience, &origins, keys)?,
                 inputs: resolve(Section::Inputs, inputs)?
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
@@ -1937,12 +2009,12 @@ fn resolve_bindings(
     section: Section,
     raw: BTreeMap<String, RawBinding>,
     origins: &BTreeMap<String, PathBuf>,
-    lookup: &impl Fn(&str) -> Option<String>,
+    keys: KeySource<'_>,
     llm_configured: bool,
 ) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
         .map(|(name, entry)| {
-            let implementation = resolve_binding(section, &name, entry, origins, lookup, llm_configured)?;
+            let implementation = resolve_binding(section, &name, entry, origins, keys, llm_configured)?;
             Ok((name, implementation))
         })
         .collect()
@@ -1955,7 +2027,7 @@ fn resolve_binding(
     name: &str,
     entry: RawBinding,
     origins: &BTreeMap<String, PathBuf>,
-    lookup: &impl Fn(&str) -> Option<String>,
+    keys: KeySource<'_>,
     llm_configured: bool,
 ) -> Result<Implementation, ConfigError> {
     let RawBinding {
@@ -1967,7 +2039,7 @@ fn resolve_binding(
     match (url, builtin, command) {
         (Some(url), None, None) => {
             let url = validated_url(section.name(), name, url)?;
-            let token = resolve_token(section.name(), name, token_env, lookup)?;
+            let token = resolve_token(section.name(), name, token_env, keys)?;
             Ok(Implementation::Resolver(Endpoint::new(url, token)))
         }
         (None, Some(builtin), None) if token_env.is_none() => {
@@ -1997,7 +2069,7 @@ fn resolve_binding(
 fn resolve_audience_bindings(
     raw: BTreeMap<String, RawAudienceBinding>,
     origins: &BTreeMap<String, PathBuf>,
-    lookup: &impl Fn(&str) -> Option<String>,
+    keys: KeySource<'_>,
 ) -> Result<BTreeMap<String, AudienceBinding>, ConfigError> {
     let section = Section::Audience;
     let mut bindings = BTreeMap::new();
@@ -2019,7 +2091,7 @@ fn resolve_audience_bindings(
         let implementation = match (url, command, readers) {
             (Some(url), None, None) => {
                 let url = validated_url(section.name(), &name, url)?;
-                let token = resolve_token(section.name(), &name, token_env, lookup)?;
+                let token = resolve_token(section.name(), &name, token_env, keys)?;
                 AudienceImplementation::Resolver(Endpoint::new(url, token))
             }
             (None, Some(argv), None) => {
@@ -2189,7 +2261,7 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
 fn resolve_jev(
     raw: RawJev,
     shared_timeout: Duration,
-    lookup: &impl Fn(&str) -> Option<String>,
+    keys: KeySource<'_>,
     operator_url: Option<String>,
 ) -> Result<JevProfile, ConfigError> {
     let token_env = raw.token_env.ok_or(ConfigError::MissingJevKey)?;
@@ -2218,12 +2290,12 @@ fn resolve_jev(
     }
     Ok(JevProfile {
         url,
-        key: ProfileKey::read(token_env, lookup),
+        key: ProfileKey::read(token_env, keys),
         limits,
     })
 }
 
-fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<LlmProfile, ConfigError> {
+fn resolve_llm(raw: RawLlm, keys: KeySource<'_>) -> Result<LlmProfile, ConfigError> {
     const SECTION: &str = "llm";
     let provider = LlmProvider::parse(&raw.provider).ok_or_else(|| ConfigError::InvalidLlmProvider {
         provider: raw.provider.clone(),
@@ -2234,7 +2306,7 @@ fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<
         .token_env
         .map(|var| endpoint_token_variable(SECTION, SECTION, var))
         .transpose()?
-        .map(|var| ProfileKey::read(var, lookup));
+        .map(|var| ProfileKey::read(var, keys));
     Ok(LlmProfile {
         provider,
         model: raw.model,
@@ -2284,14 +2356,17 @@ fn resolve_token(
     section: &'static str,
     name: &str,
     token_env: Option<String>,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<Option<Token>, ConfigError> {
+    keys: KeySource<'_>,
+) -> Result<Option<EndpointToken>, ConfigError> {
     let Some(var) = token_env else {
         return Ok(None);
     };
     let var = endpoint_token_variable(section, name, var)?;
+    let KeySource::Lookup(lookup) = keys else {
+        return Ok(Some(EndpointToken::Deferred));
+    };
     match lookup(&var) {
-        Some(value) if !value.is_empty() => Ok(Some(Token::new(value))),
+        Some(value) if !value.is_empty() => Ok(Some(EndpointToken::Set(Token::new(value)))),
         _ => Err(ConfigError::MissingSecret {
             section,
             name: name.to_string(),
@@ -2630,7 +2705,9 @@ mod tests {
         let Some(AnnotatorImplementation::Resolver(annotator)) = config.externals.annotators.get("classifier") else {
             panic!("the named annotator endpoint is set")
         };
-        let token = annotator.token.as_ref().expect("the token resolved");
+        let Some(EndpointToken::Set(token)) = &annotator.token else {
+            panic!("the token resolved")
+        };
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
     }
@@ -2812,7 +2889,7 @@ mod tests {
         let llm = config.externals.llm.expect("the profile is set");
         assert_eq!(llm.url.as_deref(), Some("http://127.0.0.1:11434"));
         assert_eq!(
-            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
+            llm.key.as_ref().and_then(|key| key.token()).map(Token::reveal),
             Some("sekret")
         );
 
@@ -3627,6 +3704,35 @@ mod tests {
         );
     }
 
+    /// Without its keys, a hosted document keeps every refusal that needs no secret: a
+    /// battery still reads only the variables its host granted, and a granted token defers.
+    #[test]
+    fn a_deferred_hosted_document_keeps_its_refusals_and_defers_its_tokens() {
+        const ROOT: &str = "include = [\"batteries/github@sha256-3333/appa.toml\"]\n[policy]\nversion = 2\n";
+        let granting = |token_env: &'static [&'static str]| {
+            move |entry: &str| match entry {
+                "batteries/github@sha256-3333/appa.toml" => Ok(HostedBattery {
+                    name: "github",
+                    policy: GITHUB_BATTERY,
+                    token_env,
+                }),
+                _ => Err(IncludeResolution::Unknown),
+            }
+        };
+        assert!(matches!(
+            Config::hosted_included_deferred(ROOT, HOST_DEFAULTS, granting(&[])),
+            Err(ConfigError::UngrantedBatteryCredential { .. })
+        ));
+        let config =
+            Config::hosted_included_deferred(ROOT, HOST_DEFAULTS, granting(&["APPA_HOSTED_TEST_BRIDGE_TOKEN"]))
+                .expect("the granted battery validates without its key");
+        let Some(AnnotatorImplementation::Resolver(endpoint)) = config.externals.annotators.get("github.visibility")
+        else {
+            panic!("the battery binds its annotator to an endpoint")
+        };
+        assert!(matches!(endpoint.token, Some(EndpointToken::Deferred)));
+    }
+
     #[test]
     fn a_hosted_root_annotator_replaces_a_battery_default() {
         let root = "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"github.visibility\"\nranks = [\"trusted\"]\naudiences = []\nmarks = []\n";
@@ -3953,10 +4059,13 @@ mod tests {
         let Some(Implementation::Resolver(endpoint)) = config.externals.authorities.get("desk") else {
             panic!("desk is an endpoint")
         };
-        assert_eq!(endpoint.token.as_ref().map(Token::reveal), Some("sekret"));
+        let Some(EndpointToken::Set(token)) = &endpoint.token else {
+            panic!("the token resolved")
+        };
+        assert_eq!(token.reveal(), "sekret");
         let llm = config.externals.llm.as_ref().expect("the profile is set");
         assert_eq!(
-            llm.key.as_ref().and_then(|key| key.token().ok()).map(Token::reveal),
+            llm.key.as_ref().and_then(|key| key.token()).map(Token::reveal),
             Some("sekret")
         );
         assert_eq!(llm.limits.max_concurrent, 2);
@@ -4335,23 +4444,28 @@ mod tests {
             max_concurrent: None,
         };
         assert_eq!(
-            resolve_jev(raw(), Duration::from_secs(2), &jev_key, None)
+            resolve_jev(raw(), Duration::from_secs(2), KeySource::Lookup(&jev_key), None)
                 .expect("resolves")
                 .url,
             JEV_DEFAULT_URL
         );
         let local = "http://127.0.0.1:9/v1/systemone";
         assert_eq!(
-            resolve_jev(raw(), Duration::from_secs(2), &jev_key, Some(local.to_string()))
-                .expect("resolves")
-                .url,
+            resolve_jev(
+                raw(),
+                Duration::from_secs(2),
+                KeySource::Lookup(&jev_key),
+                Some(local.to_string())
+            )
+            .expect("resolves")
+            .url,
             local
         );
         assert!(matches!(
             resolve_jev(
                 raw(),
                 Duration::from_secs(2),
-                &jev_key,
+                KeySource::Lookup(&jev_key),
                 Some("http://jev.example/v1".to_string())
             ),
             Err(ConfigError::CleartextEndpoint { section: "jev", .. })

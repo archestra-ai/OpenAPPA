@@ -411,6 +411,8 @@ pub enum OpenError {
     ReservedTool(String),
     #[error("the adapter spells no name for the control tool, which every remedy tells the model to call")]
     UnspelledControlTool,
+    #[error("the configuration was parsed without its keys: it validates and never serves")]
+    KeysDeferred,
     #[error("the policy names tool {name} in {field}, which a served deployment cannot name: {detail}")]
     NonCanonicalTool {
         field: &'static str,
@@ -676,7 +678,22 @@ impl ToolNaming {
 }
 
 impl Deployment {
+    /// The deployment a configuration serves. A configuration parsed without its keys never
+    /// becomes one: [`Runtime::check_hosted`] is the only path that assembles it, and it
+    /// keeps nothing.
     fn load(
+        config: Config,
+        modules: &crate::builtins::ModuleRegistry,
+        gates: ConsultGates,
+        naming: ToolNaming,
+    ) -> Result<Deployment, OpenError> {
+        if config.keys_deferred() {
+            return Err(OpenError::KeysDeferred);
+        }
+        Deployment::assemble(config, modules, gates, naming)
+    }
+
+    fn assemble(
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
         gates: ConsultGates,
@@ -894,6 +911,9 @@ struct Prepared {
 
 impl Prepared {
     fn new(config: Config, modules: Option<PathBuf>, naming: ToolNaming) -> Result<Prepared, OpenError> {
+        if config.keys_deferred() {
+            return Err(OpenError::KeysDeferred);
+        }
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
@@ -1072,6 +1092,24 @@ impl Runtime {
         };
         vary(&mut inner);
         Runtime { inner: Arc::new(inner) }
+    }
+
+    /// Run every check an open over `modules` under `adapter` runs, without a store, a network
+    /// request or a deployment kept: for a host that validates a document it will serve later,
+    /// with or without its keys ([`Config::hosted_included_deferred`]).
+    pub fn check_hosted(config: Config, modules: Option<PathBuf>, adapter: Adapter) -> Result<(), OpenError> {
+        if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
+            return Err(OpenError::UnspelledControlTool);
+        }
+        let modules =
+            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        Deployment::assemble(
+            config,
+            &modules,
+            ConsultGates::per_runtime(),
+            ToolNaming::Canonical { adapter },
+        )
+        .map(drop)
     }
 
     /// Run the serving load checks without opening a store, making network requests,
@@ -3063,7 +3101,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         ),
         (
             AnnotatorBuiltin::Jev,
-            externals.jev.as_ref().and_then(|jev| jev.key.token().err()),
+            externals.jev.as_ref().and_then(|jev| jev.key.missing()),
         ),
     ] {
         let Some(missing) = missing else { continue };
@@ -3711,6 +3749,115 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let refused = refused.map(|(kind, name, builtin, missing)| (kind, name.to_string(), builtin, missing));
             assert_eq!(opened, refused, "{document}");
         }
+    }
+
+    /// A hosted document parsed without its keys.
+    fn deferred(document: &str) -> Config {
+        Config::hosted_included_deferred(
+            document,
+            HostDefaults {
+                consult_timeout: Duration::from_secs(30),
+                max_body_bytes: 65_536,
+            },
+            |_| Err(crate::config::IncludeResolution::Unknown),
+        )
+        .expect("the deferred document validates")
+    }
+
+    /// Without its keys, a document passes or fails every check an open runs but the keys':
+    /// a model profile whose key is unset validates, and whatever else an open refuses, the
+    /// check refuses.
+    #[test]
+    fn a_deferred_document_checks_as_its_open_would_but_for_the_keys() {
+        use crate::config::MissingKey;
+        const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
+        const LLM: &str = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n";
+        const LLM_KEYED: &str =
+            "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n";
+        const TOOL: &str = "[[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\n";
+        let annotator = |builtin: &str| {
+            format!(
+                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{builtin}\"\nranks = [\"suspicious\", \"trusted\"]\n"
+            )
+        };
+        let authority = |builtin: &str| {
+            format!(
+                "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
+                 [externals.authorities.judge]\nbuiltin = \"{builtin}\"\n"
+            )
+        };
+        let document = |policy: &str, externals: &str| format!("[policy]\nversion = 2\n{TOOL}{policy}\n{externals}");
+        let adapter = appa_adapter_claude_code::adapter();
+        let check = |document: &str| Runtime::check_hosted(deferred(document), None, adapter);
+
+        for keyed in [document(&annotator("jev"), JEV), document(&authority("llm"), LLM_KEYED)] {
+            assert!(
+                matches!(load(claude_config(&keyed)), Err(OpenError::ModelKeyMissing { .. })),
+                "{keyed}"
+            );
+            assert!(check(&keyed).is_ok(), "{keyed}");
+        }
+        assert!(matches!(
+            check(&document(&annotator("llm"), LLM)),
+            Err(OpenError::ModelKeyMissing {
+                missing: MissingKey::Undeclared { provider: "openai" },
+                ..
+            })
+        ));
+        assert!(matches!(
+            check(&document(&authority("lmm"), LLM_KEYED)),
+            Err(OpenError::Modules(_))
+        ));
+        assert!(matches!(
+            check(&document("[[policy.annotator]]\nname = \"classifier\"\n", "")),
+            Err(OpenError::UnboundExternal { kind: "annotator", .. })
+        ));
+        let unspelled = Adapter {
+            spell: |_| None,
+            ..adapter
+        };
+        assert!(matches!(
+            Runtime::check_hosted(deferred(&document("", "")), None, unspelled),
+            Err(OpenError::UnspelledControlTool)
+        ));
+    }
+
+    /// A document parsed without its keys never serves: every path that opens, reloads or
+    /// prepares a deployment refuses it before anything else.
+    #[test]
+    fn every_open_path_refuses_a_deferred_document() {
+        fn refused<T>(opened: Result<T, OpenError>) -> bool {
+            matches!(opened, Err(OpenError::KeysDeferred))
+        }
+        const DOCUMENT: &str = "[policy]\nversion = 2\n";
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let store = || Arc::new(LogStore::open(Backend::Memory).expect("the memory store opens"));
+        let adapter = appa_adapter_claude_code::adapter();
+
+        assert!(refused(Runtime::open(
+            deferred(DOCUMENT),
+            dir.path().join("appa.db"),
+            None
+        )));
+        assert!(refused(Runtime::open_in_memory(deferred(DOCUMENT), None)));
+        assert!(refused(Runtime::open_with_store(deferred(DOCUMENT), store(), None)));
+        assert!(refused(Runtime::open_with_store_as(
+            deferred(DOCUMENT),
+            store(),
+            None,
+            adapter
+        )));
+        #[cfg(feature = "daemon")]
+        assert!(refused(Runtime::open_served(
+            deferred(DOCUMENT),
+            dir.path().join("served.db"),
+            None,
+            adapter
+        )));
+        let runtime = Runtime::open_in_memory(claude_config(DOCUMENT), None).expect("the keyed document opens");
+        assert!(refused(runtime.reload(deferred(DOCUMENT))));
+        assert!(refused(runtime.prepare_deployment(deferred(DOCUMENT))));
+        assert!(refused(load(deferred(DOCUMENT))));
     }
 
     /// A runtime bounds each model builtin's consults by one gate, sized by the serving
