@@ -35,9 +35,11 @@ pub(super) fn perform(
     files: &FileTracking,
     workspace: &Path,
     call: &ProposedCall,
-    destination: &str,
-    inputs: &[appa_eventlog::files::PinnedSource],
+    pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
+    let appa_eventlog::files::PinnedBasis::Process { inputs, .. } = &pin.basis else {
+        return Err("the file reservation is not a process".into());
+    };
     let backend = files
         .process_backend
         .as_ref()
@@ -83,7 +85,7 @@ pub(super) fn perform(
     if response.result.exit_code != 0 {
         return Err(text);
     }
-    Entry::create(workspace, destination)
+    Entry::create(workspace, &pin.path)
         .and_then(|destination| publish(&job.path().join("output/result"), &destination, MAX_OUTPUT_BYTES))
         .map_err(|error| format!("isolated output not published: {error}"))?;
     Ok(text)

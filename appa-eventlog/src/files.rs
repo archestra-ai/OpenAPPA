@@ -116,17 +116,6 @@ impl PinnedVersion {
 }
 
 impl PinnedBasis {
-    fn operation(&self) -> FileOperation {
-        match self {
-            PinnedBasis::Read(_) => FileOperation::Read,
-            PinnedBasis::Replace(_) => FileOperation::Replace,
-            PinnedBasis::Edit(_) => FileOperation::Edit,
-            PinnedBasis::Copy { .. } => FileOperation::Copy,
-            PinnedBasis::Move { .. } => FileOperation::Move,
-            PinnedBasis::Process { .. } => FileOperation::Process,
-        }
-    }
-
     /// The version the destination held when the reservation was taken.
     fn predecessor(&self) -> Option<&PinnedVersion> {
         match self {
@@ -191,8 +180,6 @@ pub struct FileVersion {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileReceipt {
-    pub path: String,
-    pub operation: FileOperation,
     pub dispatch: DispatchId,
     pub source_label: Option<Label>,
     pub outcome: FileOutcome,
@@ -468,7 +455,6 @@ impl FileStore {
             output_label: output,
         } = reservation.bound.clone().ok_or(FileStoreError::UnknownReservation)?;
         let observed = Observed::of(&self.workspace, &pin)?;
-        let operation = pin.basis.operation();
         let source_label = match &pin.basis {
             PinnedBasis::Process { inputs, .. } => inputs
                 .iter()
@@ -493,9 +479,10 @@ impl FileStore {
                 PinnedBasis::Replace(_) => Some(vec![]),
                 PinnedBasis::Edit(version) => Some(vec![version.id]),
                 PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => {
-                    let source_after = match operation {
-                        FileOperation::Move => ABSENT,
-                        _ => source.version.digest.as_str(),
+                    let source_after = if matches!(pin.basis, PinnedBasis::Move { .. }) {
+                        ABSENT
+                    } else {
+                        source.version.digest.as_str()
                     };
                     if observed.source.as_deref() != Some(source_after) || observed.destination != source.version.digest
                     {
@@ -538,8 +525,6 @@ impl FileStore {
             FileOutcome::Succeeded { version }
         };
         let receipt = FileReceipt {
-            path: pin.path,
-            operation,
             dispatch,
             source_label,
             outcome,

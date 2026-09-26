@@ -268,7 +268,7 @@ pub(super) fn perform(
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
     match &pin.basis {
-        PinnedBasis::Process { inputs, .. } => process::perform(files, workspace, call, &pin.path, inputs),
+        PinnedBasis::Process { .. } => process::perform(files, workspace, call, pin),
         PinnedBasis::Read(_) => read(workspace, &pin.path).map_err(|error| error.to_string()),
         PinnedBasis::Replace(_) => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
