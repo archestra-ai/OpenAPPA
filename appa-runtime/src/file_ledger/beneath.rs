@@ -4,13 +4,16 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
+#[cfg(feature = "daemon")]
+use std::io::Read;
 use std::path::{Component, Path};
 
 pub(crate) use imp::Entry;
 
 enum Parents {
     Existing,
+    #[cfg(feature = "daemon")]
     Create,
 }
 
@@ -30,6 +33,7 @@ impl Entry {
     }
 
     /// The entry, creating its missing parent directories.
+    #[cfg(feature = "daemon")]
     pub(crate) fn create(workspace: &Path, relative: &str) -> io::Result<Self> {
         walk(workspace, relative, Parents::Create)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
@@ -55,8 +59,11 @@ fn components(relative: &str) -> io::Result<(Vec<&std::ffi::OsStr>, OsString)> {
 #[cfg(unix)]
 mod imp {
     use super::*;
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    #[cfg(feature = "daemon")]
+    use rustix::fs::AtFlags;
+    use rustix::fs::{Mode, OFlags};
     use rustix::io::Errno;
+    #[cfg(feature = "daemon")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// The last component of a workspace-relative path, held through its opened parent directory.
@@ -80,6 +87,7 @@ mod imp {
             ) {
                 (Ok(next), _) => next,
                 (Err(Errno::NOENT), Parents::Existing) => return Ok(None),
+                #[cfg(feature = "daemon")]
                 (Err(Errno::NOENT), Parents::Create) => {
                     match rustix::fs::mkdirat(&parent, directory, Mode::from_raw_mode(0o777)) {
                         Ok(()) | Err(Errno::EXIST) => {}
@@ -105,6 +113,7 @@ mod imp {
         }
 
         /// Replace this entry with `content`: staged beside it, synced, then renamed over it.
+        #[cfg(feature = "daemon")]
         pub(crate) fn publish(&self, content: &mut impl Read) -> io::Result<()> {
             let (staged, mut file) = self.stage()?;
             let written = io::copy(content, &mut file)
@@ -119,11 +128,13 @@ mod imp {
         }
 
         /// Move this entry to `destination`, replacing what is there.
+        #[cfg(feature = "daemon")]
         pub(crate) fn rename_to(&self, destination: &Entry) -> io::Result<()> {
             rustix::fs::renameat(&self.parent, &self.name, &destination.parent, &destination.name)
                 .map_err(io::Error::from)
         }
 
+        #[cfg(feature = "daemon")]
         fn stage(&self) -> io::Result<(OsString, File)> {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -160,10 +171,12 @@ mod imp {
             match self.0 {}
         }
 
+        #[cfg(feature = "daemon")]
         pub(crate) fn publish(&self, _: &mut impl Read) -> io::Result<()> {
             match self.0 {}
         }
 
+        #[cfg(feature = "daemon")]
         pub(crate) fn rename_to(&self, _: &Entry) -> io::Result<()> {
             match self.0 {}
         }

@@ -556,6 +556,7 @@ impl FileStore {
     /// The pin a live reservation holds for this exact call, if it holds one. What an
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
+    #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
         let state = self.lock();
         Ok(state
