@@ -571,7 +571,7 @@ impl FileStore {
         &self.workspace
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
         let state = self.lock();
