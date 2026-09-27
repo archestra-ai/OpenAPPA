@@ -159,15 +159,15 @@ An approved agent report exports `appa.yell.report` after APPA prepares the filt
 
 By default, the full filtered report goes only to the receiver configured by `APPA_YELL_ENDPOINT`. CLI report previews and CLI reports do not enter OTLP export.
 
-### Send the same diagnostic report to Grafana
+### Send diagnostic reports to Grafana
 
-This option works with any OTLP log provider. For Grafana Cloud, configure its OTLP endpoint and credentials, then set this variable on the runtime:
+With Grafana Cloud's OTLP endpoint and credentials configured, enable report export:
 
 ```sh
 export APPA_OTEL_YELL_SNAPSHOT=true
 ```
 
-Restart the runtime. Future approved agent yells also export the finished diagnostic report to Loki, even if delivery to the report receiver fails. Existing reports are not backfilled. The report receiver remains unchanged.
+Restart the runtime to send new approved agent reports to Loki as well as the report receiver. Other OTLP log providers work too.
 
 This is a diagnostic report, not conversation replay. The existing filtering rules remove message bodies, argument values, and tool result bodies. The report retains the free-form yell message and filtered policy and trajectory diagnostics. It respects the call's `with_trajectory` choice and the report builder's size limits and omission markers.
 
