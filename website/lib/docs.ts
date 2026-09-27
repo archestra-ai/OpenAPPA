@@ -42,6 +42,11 @@ export interface TocItem {
   proposal?: true;
 }
 
+/** A `##`/`###` heading with the markdown that follows it, up to the next heading. */
+export interface DocSection extends TocItem {
+  body: string;
+}
+
 export interface DocCategory {
   name: string;
   docs: DocPage[];
@@ -192,18 +197,31 @@ export function getDocsByCategory(): DocCategory[] {
   return categories;
 }
 
-export function generateTableOfContents(content: string): TocItem[] {
+/* The one walker over a page's headings. Heading ids come from the same
+   github-slugger rules rehype-slug applies when the page renders, so an id
+   here is a real anchor on the page. The table of contents and the search
+   index both derive from it, so they cannot disagree about which sections a
+   page has. */
+export function generateSections(content: string): DocSection[] {
   const slugger = new GithubSlugger();
-  const items: TocItem[] = [];
+  const items: DocSection[] = [];
   let inCodeBlock = false;
   let inProposal = false;
   let inHeader = false;
+  const append = (line: string) => {
+    const current = items[items.length - 1];
+    if (current && !current.proposal) current.body += `${line}\n`;
+  };
   for (const line of content.split("\n")) {
     if (line.trimStart().startsWith("```")) {
       inCodeBlock = !inCodeBlock;
+      append(line);
       continue;
     }
-    if (inCodeBlock) continue;
+    if (inCodeBlock) {
+      append(line);
+      continue;
+    }
 
     /* A proposal contributes its own name and nothing else: the headings
        inside it structure the proposal, not the page. */
@@ -213,7 +231,7 @@ export function generateTableOfContents(content: string): TocItem[] {
       else if (inHeader) {
         const name = /^name\s*:\s*(.+)$/.exec(line.trim());
         if (name) {
-          items.push({ id: proposalSlug(name[1]), text: name[1].trim(), level: 3, proposal: true });
+          items.push({ id: proposalSlug(name[1]), text: name[1].trim(), level: 3, proposal: true, body: "" });
         }
       }
       continue;
@@ -225,13 +243,21 @@ export function generateTableOfContents(content: string): TocItem[] {
     }
 
     const match = line.match(/^(#{2,3})\s+(.+)$/);
-    if (!match) continue;
+    if (!match) {
+      append(line);
+      continue;
+    }
     const text = match[2].replace(/`/g, "").trim();
     items.push({
       id: slugger.slug(text),
       text,
       level: match[1].length as 2 | 3,
+      body: "",
     });
   }
   return items;
+}
+
+export function generateTableOfContents(content: string): TocItem[] {
+  return generateSections(content).map(({ body: _body, ...item }) => item);
 }

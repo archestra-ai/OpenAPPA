@@ -2,8 +2,7 @@ import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
 import { getMcpDoc, getMcpDocs, searchMcpDocs } from "@/lib/mcp-content";
-import { GLOSSARY_TERMS } from "@/lib/search";
-import { termDefinition } from "@/lib/terms";
+import { TERM_NAMES, termDefinition } from "@/lib/terms";
 
 /* Auth-less MCP server exposing the OpenAPPA documentation over streamable
    HTTP at /mcp. Content is the same markdown the site renders (lib/docs.ts),
@@ -97,7 +96,7 @@ const handler = createMcpHandler(
       async ({ term }) => {
         const definition = termDefinition(term.trim());
         if (definition) return text(`${term.trim()}: ${definition}`);
-        const known = GLOSSARY_TERMS.join(", ");
+        const known = TERM_NAMES.join(", ");
         return text(`No glossary entry for "${term}". Known terms: ${known}.`);
       },
     );

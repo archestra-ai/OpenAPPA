@@ -3,6 +3,12 @@ import path from "path";
 
 import GithubSlugger from "github-slugger";
 
+import {
+  BATTERY_REVIEW_CHECKLIST,
+  BENCHMARK_HIGHLIGHT,
+  CLAUDE_POLICY_TIMING,
+  CLAUDE_SESSION_CHOICE,
+} from "@/lib/directive-content";
 import { getAllDocs, type DocPage } from "@/lib/docs";
 
 /* Content backing the MCP server (app/mcp/route.ts) and /llms.txt: read from
@@ -12,9 +18,15 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
    catalog: only pages that appear in it (title + category frontmatter) are
    served. */
 
-const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
-  "battery-catalog":
-    "- [Slack](/battery-slack) — rules for 19 Slack tools, with audiences from Slack channels, users, and groups; Slack Connect conversations are untrusted.\n- [Claude Code tools](/battery-claude-code) — rules for Claude Code's Bash and Read tools.\n- [GitHub](/battery-github) — rules for 44 repository, issue, pull request, and user tools; each repository's visibility decides its readers.\n- [Linear](/battery-linear) — rules for 65 tools with per-issue, per-team, and per-project audiences, and reviewed writes.\n- [Grain](/battery-grain) — rules for 49 meeting, transcript, deal, and admin tools.\n- [Google Workspace](/battery-google-workspace) — uses your Workspace directory and groups to build audiences.\n- [Sentry](/battery-sentry) — rules for 9 listed and 55 catalog tools, internal reads, and reviewed writes.\n- [Notion](/battery-notion) — rules for 36 tools; reads are internal because Notion exposes no page permissions.\n- [Microsoft Learn](/battery-microsoft-learn) — rules for 3 read-only documentation tools; queries must be sharable with public.\n- [Cloudflare](/battery-cloudflare) — rules for the documentation and Workers Observability servers; public documentation reads, internal logs and Workers, no writes.\n- [LaunchDarkly](/battery-launchdarkly) — rules for 20 flag, environment, AI Config, and audit tools; every write is reviewed.\n- [PostHog](/battery-posthog) — rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.\n- [PagerDuty](/battery-pagerduty) — rules for 18 incident, schedule, team, and status page tools; internal reads and every write reviewed.\n- [Hugging Face](/battery-huggingface) — rules for 11 account, search, repository, Space, job, and sandbox tools; each repository's Hub visibility decides its readers.\n- [Databricks](/battery-databricks) — rules for the Genie One and Databricks SQL managed servers; internal reads, every SQL statement classified before it runs.\n- [xmemory](/battery-xmemory) — rules for 32 instance and admin tools; internal reads, writes from trusted input only, reviewed schema migrations and deletions.\n- [Add your own](/write-a-battery) — create and submit policy for an MCP server.",
+/* Text stand-ins for the :::name::: directives. Content-bearing directives
+   render from the same data the site's components use
+   (lib/directive-content.ts) or from the docs themselves; figures get a
+   one-line description; purely decorative blocks render as nothing. An
+   unknown directive also renders as nothing. */
+
+const FIGURE_DESCRIPTIONS: Record<string, string> = {
+  "battery-rule-order":
+    "[Figure: root rules run first, followed by each included battery. Rules in every file run from top to bottom.]",
   "fig-claude-code-hooks":
     "[Animated figure: a protected Claude Code session sends each hook event to OpenAPPA; one tool call comes back allowed, one comes back blocked with safer options.]",
   "fig-connected-agent":
@@ -29,14 +41,56 @@ const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
     "[Animated figure: labels fold as the agent reads — audience intersects, trust takes the minimum.]",
   "fig-negotiation":
     "[Animated figure: a blocked flow comes back with remedy plans; the agent picks one and completes the task.]",
+  "fig-policy-stack":
+    "[Figure: a stack of OpenAPPA policy TOML files applied to coding agents, LLM proxies, MCP gateways, MCP servers, and agents in production.]",
   "fig-remedy-plan":
     "[Animated figure: the engine enumerates remedy plans — approval, sanitization, narrowing — for a blocked call.]",
+  "fig-runtime-overview":
+    "[Figure: the agent harness intercepts lifecycle events via middleware, callbacks, or plugins and sends them to the OpenAPPA runtime at POST /hook. Inside the runtime, an adapter decodes the event and the policy engine evaluates security rules to return a decision. Remediation runs through the runtime MCP service.]",
   "fig-two-endings":
     "[Animated figure: two runs of the same trajectory reach the same verdict — determinism across runs.]",
 };
 
-function stripDirectives(markdown: string): string {
-  return markdown.replace(/^:::([a-z-]+):::$/gm, (_, name: string) => DIRECTIVE_DESCRIPTIONS[name] ?? "");
+/** The battery pages are the ones with a breadcrumb, in sidebar order. */
+function batteryCatalog(docs: DocPage[]): string {
+  const lines = docs
+    .filter((doc) => doc.breadcrumb)
+    .map((doc) => `- [${doc.breadcrumb}](${docUrl(doc.slug)}) — ${doc.description}`);
+  lines.push("- [Add your own](/write-a-battery) — create and submit policy for an MCP server.");
+  return lines.join("\n");
+}
+
+function directiveText(name: string, docs: DocPage[]): string {
+  switch (name) {
+    case "battery-catalog":
+      return batteryCatalog(docs);
+    case "battery-review-checklist":
+      return [
+        `**${BATTERY_REVIEW_CHECKLIST.summary}** ${BATTERY_REVIEW_CHECKLIST.intro}`,
+        "",
+        ...BATTERY_REVIEW_CHECKLIST.items.map((item) => `- ${item}`),
+      ].join("\n");
+    case "benchmark-highlight":
+      return [
+        ...BENCHMARK_HIGHLIGHT.charts.flatMap((chart) => [
+          `**${chart.title}**`,
+          "",
+          ...chart.rows.map((row) => `- ${row.name}: ${row.pct}%`),
+          "",
+        ]),
+        `[${BENCHMARK_HIGHLIGHT.link.label}](${BENCHMARK_HIGHLIGHT.link.href})`,
+      ].join("\n");
+    case "claude-policy-timing":
+      return `${CLAUDE_POLICY_TIMING.duration} ${CLAUDE_POLICY_TIMING.durationNote}. ${CLAUDE_POLICY_TIMING.lead} **${CLAUDE_POLICY_TIMING.emphasis}** ${CLAUDE_POLICY_TIMING.rest}`;
+    case "claude-session-choice":
+      return CLAUDE_SESSION_CHOICE.map((option) => `- \`${option.command}\` — ${option.title}. ${option.note}`).join("\n");
+    default:
+      return FIGURE_DESCRIPTIONS[name] ?? "";
+  }
+}
+
+function stripDirectives(markdown: string, docs: DocPage[]): string {
+  return markdown.replace(/^:::([a-z0-9-]+):::$/gm, (_, name: string) => directiveText(name, docs));
 }
 
 export interface DocSection {
@@ -87,22 +141,21 @@ function splitSections(markdown: string): { intro: string; sections: DocSection[
 }
 
 export function getMcpDocs(): McpDoc[] {
-  return getAllDocs()
-    .filter((doc: DocPage) => Boolean(doc.title) && Boolean(doc.category))
-    .map((doc: DocPage) => {
-      const markdown =
-        stripDirectives(doc.content).trim() || "*This page is under construction; its content has not been written yet.*";
-      const { sections } = splitSections(markdown);
-      return {
-        slug: doc.slug,
-        title: doc.title,
-        description: doc.description,
-        category: doc.category,
-        url: docUrl(doc.slug),
-        markdown,
-        sections,
-      };
-    });
+  const docs = getAllDocs().filter((doc: DocPage) => Boolean(doc.title) && Boolean(doc.category));
+  return docs.map((doc: DocPage) => {
+    const markdown =
+      stripDirectives(doc.content, docs).trim() || "*This page is under construction; its content has not been written yet.*";
+    const { sections } = splitSections(markdown);
+    return {
+      slug: doc.slug,
+      title: doc.title,
+      description: doc.description,
+      category: doc.category,
+      url: docUrl(doc.slug),
+      markdown,
+      sections,
+    };
+  });
 }
 
 export function getMcpDoc(slug: string): McpDoc | undefined {

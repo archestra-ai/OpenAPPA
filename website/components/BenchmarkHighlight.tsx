@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { BENCHMARK_HIGHLIGHT } from "@/lib/directive-content";
+
 interface BenchRowProps {
   name: string;
   pct: number;
@@ -23,27 +25,18 @@ export function BenchmarkHighlight() {
   return (
     <section className="bench-panel" aria-label="Benchmark results">
       <div className="bench-charts">
-        <figure className="bench-chart">
-          <figcaption className="bench-chart-title">
-            Task completion
-          </figcaption>
-          <BenchRow name="OpenAPPA" pct={89} isSubject />
-          <BenchRow name="Claude Auto mode" pct={90} />
-          <BenchRow name="FIDES (Microsoft)" pct={41} />
-        </figure>
-
-        <figure className="bench-chart">
-          <figcaption className="bench-chart-title">
-            Attacks that succeeded
-          </figcaption>
-          <BenchRow name="OpenAPPA" pct={0} isSubject />
-          <BenchRow name="Claude Auto mode" pct={10} />
-          <BenchRow name="FIDES (Microsoft)" pct={31} />
-        </figure>
+        {BENCHMARK_HIGHLIGHT.charts.map((chart) => (
+          <figure className="bench-chart" key={chart.title}>
+            <figcaption className="bench-chart-title">{chart.title}</figcaption>
+            {chart.rows.map((row) => (
+              <BenchRow isSubject={"subject" in row && row.subject} key={row.name} name={row.name} pct={row.pct} />
+            ))}
+          </figure>
+        ))}
       </div>
 
-      <Link className="bench-panel-link" href="/evaluation">
-        Read the full benchmark results →
+      <Link className="bench-panel-link" href={BENCHMARK_HIGHLIGHT.link.href}>
+        {BENCHMARK_HIGHLIGHT.link.label} →
       </Link>
     </section>
   );
