@@ -57,7 +57,7 @@ from appa_kagent_adk import entrypoint  # noqa: E402
 from appa_kagent_adk.gates import MEMORY_PERSIST_TOOL, gate_memory_persist  # noqa: E402
 from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
-from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
+from appa_kagent_adk.wire import RESERVED_TOOL, YELL_TOOL  # noqa: E402
 
 ACK = {"protocol": 1, "decision": "ack"}
 ALLOW = {"protocol": 1, "decision": "allow_call"}
@@ -290,7 +290,7 @@ def test_the_gated_startup_builds_the_stock_agent_and_appends_the_plugin_last(
     assert gated.tools[-2].sources == ()
     reserved = gated.tools[-1]
     assert isinstance(reserved, McpToolset)
-    assert reserved.tool_filter == [RESERVED_TOOL]
+    assert reserved.tool_filter == [RESERVED_TOOL, YELL_TOOL]
 
     assert gated.name == stock.name
     assert gated.description == stock.description

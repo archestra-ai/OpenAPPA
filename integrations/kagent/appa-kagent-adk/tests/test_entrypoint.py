@@ -30,7 +30,7 @@ from appa_kagent_adk.config_guard import ConfigRefused  # noqa: E402
 from appa_kagent_adk.gates import GatedCodeExecutor  # noqa: E402
 from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
-from appa_kagent_adk.wire import RESERVED_TOOL, RUNTIME_TOOLS  # noqa: E402
+from appa_kagent_adk.wire import RESERVED_TOOL, RUNTIME_TOOLS, YELL_TOOL  # noqa: E402
 
 RUNTIME_URL = "http://127.0.0.1:8787"
 
@@ -208,10 +208,11 @@ def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(confi
     entrypoint.build_server(config_dir({**CONFIG, "execute_code": True}), RUNTIME_URL)
     app = built_apps[-1]
 
+    assert app.plugins[-1]._inventory.spelling(YELL_TOOL) == "mcp:appa/yell"
     agent = app.root_agent_factory()
     assert isinstance(agent.code_executor, GatedCodeExecutor), "the sandboxed executor runs behind the gate"
     reserved = agent.tools[-1]
-    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL], (
+    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL, YELL_TOOL], (
         "the reserved toolset is appended last"
     )
     assert reserved._connection_params.timeout == entrypoint.REMEDY_CALL_TIMEOUT_SECONDS, (
@@ -474,9 +475,9 @@ def test_the_gated_mode_serves_the_gated_construction(config_dir, monkeypatch, b
     app = built_apps[-1]
     assert isinstance(app.plugins[-1], AppaPluginKagent), "the gate is the last plugin"
     reserved = app.root_agent_factory().tools[-1]
-    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL]
+    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL, YELL_TOOL]
 
-    # The plain config spells two names: the always builtin and the reserved tool.
+    # The plain config includes the builtin, remedy, and diagnostic tools.
     inventory = ToolInventory.from_config(CONFIG, environ={})
     assert entrypoint_lines(caplog) == [
         entrypoint.GATED_STARTUP % RUNTIME_URL,

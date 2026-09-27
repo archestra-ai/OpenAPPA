@@ -129,6 +129,10 @@ kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 
 Open [http://localhost:8080](http://localhost:8080), select **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**, and try the demonstration scenarios below.
 
+OpenAPPA protects `cluster-ops` in the background. It does not appear as a separate agent or status panel. Policy refusals, remedy calls, and approval requests appear in the conversation.
+
+The adapter adds runtime tools such as `execute_remedy_plan` at startup. These tools do not appear in the **Tools & Agents** sidebar. `appa-guide`, when installed, is a separate agent for configuring protection.
+
 ## Demonstration scenarios
 
 The `cluster-ops` chat history contains five pre-recorded runs, one for each scenario below. The dynamic input rules chat includes both runbook prompts. Other demo agents have no pre-seeded chats. Inspect these runs, or start a new chat to test the prompts live:

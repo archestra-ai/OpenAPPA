@@ -53,7 +53,7 @@ from .config_guard import ConfigRefused
 from .identity import SessionIdentity
 from .inventory import ToolInventory, guide_enabled
 from .plugin import AppaPluginKagent
-from .wire import RESERVED_TOOL, RUNTIME_TOOLS
+from .wire import RESERVED_TOOL, RUNTIME_TOOLS, YELL_TOOL
 
 logger = logging.getLogger("appa_kagent_adk.entrypoint")
 
@@ -272,7 +272,9 @@ def build_server(filepath: str, runtime_url: str):
         {
             name: spelling
             for name, spelling in inventory.spellings.items()
-            if not spelling.startswith("mcp:") or spelling.startswith("mcp:appa-guide/")
+            if not spelling.startswith("mcp:")
+            or spelling.startswith("mcp:appa-guide/")
+            or spelling == "mcp:appa/yell"
         }
     )
     plugin = AppaPluginKagent(runtime_url, inventory=base_inventory, identity=identity)
@@ -307,7 +309,7 @@ def build_server(filepath: str, runtime_url: str):
 
 
 def _runtime_toolset(runtime_url: str):
-    """The remedy-only toolset, or appa-guide's isolated management set.
+    """The remedy and diagnostic tools, or appa-guide's isolated management set.
 
     The agent executes the offered remedies on its own. A blocked call
     answers with the offers, the model chooses one (steered by its
@@ -325,7 +327,7 @@ def _runtime_toolset(runtime_url: str):
 
     guide = guide_enabled()
     endpoint = runtime_url.rstrip("/") + "/mcp"
-    tools = [RESERVED_TOOL]
+    tools = [RESERVED_TOOL, YELL_TOOL]
     if guide:
         endpoint = os.environ.get("APPA_GUIDE_MCP_URL", "").strip()
         if not endpoint:

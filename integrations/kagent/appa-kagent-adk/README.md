@@ -46,6 +46,31 @@ spelling its inventory gives it (`inventory.py`), and the shared
 fixtures in [`../fixtures/`](../fixtures/) hold the python and Go
 plugins to one spelling.
 
+## Agent diagnostic reports
+
+The gated Python agent exposes the runtime's `yell` tool when the runtime enables agent reporting.
+Add these entries to the runtime's policy file:
+
+```toml
+[reporting]
+agent_yell = true
+
+[[policy.tool]]
+name = "mcp/appa/yell"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+```
+
+Restart the runtime and agent after changing reporting settings. Ask the agent to call
+`yell` with a message and `with_trajectory=true` to include its trajectory's decisions.
+The call uses the same policy gate as other tools. A trajectory without a public audience cannot send the report.
+The report contains filtered diagnostics, not the full conversation.
+
+On a runtime that supports diagnostic snapshots, set `APPA_OTEL_YELL_SNAPSHOT=true`
+alongside its OTLP configuration to export the same report to Grafana.
+
+## Tests
+
 One plugin codebase serves both locked ADK majors — google-adk 1.31.1
 (kagent v0.9.12) and 2.8.0 (the v0.10 line). CI runs the tests twice,
 with the commands below (`.github/workflows/ci.yml`, from the
