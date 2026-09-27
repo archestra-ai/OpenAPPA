@@ -287,16 +287,32 @@ else
   report PASS target-is-directory
 fi
 
-# On PATH, the installer points at the bare command rather than the full path.
+# The next command is the same either way; what changes is whether the receipt
+# first says the install directory cannot be reached. On PATH it must not.
 path_dir=$(case_dir on-path-hint)
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$path_dir" \
   PATH="$path_dir:$PATH" sh "$installer" \
   >"$work/on-path.out" 2>"$work/on-path.err" &&
-  grep -q '^Next: appa plugin install claude-code$' "$work/on-path.out"; then
+  grep -q '^ *appa plugin install claude-code$' "$work/on-path.out" &&
+  ! grep -q 'is not on your PATH' "$work/on-path.out"; then
   report PASS on-path-hint
 else
   cat "$work/on-path.out" "$work/on-path.err" >&2
   report FAIL on-path-hint
+fi
+
+# Off PATH, the same run names the directory that cannot be reached and the one
+# line that fixes it, so the next command is runnable rather than merely printed.
+off_dir=$(case_dir off-path-hint)
+if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$off_dir" \
+  sh "$installer" >"$work/off-path.out" 2>"$work/off-path.err" &&
+  grep -q 'is not on your PATH' "$work/off-path.out" &&
+  grep -q "^ *export PATH=\"$off_dir:\$PATH\"$" "$work/off-path.out" &&
+  grep -q '^ *appa plugin install claude-code$' "$work/off-path.out"; then
+  report PASS off-path-hint
+else
+  cat "$work/off-path.out" "$work/off-path.err" >&2
+  report FAIL off-path-hint
 fi
 
 # A PATH holding everything the installer needs except a digest tool.

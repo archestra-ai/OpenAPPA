@@ -22,6 +22,30 @@ fail() {
   exit 1
 }
 
+# Terminal dress, matching the vocabulary the Rust half prints: a mark in the
+# left margin, names in one column, commands set apart. One decision for the
+# whole run, and plain unless both streams are a terminal that has not asked to
+# go without escapes -- so a redirected stream never receives them.
+if [ -t 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+  dim=$(printf '\033[2m')
+  bold=$(printf '\033[1m')
+  green=$(printf '\033[1;32m')
+  cyan=$(printf '\033[1;36m')
+  off=$(printf '\033[0m')
+else
+  dim= bold= green= cyan= off=
+fi
+
+# Narration goes to stderr; the receipt to stdout, where a caller reads it.
+step() { printf '  %s·%s %s\n' "$dim" "$off" "$1" >&2; }
+installed() { printf '\n  %s✓%s %s%s%s\n\n' "$green" "$off" "$bold" "$1" "$off"; }
+field() { printf '  %s%-9s%s %s\n' "$cyan" "$1" "$off" "$2"; }
+note() { printf '\n  %s%s%s\n' "$dim" "$1" "$off"; }
+warn() { printf '\n  %s!%s %s\n' "$bold" "$off" "$1"; }
+# `~` for the home directory, as the Rust half prints paths.
+friendly() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
+
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 # The digest comes from the same host as the archive, so the transport must be
 # HTTPS, redirects included. Only appa-install-test.sh's loopback release is
@@ -106,7 +130,7 @@ trap 'cleanup; exit 130' INT HUP TERM
 # The list and the archive come from the same pinned release, never from
 # `latest`, so a release published mid-run cannot pair one with the other.
 release=$repository/releases/download/$tag
-printf 'Downloading appa %s for %s-%s\n' "$tag" "$architecture" "$platform" >&2
+step "$(printf 'downloading appa %s for %s-%s' "$tag" "$architecture" "$platform")"
 fetch -L -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
   fail "could not download $release/SHA256SUMS"
 fetch -L -o "$work/$archive" "$release/$archive" ||
@@ -157,11 +181,18 @@ install -m 755 "$work/extract/appa" "$staged" ||
   fail "could not write $staged"
 mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa"
 staged=
-printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
+installed "Installed $version"
+field Location "$(friendly "$install_dir/appa")"
 case :${PATH:-}: in
-  *":$install_dir:"*) printf 'Next: appa plugin install claude-code\n' ;;
+  *":$install_dir:"*) ;;
   *)
-    printf 'Add %s to PATH to run appa by name.\n' "$install_dir"
-    printf 'Next: "%s/appa" plugin install claude-code\n' "$install_dir"
+    # Naming the consequence first: a reader who stops here still knows why
+    # the next command would not be found, and the line to fix it once.
+    warn "$(friendly "$install_dir") is not on your PATH, so \`appa\` will not be found."
+    note 'Add it to your shell profile, then open a new shell:'
+    command_line "export PATH=\"$install_dir:\$PATH\""
     ;;
 esac
+note 'Next:'
+command_line 'appa plugin install claude-code'
+printf '\n'
