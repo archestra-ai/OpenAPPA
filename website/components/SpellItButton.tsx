@@ -13,6 +13,9 @@ export function SpellItButton() {
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [playing, setPlaying] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  // True from the confirming click until the browser starts playback: the
+  // clip is fetched on first play, so the button says so and takes no clicks.
+  const [loading, setLoading] = useState(false);
 
   // The song lives in lib/song and keeps playing when this page is left; a
   // button mounted while it plays shows the stop state straight away.
@@ -32,7 +35,8 @@ export function SpellItButton() {
     setConfirming(false);
   }
 
-  function toggle() {
+  async function toggle() {
+    if (loading) return;
     if (playing) {
       stopSong();
       return;
@@ -48,24 +52,34 @@ export function SpellItButton() {
       return;
     }
     clearConfirm();
-    void playSong();
+    setLoading(true);
+    try {
+      await playSong();
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const label = playing
-    ? "Stop singing OpenAPPA"
-    : confirming
-      ? "Confirm: play the OpenAPPA song"
-      : "Hear how OpenAPPA is sung";
+  const label = loading
+    ? "Loading the OpenAPPA song"
+    : playing
+      ? "Stop singing OpenAPPA"
+      : confirming
+        ? "Confirm: play the OpenAPPA song"
+        : "Hear how OpenAPPA is sung";
 
   return (
     <button
       type="button"
       className="spell-it"
-      onClick={toggle}
+      onClick={() => void toggle()}
       onBlur={clearConfirm}
+      disabled={loading}
       aria-label={label}
+      aria-busy={loading || undefined}
       data-speaking={playing || undefined}
       data-confirming={confirming || undefined}
+      data-loading={loading || undefined}
     >
       <svg
         viewBox="0 0 24 24"
@@ -85,7 +99,11 @@ export function SpellItButton() {
         )}
       </svg>
       <span className="spell-it-say">
-        {confirming ? "The song will play, are you sure?" : "How to sing “OpenAPPA”"}
+        {loading
+          ? "Loading..."
+          : confirming
+            ? "The song will play, are you sure?"
+            : "How to sing “OpenAPPA”"}
       </span>
     </button>
   );
