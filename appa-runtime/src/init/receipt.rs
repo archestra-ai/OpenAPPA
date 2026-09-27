@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use super::endpoint::RuntimeOutcome;
 use super::paths::friendly_path;
-pub(super) use crate::style::Style;
 use crate::style::Mark;
+pub(super) use crate::style::Style;
 
 /// What an activation decided, before any of it is words.
 ///

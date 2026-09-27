@@ -156,7 +156,10 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
             PackageKind::Plugin,
             &PackageName::parse(&args.name).map_err(|error| InstallError::Invalid(error.to_string()))?,
         );
-        step(Mark::Doing, &format!("verifying ownership and removing {} support", args.name));
+        step(
+            Mark::Doing,
+            &format!("verifying ownership and removing {} support", args.name),
+        );
         installation.commit_installation(Some(&before), &before, &selection)?;
         Ok((
             Some(Version::of(selection.generation())),
@@ -178,7 +181,10 @@ fn purge_plugin(args: PluginRemove) -> ExitCode {
                 "--purge removes the default deployment only; drop --config and unset APPA_CONFIG".into(),
             ));
         }
-        step(Mark::Doing, "removing claude-code support, stopping the runtime, deleting the deployment");
+        step(
+            Mark::Doing,
+            "removing claude-code support, stopping the runtime, deleting the deployment",
+        );
         let purge = crate::init::claude_code_purge().map_err(|error| InstallError::Invalid(error.to_string()))?;
         let runtime = match purge.runtime {
             crate::init::PurgedRuntime::Nothing => serde_json::json!({"state": "absent"}),
@@ -506,7 +512,10 @@ impl Source {
             return Ok(acquired);
         }
         if self.revision.is_some() || is_published_build() {
-            step(Mark::Doing, "resolving the published version and fetching its artifacts");
+            step(
+                Mark::Doing,
+                "resolving the published version and fetching its artifacts",
+            );
         }
         Acquired::own(self.revision.as_deref(), requirements)
     }
@@ -1555,8 +1564,9 @@ mod tests {
 
     #[test]
     fn an_empty_answer_is_yes_and_end_of_input_is_no() {
-        let ask =
-            |answer: &str| ask_agent_yell(Style::Plain, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads");
+        let ask = |answer: &str| {
+            ask_agent_yell(Style::Plain, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads")
+        };
         for accepted in ["\n", "y\n", "yes\n", "Y\n", " yes \n"] {
             assert_eq!(ask(accepted), AgentYell::On, "{accepted:?}");
         }

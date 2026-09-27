@@ -65,8 +65,7 @@ impl Style {
 
     /// Escapes only for a terminal that has not asked to go without them.
     fn of(is_terminal: bool) -> Self {
-        let refused =
-            env::var_os("NO_COLOR").is_some() || env::var_os("TERM").is_some_and(|term| term == "dumb");
+        let refused = env::var_os("NO_COLOR").is_some() || env::var_os("TERM").is_some_and(|term| term == "dumb");
         match is_terminal && !refused {
             true => Style::Colored,
             false => Style::Plain,
@@ -202,7 +201,8 @@ mod tests {
     /// two lines cannot be copied into a shell.
     #[test]
     fn commands_are_never_wrapped() {
-        let long = "appa plugin install claude-code --config /Users/someone/Library/Application Support/appa/appa.toml".to_owned();
+        let long = "appa plugin install claude-code --config /Users/someone/Library/Application Support/appa/appa.toml"
+            .to_owned();
 
         let rendered = Style::Plain.commands(std::slice::from_ref(&long));
 
@@ -241,4 +241,3 @@ mod tests {
         out
     }
 }
-
