@@ -92,6 +92,12 @@ pub(crate) async fn run_claude_code(
         .arg("--safe-mode")
         .arg("--setting-sources")
         .arg("")
+        // `--setting-sources ""` leaves out the settings files, not the user's global
+        // `~/.claude.json`. Its `verbose = true` turns `--output-format json` into the
+        // whole event list instead of the one result envelope parsed below, and every
+        // consult then ends malformed. The answer's shape is fixed here, not by the host.
+        .arg("--settings")
+        .arg(r#"{"verbose":false}"#)
         .arg("--disable-slash-commands")
         .arg("--tools")
         .arg("")
@@ -288,6 +294,25 @@ mod tests {
                 status: 1,
                 detail: None
             })
+        );
+    }
+
+    /// The CLI answers with its whole event list, not the one result envelope, when the
+    /// user's global config turns `verbose` on; the consult overrides it on every call,
+    /// so a host's personal setting never turns every answer malformed.
+    #[tokio::test]
+    async fn a_claude_consult_turns_verbose_output_off() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let script = r#"envelope='{"type":"result","structured_output":{"ruling":"approve"}}'
+verbose=true
+while [ $# -gt 0 ]; do
+  if [ "$1" = --settings ] && [ "$2" = '{"verbose":false}' ]; then verbose=false; fi
+  shift
+done
+if [ "$verbose" = true ]; then printf '[{"type":"system"},%s]' "$envelope"; else printf '%s' "$envelope"; fi"#;
+        assert_eq!(
+            fake_consult(dir.path(), script).await,
+            Ok(serde_json::json!({"ruling": "approve"}))
         );
     }
 
