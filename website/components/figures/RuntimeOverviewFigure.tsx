@@ -21,10 +21,9 @@ export function RuntimeOverviewFigure({ overview = false }: { overview?: boolean
         </defs>
 
         <g aria-hidden="true">
-          <g transform="translate(58 36)"><PixelMark size={48} /></g>
-          <g transform="translate(758 20)"><PixelMark size={72} /></g>
-          <g transform="translate(838 62)"><PixelMark size={24} /></g>
-          <path d="M735 32V44M729 38H741M849 24V36M843 30H855" className="rof-spark" />
+          <g transform="translate(710 20)"><PixelMark size={72} /></g>
+          <g transform="translate(790 62)"><PixelMark size={24} /></g>
+          <path d="M687 32V44M681 38H693M801 24V36M795 30H807" className="rof-spark" />
         </g>
 
         <text x="152" y="116" className="rof-title" textAnchor="middle">Agent</text>
