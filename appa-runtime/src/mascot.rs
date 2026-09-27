@@ -122,7 +122,9 @@ fn speech() -> [String; 4] {
 /// share a paint are written as one run.
 pub(crate) fn happy(style: Style) -> String {
     BEAST
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .map(|(row, pair)| {
             let (top, bottom) = (pair[0].as_bytes(), pair[1].as_bytes());
@@ -210,7 +212,7 @@ mod tests {
     /// never produce one.
     #[test]
     fn the_only_tone_the_grid_stacks_is_grey_under_body() {
-        for pair in BEAST.chunks_exact(2) {
+        for pair in BEAST.as_chunks::<2>().0 {
             let (top, bottom) = (pair[0].as_bytes(), pair[1].as_bytes());
             for x in 0..COLS {
                 if let (Some(over), Some(under)) = (tone(top[x]), tone(bottom[x]))
