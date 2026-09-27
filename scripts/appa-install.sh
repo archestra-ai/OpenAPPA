@@ -30,10 +30,12 @@ if [ -t 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; th
   dim=$(printf '\033[2m')
   bold=$(printf '\033[1m')
   green=$(printf '\033[1;32m')
-  cyan=$(printf '\033[1;36m')
   off=$(printf '\033[0m')
 else
-  dim= bold= green= cyan= off=
+  dim=''
+  bold=''
+  green=''
+  off=''
 fi
 
 # Narration goes to stderr; the receipt to stdout, where a caller reads it.
@@ -44,7 +46,6 @@ installed() { printf '\n  %s✓%s %s%s%s\n' "$green" "$off" "$bold" "$1" "$off";
 note() { printf '\n  %s\n' "$1"; }
 command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
 friendly() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
-command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 # The digest comes from the same host as the archive, so the transport must be
@@ -201,9 +202,13 @@ case :${PATH:-}: in
         add_to_path="fish_add_path $install_dir"
         ;;
       bash)
-        rc='~/.bashrc'
-        [ "$(uname -s)" != Darwin ] || rc='~/.bash_profile'
-        add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> $rc && source $rc"
+        # The tilde stays unexpanded on purpose: this is a line the reader
+        # pastes, and their shell expands it when they do.
+        if [ "$(uname -s)" = Darwin ]; then
+          add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.bash_profile && source ~/.bash_profile"
+        else
+          add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+        fi
         ;;
       zsh)
         add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
