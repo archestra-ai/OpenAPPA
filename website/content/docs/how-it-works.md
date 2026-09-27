@@ -159,10 +159,6 @@ The agent has three tools:
 - **`send_email`:** Send an email to a recipient.
 - **`file_github_issue`:** Create a public GitHub issue.
 
-Policies accept native names, such as Claude Code's `Bash` or kagent's `get_ticket`, and canonical names, `<family>/<namespace>/<tool>`. The agent keeps calling its normal names. APPA records canonical identities internally. An unqualified kagent rule applies across MCP servers; add `server` when a rule should apply to one connection. Discovery identifies tools without changing the opening policy. See [Tool names](/contracts#tool-names).
-
-Discovery is evidence, not permission. Known tools need policy coverage; an unreachable source remains unknown. The kagent plugin checks metadata before exposure and isolates invalid later additions. Every call still passes runtime enforcement. A trajectory keeps its opening policy and accepted tool identities across plugin restarts.
-
 The policy says:
 
 - CRM tickets are internal.
@@ -186,10 +182,3 @@ The agent has three options when reading the ticket:
 Suppose the agent takes the first option: it reads the original ticket and tries to email an external auditor at `auditor@external.com`. OpenAPPA blocks the email and offers human approval. If approved, that particular email is sent. Future external emails still need their own approval.
 
 The agent can still finish useful work with private data, but sharing it outside the company requires either cleaning it or obtaining permission.
-
-## Next steps
-
-- [Policy configuration](/contracts): Syntax and requirements for policy declarations and component services.
-- [How to add it to your agent](/add-to-agent): Integration guide, deployment models, and existing integrations.
-- [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
-- [OpenAPPA Paper](/paper): Formal information-flow model, theorems, and experimental methodology.

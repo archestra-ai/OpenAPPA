@@ -7,8 +7,7 @@ sidebar: false
 breadcrumb: monday
 ---
 
-The monday battery covers the 99 tools discovered from the hosted Platform
-MCP server at `https://mcp.monday.com/mcp`, version 1.0.0, on 2026-09-22.
+The monday battery covers the 99 tools of monday.com's hosted Platform MCP server.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/monday)
 and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/main/marketplace/batteries/monday/README.md#rules).
@@ -48,9 +47,9 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
 - **Returned credentials:** `connect_external_agent` returns a signing secret
   and API token. Its reviewed contract keeps input and output within `self`.
 
-The read actions of `manage_agent`, `manage_agent_triggers` and
+The read actions of `manage_agent`, `manage_agent_triggers`, and
 `manage_agent_knowledge` have separate contracts before their reviewed mutation
-fallbacks. There are no terminal blocks in the discovered inventory.
+fallbacks.
 
 ## Deployment
 
@@ -67,12 +66,3 @@ The Claude Code and kagent defaults provide a human authority for
 can omit audience expansion: reviewed internal read-to-write workflows still
 work, while external submissions remain refused. See the battery README for
 the authority configuration and complete limits.
-
-Future tool names follow the deployment's fallback policy. Provider error text
-is outside successful-output admission in the current host/runtime and is not
-sanitized by this battery. Installing it adds policy, not a connection or board
-permissions.
-
-The [offline replay](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/live-replays/monday)
-checks decisions using a fictional audience and simulated approvals. It does
-not call monday or verify provider effects.
