@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import gzip
 import http.server
 import json
 import os
@@ -75,6 +76,7 @@ class Captured:
     lock: threading.Lock = field(default_factory=threading.Lock)
     requests: list[tuple[str, dict[str, str], bytes]] = field(default_factory=list)
     annotation_requests: list[dict] = field(default_factory=list)
+    reports: list[bytes] = field(default_factory=list)
 
 
 class Receiver(http.server.BaseHTTPRequestHandler):
@@ -82,6 +84,14 @@ class Receiver(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", "0")))
+        if self.path == "/yell":
+            with self.state.lock:
+                self.state.reports.append(gzip.decompress(body))
+            # Capture the actual receiver payload but refuse delivery.
+            self.send_response(400)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
         if self.path == "/approve":
             payload = b'{"version":1,"answer":{"ruling":"approve"}}'
             self.send_response(200)
@@ -133,7 +143,8 @@ def free_port() -> int:
 
 def clean_env(**updates: str) -> dict[str, str]:
     env = {
-        key: value for key, value in os.environ.items() if not key.startswith("OTEL_")
+        key: value for key, value in os.environ.items()
+        if not key.startswith("OTEL_") and key != "APPA_OTEL_YELL_SNAPSHOT"
     }
     env.update(updates)
     return env
@@ -243,11 +254,12 @@ def exercise(
     *,
     graceful: bool,
     captured: Captured | None = None,
+    report_receiver: str = "http://127.0.0.1:1",
 ) -> dict[str, str]:
     port = free_port()
     url = f"http://127.0.0.1:{port}"
     env.update(
-        APPA_GATE="1", APPA_RUNTIME_URL=url, APPA_YELL_ENDPOINT="http://127.0.0.1:1"
+        APPA_GATE="1", APPA_RUNTIME_URL=url, APPA_YELL_ENDPOINT=report_receiver
     )
     log_path = root / "runtime.log"
     with log_path.open("w+") as log:
@@ -475,7 +487,7 @@ def decode(captured: Captured):
     return requests, resources, spans, logs, metrics
 
 
-def verify_telemetry(captured: Captured) -> None:
+def verify_telemetry(captured: Captured, *, snapshots: bool = False) -> None:
     requests, resources, spans, logs, metrics = decode(captured)
     for resource in resources:
         attrs = attributes(resource.attributes)
@@ -570,6 +582,31 @@ def verify_telemetry(captured: Captured) -> None:
         and reports[0]["appa.report.message"] == "Telemetry verification report"
     ), reports
     assert reports[0]["appa.report.id"] and reports[0]["appa.trajectory.root"]
+    chunks = [
+        (log, attrs) for log, attrs in log_attrs
+        if attrs["appa.event.name"] == "appa.yell.snapshot"
+    ]
+    if snapshots:
+        assert chunks, "opted-in diagnostic snapshot missing"
+        chunks.sort(key=lambda item: item[1]["appa.report.chunk.index"])
+        report_logs = [log for log, attrs in log_attrs if attrs["appa.event.name"] == "appa.yell.report"]
+        for index, (log, attrs) in enumerate(chunks):
+            assert attrs["appa.report.id"] == reports[0]["appa.report.id"]
+            assert attrs["appa.report.chunk.index"] == index
+            assert attrs["appa.report.chunk.count"] == len(chunks)
+            assert log.trace_id == report_logs[0].trace_id
+            assert log.span_id == report_logs[0].span_id
+            assert len(attrs["appa.report.chunk"].encode()) <= 16 * 1024
+        plain = "".join(attrs["appa.report.chunk"] for _, attrs in chunks)
+        assert len(plain.encode()) == chunks[0][1]["appa.report.bytes"]
+        with captured.lock:
+            assert captured.reports == [plain.encode()], "snapshot differs from receiver report"
+        report = json.loads(plain)
+        assert report["report_id"] == reports[0]["appa.report.id"]
+        assert report["message"] == "Telemetry verification report"
+        assert "Blocked" in plain and "blocked" in plain, "diagnostic decisions missing"
+    else:
+        assert not chunks, "snapshot exported without explicit opt-in"
     assert any(
         log.trace_id == span.trace_id
         and log.span_id == span.span_id
@@ -688,6 +725,22 @@ def main() -> None:
             )
             verify_telemetry(captured)
 
+            with captured.lock:
+                captured.requests.clear()
+                captured.annotation_requests.clear()
+            snapshot_root = root / "snapshot"
+            snapshot_root.mkdir()
+            write_config(snapshot_root / "appa.toml", f"http://127.0.0.1:{collector.server_port}")
+            snapshot = exercise(
+                binary, snapshot_root,
+                {**enabled_env, "APPA_OTEL_YELL_SNAPSHOT": "true"},
+                graceful=True, captured=captured,
+                report_receiver=f"http://127.0.0.1:{collector.server_port}/yell",
+            )
+            assert snapshot == enabled
+            verify_telemetry(captured, snapshots=True)
+            assert "agent report diagnostic snapshot" not in (snapshot_root / "runtime.log").read_text()
+
             disabled_root = root / "disabled"
             disabled_root.mkdir()
             write_config(
@@ -699,6 +752,7 @@ def main() -> None:
                 disabled_root,
                 clean_env(
                     OTEL_SDK_DISABLED="true",
+                    APPA_OTEL_YELL_SNAPSHOT="true",
                     OTEL_EXPORTER_OTLP_ENDPOINT=f"http://127.0.0.1:{collector.server_port}",
                     RUST_LOG="trace",
                 ),

@@ -12,7 +12,8 @@ pub(crate) struct Telemetry {
 impl Telemetry {
     pub(crate) fn init(level: &str) -> Self {
         let stderr = tracing_subscriber::fmt::layer()
-            .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)));
+            .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)))
+            .with_filter(filter_fn(|metadata| metadata.target() != "appa_yell_snapshot"));
         let providers = if configured() {
             match Self::providers() {
                 Ok(providers) => Some(providers),
@@ -33,8 +34,10 @@ impl Telemetry {
                 .with_filter(filter_fn(|metadata| metadata.target() == "appa_telemetry"))
         });
         let logs = providers.as_ref().map(|(_, logger, _)| {
-            OpenTelemetryTracingBridge::new(logger)
-                .with_filter(filter_fn(|metadata| metadata.target() == "appa_telemetry"))
+            let snapshots = std::env::var("APPA_OTEL_YELL_SNAPSHOT").is_ok_and(|value| value == "true");
+            OpenTelemetryTracingBridge::new(logger).with_filter(filter_fn(move |metadata| {
+                metadata.target() == "appa_telemetry" || (snapshots && metadata.target() == "appa_yell_snapshot")
+            }))
         });
         tracing_subscriber::registry()
             .with(stderr)

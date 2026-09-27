@@ -1597,19 +1597,22 @@ samp {
   white-space: nowrap;
 }
 
-/* One accent box spans the subject row of every chart. Each row draws its
-   own segment as an overlay so the columns stay put; side by side, the
-   segments open toward the gap and meet at its midpoint, so the two charts
-   read as one boxed line. Stacked, each row closes its own box. */
+/* One faint accent band spans the subject row of every chart. A fill, not
+   an outline: a bordered box reads as keyboard focus. Each row paints its
+   own segment behind its content so the columns stay put; side by side, the
+   segments extend into the gap and meet at its midpoint, so the two charts
+   read as one highlighted line. Stacked, each row closes its own band. */
 .bench-row.subject {
   position: relative;
+  isolation: isolate;
 }
 
 .bench-row.subject::before {
   content: "";
   position: absolute;
-  inset: -1px -7px;
-  border: 1px solid var(--accent);
+  inset: -3px -7px;
+  z-index: -1;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   border-radius: 3px;
   pointer-events: none;
 }
@@ -1617,13 +1620,11 @@ samp {
 @container (min-width: calc(30rem + 32px)) {
   .bench-chart:first-child .bench-row.subject::before {
     right: -16px;
-    border-right: 0;
     border-radius: 3px 0 0 3px;
   }
 
   .bench-chart:last-child .bench-row.subject::before {
     left: -16px;
-    border-left: 0;
     border-radius: 0 3px 3px 0;
   }
 }

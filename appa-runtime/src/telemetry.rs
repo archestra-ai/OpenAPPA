@@ -184,6 +184,7 @@ fn spelling(value: &impl serde::Serialize) -> String {
 pub(crate) fn yell(report: &crate::yell::Finished, root: &appa_runtime_api::TrajectoryId) {
     // Finished contains only the existing deny-by-default report projection.
     // Agent reports are already opted in. CLI previews must never reach here.
+    let plain = &report.plain;
     let Ok(report) = serde_json::from_slice::<serde_json::Value>(&report.plain) else {
         return;
     };
@@ -193,11 +194,56 @@ pub(crate) fn yell(report: &crate::yell::Finished, root: &appa_runtime_api::Traj
         "appa.report.id" = report["report_id"].as_str().unwrap_or_default(),
         "appa.report.message" = report["message"].as_str().unwrap_or_default() },
         "agent report prepared");
+    // A separate, log-only target prevents snapshots from entering spans or stderr.
+    if tracing::enabled!(target: "appa_yell_snapshot", tracing::Level::INFO) {
+        let text = std::str::from_utf8(plain).expect("finished reports contain JSON UTF-8");
+        let chunks = report_chunks(text);
+        for (index, chunk) in chunks.iter().enumerate() {
+            tracing::info!(target: "appa_yell_snapshot", {
+                "appa.event.name" = "appa.yell.snapshot",
+                "appa.trajectory.root" = name(&root.0),
+                "appa.report.id" = report["report_id"].as_str().unwrap_or_default(),
+                "appa.report.chunk.index" = index as u64,
+                "appa.report.chunk.count" = chunks.len() as u64,
+                "appa.report.bytes" = plain.len() as u64,
+                "appa.report.chunk" = *chunk }, "agent report diagnostic snapshot");
+        }
+    }
+}
+
+/// Split the finished report without changing its content or UTF-8 encoding.
+/// Index and count let readers detect missing records in best-effort export.
+#[cfg(feature = "daemon")]
+fn report_chunks(mut text: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    while !text.is_empty() {
+        let mut end = text.len().min(16 * 1024);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&text[..end]);
+        text = &text[end..];
+    }
+    chunks
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn report_chunks_preserve_unicode_and_boundary_bytes() {
+        for size in [16 * 1024 - 1, 16 * 1024, 16 * 1024 + 1, 32 * 1024] {
+            let text = format!("{}🦞終", "x".repeat(size));
+            let chunks = report_chunks(&text);
+            assert_eq!(chunks.concat(), text);
+            assert!(chunks.iter().all(|chunk| !chunk.is_empty() && chunk.len() <= 16 * 1024));
+            assert!(chunks.len() >= 2);
+        }
+        assert!(report_chunks("").is_empty());
+        assert_eq!(report_chunks("{}"), vec!["{}"]);
+    }
 
     #[test]
     fn names_and_error_classes_do_not_export_unbounded_details() {
