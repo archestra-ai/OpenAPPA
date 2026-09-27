@@ -109,10 +109,35 @@ impl Style {
             .join("\n")
     }
 
+    /// The mascot's second tone: the muzzle and the paws. The body has no
+    /// method here because it is the terminal's own text colour, which is
+    /// written by not painting it at all.
+    pub(crate) fn grey(self, text: &str) -> String {
+        self.paint("90", text)
+    }
+
+    /// Grey behind the glyph rather than in it, for the cells whose lower half
+    /// is a paw under a body the terminal draws in its own colour.
+    pub(crate) fn on_grey(self, text: &str) -> String {
+        self.paint("100", text)
+    }
+
     /// One `name value` row of a receipt, with the names in one column.
     pub(crate) fn field(self, name: &str, width: usize, value: &str) -> String {
         format!("  {} {value}", self.paint("1;36", &format!("{name:<width$}")))
     }
+}
+
+/// A sentence at the receipt's own margin, introducing the commands beneath
+/// it. Unpainted on purpose: it is ordinary prose, and the command under it
+/// carries the emphasis. A free function because nothing about it depends on
+/// [`Style`] — saying so beats taking a `self` it would ignore.
+pub(crate) fn lead(text: &str) -> String {
+    wrap(text, WIDTH - 2)
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Greedy word wrap. A run of non-space characters longer than the column is

@@ -608,7 +608,9 @@ fn render_servers(output: &mut String, config: &Path, servers: &BTreeSet<appa_pa
         return;
     }
     let mut rendered = Vec::new();
-    match crate::installation::cli::render_server_coverage(&mut rendered, config, servers) {
+    // `describe` composes one plain document; escapes in a nested section of it
+    // would be the only ones, and would travel wherever the text is put.
+    match crate::installation::cli::render_server_coverage(&mut rendered, crate::style::Style::Plain, config, servers) {
         Ok(()) => output.push_str(&String::from_utf8_lossy(&rendered)),
         Err(error) => {
             let _ = writeln!(output, "Battery matches: unavailable ({error})");

@@ -25,6 +25,8 @@ pub mod managed_files;
 #[cfg(feature = "daemon")]
 mod management;
 #[cfg(feature = "daemon")]
+mod mascot;
+#[cfg(feature = "daemon")]
 pub mod mcp;
 #[cfg(feature = "daemon")]
 pub mod replay;

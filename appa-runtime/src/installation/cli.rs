@@ -120,6 +120,7 @@ pub struct PluginRemove {
 }
 
 pub fn remove_plugin(args: PluginRemove) -> ExitCode {
+    begin(&args.target);
     if args.purge {
         return purge_plugin(args);
     }
@@ -172,6 +173,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
 /// `--purge` reads none of the installation state: a state the installer cannot
 /// open is the state a purge exists for.
 fn purge_plugin(args: PluginRemove) -> ExitCode {
+    begin(&args.target);
     let result = (|| {
         if args.name != "claude-code" {
             return Err(InstallError::Invalid("--purge applies to claude-code".into()));
@@ -208,6 +210,7 @@ fn server_name(value: &str) -> Result<String, String> {
 }
 
 pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
+    begin(&args.target);
     if args.names.is_empty() {
         return orient(PackageKind::Battery, &args.target);
     }
@@ -311,6 +314,14 @@ fn credential_is_set(variable: &str) -> bool {
 /// manifest's `setup` says. `is_set` looks a variable up where this command
 /// runs; the runtime may run elsewhere, so the answer is information, never a
 /// refusal. Batteries with nothing to say are absent.
+/// A blank line before a run's first narration, so its output does not start
+/// against the shell prompt. `--json` emits one document and nothing else.
+fn begin(target: &Target) {
+    if !target.json {
+        eprintln!();
+    }
+}
+
 /// One step of a run, on stderr: stdout carries the receipt and the `--json`
 /// result, so a caller can read either without the narration in the way.
 fn step(mark: Mark, text: &str) {
@@ -351,7 +362,7 @@ fn setup_notices<'a>(
 
 /// One line per battery with something to set up, after the install or
 /// suggestion line it belongs to.
-fn render_setup(output: &mut impl Write, result: &serde_json::Value) -> io::Result<()> {
+fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Value) -> io::Result<()> {
     for notice in result["setup"].as_array().into_iter().flatten() {
         let reads: Vec<String> = notice["credentials"]
             .as_array()
@@ -368,11 +379,11 @@ fn render_setup(output: &mut impl Write, result: &serde_json::Value) -> io::Resu
         let battery = notice["battery"].as_str().unwrap_or_default();
         let note = notice["note"].as_str().unwrap_or_default();
         let line = match (reads.is_empty(), note.is_empty()) {
-            (false, false) => format!("  {battery} reads {}. {note}", reads.join(", ")),
-            (false, true) => format!("  {battery} reads {}.", reads.join(", ")),
-            (true, _) => format!("  {battery}: {note}"),
+            (false, false) => format!("{battery} reads {}. {note}", reads.join(", ")),
+            (false, true) => format!("{battery} reads {}.", reads.join(", ")),
+            (true, _) => format!("{battery}: {note}"),
         };
-        writeln!(output, "{line}")?;
+        writeln!(output, "{}", style.detail(&line))?;
     }
     Ok(())
 }
@@ -606,6 +617,7 @@ pub fn install(args: Install) -> ExitCode {
     let Some(name) = args.name.clone() else {
         return orient(PackageKind::Plugin, &args.target);
     };
+    begin(&args.target);
     let result = (|| {
         if args.runtime.is_some() && name != "kagent" {
             return Err(InstallError::Invalid("--runtime applies only to kagent".into()));
@@ -835,6 +847,7 @@ fn coverage_result(
 /// catalog to match against, and says so.
 pub(crate) fn render_server_coverage(
     output: &mut impl Write,
+    style: Style,
     config: &Path,
     servers: &std::collections::BTreeSet<Namespace>,
 ) -> Result<(), InstallError> {
@@ -855,12 +868,25 @@ pub(crate) fn render_server_coverage(
         .unwrap_or_default();
     let (included, bindings) = includes::batteries(&text)?;
     let result = coverage_result(servers, &available, &included, &bindings, Some(config));
-    render_coverage(output, &result).map_err(|error| super::io("write", Path::new("stdout"), error))
+    render_coverage(output, style, &result).map_err(|error| super::io("write", Path::new("stdout"), error))
 }
 
 /// Where a person goes next after a Claude Code install: the guide fits the default to what
 /// this machine has connected.
-const GUIDE_NEXT: &str = "Next: run `clappa`, then `/appa-guide` to check your MCP servers and tune the defaults.";
+/// What to do once the install has registered. The two commands run in two
+/// different places — `clappa` in the shell, `/appa-guide` inside the session it
+/// starts — so each gets its own line under a sentence that says where it goes,
+/// rather than one sentence quoting both. Terminal output is not markdown, so
+/// neither is wrapped in backticks.
+fn guide_next(style: Style) -> String {
+    format!(
+        "\n{}\n{}\n\n{}\n{}",
+        crate::style::lead("Next, start a protected session:"),
+        style.commands(&["clappa".to_owned()]),
+        crate::style::lead("Then, inside it, check your MCP servers and tune the defaults:"),
+        style.commands(&["/appa-guide".to_owned()]),
+    )
+}
 
 /// A release build carries the tag whose generation the marketplace can fetch.
 pub(crate) fn is_published_build() -> bool {
@@ -1098,7 +1124,7 @@ fn shell_word(text: &str) -> String {
 /// The batteries an install found servers for, as the commands that include
 /// them, and the servers no battery covers. Nothing when there is nothing to
 /// say: a host without discovery, or one whose servers are all covered.
-fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::Result<()> {
+fn render_coverage(output: &mut impl Write, style: Style, result: &serde_json::Value) -> io::Result<()> {
     let commands: Vec<&str> = result["commands"]
         .as_array()
         .into_iter()
@@ -1106,11 +1132,14 @@ fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::R
         .filter_map(serde_json::Value::as_str)
         .collect();
     if !commands.is_empty() {
-        writeln!(output, "MCP servers here have batteries; include them with:")?;
-        for command in commands {
-            writeln!(output, "  {command}")?;
-        }
-        render_setup(output, result)?;
+        writeln!(
+            output,
+            "\n{}",
+            crate::style::lead("These MCP servers have batteries. Include them with:")
+        )?;
+        let commands: Vec<String> = commands.iter().map(|command| (*command).to_owned()).collect();
+        writeln!(output, "{}", style.commands(&commands))?;
+        render_setup(output, style, result)?;
     }
     let uncovered: Vec<&str> = result["uncovered_servers"]
         .as_array()
@@ -1119,17 +1148,24 @@ fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::R
         .filter_map(serde_json::Value::as_str)
         .collect();
     if !uncovered.is_empty() {
+        // Singular reads as often as plural here: most installs leave one
+        // server uncovered, and "Their tools" about one server is a stumble.
+        let belonging = match uncovered.len() {
+            1 => "Its",
+            _ => "Their",
+        };
         writeln!(
             output,
-            "MCP servers without a battery: {}. Their tools are annotated call by call until `/appa-guide` writes rules for them.",
-            uncovered.join(", ")
+            "\n{}",
+            crate::style::lead(&format!(
+                "No battery covers {}. {belonging} tools are annotated call by call until /appa-guide writes rules for them.",
+                uncovered.join(", ")
+            ))
         )?;
     }
     Ok(())
 }
 
-/// " with battery x" / " with batteries x and y" for a plugin receipt, empty when
-/// the install included none.
 /// The batteries a receipt lists, as one field value. A row that is always
 /// present, so an install with none says so rather than leaving the reader to
 /// notice an absent line.
@@ -1352,13 +1388,14 @@ fn finish(
             )
         } else if plugin == "kagent" {
             let result = receipt.result.as_ref().expect("plugin result is present");
+            let style = Style::of_stdout();
             writeln!(
                 output,
                 "Prepared kagent for {} at {}. No cluster changes. Read KAGENT.md and CONFIGURATION.txt there before deploying.",
                 receipt.deployment.display(),
                 result["directory"].as_str().unwrap_or_default()
             )
-            .and_then(|()| render_coverage(&mut output, result))
+            .and_then(|()| render_coverage(&mut output, style, result))
         } else {
             let result = receipt.result.as_ref().expect("plugin result is present");
             let style = Style::of_stdout();
@@ -1375,8 +1412,11 @@ fn finish(
                 style.field("Runtime", 11, "verified"),
                 style.field("Batteries", 11, &batteries_or_none(result)),
             )
-            .and_then(|()| render_coverage(&mut output, result))
-            .and_then(|()| writeln!(output, "\n{GUIDE_NEXT}"))
+            .and_then(|()| render_coverage(&mut output, style, result))
+            // The mark, then what to do next: the install is done being
+            // reported, so this is the one moment it is not in the way.
+            .and_then(|()| writeln!(output, "\n{}", crate::mascot::happy(style)))
+            .and_then(|()| writeln!(output, "{}\n", guide_next(style)))
         }
     } else if let Some(batteries) = receipt.result.as_ref().and_then(|result| result.get("batteries")) {
         (|| {
@@ -1395,7 +1435,7 @@ fn finish(
                 result["state"].as_str().unwrap_or_default(),
                 receipt.deployment.display()
             )?;
-            render_setup(&mut output, result)?;
+            render_setup(&mut output, Style::of_stdout(), result)?;
             if let Some(directory) = result.get("directory").and_then(serde_json::Value::as_str) {
                 writeln!(
                     output,
@@ -1437,6 +1477,7 @@ mod tests {
         let mut quiet = Vec::new();
         render_coverage(
             &mut quiet,
+            Style::Plain,
             &serde_json::json!({"commands": [], "uncovered_servers": []}),
         )
         .unwrap();
@@ -1445,6 +1486,7 @@ mod tests {
         let mut found = Vec::new();
         render_coverage(
             &mut found,
+            Style::Plain,
             &serde_json::json!({
                 "commands": ["appa battery install github linear", "appa battery install slack --server slack"],
                 "uncovered_servers": ["fetch"],
@@ -1452,11 +1494,35 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(found).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[1], "  appa battery install github linear");
-        assert_eq!(lines[2], "  appa battery install slack --server slack");
-        assert_eq!(lines.len(), 4);
-        assert!(lines[3].contains("fetch"));
+        // Each command stands alone on its line, so it can be copied without
+        // the prose around it.
+        assert!(text.contains("\n      appa battery install github linear\n"));
+        assert!(text.contains("\n      appa battery install slack --server slack\n"));
+        assert!(text.contains("fetch"));
+    }
+
+    /// One uncovered server is spoken of as one, and terminal output carries no
+    /// markdown: the guide is named as it is typed.
+    #[test]
+    fn an_uncovered_server_reads_as_one_and_carries_no_markdown() {
+        let render = |servers: serde_json::Value| {
+            let mut out = Vec::new();
+            render_coverage(
+                &mut out,
+                Style::Plain,
+                &serde_json::json!({"commands": [], "uncovered_servers": servers}),
+            )
+            .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+
+        let one = render(serde_json::json!(["fetch"]));
+        assert!(one.contains("Its tools"), "{one}");
+        assert!(!one.contains('`'), "terminal output is not markdown: {one}");
+        assert!(one.contains("/appa-guide"));
+
+        let many = render(serde_json::json!(["fetch", "reopenscad"]));
+        assert!(many.contains("Their tools"), "{many}");
     }
 
     /// A battery whose helpers read a credential, or whose manifest has a
@@ -1489,13 +1555,16 @@ mod tests {
             variable == "APPA_PROVIDER_LINEAR_TOKEN"
         });
         let mut rendered = Vec::new();
-        render_setup(&mut rendered, &serde_json::json!({"setup": setup})).unwrap();
+        render_setup(&mut rendered, Style::Plain, &serde_json::json!({"setup": setup})).unwrap();
 
-        assert_eq!(
-            String::from_utf8(rendered).unwrap(),
-            "  github reads APPA_PROVIDER_GITHUB_TOKEN (not set in this shell). Uses your gh login when unset.\n\
-             \x20 linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell).\n"
-        );
+        // Wrapped under the commands they explain; a battery with neither a
+        // credential nor a note contributes nothing.
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains("github reads APPA_PROVIDER_GITHUB_TOKEN (not set in this shell)."));
+        assert!(rendered.contains("Uses your gh login when unset."));
+        assert!(rendered.contains("linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell)."));
+        assert!(!rendered.contains("notion"));
+        assert_eq!(rendered.lines().filter(|line| line.contains("reads")).count(), 2);
     }
 
     /// Every battery without a binding goes in one command, so the person
