@@ -3,7 +3,7 @@ export function ClaudePolicyTiming() {
     <aside className="claude-policy-timing" aria-label="Policy setup timing">
       <div className="claude-policy-duration">
         <strong>~10 min</strong>
-        <span>for the demo policy</span>
+        <span>for a typical local policy, end to end</span>
       </div>
       <div className="claude-policy-timing-copy">
         <p>
