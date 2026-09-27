@@ -540,12 +540,14 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, sess
         }
     }
     let session = served.map(|served| SessionCoverage::of(session_tools, served, served_policy.as_ref()));
+    #[cfg(feature = "daemon")]
     if adapter == "claude-code" {
         let servers = std::env::current_dir()
             .map(|cwd| crate::installation::discover::servers(appa_package::Host::ClaudeCode, &cwd))
             .unwrap_or_default()
             .into_iter()
             .chain(session.iter().flat_map(|session| session.servers.iter().cloned()))
+            .filter(|server| server.as_str() != crate::init::RUNTIME_SERVER)
             .collect::<BTreeSet<_>>();
         render_servers(&mut output, path, &servers);
     }
@@ -598,6 +600,7 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, sess
 
 /// The MCP servers this machine configures or the session reports, and the batteries of the
 /// installed version that cover them.
+#[cfg(feature = "daemon")]
 fn render_servers(output: &mut String, config: &Path, servers: &BTreeSet<appa_package::Namespace>) {
     let names: Vec<String> = servers.iter().map(|server| server.as_str().to_owned()).collect();
     let _ = writeln!(output, "MCP servers: {}", list_or_none(&names));
@@ -644,7 +647,6 @@ impl SessionCoverage {
                 .strip_prefix("mcp/")
                 .and_then(|rest| rest.split_once('/'))
                 .and_then(|(server, _)| appa_package::Namespace::parse(server).ok())
-                .filter(|server| server.as_str() != crate::init::RUNTIME_SERVER)
             {
                 coverage.servers.insert(server);
             }
