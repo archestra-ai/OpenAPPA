@@ -39,6 +39,8 @@ pub mod runtime_url;
 pub mod session_context;
 #[cfg(feature = "daemon")]
 pub mod statusline;
+#[cfg(feature = "daemon")]
+mod style;
 pub mod tls;
 pub mod tool_validation;
 

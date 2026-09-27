@@ -1,28 +1,11 @@
 //! What an activation decided, and how that is shown once.
 
-use std::env;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use super::endpoint::RuntimeOutcome;
 use super::paths::friendly_path;
-
-/// Whether the receipt carries terminal escapes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Style {
-    Plain,
-    Colored,
-}
-
-impl Style {
-    pub(super) fn of_stdout() -> Self {
-        if std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none() {
-            Style::Colored
-        } else {
-            Style::Plain
-        }
-    }
-}
+pub(super) use crate::style::Style;
+use crate::style::Mark;
 
 /// What an activation decided, before any of it is words.
 ///
@@ -42,30 +25,15 @@ pub(super) struct Receipt {
 
 impl Receipt {
     pub(super) fn render(&self, style: Style) -> String {
-        let colored = style == Style::Colored;
-        let title = if colored {
-            "\u{1b}[1;32m✓ OpenAPPA activated\u{1b}[0m \u{1b}[2mfor Claude Code\u{1b}[0m"
-        } else {
-            "OpenAPPA activated for Claude Code"
-        };
-        let label = |name: &str| {
-            if colored {
-                format!("\u{1b}[1;36m{name:<9}\u{1b}[0m")
-            } else {
-                format!("{name:<9}")
-            }
-        };
+        let title = style.step(Mark::Done, &style.heading("OpenAPPA activated for Claude Code"));
+        let field = |name: &str, value: &str| style.field(name, 9, value);
         let mut receipt = format!(
-            "{title}\n\n  {} {}\n  {} {}\n  {} {}\n  {} {}\n  {} clappa\n",
-            label("Adapter"),
-            self.adapter,
-            label("Hooks"),
-            friendly_path(&self.hooks),
-            label("Runtime"),
-            self.runtime_outcome.as_str(),
-            label("Config"),
-            friendly_path(&self.config),
-            label("Launcher"),
+            "{title}\n\n{}\n{}\n{}\n{}\n{}\n",
+            field("Adapter", &self.adapter),
+            field("Hooks", &friendly_path(&self.hooks)),
+            field("Runtime", self.runtime_outcome.as_str()),
+            field("Config", &friendly_path(&self.config)),
+            field("Launcher", "clappa"),
         );
         // A session loads its hooks at session start, and the hook wire carries no
         // version, so a session running across an upgrade keeps talking to the
