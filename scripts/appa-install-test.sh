@@ -288,31 +288,45 @@ else
 fi
 
 # The next command is the same either way; what changes is whether the receipt
-# first says the install directory cannot be reached. On PATH it must not.
+# asks for a PATH step first. On PATH there is nothing to add, so it must not.
 path_dir=$(case_dir on-path-hint)
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$path_dir" \
   PATH="$path_dir:$PATH" sh "$installer" \
   >"$work/on-path.out" 2>"$work/on-path.err" &&
   grep -q '^ *appa plugin install claude-code$' "$work/on-path.out" &&
-  ! grep -q 'is not on your PATH' "$work/on-path.out"; then
+  ! grep -q 'export PATH=' "$work/on-path.out"; then
   report PASS on-path-hint
 else
   cat "$work/on-path.out" "$work/on-path.err" >&2
   report FAIL on-path-hint
 fi
 
-# Off PATH, the same run names the directory that cannot be reached and the one
-# line that fixes it, so the next command is runnable rather than merely printed.
+# Off PATH, the receipt carries the PATH step before the next command, and the
+# step names the profile the running shell actually reads, so it is one command
+# to paste rather than an instruction to interpret.
 off_dir=$(case_dir off-path-hint)
-if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$off_dir" \
+if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$off_dir" SHELL=/bin/zsh \
   sh "$installer" >"$work/off-path.out" 2>"$work/off-path.err" &&
-  grep -q 'is not on your PATH' "$work/off-path.out" &&
-  grep -q "^ *export PATH=\"$off_dir:\$PATH\"$" "$work/off-path.out" &&
+  grep -q "export PATH=\"$off_dir:\$PATH\"" "$work/off-path.out" &&
+  grep -q '\.zshrc' "$work/off-path.out" &&
   grep -q '^ *appa plugin install claude-code$' "$work/off-path.out"; then
   report PASS off-path-hint
 else
   cat "$work/off-path.out" "$work/off-path.err" >&2
   report FAIL off-path-hint
+fi
+
+# A shell with no known profile is told the line and left to place it, rather
+# than being handed a command that appends to a file it does not read.
+unknown_dir=$(case_dir unknown-shell-hint)
+if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$unknown_dir" SHELL=/bin/nosuchsh \
+  sh "$installer" >"$work/unknown.out" 2>"$work/unknown.err" &&
+  grep -q "^ *export PATH=\"$unknown_dir:\$PATH\"$" "$work/unknown.out" &&
+  ! grep -q 'zshrc\|bashrc\|bash_profile\|fish_add_path' "$work/unknown.out"; then
+  report PASS unknown-shell-hint
+else
+  cat "$work/unknown.out" "$work/unknown.err" >&2
+  report FAIL unknown-shell-hint
 fi
 
 # A PATH holding everything the installer needs except a digest tool.

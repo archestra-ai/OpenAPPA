@@ -37,12 +37,12 @@ else
 fi
 
 # Narration goes to stderr; the receipt to stdout, where a caller reads it.
-step() { printf '  %s·%s %s\n' "$dim" "$off" "$1" >&2; }
-installed() { printf '\n  %s✓%s %s%s%s\n\n' "$green" "$off" "$bold" "$1" "$off"; }
-field() { printf '  %s%-9s%s %s\n' "$cyan" "$1" "$off" "$2"; }
-note() { printf '\n  %s%s%s\n' "$dim" "$1" "$off"; }
-warn() { printf '\n  %s!%s %s\n' "$bold" "$off" "$1"; }
-# `~` for the home directory, as the Rust half prints paths.
+# Success is the only mark: an install that worked says so once, and what is
+# left to do is instructions, not a warning.
+step() { printf '  %s%s%s\n' "$dim" "$1" "$off" >&2; }
+installed() { printf '\n  %s✓%s %s%s%s\n' "$green" "$off" "$bold" "$1" "$off"; }
+note() { printf '\n  %s\n' "$1"; }
+command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
 friendly() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
 
@@ -130,7 +130,7 @@ trap 'cleanup; exit 130' INT HUP TERM
 # The list and the archive come from the same pinned release, never from
 # `latest`, so a release published mid-run cannot pair one with the other.
 release=$repository/releases/download/$tag
-step "$(printf 'downloading appa %s for %s-%s' "$tag" "$architecture" "$platform")"
+step "$(printf 'Downloading appa %s for %s-%s' "$tag" "$architecture" "$platform")"
 fetch -L -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
   fail "could not download $release/SHA256SUMS"
 fetch -L -o "$work/$archive" "$release/$archive" ||
@@ -181,18 +181,43 @@ install -m 755 "$work/extract/appa" "$staged" ||
   fail "could not write $staged"
 mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa"
 staged=
-installed "Installed $version"
-field Location "$(friendly "$install_dir/appa")"
+installed "Installed $version to $(friendly "$install_dir/appa")"
 case :${PATH:-}: in
-  *":$install_dir:"*) ;;
+  *":$install_dir:"*)
+    note 'Next, protect Claude Code:'
+    command_line 'appa plugin install claude-code'
+    ;;
   *)
-    # Naming the consequence first: a reader who stops here still knows why
-    # the next command would not be found, and the line to fix it once.
-    warn "$(friendly "$install_dir") is not on your PATH, so \`appa\` will not be found."
-    note 'Add it to your shell profile, then open a new shell:'
-    command_line "export PATH=\"$install_dir:\$PATH\""
+    # Not on PATH is the ordinary case for ~/.local/bin, so it reads as the
+    # first of two steps rather than something that went wrong.
+    #
+    # Naming the file and reloading it is the whole step: a reader should not
+    # have to know which profile their shell reads, nor that a new shell is
+    # needed. fish keeps its own path command. A shell this does not know gets
+    # the bare line to place itself, which is all that can honestly be said.
+    add_to_path=
+    case ${SHELL##*/} in
+      fish)
+        add_to_path="fish_add_path $install_dir"
+        ;;
+      bash)
+        rc='~/.bashrc'
+        [ "$(uname -s)" != Darwin ] || rc='~/.bash_profile'
+        add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> $rc && source $rc"
+        ;;
+      zsh)
+        add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+        ;;
+    esac
+    if [ -n "$add_to_path" ]; then
+      note 'Next, add appa to your PATH. Run this once:'
+      command_line "$add_to_path"
+    else
+      note 'Next, add appa to your PATH. Put this in your shell profile:'
+      command_line "export PATH=\"$install_dir:\$PATH\""
+    fi
+    note 'Then protect Claude Code:'
+    command_line 'appa plugin install claude-code'
     ;;
 esac
-note 'Next:'
-command_line 'appa plugin install claude-code'
 printf '\n'
