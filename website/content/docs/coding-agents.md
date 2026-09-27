@@ -5,7 +5,7 @@ order: 4
 description: File taint tracking, isolated file processing, shell and credential rules, subagent return checks, and protected sessions for coding agents.
 ---
 
-Coding agents move data through the filesystem, the shell, and subagents, not only through API tools. OpenAPPA tracks Labels through file reads, writes, copies, and moves, confines declared file processing, and checks shell commands and subagent returns. Claude Code is the first harness that uses these features.
+Coding agents move data through the filesystem, the shell, and subagents, not only through API tools. OpenAPPA tracks Labels through file reads, writes, copies, and moves, confines declared file processing, and checks shell commands and subagent returns. [Claude Code](/claude-code) is the first harness that uses these features.
 
 | Feature | What it does | Status |
 |---|---|---|
