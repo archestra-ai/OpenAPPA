@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.0...v0.26.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **claude-code:** preserve symlinked settings during activation ([#494](https://github.com/archestra-ai/OpenAPPA/issues/494)) ([2da0c61](https://github.com/archestra-ai/OpenAPPA/commit/2da0c61d68e6621b757f6caf3c1605f444564455))
+* **website:** drop the sponsor-note mark and the Docs nav link ([#499](https://github.com/archestra-ai/OpenAPPA/issues/499)) ([db91806](https://github.com/archestra-ai/OpenAPPA/commit/db918065feb5498ca6ade403d46d010398e72676))
+
 ## [0.26.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.25.0...v0.26.0) (2026-09-28)
 
 
