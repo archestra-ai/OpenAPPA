@@ -14,12 +14,14 @@ public source revision.
 
 ## Rules
 
-*Internal reads* — queries and results stay within `internal`. Most results enter
-`suspicious`. `get_graphql_schema`, `get_column_type_info`, and
-`get_automation_statistics(breakdown:totals)` return bounded provider metadata
-and preserve trust (a fresh trajectory stays `trusted`). The statistics tool's `by_entity`
-response remains suspicious. `all_api_read` rejects mutations at the provider,
-and `read_docs` reads workspace documents. This group covers:
+*Internal reads* — queries and results stay within `internal`. Trust follows
+who can write the text. Account members write boards, items, updates, and docs,
+so these reads keep the session's trust. Items a form or an integration creates
+count as trusted too, because a member published the form or installed the
+integration. Meeting notes and transcripts carry what outside participants said,
+so `explore_meetings`, `search_meetings_content`, and `get_meetings_content`
+enter `suspicious`. `all_api_read` rejects mutations at the provider, and
+`read_docs` reads workspace documents. This group covers:
 
 `agent_catalog`, `all_api_read`, `all_widgets_schema`, `board_insights`,
 `explore_meetings`, `get_action`, `get_assets`, `get_assigned_items`, `get_automation_runs`,
@@ -39,16 +41,11 @@ and `manage_agent_knowledge(action:list)` use the read contract. Other actions
 use the sensitive-write contract below.
 
 *Public documentation* — `get_monday_knowledge` requires a public question and
-returns suspicious/public content.
+answers from monday's own documentation, so its result enters `suspicious` and
+`public`.
 
-*Reviewed writes* — trusted internal input and `monday-review`; results remain
-suspicious/internal when they can include existing content, such as the item
-name returned by `create_update`, or API error details from `create_items` and
-`create_doc`. Creation of folders, groups, dashboards and widgets
-returns only new object identifiers, trusted input or provider defaults, so
-those results preserve trust. `get_asset_upload_url` returns a provider issued
-upload ID, URL and expiration and also preserves trust.
-These tools record `monday.changed`:
+*Reviewed writes* — trusted internal input and `monday-review`; results are
+`internal` and keep the session's trust. These tools record `monday.changed`:
 
 `change_item_column_values`, `create_dashboard`, `create_doc`, `create_folder`,
 `create_group`, `create_item`, `create_items`, `create_update`, `create_view`,
@@ -58,11 +55,8 @@ These tools record `monday.changed`:
 *Sensitive writes* — the same reviewed internal contract except the
 recipient-bound notification below, recording `monday.sensitive`. Review must
 account for affected resources and destinations, including nested operations in
-code, GraphQL, workflows and agents. `create_board`, `create_column`,
-`create_workspace` and `create_form` return bounded new object confirmations and
-preserve trust. `move_object(objectType:Folder)` returns a fixed confirmation and
-object ID with the same result rule; the other object types remain suspicious.
-These tools are:
+code, GraphQL, workflows and agents. Results are `internal` and keep the
+session's trust. These tools are:
 
 `all_api_write`, `all_monday_api`, `create_action`, `create_automation`, `create_board`,
 `create_column`, `create_form`, `create_notification`, `create_workflow`,
@@ -77,17 +71,17 @@ These tools are:
 read the input. The `monday` audience source looks up that user's confirmed
 email through the monday Users API. It refuses absent, inactive, or
 unconfirmed users and lookup errors. The contract requires trusted input and
-`monday-review`; its result remains suspicious/internal.
+`monday-review`; its result is `internal`.
 
 *External submissions* — `create_form_submission` and
 `submit_bug_or_feature_request` require trusted public input and review, and
-record `monday.sensitive`. Results remain suspicious/internal, so the combined
+record `monday.sensitive`. Results are `internal`, so the combined
 input/output check also requires explicit audience-expansion authority, even
 from a fresh trajectory.
 
 *Credentials* — `connect_external_agent` requires trusted input sharable with
-`self` and review, records `monday.sensitive`, and returns suspicious/self
-content containing a signing secret and API token.
+`self` and review, records `monday.sensitive`, and returns `self` content
+containing a signing secret and API token.
 
 ## Root configuration
 

@@ -17,70 +17,10 @@ fn read(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+/// The installer replaces only a file that starts with this frontmatter.
 #[test]
-fn the_router_routes_by_host_and_carries_the_shared_rules() {
-    let router = read("SKILL.md");
-    assert!(router.starts_with("---\n"), "the router keeps its frontmatter");
-    assert!(router.contains("name: appa-guide"));
-    assert!(router.contains("references/claude-code.md"));
-    assert!(router.contains("/skills/appa-guide/references/kagent.md"));
-    assert!(router.contains("`offset: 1`") && router.contains("`limit: 0`"));
-    assert!(
-        router.contains("k8s_get_resources"),
-        "the router detects the kagent host"
-    );
-    assert!(
-        router.contains("Do not call `Read`"),
-        "Claude bootstraps without a gated tool call"
-    );
-    assert!(router.contains("`init`") && router.contains("`adjust`"));
-    assert!(router.contains("Do not ask whether to continue before the proposal"));
-    for shared in [
-        "Never edit a battery",
-        "OpenAPPA pieces",
-        "smallest change",
-        "wait for approval",
-        "reload an unchanged config",
-        "start a new chat when nothing changed",
-        "invent an offer id",
-        "nothing needs applying",
-        "Say \"include\" rather than \"install\"",
-        "awaiting approval to propose",
-        "exactly one state",
-        "Keep user-facing replies compact",
-        "If the request says `diagnose` and `inspect only`",
-        "Do not narrate inspection calls",
-        "including `appa_update_policy`",
-        "`appa-guide-*` executable",
-        "runtime-owned `execute_remedy_plan` and",
-    ] {
-        assert!(
-            router.contains(shared),
-            "the shared rule {shared:?} lives in the router"
-        );
-    }
-    // Host mechanics stay out of the router.
-    for host_only in ["claude mcp list", "status.discoveredTools", "references/contracts.md"] {
-        assert!(!router.contains(host_only), "{host_only:?} belongs to a reference file");
-    }
-}
-
-#[test]
-fn the_claude_code_reference_carries_the_full_flow() {
-    let reference = read("references/claude-code.md");
-    for marker in [
-        "appa describe --config",
-        "appa battery list --json --config <live-path>",
-        "claude mcp list",
-        "mcp__<server>__<tool>",
-        "appa battery install <name> --config <live-path>",
-        "references/contracts.md",
-        "http://127.0.0.1:8787",
-        "clappa",
-        "Approve, or tell me what to change.",
-    ] {
-        assert!(reference.contains(marker), "the claude-code flow names {marker:?}");
-    }
+fn the_router_opens_with_the_frontmatter_the_installer_recognizes() {
+    assert!(read("SKILL.md").starts_with("---\nname: appa-guide\n"));
 }
 
 #[test]

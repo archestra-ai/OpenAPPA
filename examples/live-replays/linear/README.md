@@ -5,7 +5,8 @@ with its readers as Linear reports them, each repository with its
 collaborators; one root override keeps a fictional resource ENG-1 that only
 Alice reads.
 
-1. Reading ENG-1 enters suspicious content restricted to Alice.
+1. Reading ENG-1 enters content restricted to Alice; workspace members
+   wrote it, so it keeps the trajectory's trust.
 2. Posting that content to a public GitHub repository is refused.
 3. Commenting on ENG-1 requires human review of the exact call.
 4. A successful comment records `linear.changed`.

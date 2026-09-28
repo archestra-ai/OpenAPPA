@@ -74,18 +74,7 @@ fn valid_tool_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TrajectoryId(String);
-
-impl TrajectoryId {
-    pub fn new(id: impl Into<String>) -> Self {
-        TrajectoryId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+pub use appa_runtime_api::TrajectoryId;
 
 /// A stable id for an admitted value: its position in the log's value sequence, assigned
 /// deterministically by the projection at append order (see the event-log slice).

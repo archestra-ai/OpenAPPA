@@ -31,7 +31,7 @@
 //! call whose answer is bounded by its mandate and pinned ([`contract::PinnedAnnotation`])
 //! to the producing Annotator and the call's canonical digest, so a rewrite is annotated
 //! afresh and replay never consults again. The
-//! wildcard declaration (`"*"`) routes every call the policy does not name through an
+//! wildcard declaration (`"*"`) routes every call without a matching explicit contract through an
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.
 //!

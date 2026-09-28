@@ -9,7 +9,7 @@ breadcrumb: Linear
 
 The Linear battery covers 65 MCP tools and binds the `linear` audience source, which reads who may see each issue, team, project, and document from Linear itself.
 
-Reads and mutation responses enter as suspicious. A tool that names a resource by id is labelled with that resource's readers: every full member for a public team's issue, the team's members for a private one, plus the people the issue is shared with. Writes into a resource require trusted data its readers may see and a review mark, and record their effects. Tools that name no resource, or name one by a free-text query, keep the `internal` audience.
+Trust follows who can write the text. Workspace members write issues, comments, documents, and projects, and a member installed each integration that posts text, so reads and mutation responses keep the session's trust. Linear's public documentation (`search_documentation`) and images from arbitrary URLs (`extract_images`) enter suspicious. A tool that names a resource by id is labelled with that resource's readers: every full member for a public team's issue, the team's members for a private one, plus the people the issue is shared with. Writes into a resource require trusted data its readers may see and a review mark, and record their effects. Tools that name no resource, or name one by a free-text query, keep the `internal` audience.
 
 Define `internal` as readers authorized for everything the connection can list; map `self` and `internal` onto the source in the root config and pass the token through `APPA_PROVIDER_LINEAR_TOKEN`. A resource named by a display name gets no answer, so the agent names it by id.
 

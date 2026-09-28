@@ -25,6 +25,8 @@ pub mod managed_files;
 #[cfg(feature = "daemon")]
 mod management;
 #[cfg(feature = "daemon")]
+mod mascot;
+#[cfg(feature = "daemon")]
 pub mod mcp;
 #[cfg(feature = "daemon")]
 pub mod replay;
@@ -39,6 +41,8 @@ pub mod runtime_url;
 pub mod session_context;
 #[cfg(feature = "daemon")]
 pub mod statusline;
+#[cfg(feature = "daemon")]
+mod style;
 pub mod tls;
 pub mod tool_validation;
 
@@ -46,14 +50,17 @@ mod batteries_layout;
 #[cfg(feature = "daemon")]
 mod batteries_staging;
 mod builtins;
+pub mod child_process;
 mod consult;
 mod elicit;
 mod engine;
 mod events;
 mod external;
-mod jev;
 mod label_guide;
-mod llm;
+mod model;
 mod recorder;
+mod secrets;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 pub mod yell;

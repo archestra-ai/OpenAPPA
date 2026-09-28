@@ -7,7 +7,7 @@ use std::process::Command;
 mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
-use common::{free_port, http, repo_root, serve_runtime};
+use common::{RefusingPort, http, repo_root, serve_runtime};
 use init_fixture::{Fixture, Installed, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
@@ -251,7 +251,16 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             fixture.data,
         ])
     );
-    let statusline = fixture.settings_value()["statusLine"]["command"]
+    assert!(fixture.settings_value().get("statusLine").is_none());
+    let clappa_settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.data.join("clappa.settings.json")).expect("clappa's settings"))
+            .expect("clappa's settings are JSON");
+    assert_eq!(
+        clappa_settings["permissions"]["deny"],
+        serde_json::json!(["SendMessage"])
+    );
+    assert!(fixture.settings_value().get("permissions").is_none());
+    let statusline = clappa_settings["statusLine"]["command"]
         .as_str()
         .expect("the status line is a command")
         .to_owned();
@@ -468,7 +477,8 @@ fn assert_profile_taken_back(fixture: &Fixture) {
 fn a_purge_with_no_runtime_running_deletes_the_deployment() {
     let fixture = Fixture::new();
     fixture.successful_activation();
-    let dead = format!("http://127.0.0.1:{}", free_port());
+    let refusing = RefusingPort::new();
+    let dead = refusing.url();
 
     let output = fixture.purge(&dead).output().expect("appa purges");
 
@@ -521,6 +531,33 @@ fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
     );
 }
 
+/// A `token_env` resolves where the runtime runs, so a secret the installing terminal does
+/// not hold is not activation's to refuse: the surviving runtime is reloaded, and the
+/// reload it accepts settles the policy.
+#[test]
+fn activation_leaves_a_secret_it_cannot_see_to_the_runtime() {
+    let fixture = Fixture::new();
+    let config = fixture.config.join("appa.toml");
+    let mut text = fs::read_to_string(&config).expect("the config is readable");
+    text.push_str(
+        "\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\ntoken_env = \"APPA_UNSET_IN_THIS_PROCESS\"\n",
+    );
+    fs::write(&config, text).expect("the config is written");
+    let reloads = fixture.root.join("reloads");
+    let output = fixture
+        .activate()
+        .env_remove("APPA_UNSET_IN_THIS_PROCESS")
+        .env("FAKE_RELOADS", &reloads)
+        .output()
+        .expect("appa activates");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        reloads.exists(),
+        "a policy activation cannot compose is settled by a reload"
+    );
+}
+
 #[test]
 fn activation_keeps_a_custom_statusline() {
     let fixture = Fixture::new();
@@ -570,6 +607,7 @@ fn foreign_settings_survive_activation_and_removal() {
         "the skill directory goes with its files"
     );
     assert!(!fixture.launcher().exists());
+    assert!(!fixture.data.join("clappa.settings.json").exists());
     assert!(
         fixture.deployed_binary().is_file(),
         "removal takes back the profile, not the runtime"
@@ -578,6 +616,35 @@ fn foreign_settings_survive_activation_and_removal() {
     // Removal is replayable: a second run finds nothing of its own and succeeds.
     let again = fixture.remove().output().expect("appa removes");
     assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+    assert_eq!(fixture.settings_value(), original);
+}
+
+#[test]
+fn settings_symlink_survives_activation_removal_and_rollback() {
+    let fixture = Fixture::new();
+    let target = fixture.root.join("dotfiles/claude/settings.json");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let original = serde_json::json!({"theme": "dark"});
+    fs::write(&target, original.to_string()).unwrap();
+    std::os::unix::fs::symlink(&target, fixture.settings()).unwrap();
+
+    let failed = fixture
+        .activate()
+        .env("FAKE_CLAUDE_FAIL_ONCE", "mcp-add")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
+    assert_eq!(fixture.settings_value(), original);
+
+    fixture.successful_activation();
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
+    assert_eq!(fixture.settings_value()["theme"], "dark");
+    assert!(fixture.settings_value()["hooks"].is_object());
+
+    let removed = fixture.remove().output().unwrap();
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
     assert_eq!(fixture.settings_value(), original);
 }
 

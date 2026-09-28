@@ -1,6 +1,7 @@
-//! Claude Code battery: the Databricks CLI's credential commands are credential paths, so
-//! they narrow the session to `self` by a static rule, with the CLI's global flags anywhere
-//! before the verb, and no classifier is asked.
+//! Claude Code battery: a command naming a credential path, or one of the Databricks CLI's
+//! credential commands with its global flags anywhere before the verb, narrows the session
+//! to `self` by a static rule, and no classifier is asked. Every other shell command, and
+//! every Monitor call, is the Annotator's.
 #![cfg(unix)]
 mod common;
 
@@ -83,4 +84,48 @@ async fn a_credential_command_narrows_to_self_without_a_classifier() {
         matches!(decision, HookDecision::Refuse { .. }),
         "any other command is the annotator's: {decision:?}"
     );
+}
+
+#[tokio::test]
+async fn a_command_naming_any_credential_directory_the_read_rules_name_narrows_to_self() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    for command in [
+        "cat ~/.azure/accessTokens.json",
+        "ls ~/.gnupg/private-keys-v1.d",
+        "cat ~/.config/gcloud/credentials.db",
+        "cat ~/.password-store/work.gpg",
+        "cat ~/.vault-token",
+        "cat ~/.aws/config",
+        "cat ~/.config/gh/config.yml",
+    ] {
+        let decision = propose(&runtime, bash(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_monitor_call_is_the_annotators_whether_it_runs_a_command_or_opens_a_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    for arguments in [
+        serde_json::json!({ "command": "tail -f build.log", "description": "build", "timeout_ms": 60000 }),
+        serde_json::json!({ "ws": { "url": "wss://events.example/stream" }, "description": "events", "timeout_ms": 60000 }),
+    ] {
+        let monitor = ProposedCall {
+            tool: "host/claude-code/Monitor".to_string(),
+            arguments: raw(arguments.clone()),
+            cwd: None,
+        };
+        let decision = propose(&runtime, monitor).await;
+        assert!(
+            matches!(decision, HookDecision::Refuse { .. }),
+            "an unanswered Annotator fails closed for {arguments}: {decision:?}"
+        );
+    }
 }

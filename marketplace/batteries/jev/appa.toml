@@ -20,6 +20,7 @@ builtin = "jev"
 ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []
+effects = []
 
 [externals.jev]
 token_env = "APPA_PROVIDER_JEV_API_KEY"

@@ -4,10 +4,13 @@ Two annotators share this script, told apart by the consult's name. Both
 read the repository the call names (`owner`, `repo`) and ask GitHub for
 its visibility:
 
-  github.repository-visibility   what a read returns: content written by
-                                 whoever pushed it (`suspicious`), read by
-                                 everyone for a public repository, by the
-                                 repository's collaborators otherwise
+  github.repository-visibility   what a read returns: for a public
+                                 repository, content anyone may write
+                                 (`suspicious`) that everyone reads; for a
+                                 private or internal one, content only the
+                                 organization's people write, at the
+                                 session's trust, read by the repository's
+                                 collaborators
   github.repository-readers      what a write needs: trusted data that
                                  everyone may see for a public repository,
                                  that the repository's collaborators may
@@ -157,11 +160,23 @@ def must_reach(visibility, owner, repo):
             raise ValueError(f"unexpected repository visibility {visibility!r}")
 
 
+def read_delta(visibility, owner, repo):
+    """Trust follows who can write the text: anyone can open an issue or a
+    pull request on a public repository, only the organization's people on
+    a private or internal one."""
+    audience = read_by(visibility, owner, repo)
+    match visibility:
+        case "public":
+            return {"trust": "suspicious", "audience": audience}
+        case _:
+            return {"audience": audience}
+
+
 def annotation(name, visibility, owner, repo):
     match name:
         case "github.repository-visibility":
             return {
-                "delta": {"trust": "suspicious", "audience": read_by(visibility, owner, repo)},
+                "delta": read_delta(visibility, owner, repo),
                 "requires": {"history": [], "attention": []},
                 "emits": [],
             }

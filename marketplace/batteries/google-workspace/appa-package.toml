@@ -1,9 +1,9 @@
 schema = 1
 name = "google-workspace"
-description = "The google-workspace audience source, which builds audiences from the Workspace directory. It carries no tool rules yet."
+description = "Rules for the claude.ai Google Drive connector, all 11 of its tools: viewer-only untrusted reads, trusted writes, reviewed sharing, plus the google-workspace audience source."
 
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code"]
-namespaces = ["google-workspace"]
+namespaces = ["google-workspace", "claude_ai_Google_Drive"]
 helpers = ["audience-source.py"]

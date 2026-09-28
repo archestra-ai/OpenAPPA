@@ -10,7 +10,7 @@ use std::time::Duration;
 mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
-use common::{free_port, http, serve_runtime};
+use common::{RefusingPort, http, serve_runtime};
 use init_fixture::shipped_default_config;
 
 fn stop(arguments: &[&str]) -> Output {
@@ -65,8 +65,8 @@ fn the_runtime_at_the_deployment_endpoint_is_stopped() {
 
 #[test]
 fn nothing_answering_is_not_a_failure() {
-    let url = format!("http://127.0.0.1:{}", free_port());
-    let output = stop(&["--deployment-url", &url]);
+    let refusing = RefusingPort::new();
+    let output = stop(&["--deployment-url", &refusing.url()]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 

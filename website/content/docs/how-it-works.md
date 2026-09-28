@@ -30,7 +30,7 @@ OpenAPPA operates with three concepts:
    Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
    1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination. An audience can be as specific as the members of one Slack channel: the contract extracts the channel ID from the tool's arguments, so reading channel `C0123` labels the data with that channel's membership, and posting to it requires that they are already valid readers.
-   2. **Trust:** How much the data in the session can be trusted. Reading an untrusted web page can lower the session's trust, and tools that require trusted input will no longer be allowed to run.
+   2. **Trust:** How much the data in the session can be trusted. Trust follows who can write the text. Text that only members of the organization can write, such as a private issue or an internal channel, keeps the session's trust. Text that an outsider can write, such as a web page or an issue on a public repository, lowers it, and tools that require trusted input will no longer be allowed to run.
    3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
    4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.
 
@@ -41,6 +41,8 @@ OpenAPPA operates with three concepts:
    - **`delta`:** How data returned by the tool changes the security label.
    - **`requires`:** Which requirements the session must satisfy for OpenAPPA to allow the action.
    - **`effects`:** Which effects are recorded after a tool runs successfully.
+
+   OpenAPPA uses the first explicit contract whose argument selectors match. If none match, the policy can route the call through a wildcard (`name = "*"`) annotator. Once a contract matches, a schema error refuses the call without falling through.
 
    For example, a CRM tool can label its result as internal, while an email tool can require the recipient to be included in the session's audience.
 
@@ -106,7 +108,7 @@ See [Sanitizers in Policy configuration](/contracts#sanitizers) for service conf
 
 ### Annotators
 
-An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
 
 For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
@@ -160,10 +162,6 @@ The agent has three tools:
 - **`get_ticket_from_crm`:** Read a customer support ticket.
 - **`send_email`:** Send an email to a recipient.
 - **`file_github_issue`:** Create a public GitHub issue.
-
-Policies accept native names, such as Claude Code's `Bash` or kagent's `get_ticket`, and canonical names, `<family>/<namespace>/<tool>`. The agent keeps calling its normal names. APPA records canonical identities internally. An unqualified kagent rule applies across MCP servers; add `server` when a rule should apply to one connection. Discovery identifies tools without changing the opening policy. See [Tool names](/contracts#tool-names).
-
-Discovery is evidence, not permission. Known tools need policy coverage; an unreachable source remains unknown. The kagent plugin checks metadata before exposure and isolates invalid later additions. Every call still passes runtime enforcement. A trajectory keeps its opening policy and accepted tool identities across plugin restarts.
 
 The policy says:
 

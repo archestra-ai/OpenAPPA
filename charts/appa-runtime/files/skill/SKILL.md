@@ -1,17 +1,10 @@
 ---
 name: appa-guide
-description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
-argument-hint: "init|adjust"
+description: Set up and tune OpenAPPA on the host you run in — Claude Code or a kagent cluster. Checks which tools and MCP servers the policy covers, includes the batteries that fit, writes rules for the rest, explains why a call was blocked, and makes the defaults stricter or looser on request.
+argument-hint: "[init | adjust | explain | what you want]"
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
-
-If the request says `diagnose` and `inspect only`, ignore all proposal,
-battery-suggestion, approval, and mutation instructions below. Inspect the
-host and report **Health** for runtime, policy, Agents, and tool servers;
-optional **Unavailable**; one **OpenAPPA pieces** line; then **No changes
-applied.** Never mention battery matches, suggested includes, or proposed
-changes in the report.
 
 You run inside a host. Every host follows the same flow — inspect the
 installed tools, propose contracts in plain English, wait for approval,
@@ -44,25 +37,30 @@ guess its content.
 
 Use one mode:
 
-- **`init`** — inspect the installed tools and build a useful starting
-  config.
-- **`adjust`** — help the operator make changes to an existing config.
+- **`init`** — check what the host has connected and how the policy
+  covers it, then propose a starting config: batteries to include, what
+  they need set up, and rules for tools nothing covers. It is also the
+  checkup to run after MCP servers change.
+- **`adjust`** — change how OpenAPPA treats a tool, data source,
+  destination, battery, or approval, including making the defaults
+  stricter or looser.
+- **`explain`** — say why a call was blocked, or what the current policy
+  does. Read-only: it proposes nothing unless the operator then asks for
+  a change, which continues as `adjust`.
 
-If the request already makes the mode clear, start there. Otherwise show
-these two choices in one short message and wait. Do not run both modes
-together. Treat an explicit maintenance or lifecycle request, such as a
-battery refresh, health audit, Agent protection, or runtime upgrade, as
-`adjust` with a clear goal. Do not ask the operator to select a mode in
-that case. If the operator asks to view or explain the current policy (e.g. `show policy`, `explain policy`, `what is the current policy?`), inspect the serving policy with the host's read-only tool (`appa describe` on Claude Code, `appa_get_runtime_state` on kagent), then summarize the active rules, protected tools, and included batteries in plain, accessible language without proposing any mutations.
-If the operator chooses `adjust` without describing the change,
-ask what they want OpenAPPA to do differently.
+With no request, run `init`. Otherwise start in the mode the request
+makes clear, and ask only when two modes fit it equally. Do not run two
+modes together. Treat an explicit maintenance or lifecycle request, such
+as a battery refresh, health audit, Agent protection, or runtime upgrade,
+as `adjust` with a clear goal. Treat "why was this blocked", "show
+policy", or "what does the policy do" as `explain`, on the host's
+read-only tools (`appa describe` on Claude Code, `appa_get_runtime_state`
+on kagent). If the operator chooses `adjust` without describing the
+change, ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
-proposal. Do not ask whether to continue before the proposal. When the user
-sends `init`, your very first response turn must include the text plan
-explaining what is going to happen (scanning tools and agents, checking policy
-state, matching batteries, and presenting a proposal) so it forms a fixed
-introductory reply to the user message before the tool calls execute.
+proposal. Do not ask whether to continue before the proposal. Start with one
+sentence saying what you will inspect.
 Invoke only the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
@@ -75,6 +73,12 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   Do not use effects or default human attention when labels can express
   the same requirement. Trusted data flowing within its audience stays
   autonomous.
+- The shipped defaults trade safety against interruptions, and the
+  operator may move that line either way. When they ask for stricter or
+  looser behavior, offer the matching options from the host reference,
+  each with what it changes and what it costs. Make every such change a
+  root rule marked with a comment naming the option, so undoing it means
+  removing that rule.
 - A battery supplies maintained defaults. Never edit a battery. Override
   a tool contract with a root rule. Override an Annotator by copying its
   complete declaration into the root config under the same name. Preserve
@@ -99,31 +103,20 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
   the session, what needs approval, and what becomes blocked.
-- Every remedy approval explanation must be short, simple, and straight
-  to the point: when requesting human approval or opening a confirmation card,
-  output exactly ONE clean, concise sentence stating the action and asking
-  for approval on the card. Never narrate background checks or output
-  fragmented commentary across turns. Run background calls silently.
-- Use human, user-friendly language without jargon. Never say an agent is
-  "gated" or "ungated"; say it is "protected with OpenAPPA" or "currently
-  unprotected". Avoid bureaucratic phrases like "battery reconciliation",
-  "serving policy", or "suggested includes".
-- Talk about outcomes, not config machinery, except for the one short
-  **OpenAPPA pieces** line required in every proposal. Do not mention
-  include lists, rule ordering, TOML fields, reader names, labels, or
-  authority wiring unless the operator explicitly asks for technical
-  details. Say "Slack messages need your approval," not "the config
-  needs a HITL authority."
-- Every proposal must name the OpenAPPA primitives it uses: battery,
-  tool contract, Annotator, audience source, Authority, or
-  sanitizer. When a command or service implements a primitive, state
-  which one. For example: "OpenAPPA pieces: tool contract and an
-  annotator backed by `gh`."
-- Use ordinary descriptions, not invented category names. Never say
-  "stale root rules." If relevant, say: "These tools are in your config
-  but were not detected in this session: <names>. I'll leave them
-  unchanged."
-- Show TOML only when the operator asks for it.
+- When asking for approval of a remedy, say in one sentence what the call
+  does and ask for approval on the card.
+- Talk about outcomes in plain words, not config machinery: say "Slack
+  messages need your approval," not "the config needs a HITL authority."
+  Say an agent is "protected with OpenAPPA" or "currently unprotected".
+  Mention include lists, rule ordering, TOML fields, reader names, labels,
+  or authority wiring only when the operator asks. Show TOML only when
+  asked.
+- Keep replies short and use everyday words. Explain the practical result and
+  next step; save technical details for when the user asks. If a host requires
+  an **OpenAPPA pieces** line, use plain words there too.
+- Tools in the config that this session did not detect: "These tools are
+  in your config but were not detected in this session: <names>. I'll
+  leave them unchanged."
 - Ask one focused question at a time. Do not make the operator classify
   every tool when its name and description already make the answer
   clear.

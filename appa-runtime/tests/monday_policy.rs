@@ -156,7 +156,7 @@ fn effects(runtime: &Runtime) -> Vec<Vec<String>> {
 }
 
 #[tokio::test]
-async fn bounded_metadata_keeps_trust_but_entity_details_lower_it() {
+async fn account_reads_keep_trust_and_meeting_content_lowers_it() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir, false).await;
     accept_read(&runtime, call("get_graphql_schema", serde_json::json!({}))).await;
@@ -164,16 +164,13 @@ async fn bounded_metadata_keeps_trust_but_entity_details_lower_it() {
         &runtime,
         call(
             "get_automation_statistics",
-            serde_json::json!({ "breakdown": "totals", "boardId": "1" }),
+            serde_json::json!({ "breakdown": "by_entity", "accountWide": true, "runStatus": "success" }),
         ),
     )
     .await;
     accept_read(
         &runtime,
-        call(
-            "get_automation_statistics",
-            serde_json::json!({ "breakdown": "by_entity", "accountWide": true, "runStatus": "success" }),
-        ),
+        call("get_meetings_content", serde_json::json!({ "meetingIds": ["1"] })),
     )
     .await;
     let trusts: Vec<_> = runtime
@@ -189,7 +186,7 @@ async fn bounded_metadata_keeps_trust_but_entity_details_lower_it() {
 }
 
 #[tokio::test]
-async fn reviewed_writes_distinguish_confirmations_from_broader_results() {
+async fn reviewed_writes_keep_trust_and_record_their_effects() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir, false).await;
     review_write(
@@ -224,7 +221,7 @@ async fn reviewed_writes_distinguish_confirmations_from_broader_results() {
             _ => None,
         })
         .collect();
-    assert_eq!(trusts, ["trusted", "trusted", "suspicious", "suspicious"]);
+    assert_eq!(trusts, ["trusted"; 4]);
     assert_eq!(
         effects(&runtime),
         vec![

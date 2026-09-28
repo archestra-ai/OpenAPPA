@@ -92,9 +92,9 @@ pub fn claude_code_purge() -> Result<Purge, InitError> {
 
 fn remove_profile(paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), InitError> {
     let deployed = paths.data_dir.join("bin").join(appa_filename());
-    let launcher = paths.install_dir.join(CLAPPA.0);
+    let launcher = paths.install_dir.join(CLAPPA);
     let launcher_before = file_before(&launcher)?;
-    verify_launcher(launcher_before.as_deref(), &launcher)?;
+    verify_launcher(launcher_before.as_deref(), &launcher, paths)?;
     // Everything foreign is refused before anything is removed.
     let registered = mcp::current(endpoint.url())?;
     skill::verify(&paths.claude_dir)?;
@@ -110,7 +110,7 @@ fn remove_profile(paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), In
         mcp::remove()?;
     }
     skill::remove(&paths.claude_dir)?;
-    settings::remove_statusline(paths, &deployed)?;
+    settings::remove_clappa_settings(paths)?;
     if launcher_before.is_some() {
         if file_before(&launcher)?.as_deref() != Some(REMOVING.as_bytes()) {
             return Err(conflict(
@@ -123,8 +123,8 @@ fn remove_profile(paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), In
     Ok(())
 }
 
-fn verify_launcher(bytes: Option<&[u8]>, path: &Path) -> Result<(), InitError> {
-    if bytes.is_some_and(|bytes| !super::launcher_is_owned(bytes)) {
+fn verify_launcher(bytes: Option<&[u8]>, path: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
+    if bytes.is_some_and(|bytes| !super::launcher_is_owned(bytes, paths)) {
         return Err(conflict(
             path,
             "launcher was edited; resolve it before removing the plugin",
@@ -146,10 +146,18 @@ mod tests {
 
     #[test]
     fn removal_accepts_only_owned_launcher_states() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = DeploymentPaths {
+            install_dir: root.path().to_path_buf(),
+            config_dir: root.path().join("config"),
+            data_dir: root.path().join("it's data"),
+            claude_dir: root.path().join("claude"),
+        };
         let launcher = Path::new("clappa");
-        for bytes in [None, Some(CLAPPA.1.as_bytes()), Some(REMOVING.as_bytes())] {
-            verify_launcher(bytes, launcher).unwrap();
+        let armed = super::super::armed_clappa(&paths);
+        for bytes in [None, Some(armed.as_bytes()), Some(REMOVING.as_bytes())] {
+            verify_launcher(bytes, launcher, &paths).unwrap();
         }
-        assert!(verify_launcher(Some(b"custom launcher"), launcher).is_err());
+        assert!(verify_launcher(Some(b"custom launcher"), launcher, &paths).is_err());
     }
 }

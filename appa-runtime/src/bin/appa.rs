@@ -65,6 +65,11 @@ enum Command {
         /// Exit unsuccessfully unless the complete configuration loads.
         #[arg(long)]
         check: bool,
+
+        /// Tool names the calling session sees, comma-separated, in the host's spelling or as
+        /// canonical ids. Each is reported as covered by a rule, annotated call by call, or refused.
+        #[arg(long = "session-tools", value_delimiter = ',')]
+        session_tools: Vec<String>,
     },
 
     /// Replay trace files against a policy and check every expectation.
@@ -273,6 +278,7 @@ fn main() -> ExitCode {
             batteries_dir,
             adapter,
             check,
+            session_tools,
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             let batteries_dir = if batteries_dir.is_empty() {
@@ -280,7 +286,7 @@ fn main() -> ExitCode {
             } else {
                 batteries_dir
             };
-            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str(), &session_tools);
             print!("{}", description.text);
             if check && !description.valid {
                 ExitCode::FAILURE

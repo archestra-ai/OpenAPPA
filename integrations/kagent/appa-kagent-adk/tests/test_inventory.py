@@ -46,6 +46,8 @@ def test_each_class_spells_its_tools():
     assert built.spelling("kagent__NS__log_analyst") == "agent:kagent/log-analyst"
     assert built.spelling("ask_user") == "builtin:ask_user"
     assert built.spelling(wire.RESERVED_TOOL) == wire.CONTROL_TOOL
+    assert built.spelling(wire.YELL_TOOL) == "mcp:appa/yell"
+    assert wire.YELL_TOOL not in wire.MANAGEMENT_TOOLS
     assert built.spelling("k8s_delete_namespace") is None
     assert (CODE_EXECUTION_TOOL, MEMORY_PERSIST_TOOL) == ("gate:code_execution", "gate:memory_persist")
 
@@ -163,6 +165,8 @@ def test_a_raw_name_declared_twice_is_refused():
         inventory(http_tools=[DEMO_TOOLS, {"params": {"url": "http://other:3000/mcp"}, "tools": ["list_pods"]}])
     with pytest.raises(ConfigRefused, match="ask_user"):
         inventory(http_tools=[{"params": {"url": "http://other:3000/mcp"}, "tools": ["ask_user"]}])
+    with pytest.raises(ConfigRefused, match="yell"):
+        inventory(http_tools=[{"params": {"url": "http://other:3000/mcp"}, "tools": ["yell"]}])
 
 
 def test_two_raw_names_that_spell_alike_are_refused():

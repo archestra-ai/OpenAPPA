@@ -1,6 +1,6 @@
 schema = 1
 name = "xmemory"
-description = "Rules for the hosted xmemory instance and admin MCP servers' 32 tools, one namespace bound to both: internal reads, writes without trusted data, trusted admin and schema changes, reviewed schema migrations and instance deletion."
+description = "Rules for the hosted xmemory instance and admin MCP servers' 32 tools, one namespace bound to both: internal reads, writes from trusted data only, trusted admin and schema changes, reviewed schema migrations and instance deletion."
 
 [battery]
 policy = "appa.toml"

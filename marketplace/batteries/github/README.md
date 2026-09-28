@@ -21,20 +21,24 @@ until a person widens it.
 
 *Reads of one repository* — every tool that names a repository with
 `owner` and `repo`: file contents, branches, commits, tags, releases,
-collaborators, issues, labels, pull requests. The text was written by
-whoever pushed it, so the result is untrusted, the same way a fetched
-web page is. Who may see it is the repository's visibility, which the
-`github.repository-visibility` annotator asks GitHub for on each call:
-`public` for a public repository, the collection
-`@github:repo/<owner>/<repo>/collaborators` for a private one and for an
-Enterprise `internal` one (every enterprise member may read it; its
-collaborators are the bound this source can list). Content read from a
+collaborators, issues, labels, pull requests. Trust follows who can
+write the text, and both trust and audience follow the repository's
+visibility, which the `github.repository-visibility` annotator asks
+GitHub for on each call. Anyone can open an issue or a pull request on a
+public repository, so its content enters `suspicious`, the same way a
+fetched web page does, and is `public`. A private or internal
+repository's content is written by the organization's people and its
+collaborators, so it keeps the session's trust and is read by the
+collection `@github:repo/<owner>/<repo>/collaborators`. For an
+Enterprise `internal` repository every enterprise member may read it;
+its collaborators are the bound this source can list. Content read from a
 non-public repository can then go only where its collaborators read.
 
 *Reads across repositories* — code, commit, issue, pull-request and
 repository searches, secret scanning, and org-level field listings name
-no single repository and reach every private repository the token
-sees. Their results are untrusted and stay with the viewer (`self`);
+no single repository and reach public repositories as well as every
+private one the token sees. Their results enter `suspicious` and stay
+with the viewer (`self`);
 a root rule can treat a search of public repositories as public by its
 query.
 

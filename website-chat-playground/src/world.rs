@@ -188,7 +188,8 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> toml::Table {
     // that names any other refuse at open — where the message names the annotator —
     // instead of failing operationally on every call.
     let annotators: toml::Table = policy
-        .annotator_names()
+        .annotators()
+        .map(|(name, _)| name)
         .filter(|name| name.as_str() == DIRECTORY_ANNOTATOR)
         .map(|name| (name.as_str().to_string(), endpoint(format!("{base}{ANNOTATOR_PATH}"))))
         .collect();

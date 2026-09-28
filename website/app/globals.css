@@ -1371,6 +1371,17 @@ samp {
   border-radius: 2px;
 }
 
+/* Loading: the clip is being fetched, so the button takes no clicks and
+   the glyph dims until playback starts. */
+.spell-it:disabled {
+  cursor: progress;
+}
+
+.spell-it[data-loading] .spell-it-glyph {
+  color: var(--icon);
+  opacity: 0.5;
+}
+
 .spell-it-glyph {
   flex: none;
 }
@@ -1548,9 +1559,12 @@ samp {
 
 .bench-charts {
   display: grid;
+  /* Two columns fit from 30rem + the 32px gap; the subject box below keys
+     its side-by-side form off the same threshold. */
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   gap: 22px 32px;
   margin-top: 22px;
+  container-type: inline-size;
 }
 
 .bench-chart {
@@ -1581,6 +1595,38 @@ samp {
 .bench-row-name {
   color: var(--text-weak);
   white-space: nowrap;
+}
+
+/* One faint accent band spans the subject row of every chart. A fill, not
+   an outline: a bordered box reads as keyboard focus. Each row paints its
+   own segment behind its content so the columns stay put; side by side, the
+   segments extend into the gap and meet at its midpoint, so the two charts
+   read as one highlighted line. Stacked, each row closes its own band. */
+.bench-row.subject {
+  position: relative;
+  isolation: isolate;
+}
+
+.bench-row.subject::before {
+  content: "";
+  position: absolute;
+  inset: -3px -7px;
+  z-index: -1;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+@container (min-width: calc(30rem + 32px)) {
+  .bench-chart:first-child .bench-row.subject::before {
+    right: -16px;
+    border-radius: 3px 0 0 3px;
+  }
+
+  .bench-chart:last-child .bench-row.subject::before {
+    left: -16px;
+    border-radius: 0 3px 3px 0;
+  }
 }
 
 .bench-row.subject .bench-row-name {
@@ -2324,18 +2370,11 @@ samp {
    Sponsor note — who pays for OpenAPPA
    ———————————————————————————————————————————————— */
 .sponsor-note {
-  display: flex;
-  align-items: center;
-  gap: 20px;
   margin: 1.5rem 0 2rem;
   padding: 18px 22px;
   border: 1px solid var(--warn);
   border-radius: 10px;
   background: var(--warn-bg);
-}
-
-.sponsor-note-mark {
-  flex: none;
 }
 
 .sponsor-note-text {
@@ -2349,14 +2388,6 @@ samp {
   color: var(--warn);
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-
-@media (max-width: 480px) {
-  .sponsor-note {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
 }
 
 .under-construction {

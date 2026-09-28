@@ -37,9 +37,7 @@ pub(super) enum Registered {
 /// only default an install writes, so a template reported without one is read
 /// as the template of `endpoint`, this deployment's.
 pub(super) fn current(endpoint: &str) -> Result<Registered, InitError> {
-    let output = Command::new("claude")
-        .args(["mcp", "get", SERVER])
-        .output()
+    let output = crate::child_process::output(Command::new("claude").args(["mcp", "get", SERVER]))
         .map_err(InitError::ClaudeUnavailable)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -127,8 +125,13 @@ fn is_ours(url: &str) -> bool {
     url.starts_with(TEMPLATE_PREFIX) && url.ends_with(TEMPLATE_SUFFIX)
 }
 
+/// Absence, across the wordings Claude Code has used for it: 2.1.32 answers
+/// `No MCP server found with name: appa`, later versions `No MCP server named
+/// "appa"`. The stem is what both share, so matching it keeps a removal from
+/// refusing because the registration it came to remove is already gone — which
+/// is the state a `--purge` exists to clean up, not a reason to stop.
 fn is_absent(message: &str) -> bool {
-    message.contains("No MCP server named")
+    message.to_ascii_lowercase().contains("no mcp server")
 }
 
 /// The `URL:` line of `claude mcp get`.
@@ -150,10 +153,8 @@ fn message(stdout: &str, stderr: &str) -> String {
 
 /// Run one `claude` command, answering with its stdout only when it succeeded.
 fn run<A: AsRef<OsStr>, const N: usize>(arguments: [A; N]) -> Result<String, InitError> {
-    let output = Command::new("claude")
-        .args(&arguments)
-        .output()
-        .map_err(InitError::ClaudeUnavailable)?;
+    let output =
+        crate::child_process::output(Command::new("claude").args(&arguments)).map_err(InitError::ClaudeUnavailable)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() {
         return Ok(stdout.into_owned());
@@ -187,6 +188,24 @@ mod tests {
             assert!(!is_ours(foreign), "{foreign}");
         }
         assert_eq!(served_url("appa:\n  Type: http\n"), None);
-        assert!(is_absent("No MCP server named \"appa\" in user scope"));
+    }
+
+    /// Every wording of "it is not there" that a supported Claude Code answers
+    /// with, and nothing else. A version whose phrasing this misses stops a
+    /// purge on the state it exists to remove.
+    #[test]
+    fn absence_is_recognized_whichever_claude_code_words_it() {
+        for absent in [
+            "No MCP server named \"appa\" in user scope",
+            "No MCP server found with name: appa",
+        ] {
+            assert!(is_absent(absent), "{absent}");
+        }
+        for present in [
+            "appa:\n  Type: http\n  URL: http://127.0.0.1:8787/mcp\n",
+            "error: connection refused",
+        ] {
+            assert!(!is_absent(present), "{present}");
+        }
     }
 }

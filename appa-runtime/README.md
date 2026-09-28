@@ -22,8 +22,8 @@ the release archive, verifies its checksum, and places `appa` in
 release, verifies it, and retains it:
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 A build from a checkout carries its exact Git commit, so the same command
@@ -36,8 +36,8 @@ appa plugin install claude-code
 
 The result does not depend on the working directory. It deploys the same `appa` build for its internal
 `runtime` command and registers it in the user's Claude Code settings as every session hook, rewriting the
-entries an earlier install wrote instead of stacking another set; it creates `clappa`, installs the
-statusline unless Claude already has a custom one, preserves an existing policy,
+entries an earlier install wrote instead of stacking another set; it creates `clappa`, which loads
+APPA's statusline for the sessions it starts, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../marketplace/plugins/claude-code/README.md)
 covers the complete flow.
 

@@ -2,13 +2,20 @@
 # version 1.0.0, authenticated 99-tool inventory captured on 2026-09-22.
 #
 # Like Notion, monday has no complete resource-reader API in this tool set.
-# Workspace reads stay suspicious/internal except bounded metadata results.
-# The root maps internal to the people who
+# Workspace reads are internal, and the root maps internal to the people who
 # may see everything the connection can reach. Per-board ACLs are not inferred.
 #
+# Trust follows who can write the text. Boards, items, updates, and docs are
+# written by account members, so reads keep the session's trust. Items a form
+# or an integration creates are trusted the same way: a member published the
+# form or installed the integration, even when an outsider wrote the words.
+# Meeting notes and transcripts carry what outside participants said, and the
+# knowledge endpoint answers from monday's own documentation, so those reads
+# enter `suspicious`.
+#
 # Like Linear and PostHog, many writes return provider-owned content as well as
-# confirmations: keep those results suspicious/internal and review the exact
-# write. Bounded provider-issued results can remain trusted. Ordinary changes
+# confirmations: keep those results internal and review the exact write.
+# Ordinary changes
 # record monday.changed; structural, automation,
 # execution, sharing and destructive operations record monday.sensitive.
 # The root supplies an authority permitting monday-review.
@@ -33,57 +40,57 @@ selectors = [{ template = "user/<id>" }]
 
 [[policy.tool]]
 name = "mcp/monday/get_assigned_items"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_user_mentions"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_user_recent_activity"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_user_context"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_board_info"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_board_items_page"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_updates"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_board_activity"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/list_users_and_teams"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_form"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/all_api_read"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -98,97 +105,92 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_type_details"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/read_docs"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/workspace_info"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/list_workspaces"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/all_widgets_schema"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/board_insights"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/search"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_assets"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/list_automations"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_automation_runs"
-delta = { trust = "suspicious", audience = ["internal"] }
-requires = { audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/monday/get_automation_statistics(breakdown:totals)"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_automation_statistics"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_monday_dev_sprints_boards"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_sprints_metadata"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_sprint_summary"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/invoke_process_planner"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/validate_workflow"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_run_once_trigger_entities"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_workflow_run_once_status"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -208,69 +210,69 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/agent_catalog"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/show-chart"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/show-table"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/show-assign"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/show-battery"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_action"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/list_actions"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/vibe_get"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/vibe_list"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/vibe_ask"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 # Read actions on mixed tools precede their reviewed mutation fallbacks.
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent(action:get)"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_triggers(action:list)"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_knowledge(action:list)"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 # --- public documentation: the question must be sharable with public ---
@@ -287,43 +289,43 @@ requires = { audience = { contains = ["public"] } }
 
 [[policy.tool]]
 name = "mcp/monday/create_item"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_items"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_update"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/change_item_column_values"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_items"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_doc"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_doc"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -353,25 +355,25 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_view"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_view_table"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_view"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_view_table"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -383,7 +385,7 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/finalize_asset_upload"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -400,13 +402,13 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_form"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/form_questions_editor"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -418,19 +420,19 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_column"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_workspace"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_folder"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -441,14 +443,8 @@ requires = { trust = "trusted", audience = { contains = ["internal"] }, attentio
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
-name = "mcp/monday/move_object(objectType:Folder)"
-delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
-effects = ["monday.sensitive"]
-
-[[policy.tool]]
 name = "mcp/monday/move_object"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -460,145 +456,145 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/delete_view"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/manage_automations"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_automation"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/invoke_workflow_expert"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_workflow"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/publish_workflow"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/run_workflow_once"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/stop_workflow_run_once"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_triggers"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_skills"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_knowledge"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/execute_code"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_action"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_action"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/delete_action"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/run_action"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/vibe_create"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/vibe_update"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/vibe_publication"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/vibe_delete"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/all_monday_api"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/all_api_write"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_notification"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -608,13 +604,13 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_form_submission"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/submit_bug_or_feature_request"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -624,6 +620,6 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/connect_external_agent"
-delta = { trust = "suspicious", audience = ["self"] }
+delta = { audience = ["self"] }
 requires = { trust = "trusted", audience = { contains = ["self"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]

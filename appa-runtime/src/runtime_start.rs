@@ -369,7 +369,7 @@ fn start(
         command.env_remove(name);
     }
     detach(&mut command);
-    command.spawn().map_err(|source| StartError::Spawn {
+    crate::child_process::spawn(&mut command).map_err(|source| StartError::Spawn {
         executable: executable.to_path_buf(),
         source,
     })?;

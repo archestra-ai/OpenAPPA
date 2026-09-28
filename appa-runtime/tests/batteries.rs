@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -29,14 +31,7 @@ impl Drop for Server {
     }
 }
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port binds");
-    let port = listener.local_addr().expect("the bound address is readable").port();
-    drop(listener);
-    port
-}
-
-fn start(config: &Path, db: &Path, batteries_dir: &Path, port: u16) -> Server {
+fn start(config: &Path, db: &Path, batteries_dir: &Path) -> Server {
     let child = Command::new(env!("CARGO_BIN_EXE_appa"))
         .arg("runtime")
         .arg("--config")
@@ -46,15 +41,17 @@ fn start(config: &Path, db: &Path, batteries_dir: &Path, port: u16) -> Server {
         .arg("--batteries-dir")
         .arg(batteries_dir)
         .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .stdout(Stdio::null())
+        .arg("127.0.0.1:0")
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("the binary spawns");
-    Server {
+    let mut server = Server {
         child,
-        url: format!("http://127.0.0.1:{port}"),
-    }
+        url: String::new(),
+    };
+    server.url = common::served_url(&mut server.child);
+    server
 }
 
 fn wait_for_health(server: &mut Server) {
@@ -125,7 +122,7 @@ fn get_batteries_lists_bundled_names_and_tools() {
     write_battery(&batteries, "chat", "mcp/chat/post_message");
     let config = dir.path().join("appa.toml");
     std::fs::write(&config, CONFIG).expect("root config");
-    let mut server = start(&config, &dir.path().join("appa.db"), &batteries, free_port());
+    let mut server = start(&config, &dir.path().join("appa.db"), &batteries);
     wait_for_health(&mut server);
 
     let body = http(&format!("{}/batteries", server.url), "GET", None).expect("/batteries answers");
@@ -185,7 +182,7 @@ fn a_file_as_batteries_dir_refuses_startup() {
         .arg("--batteries-dir")
         .arg(&file)
         .arg("--listen")
-        .arg(format!("127.0.0.1:{}", free_port()))
+        .arg("127.0.0.1:0")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

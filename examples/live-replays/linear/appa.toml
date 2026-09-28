@@ -18,13 +18,13 @@ internal = ["linear:full-members"]
 [[policy.tool]]
 name = "mcp/linear/get_issue(id:ENG-1)"
 parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = false }
-delta = { trust = "suspicious", audience = ["alice@corp.example"] }
+delta = { audience = ["alice@corp.example"] }
 requires = { audience = { contains = ["alice@corp.example"] } }
 
 [[policy.tool]]
 name = "mcp/linear/save_comment(issueId:ENG-1)"
 parameters = { type = "object", properties = { issueId = { type = "string" }, body = { type = "string" } }, required = ["issueId", "body"], additionalProperties = false }
-delta = { trust = "suspicious", audience = ["alice@corp.example"] }
+delta = { audience = ["alice@corp.example"] }
 requires = { trust = "trusted", audience = { contains = ["alice@corp.example"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 

@@ -74,10 +74,10 @@ class AnswerTests(unittest.TestCase):
             },
         )
 
-    def test_a_read_of_a_private_or_internal_repository_narrows_to_its_collaborators(self):
+    def test_a_read_of_a_private_or_internal_repository_keeps_trust_and_narrows_to_its_collaborators(self):
         for visibility in ["private", "internal"]:
             answer = ANNOTATOR.annotation(ANNOTATOR.CONTENT, visibility, "acme", "api")
-            self.assertEqual(answer["delta"], {"trust": "suspicious", "audience": [COLLABORATORS]})
+            self.assertEqual(answer["delta"], {"audience": [COLLABORATORS]})
 
     def test_only_a_reported_visibility_is_answered(self):
         for payload in [{"private": False}, {"visibility": "secret"}, {"visibility": None}, []]:
@@ -141,7 +141,7 @@ class EnvelopeTests(unittest.TestCase):
             result = self.run_script(consult(), github.env())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(github.seen, [("/repos/acme/api", "Bearer ghp-fixture")])
-        self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"trust": "suspicious", "audience": [COLLABORATORS]})
+        self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"audience": [COLLABORATORS]})
 
     def test_a_write_carrying_a_large_file_is_answered(self):
         arguments = {"owner": "acme", "repo": "api", "path": "data.txt", "content": "x" * 100_000}

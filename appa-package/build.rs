@@ -7,6 +7,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let crate_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
@@ -33,6 +34,9 @@ fn main() {
         writeln!(table, "    BundledBattery {{ name: {name:?}, files: &[").expect("a String grows");
         let mut files = Vec::new();
         collect_files(&directory, &directory, &mut files);
+        if let Some(listed) = git_listed(&directory) {
+            files.retain(|(relative, _)| listed.contains(relative));
+        }
         files.sort();
         for (relative, absolute) in files {
             let absolute = absolute.to_str().expect("a battery file has a UTF-8 path");
@@ -48,6 +52,27 @@ fn main() {
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("bundled_batteries.rs");
     fs::write(&out, table).unwrap_or_else(|error| panic!("{}: {error}", out.display()));
+}
+
+/// The files git tracks or would track under `directory`, relative to it: the set
+/// `scripts/appa-marketplace.sh` digests, so a test run's `__pycache__` is never
+/// bundled. `None` outside a git checkout, where every file counts.
+fn git_listed(directory: &Path) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let listed = String::from_utf8(output.stdout).ok()?;
+    Some(
+        listed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Every regular file under `directory`, as the path relative to the battery root the

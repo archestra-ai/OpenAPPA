@@ -2,9 +2,25 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { searchDocs, type SearchResult } from "@/lib/search";
+import { searchDocs, type SearchIndex, type SearchResult } from "@/lib/search";
+
+/* Fetched once per page load, the first time search opens; every later open
+   and keystroke matches against the copy held here. */
+let indexPromise: Promise<SearchIndex> | null = null;
+function loadIndex(): Promise<SearchIndex> {
+  indexPromise ??= fetch("/search-index").then((res) => {
+    if (!res.ok) throw new Error(`search index: ${res.status}`);
+    return res.json() as Promise<SearchIndex>;
+  });
+  indexPromise.catch(() => {
+    indexPromise = null;
+  });
+  return indexPromise;
+}
 
 export function SearchModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+  const [index, setIndex] = useState<SearchIndex | null>(null);
+  const [failed, setFailed] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -12,19 +28,31 @@ export function SearchModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
   const router = useRouter();
 
   useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => inputRef.current?.focus(), 50);
-      setQuery("");
-      setResults([]);
-      setSelectedIndex(0);
-    }
-  }, [isOpen]);
+    if (!isOpen) return;
+    setTimeout(() => inputRef.current?.focus(), 50);
+    setQuery("");
+    setResults([]);
+    setSelectedIndex(0);
+    if (index) return;
+    let cancelled = false;
+    setFailed(false);
+    loadIndex().then(
+      (loaded) => {
+        if (!cancelled) setIndex(loaded);
+      },
+      () => {
+        if (!cancelled) setFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, index]);
 
   useEffect(() => {
-    const res = searchDocs(query);
-    setResults(res);
+    setResults(index ? searchDocs(index, query) : []);
     setSelectedIndex(0);
-  }, [query]);
+  }, [index, query]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -82,7 +110,11 @@ export function SearchModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
 
         {query.trim() !== "" && (
           <div className="search-results">
-            {results.length === 0 ? (
+            {failed ? (
+              <div className="search-empty">Search is unavailable right now.</div>
+            ) : !index ? (
+              <div className="search-empty">Loading…</div>
+            ) : results.length === 0 ? (
               /* `ph-mask` is PostHog's default mask-text class: session replay
                  records this element's text as asterisks. Masking the input
                  itself is not enough — this line echoes what was typed back

@@ -22,6 +22,31 @@ fail() {
   exit 1
 }
 
+# Terminal dress, matching the vocabulary the Rust half prints: a mark in the
+# left margin, names in one column, commands set apart. One decision for the
+# whole run, and plain unless both streams are a terminal that has not asked to
+# go without escapes -- so a redirected stream never receives them.
+if [ -t 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+  dim=$(printf '\033[2m')
+  bold=$(printf '\033[1m')
+  green=$(printf '\033[1;32m')
+  off=$(printf '\033[0m')
+else
+  dim=''
+  bold=''
+  green=''
+  off=''
+fi
+
+# Narration goes to stderr; the receipt to stdout, where a caller reads it.
+# Success is the only mark: an install that worked says so once, and what is
+# left to do is instructions, not a warning.
+step() { printf '  %s%s%s\n' "$dim" "$1" "$off" >&2; }
+installed() { printf '\n  %s✓%s %s%s%s\n' "$green" "$off" "$bold" "$1" "$off"; }
+note() { printf '\n  %s\n' "$1"; }
+command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
+friendly() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 # The digest comes from the same host as the archive, so the transport must be
 # HTTPS, redirects included. Only appa-install-test.sh's loopback release is
@@ -106,7 +131,7 @@ trap 'cleanup; exit 130' INT HUP TERM
 # The list and the archive come from the same pinned release, never from
 # `latest`, so a release published mid-run cannot pair one with the other.
 release=$repository/releases/download/$tag
-printf 'Downloading appa %s for %s-%s\n' "$tag" "$architecture" "$platform" >&2
+step "$(printf 'Downloading appa %s for %s-%s' "$tag" "$architecture" "$platform")"
 fetch -L -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
   fail "could not download $release/SHA256SUMS"
 fetch -L -o "$work/$archive" "$release/$archive" ||
@@ -157,11 +182,47 @@ install -m 755 "$work/extract/appa" "$staged" ||
   fail "could not write $staged"
 mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa"
 staged=
-printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
+installed "Installed $version to $(friendly "$install_dir/appa")"
 case :${PATH:-}: in
-  *":$install_dir:"*) printf 'Next: appa plugin install claude-code\n' ;;
+  *":$install_dir:"*)
+    note 'Next, protect Claude Code:'
+    command_line 'appa plugin install claude-code'
+    ;;
   *)
-    printf 'Add %s to PATH to run appa by name.\n' "$install_dir"
-    printf 'Next: "%s/appa" plugin install claude-code\n' "$install_dir"
+    # Not on PATH is the ordinary case for ~/.local/bin, so it reads as the
+    # first of two steps rather than something that went wrong.
+    #
+    # Naming the file and reloading it is the whole step: a reader should not
+    # have to know which profile their shell reads, nor that a new shell is
+    # needed. fish keeps its own path command. A shell this does not know gets
+    # the bare line to place itself, which is all that can honestly be said.
+    add_to_path=
+    case ${SHELL##*/} in
+      fish)
+        add_to_path="fish_add_path $install_dir"
+        ;;
+      bash)
+        # The tilde stays unexpanded on purpose: this is a line the reader
+        # pastes, and their shell expands it when they do.
+        if [ "$(uname -s)" = Darwin ]; then
+          add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.bash_profile && source ~/.bash_profile"
+        else
+          add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+        fi
+        ;;
+      zsh)
+        add_to_path="echo 'export PATH=\"$install_dir:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+        ;;
+    esac
+    if [ -n "$add_to_path" ]; then
+      note 'Next, add appa to your PATH. Run this once:'
+      command_line "$add_to_path"
+    else
+      note 'Next, add appa to your PATH. Put this in your shell profile:'
+      command_line "export PATH=\"$install_dir:\$PATH\""
+    fi
+    note 'Then protect Claude Code:'
+    command_line 'appa plugin install claude-code'
     ;;
 esac
+printf '\n'

@@ -7,9 +7,11 @@ description: Export bounded runtime telemetry to your existing observability too
 
 OpenAPPA exports traces, logs, and metrics through OpenTelemetry (OTEL). You can send this telemetry to an OTEL-compatible collector or provider.
 
+![OpenAPPA dashboard in Grafana with summary counts and tables of agent yells, blocked calls, and remedy outcomes.](/images/grafana-openappa-dashboard.png)
+
 The export covers tool proposal checks, external calls, store failures, remedies, hooks, and agent reports. Policy-check time includes external and storage time. It excludes agent model inference and tool execution. An Annotator's model call counts as external-call time.
 
-The runtime exports only events with the `appa_telemetry` target. The `-v` and `-vv` options change stderr detail independently. The exporter does not capture function arguments.
+The runtime exports operational events with the `appa_telemetry` target. Optional diagnostic snapshots use the log-only `appa_yell_snapshot` target. The `-v` and `-vv` options change stderr detail independently. The exporter does not capture function arguments.
 
 ## OpenTelemetry export
 
@@ -31,6 +33,7 @@ export OTEL_RESOURCE_ATTRIBUTES=\
 | `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated resource attributes, such as the deployment environment. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Optional collector authentication headers. Supply them through your secret manager. |
 | `OTEL_SDK_DISABLED` | Set to `true` to disable export, even when an endpoint is set. |
+| `APPA_OTEL_YELL_SNAPSHOT` | Set to `true` to also export filtered agent yell reports as logs. Disabled by default. |
 
 APPA exports OTLP over HTTP with protobuf encoding. It uses `/v1/traces`, `/v1/logs`, and `/v1/metrics` under the base URL. Inside a container, `localhost` refers to that container.
 
@@ -132,7 +135,7 @@ Filter structured logs with `appa.event.name`:
 | `appa.runtime.failure` | `appa.component`, `appa.error.type`, plus `appa.trajectory.root` and `appa.operation` for store failures |
 | `appa.yell.report` | `appa.trajectory.root`, `appa.report.source`, `appa.report.id`, `appa.report.message` |
 
-The exporter does not send raw prompts, tool arguments, tool results, provenance, audience sets, or trust claims. It also does not export policy feedback, review text, or remedy display text.
+Operational telemetry does not send raw prompts, tool arguments, tool results, provenance, audience sets, or trust claims. It also excludes policy feedback, review text, and remedy display text. Optional yell snapshots include the existing report's filtered policy, labels, and diagnostic facts, as described below.
 
 APPA bounds caller-controlled exported identifiers and names to 256 UTF-8 bytes. A policy decision exports at most 32 offer IDs.
 
@@ -154,7 +157,44 @@ Export runs on background workers with bounded queues. A failed export cannot ch
 
 An approved agent report exports `appa.yell.report` after APPA prepares the filtered report. The event contains the message, report ID, source, and root trajectory ID. APPA exports this event even if delivery to the report receiver later fails.
 
-The full filtered report goes only to the receiver configured by `APPA_YELL_ENDPOINT`. APPA does not send the report body through OTLP. CLI report previews and CLI reports do not enter OTLP export.
+By default, the full filtered report goes only to the receiver configured by `APPA_YELL_ENDPOINT`. CLI report previews and CLI reports do not enter OTLP export.
+
+### Send diagnostic reports to Grafana
+
+With Grafana Cloud's OTLP endpoint and credentials configured, enable report export:
+
+```sh
+export APPA_OTEL_YELL_SNAPSHOT=true
+```
+
+Restart the runtime to send new approved agent reports to Loki as well as the report receiver. Other OTLP log providers work too.
+
+This is a diagnostic report, not conversation replay. The existing filtering rules remove message bodies, argument values, and tool result bodies. The report retains the free-form yell message and filtered policy and trajectory diagnostics. It respects the call's `with_trajectory` choice and the report builder's size limits and omission markers.
+
+This opt-in authorizes an additional destination for that filtered report. Filtering uses fixed report rules, not a destination-specific engine policy check. Restrict Grafana access and retention accordingly.
+
+Each `appa.yell.snapshot` log carries up to 16 KiB of the report in `appa.report.chunk`. It also carries these fields:
+
+| Field | Meaning |
+|---|---|
+| `appa.report.id` | The same ID as the yell event and receiver report. |
+| `appa.trajectory.root` | The root trajectory identifier. |
+| `appa.report.chunk.index` | Zero-based position in the report. |
+| `appa.report.chunk.count` | Expected number of records for this report. |
+| `appa.report.bytes` | Total UTF-8 bytes in the finished report. |
+
+Records carry the yell's native trace and span IDs. Snapshot content does not enter spans or stderr, including verbose stderr.
+
+In Grafana Explore, select Loki and filter by report ID. Grafana maps dotted OTLP attribute names to underscores:
+
+```logql
+{service_name="appa-clappa"}
+  | appa_event_name="appa.yell.snapshot"
+  | appa_report_id="REPLACE_WITH_REPORT_ID"
+  | line_format "{{.appa_report_chunk}}"
+```
+
+For reconstruction, sort records by numeric chunk index and concatenate their chunk fields without separators. Require every index from zero through count minus one. Check the total byte length before parsing the report as JSON. Missing chunks mean an incomplete export, not policy-withheld content. Export queues and provider limits can lose records. The diagnostic report itself can also contain omission markers from its existing size limits.
 
 OpenTelemetry does not change report approval or delivery rules. It does not bypass the agent-reporting opt-in or add a confirmation bypass. See [`appa yell`](/yell) for report controls.
 

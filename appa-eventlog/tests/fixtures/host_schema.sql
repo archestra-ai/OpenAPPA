@@ -32,24 +32,6 @@ CREATE TABLE openappa_sessions (
 );
 CREATE INDEX openappa_sessions_root_idx ON openappa_sessions (root);
 
-CREATE TABLE openappa_offer_owners (
-    organization_id text NOT NULL,
-    caller_id text,
-    session_id text NOT NULL,
-    binding text NOT NULL,
-    offer_id text NOT NULL,
-    root text NOT NULL,
-    parent_id text,
-    arguments text,
-    tool text,
-    spelling text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_offer_owners_pk PRIMARY KEY (organization_id, offer_id)
-);
-CREATE INDEX openappa_offer_owners_created_at_idx ON openappa_offer_owners (created_at);
-CREATE INDEX openappa_offer_owners_root_idx ON openappa_offer_owners (root);
-CREATE INDEX openappa_offer_owners_session_idx ON openappa_offer_owners (organization_id, session_id, caller_id);
-
 CREATE TABLE openappa_operations (
     organization_id text NOT NULL,
     caller_id text,
@@ -60,7 +42,7 @@ CREATE TABLE openappa_operations (
     input jsonb NOT NULL,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_operations_pk PRIMARY KEY (session_id, operation_id),
+    CONSTRAINT openappa_operations_pk PRIMARY KEY (organization_id, session_id, operation_id),
     CONSTRAINT openappa_operations_status CHECK (
         (status = 'pending' AND decision IS NULL)
         OR (status = 'complete' AND decision IS NOT NULL)
@@ -78,7 +60,7 @@ CREATE TABLE openappa_processed_results (
     approved_output text,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT openappa_results_pk PRIMARY KEY (session_id, tool_call_id),
+    CONSTRAINT openappa_results_pk PRIMARY KEY (organization_id, session_id, tool_call_id),
     CONSTRAINT openappa_results_status CHECK (
         (status = 'pending' AND approved_output IS NULL AND decision IS NULL)
         OR (status = 'complete' AND approved_output IS NOT NULL AND decision IS NOT NULL)

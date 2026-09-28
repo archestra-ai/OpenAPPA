@@ -1254,8 +1254,8 @@ mod tests {
         cfg.sanitizers = vec![output_sanitizer("redactor")];
         let profile = covering_profile(&cfg);
         let bare = identity(&cfg, &profile);
-        cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk"));
-        cfg.sanitizers[0].hint = Some(Hint::new("strips PII"));
+        cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk").expect("a short hint"));
+        cfg.sanitizers[0].hint = Some(Hint::new("strips PII").expect("a short hint"));
         assert_eq!(identity(&cfg, &profile), bare);
     }
 
@@ -1350,8 +1350,10 @@ mod tests {
         let mut with_group = with_reader.clone();
         with_group.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("team"),
@@ -1432,7 +1434,7 @@ mod tests {
             let mut cfg = config(vec![tool("fetch")]);
             cfg.audience = AudienceConfig {
                 sources: vec![SourceRegistration {
-                    provider: "slack".to_string(),
+                    provider: crate::names::ProviderName::new("slack"),
                     templates,
                 }],
                 self_from: vec![SelectorSpec {
@@ -1443,7 +1445,9 @@ mod tests {
             };
             cfg
         };
-        let viewer_only = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))]);
+        let viewer_only = with_templates(vec![
+            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+        ]);
         let profile = covering_profile(&viewer_only);
         let base = identity(&viewer_only, &profile);
 
@@ -1455,12 +1459,14 @@ mod tests {
         );
 
         let with_group = with_templates(vec![
-            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
-            DeclaredTemplate::named("user-group/<handle>"),
+            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
+            DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
         ]);
         assert_ne!(identity(&with_group, &profile), base, "a declared template is policy");
 
-        let refed = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Internal))]);
+        let refed = with_templates(vec![
+            DeclaredTemplate::new("viewer", Some(ChainAudience::Internal)).expect("a well-formed template"),
+        ]);
         assert_ne!(identity(&refed, &profile), base, "what a template feeds is policy");
     }
 }

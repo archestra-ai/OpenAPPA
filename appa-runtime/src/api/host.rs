@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use appa_eventlog::{HostActor, HostObservation, HostRecord, Log};
-use appa_runtime_api::{Actor, Adapter, Ruling, TrajectoryId, inventory::ToolInventory};
+use appa_runtime_api::{Actor, Adapter, Ruling, inventory::ToolInventory};
 
 use super::{EventError, PermitKey, Unvouched, acting_trajectory, inventory_refused};
 
@@ -140,19 +140,16 @@ fn recorded_key(recorded: &str) -> Option<PermitKey> {
 /// The actor a record names, in the vocabulary the harness speaks.
 fn actor_of(actor: &HostActor) -> Actor {
     Actor {
-        root: TrajectoryId(actor.root.as_str().to_string()),
-        child: actor
-            .child
-            .as_ref()
-            .map(|child| TrajectoryId(child.as_str().to_string())),
+        root: actor.root.clone(),
+        child: actor.child.clone(),
     }
 }
 
 /// The actor of a record, as a record carries it.
 pub(crate) fn host_actor(actor: &Actor) -> HostActor {
     HostActor {
-        root: crate::engine::engine_id(&actor.root),
-        child: actor.child.as_ref().map(crate::engine::engine_id),
+        root: actor.root.clone(),
+        child: actor.child.clone(),
     }
 }
 
@@ -209,7 +206,7 @@ pub(crate) fn inventory_at(log: &Log, actor: &Actor, adapter: Adapter) -> Result
         .into_iter()
         .map(|source| (source.server.clone(), source))
         .collect();
-    let scope = crate::engine::engine_id(acting_trajectory(actor));
+    let scope = acting_trajectory(actor);
     for record in log.host_records() {
         let HostObservation::Inventory {
             actor: observed,
@@ -219,7 +216,7 @@ pub(crate) fn inventory_at(log: &Log, actor: &Actor, adapter: Adapter) -> Result
         else {
             continue;
         };
-        if *observed != scope {
+        if observed != scope {
             continue;
         }
         if *observed_adapter != adapter.name {

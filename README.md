@@ -64,8 +64,8 @@ The Claude Code integration is a playground for the model, not the product. It i
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 The installer verifies the checksum of the release binary for Linux or macOS
@@ -78,12 +78,13 @@ A release binary installs the version published for its tag; a checkout build
 installs the commit it was built from.
 
 The native `appa` command deploys the runtime and registers it in your Claude
-Code user settings as the session's hooks and status line, together with the
-runtime's MCP server, the `appa-guide` skill, and the `clappa` launcher. Rerunning
-it rewrites only what it wrote and preserves an existing policy or custom
-statusline. Fresh policies use a fail-closed Claude annotator as a compatibility
+Code user settings as the session's hooks, together with the runtime's MCP
+server, the `appa-guide` skill, and the `clappa` launcher, which adds APPA's
+status line to the sessions it starts. Rerunning it rewrites only what it wrote
+and preserves an existing policy. Fresh policies use a fail-closed Claude annotator as a compatibility
 net for MCP tools they do not yet name. Start `clappa`, then run
-`/appa-guide init` to replace that fallback with exact connector contracts.
+`/appa-guide` to replace that fallback with exact connector contracts; the
+same skill explains blocks and tunes the defaults.
 Plain `claude` sessions stay untouched.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)

@@ -9,8 +9,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use appa_engine::label::Label;
+use appa_engine::value::{DispatchId, FileBasis, FileSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+pub mod beneath;
 
 const ABSENT: &str = "-";
 /// How many input snapshots one Process call may declare. Every one of them is hashed at
@@ -52,25 +55,115 @@ pub enum FileOperation {
     Process,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileSourcePin {
-    pub path: String,
-    pub version: i64,
-    pub label: Label,
+/// One tracked version as a reservation pinned it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedVersion {
+    pub id: i64,
     pub digest: String,
+    pub label: Label,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A pinned version at another path whose bytes the operation consumes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedSource {
+    pub path: String,
+    pub version: PinnedVersion,
+}
+
+/// What a reserved operation reads and replaces. `replaced` is the destination's version
+/// before the operation, absent when the destination does not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinnedBasis {
+    Read(PinnedVersion),
+    Replace(Option<PinnedVersion>),
+    Edit(PinnedVersion),
+    Copy {
+        source: PinnedSource,
+        replaced: Option<PinnedVersion>,
+    },
+    Move {
+        source: PinnedSource,
+        replaced: Option<PinnedVersion>,
+    },
+    Process {
+        inputs: Vec<PinnedSource>,
+        replaced: Option<PinnedVersion>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilePin {
     pub path: String,
-    pub operation: FileOperation,
-    pub predecessor_version: Option<i64>,
-    pub predecessor_label: Option<Label>,
-    pub predecessor_digest: Option<String>,
-    /// The source bytes consumed by a Copy or Move.
-    pub source: Option<FileSourcePin>,
-    /// The source bytes consumed by a Process. Empty for all other operations.
-    pub inputs: Vec<FileSourcePin>,
+    pub basis: PinnedBasis,
+}
+
+impl PinnedVersion {
+    fn of(version: FileVersion) -> Self {
+        Self {
+            id: version.id,
+            digest: version.digest,
+            label: version.label,
+        }
+    }
+
+    fn file_source(&self) -> FileSource {
+        FileSource {
+            version: self.id.to_string(),
+            digest: self.digest.clone(),
+            label: self.label.clone(),
+        }
+    }
+}
+
+impl PinnedBasis {
+    /// The version the destination held when the reservation was taken.
+    fn predecessor(&self) -> Option<&PinnedVersion> {
+        match self {
+            PinnedBasis::Read(version) | PinnedBasis::Edit(version) => Some(version),
+            PinnedBasis::Replace(replaced)
+            | PinnedBasis::Copy { replaced, .. }
+            | PinnedBasis::Move { replaced, .. }
+            | PinnedBasis::Process { replaced, .. } => replaced.as_ref(),
+        }
+    }
+
+    fn transferred(&self) -> Option<&PinnedSource> {
+        match self {
+            PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
+    fn inputs(&self) -> &[PinnedSource] {
+        match self {
+            PinnedBasis::Process { inputs, .. } => inputs,
+            _ => &[],
+        }
+    }
+}
+
+impl FilePin {
+    /// The engine's view of this pin: what the call's flow check rules on.
+    pub fn file_basis(&self) -> FileBasis {
+        let pinned = |replaced: &Option<PinnedVersion>| replaced.as_ref().map(PinnedVersion::file_source);
+        match &self.basis {
+            PinnedBasis::Read(version) => FileBasis::Read(version.file_source()),
+            PinnedBasis::Replace(replaced) => FileBasis::Replace(pinned(replaced)),
+            PinnedBasis::Edit(version) => FileBasis::Edit(version.file_source()),
+            PinnedBasis::Copy { source, replaced } => FileBasis::Copy {
+                source: source.version.file_source(),
+                replaced: pinned(replaced),
+            },
+            PinnedBasis::Move { source, replaced } => FileBasis::Move {
+                source: source.version.file_source(),
+                replaced: pinned(replaced),
+            },
+            PinnedBasis::Process { inputs, replaced } => FileBasis::Process {
+                inputs: inputs.iter().map(|input| input.version.file_source()).collect(),
+                replaced: pinned(replaced),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,26 +175,23 @@ pub struct FileVersion {
     pub previous: Option<i64>,
     /// The versions whose bytes contributed to this content.
     pub content_dependencies: Vec<i64>,
-    pub dispatch: Option<String>,
+    pub dispatch: Option<DispatchId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileReceipt {
-    pub path: String,
-    pub operation: FileOperation,
-    pub success: bool,
+    pub dispatch: DispatchId,
     pub source_label: Option<Label>,
-    pub version: Option<FileVersion>,
-    pub dispatch: Option<String>,
+    pub outcome: FileOutcome,
 }
 
-/// A live reservation: the pinned operation a released call holds the workspace for.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reservation {
-    pub actor: String,
-    pub call_key: String,
-    pub pin: FilePin,
-    pub bound_dispatch: Option<String>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// `version` is the one the call published; a Read publishes none.
+    Succeeded {
+        version: Option<FileVersion>,
+    },
+    Failed,
 }
 
 /// What releasing a call that never ran did to its reservation.
@@ -122,48 +212,39 @@ pub struct FileStore {
 }
 
 struct State {
+    initial: Label,
     next_id: i64,
     versions: BTreeMap<i64, FileVersion>,
     current: BTreeMap<String, i64>,
-    reservation: Option<StoredReservation>,
+    reservation: Option<Reservation>,
     receipts: HashMap<(String, String), FileReceipt>,
 }
 
-struct StoredReservation {
+/// A live reservation: the pinned operation a released call holds the workspace for.
+struct Reservation {
     actor: String,
     call_key: String,
     pin: FilePin,
-    bound_dispatch: Option<String>,
-    output_label: Option<Label>,
+    bound: Option<Bound>,
+}
+
+/// What the released dispatch fixed for a reservation: the Label its output file receives.
+#[derive(Clone)]
+struct Bound {
+    dispatch: DispatchId,
+    output_label: Label,
 }
 
 impl FileStore {
     pub fn new(workspace: &Path, initial: &Label) -> Result<Self, FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
-        let mut versions = BTreeMap::new();
-        let mut current = BTreeMap::new();
-        let mut next_id = 1;
-        for (path, digest) in scan(&workspace)? {
-            versions.insert(
-                next_id,
-                FileVersion {
-                    id: next_id,
-                    path: path.clone(),
-                    digest,
-                    label: initial.clone(),
-                    previous: None,
-                    content_dependencies: vec![],
-                    dispatch: None,
-                },
-            );
-            current.insert(path, next_id);
-            next_id += 1;
-        }
+        check_links(&workspace)?;
         Ok(Self {
             state: Mutex::new(State {
-                next_id,
-                versions,
-                current,
+                initial: initial.clone(),
+                next_id: 1,
+                versions: BTreeMap::new(),
+                current: BTreeMap::new(),
                 reservation: None,
                 receipts: HashMap::new(),
             }),
@@ -187,40 +268,28 @@ impl FileStore {
             ));
         }
         let relative = validated_relative(&self.workspace, path)?;
-        let absolute = self.workspace.join(&relative);
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let predecessor = current_state(&state, &relative);
-        match operation {
-            FileOperation::Read | FileOperation::Edit if predecessor.is_none() => {
-                return Err(FileStoreError::Untracked);
-            }
-            _ => {}
-        }
-        if absolute.exists() {
-            check_regular(&absolute)?;
-            let actual = hash(&absolute)?;
-            let Some(version) = &predecessor else {
-                return Err(FileStoreError::Untracked);
-            };
-            if actual != version.digest {
-                return Err(FileStoreError::DigestMismatch);
-            }
-        } else if predecessor.is_some() || operation != FileOperation::Replace {
-            return Err(FileStoreError::DigestMismatch);
-        }
-        let pin = FilePin {
-            path: relative.clone(),
-            operation,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: None,
-            inputs: vec![],
+        let Touched {
+            version: predecessor,
+            actual,
+        } = touch(&mut state, &self.workspace, &relative)?;
+        let basis = match (operation, predecessor.map(PinnedVersion::of)) {
+            (FileOperation::Replace, predecessor) => PinnedBasis::Replace(predecessor),
+            (FileOperation::Read, Some(version)) => PinnedBasis::Read(version),
+            (FileOperation::Edit, Some(version)) => PinnedBasis::Edit(version),
+            _ => return Err(FileStoreError::Untracked),
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        match (actual.as_str(), basis.predecessor()) {
+            (ABSENT, None) => {}
+            (_, None) => return Err(FileStoreError::Untracked),
+            (actual, Some(version)) if actual == version.digest => {}
+            (_, Some(_)) => return Err(FileStoreError::DigestMismatch),
+        }
+        let pin = FilePin { path: relative, basis };
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -247,42 +316,43 @@ impl FileStore {
         let source_absolute = self.workspace.join(&source);
         let destination_absolute = self.workspace.join(&destination);
 
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
-        let source_version = current_state(&state, &source).ok_or(FileStoreError::Untracked)?;
-        if !source_absolute.exists() {
+        let Touched {
+            version: source_version,
+            actual: source_actual,
+        } = touch(&mut state, &self.workspace, &source)?;
+        let source_version = source_version.ok_or(FileStoreError::Untracked)?;
+        if source_actual == ABSENT {
             return Err(FileStoreError::Untracked);
         }
-        check_regular(&source_absolute)?;
         check_move_filesystem(operation, &source_absolute, &destination_absolute)?;
-        if hash(&source_absolute)? != source_version.digest {
+        if source_actual != source_version.digest {
             return Err(FileStoreError::DigestMismatch);
         }
-        let predecessor = current_state(&state, &destination);
-        let destination_actual = state_digest(&destination_absolute)?;
+        let Touched {
+            version: predecessor,
+            actual: destination_actual,
+        } = touch(&mut state, &self.workspace, &destination)?;
         if destination_actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
         }
-        if destination_absolute.exists() {
-            check_regular(&destination_absolute)?;
-        }
+        let source = PinnedSource {
+            path: source,
+            version: PinnedVersion::of(source_version),
+        };
+        let replaced = predecessor.map(PinnedVersion::of);
+        let basis = match operation {
+            FileOperation::Copy => PinnedBasis::Copy { source, replaced },
+            _ => PinnedBasis::Move { source, replaced },
+        };
         let pin = FilePin {
             path: destination,
-            operation,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: Some(FileSourcePin {
-                path: source,
-                version: source_version.id,
-                label: source_version.label,
-                digest: source_version.digest,
-            }),
-            inputs: vec![],
+            basis,
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -307,46 +377,40 @@ impl FileStore {
         if inputs.len() > MAX_PROCESS_INPUTS {
             return Err(FileStoreError::InvalidPath("too many process inputs".into()));
         }
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         if state.reservation.is_some() {
             return Err(FileStoreError::Pending);
         }
         let mut pinned = Vec::with_capacity(inputs.len());
         for path in inputs {
-            let version = current_state(&state, &path).ok_or(FileStoreError::Untracked)?;
-            let absolute = self.workspace.join(&path);
-            if !absolute.exists() {
+            let Touched { version, actual } = touch(&mut state, &self.workspace, &path)?;
+            let version = version.ok_or(FileStoreError::Untracked)?;
+            if actual == ABSENT {
                 return Err(FileStoreError::Untracked);
             }
-            check_regular(&absolute)?;
-            if hash(&absolute)? != version.digest {
+            if actual != version.digest {
                 return Err(FileStoreError::DigestMismatch);
             }
-            pinned.push(FileSourcePin {
+            pinned.push(PinnedSource {
                 path,
-                version: version.id,
-                label: version.label,
-                digest: version.digest,
+                version: PinnedVersion::of(version),
             });
         }
-        let predecessor = current_state(&state, &destination);
-        let destination_absolute = self.workspace.join(&destination);
-        if state_digest(&destination_absolute)? != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
+        let Touched {
+            version: predecessor,
+            actual,
+        } = touch(&mut state, &self.workspace, &destination)?;
+        if actual != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
             return Err(FileStoreError::DigestMismatch);
-        }
-        if destination_absolute.exists() {
-            check_regular(&destination_absolute)?;
         }
         let pin = FilePin {
             path: destination,
-            operation: FileOperation::Process,
-            predecessor_version: predecessor.as_ref().map(|v| v.id),
-            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
-            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
-            source: None,
-            inputs: pinned,
+            basis: PinnedBasis::Process {
+                inputs: pinned,
+                replaced: predecessor.map(PinnedVersion::of),
+            },
         };
-        state.reservation = Some(stored_reservation(actor, call_key, &pin));
+        state.reservation = Some(pending_reservation(actor, call_key, &pin));
         Ok(pin)
     }
 
@@ -354,22 +418,24 @@ impl FileStore {
         &self,
         actor: &str,
         call_key: &str,
-        dispatch: &str,
+        dispatch: &DispatchId,
         output_label: &Label,
     ) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let reservation = matching_reservation_mut(&mut state, actor, call_key)?;
-        if reservation.bound_dispatch.is_some() {
+        if reservation.bound.is_some() {
             return Err(FileStoreError::AlreadyBound);
         }
-        reservation.bound_dispatch = Some(dispatch.into());
-        reservation.output_label = Some(output_label.clone());
+        reservation.bound = Some(Bound {
+            dispatch: dispatch.clone(),
+            output_label: output_label.clone(),
+        });
         Ok(())
     }
 
     pub fn cancel(&self, actor: &str, call_key: &str) -> Result<(), FileStoreError> {
-        let mut state = self.lock()?;
-        if matching_reservation(&state, actor, call_key)?.bound_dispatch.is_some() {
+        let mut state = self.lock();
+        if matching_reservation(&state, actor, call_key)?.bound.is_some() {
             return Err(FileStoreError::AlreadyBound);
         }
         state.reservation = None;
@@ -377,153 +443,95 @@ impl FileStore {
     }
 
     pub fn finish(&self, actor: &str, call_key: &str, success: bool) -> Result<FileReceipt, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let key = (actor.to_owned(), call_key.to_owned());
         if let Some(receipt) = state.receipts.get(&key) {
             return Ok(receipt.clone());
         }
         let reservation = matching_reservation(&state, actor, call_key)?;
         let pin = reservation.pin.clone();
-        let dispatch = reservation
-            .bound_dispatch
-            .clone()
-            .ok_or(FileStoreError::UnknownReservation)?;
-        let output = reservation
-            .output_label
-            .clone()
-            .ok_or(FileStoreError::UnknownReservation)?;
-        let absolute = self.workspace.join(&pin.path);
-        let actual = state_digest(&absolute)?;
-        let expected = pin.predecessor_digest.as_deref().unwrap_or(ABSENT);
-        let source_actual = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
-            .transpose()?;
-        let input_states = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        let inputs_unchanged = input_states.iter().all(|unchanged| *unchanged);
-        let source_label = if pin.operation == FileOperation::Process {
-            pin.inputs
+        let Bound {
+            dispatch,
+            output_label: output,
+        } = reservation.bound.clone().ok_or(FileStoreError::UnknownReservation)?;
+        let observed = Observed::of(&self.workspace, &pin)?;
+        let source_label = match &pin.basis {
+            PinnedBasis::Process { inputs, .. } => inputs
                 .iter()
-                .map(|input| input.label.clone())
-                .reduce(|label, next| label.combine(&next))
-        } else {
-            pin.source
-                .as_ref()
-                .map(|source| source.label.clone())
-                .or_else(|| pin.predecessor_label.clone())
+                .map(|input| input.version.label.clone())
+                .reduce(|label, next| label.combine(&next)),
+            PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => Some(source.version.label.clone()),
+            basis => basis.predecessor().map(|version| version.label.clone()),
         };
-        let receipt = if !success {
-            if !undisturbed(&pin, &actual, source_actual.as_deref(), &input_states) {
+        let outcome = if !success {
+            if !observed.undisturbed(&pin) {
                 return Err(FileStoreError::Quarantined);
             }
-            FileReceipt {
-                path: pin.path.clone(),
-                operation: pin.operation,
-                success: false,
-                source_label: source_label.clone(),
-                version: None,
-                dispatch: Some(dispatch),
-            }
-        } else if pin.operation == FileOperation::Read {
-            if actual != expected {
-                return Err(FileStoreError::DigestMismatch);
-            }
-            FileReceipt {
-                path: pin.path.clone(),
-                operation: pin.operation,
-                success: true,
-                source_label: source_label.clone(),
-                version: None,
-                dispatch: Some(dispatch),
-            }
+            FileOutcome::Failed
         } else {
-            let dependencies = match pin.operation {
-                FileOperation::Edit => pin.predecessor_version.into_iter().collect(),
-                FileOperation::Copy | FileOperation::Move => {
-                    let source = pin
-                        .source
-                        .as_ref()
-                        .ok_or_else(|| FileStoreError::Corrupt("transfer has no source pin".into()))?;
-                    let source_ok = if pin.operation == FileOperation::Move {
-                        source_actual.as_deref() == Some(ABSENT)
+            let dependencies = match &pin.basis {
+                PinnedBasis::Read(version) => {
+                    if observed.destination != version.digest {
+                        return Err(FileStoreError::DigestMismatch);
+                    }
+                    None
+                }
+                PinnedBasis::Replace(_) => Some(vec![]),
+                PinnedBasis::Edit(version) => Some(vec![version.id]),
+                PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => {
+                    let source_after = if matches!(pin.basis, PinnedBasis::Move { .. }) {
+                        ABSENT
                     } else {
-                        source_actual.as_deref() == Some(source.digest.as_str())
+                        source.version.digest.as_str()
                     };
-                    if !source_ok || actual != source.digest {
+                    if observed.source.as_deref() != Some(source_after) || observed.destination != source.version.digest
+                    {
                         return Err(FileStoreError::DigestMismatch);
                     }
-                    vec![source.version]
+                    Some(vec![source.version.id])
                 }
-                FileOperation::Process => {
-                    if !inputs_unchanged {
+                PinnedBasis::Process { inputs, .. } => {
+                    if !observed.inputs_unchanged {
                         return Err(FileStoreError::DigestMismatch);
                     }
-                    pin.inputs.iter().map(|input| input.version).collect()
+                    Some(inputs.iter().map(|input| input.version.id).collect())
                 }
-                FileOperation::Replace => vec![],
-                FileOperation::Read => unreachable!(),
             };
-            if actual == ABSENT {
-                return Err(FileStoreError::DigestMismatch);
-            }
-            check_regular(&absolute)?;
-            let id = state.next_id;
-            state.next_id += 1;
-            if pin.operation == FileOperation::Move {
-                state.current.remove(
-                    &pin.source
-                        .as_ref()
-                        .expect("successful Move validated its source pin")
-                        .path,
-                );
-            }
-            let version = FileVersion {
-                id,
-                path: pin.path.clone(),
-                digest: actual,
-                label: output,
-                previous: pin.predecessor_version,
-                content_dependencies: dependencies,
-                dispatch: Some(dispatch.clone()),
+            let version = match dependencies {
+                None => None,
+                Some(dependencies) => {
+                    if observed.destination == ABSENT {
+                        return Err(FileStoreError::DigestMismatch);
+                    }
+                    let id = state.next_id;
+                    state.next_id += 1;
+                    if let PinnedBasis::Move { source, .. } = &pin.basis {
+                        state.current.remove(&source.path);
+                    }
+                    let version = FileVersion {
+                        id,
+                        path: pin.path.clone(),
+                        digest: observed.destination,
+                        label: output,
+                        previous: pin.basis.predecessor().map(|version| version.id),
+                        content_dependencies: dependencies,
+                        dispatch: Some(dispatch.clone()),
+                    };
+                    state.versions.insert(id, version.clone());
+                    state.current.insert(pin.path.clone(), id);
+                    Some(version)
+                }
             };
-            state.versions.insert(id, version.clone());
-            state.current.insert(pin.path.clone(), id);
-            FileReceipt {
-                path: pin.path.clone(),
-                operation: pin.operation,
-                success: true,
-                source_label,
-                version: Some(version),
-                dispatch: Some(dispatch),
-            }
+            FileOutcome::Succeeded { version }
+        };
+        let receipt = FileReceipt {
+            dispatch,
+            source_label,
+            outcome,
         };
         state.receipts.insert(key, receipt.clone());
         state.reservation = None;
         Ok(receipt)
-    }
-
-    /// Whether the workspace still shows exactly the state this pin recorded: the bytes the
-    /// operation would have replaced, the bytes a transfer would have consumed, and every
-    /// declared input. `finish` and `abandon` answer the same question from values they have
-    /// already hashed; diagnostics can ask it here.
-    pub fn pin_matches_workspace(&self, pin: &FilePin) -> Result<bool, FileStoreError> {
-        let destination = state_digest(&self.workspace.join(&pin.path))?;
-        let source = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
-            .transpose()?;
-        let inputs = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        Ok(undisturbed(pin, &destination, source.as_deref(), &inputs))
     }
 
     /// Release the reservation of a call that was released and never ran, provided the
@@ -531,67 +539,30 @@ impl FileStore {
     /// whose report was lost, so anything else keeps the reservation: a workspace that moved
     /// is never released by guessing here.
     pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
-        let mut state = self.lock()?;
+        let mut state = self.lock();
         let Some(reservation) = state.reservation.as_ref() else {
             return Ok(AbandonOutcome::Absent);
         };
         if reservation.actor != actor || reservation.call_key != call_key {
             return Ok(AbandonOutcome::Absent);
         }
-        let pin = reservation.pin.clone();
-        let destination = state_digest(&self.workspace.join(&pin.path))?;
-        let source = pin
-            .source
-            .as_ref()
-            .map(|source| state_digest(&self.workspace.join(&source.path)))
-            .transpose()?;
-        let inputs = pin
-            .inputs
-            .iter()
-            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
-            .collect::<Result<Vec<_>, FileStoreError>>()?;
-        if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
+        if !Observed::of(&self.workspace, &reservation.pin)?.undisturbed(&reservation.pin) {
             return Ok(AbandonOutcome::Quarantined);
         }
         state.reservation = None;
         Ok(AbandonOutcome::Released)
     }
 
-    /// Every tracked path that no longer holds the bytes its recorded version describes. A
-    /// path that is gone counts: the ledger cannot tell a deletion from a loss.
-    pub fn drifted(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let state = self.lock()?;
-        let current = snapshot_state(&state);
-        let mut drifted = Vec::new();
-        for version in current {
-            if state_digest(&self.workspace.join(&version.path))? != version.digest {
-                drifted.push(version);
-            }
-        }
-        Ok(drifted)
-    }
-
     /// The pin a live reservation holds for this exact call, if it holds one. What an
     /// operation executes is the path this pin recorded, never the path the call spelled: the
     /// ledger validated and hashed that one.
     pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(state
             .reservation
             .as_ref()
             .filter(|r| r.actor == actor && r.call_key == call_key)
             .map(|r| r.pin.clone()))
-    }
-
-    /// The live reservation, if any. One workspace holds at most one.
-    pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
-        let state = self.lock()?;
-        Ok(state.reservation.as_ref().map(|r| Reservation {
-            actor: r.actor.clone(),
-            call_key: r.call_key.clone(),
-            pin: r.pin.clone(),
-            bound_dispatch: r.bound_dispatch.clone(),
-        }))
     }
 
     /// The workspace this ledger is bound to.
@@ -601,30 +572,14 @@ impl FileStore {
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
         let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
+        let state = self.lock();
         Ok(current_state(&state, &relative))
     }
 
-    pub fn history(&self, path: &str) -> Result<Vec<FileVersion>, FileStoreError> {
-        let relative = validated_relative(&self.workspace, path)?;
-        let state = self.lock()?;
-        Ok(state
-            .versions
-            .values()
-            .filter(|v| v.path == relative)
-            .cloned()
-            .collect())
-    }
-
-    pub fn snapshot(&self) -> Result<Vec<FileVersion>, FileStoreError> {
-        let state = self.lock()?;
-        Ok(snapshot_state(&state))
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>, FileStoreError> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
-            .map_err(|_| FileStoreError::Corrupt("file store lock poisoned".into()))
+            .expect("the file store mutex is never poisoned: no panics under the lock")
     }
 }
 fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
@@ -641,30 +596,41 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
 }
 fn validated_relative(workspace: &Path, input: &str) -> Result<String, FileStoreError> {
     let supplied = Path::new(input);
-    let joined = if supplied.is_absolute() {
-        supplied.to_path_buf()
-    } else {
-        workspace.join(supplied)
+    let stripped = match supplied.is_absolute() {
+        false => supplied,
+        true if supplied.components().any(|c| c == Component::ParentDir) => {
+            return Err(FileStoreError::InvalidPath(input.into()));
+        }
+        // The harness may spell the workspace through a symlinked ancestor (macOS `/var`,
+        // `/tmp`); the shortest ancestor that is the canonical workspace anchors the path.
+        true => {
+            let mut ancestors: Vec<&Path> = supplied.ancestors().collect();
+            ancestors.reverse();
+            ancestors
+                .into_iter()
+                .find(|ancestor| fs::canonicalize(ancestor).is_ok_and(|canonical| canonical == workspace))
+                .and_then(|anchor| supplied.strip_prefix(anchor).ok())
+                .ok_or_else(|| FileStoreError::InvalidPath(input.into()))?
+        }
     };
-    let stripped = joined
-        .strip_prefix(workspace)
-        .map_err(|_| FileStoreError::InvalidPath(input.into()))?;
     if stripped.as_os_str().is_empty() || stripped.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(FileStoreError::InvalidPath(input.into()));
     }
     let mut cursor = workspace.to_path_buf();
     for component in stripped.components() {
         cursor.push(component);
-        if let Ok(meta) = fs::symlink_metadata(&cursor)
-            && meta.file_type().is_symlink()
-        {
-            return Err(FileStoreError::InvalidPath("symlink component".into()));
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(FileStoreError::InvalidPath("symlink component".into()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(stripped.to_string_lossy().into_owned())
 }
-fn check_regular(path: &Path) -> Result<(), FileStoreError> {
-    let m = fs::symlink_metadata(path)?;
+fn check_regular_metadata(m: &fs::Metadata) -> Result<(), FileStoreError> {
     #[cfg(unix)]
     let singly_linked = m.nlink() == 1;
     #[cfg(not(unix))]
@@ -676,9 +642,7 @@ fn check_regular(path: &Path) -> Result<(), FileStoreError> {
     }
     Ok(())
 }
-fn hash(path: &Path) -> Result<String, FileStoreError> {
-    check_regular(path)?;
-    let mut f = File::open(path)?;
+fn digest(mut f: File) -> Result<String, FileStoreError> {
     let mut h = Sha256::new();
     let mut b = [0; 8192];
     loop {
@@ -690,8 +654,12 @@ fn hash(path: &Path) -> Result<String, FileStoreError> {
     }
     Ok(h.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
-fn state_digest(path: &Path) -> Result<String, FileStoreError> {
-    if path.exists() { hash(path) } else { Ok(ABSENT.into()) }
+fn state_digest(workspace: &Path, relative: &str) -> Result<String, FileStoreError> {
+    let Some(file) = beneath::open(workspace, relative)? else {
+        return Ok(ABSENT.into());
+    };
+    check_regular_metadata(&file.metadata()?)?;
+    digest(file)
 }
 #[cfg(not(unix))]
 fn check_move_filesystem(_: FileOperation, _: &Path, _: &Path) -> Result<(), FileStoreError> {
@@ -720,63 +688,76 @@ fn check_move_filesystem(operation: FileOperation, source: &Path, destination: &
     }
     Ok(())
 }
-fn scan(root: &Path) -> Result<Vec<(String, String)>, FileStoreError> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), FileStoreError> {
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            let p = e.path();
-            let m = fs::symlink_metadata(&p)?;
-            if m.file_type().is_symlink() {
-                return Err(FileStoreError::InvalidPath("workspace contains symlink".into()));
-            }
-            if m.is_dir() {
-                walk(root, &p, out)?
-            } else {
-                check_regular(&p)?;
-                out.push((
-                    p.strip_prefix(root)
-                        .map_err(|_| FileStoreError::InvalidPath("outside workspace".into()))?
-                        .to_string_lossy()
-                        .into_owned(),
-                    hash(&p)?,
-                ));
-            }
+/// Refuse a workspace holding a symlink or a multiply linked file anywhere. Only metadata
+/// is read: each file is hashed when a call first touches it.
+fn check_links(dir: &Path) -> Result<(), FileStoreError> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            return Err(FileStoreError::InvalidPath("workspace contains symlink".into()));
         }
-        Ok(())
+        if meta.is_dir() {
+            check_links(&path)?;
+        } else {
+            check_regular_metadata(&meta)?;
+        }
     }
-    let mut o = vec![];
-    walk(root, root, &mut o)?;
-    o.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(o)
+    Ok(())
 }
-/// Whether a pin still describes the workspace: the destination holds the bytes the operation
-/// would have replaced, a transfer's source is where the operation would have left it, and
-/// every declared input is unchanged. `finish` and `abandon` compute these values themselves;
-/// both ask this one question of them.
-fn undisturbed(pin: &FilePin, destination: &str, source_state: Option<&str>, inputs: &[bool]) -> bool {
-    destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
-        && pin
-            .source
-            .as_ref()
-            .is_none_or(|source| source_state == Some(source.digest.as_str()))
-        && inputs.iter().all(|unchanged| *unchanged)
+/// What the workspace holds now at every path a pin recorded, each hashed once.
+struct Observed {
+    destination: String,
+    source: Option<String>,
+    inputs_unchanged: bool,
 }
 
-fn stored_reservation(actor: &str, call_key: &str, pin: &FilePin) -> StoredReservation {
-    StoredReservation {
+impl Observed {
+    fn of(workspace: &Path, pin: &FilePin) -> Result<Self, FileStoreError> {
+        let destination = state_digest(workspace, &pin.path)?;
+        let source = pin
+            .basis
+            .transferred()
+            .map(|source| state_digest(workspace, &source.path))
+            .transpose()?;
+        let mut inputs_unchanged = true;
+        for input in pin.basis.inputs() {
+            inputs_unchanged &= state_digest(workspace, &input.path)? == input.version.digest;
+        }
+        Ok(Self {
+            destination,
+            source,
+            inputs_unchanged,
+        })
+    }
+
+    /// Whether the pin still describes the workspace: the destination holds the bytes the
+    /// operation would have replaced, a transfer's source is where the operation would have
+    /// left it, and every declared input is unchanged.
+    fn undisturbed(&self, pin: &FilePin) -> bool {
+        self.destination
+            == pin
+                .basis
+                .predecessor()
+                .map_or(ABSENT, |version| version.digest.as_str())
+            && pin
+                .basis
+                .transferred()
+                .is_none_or(|source| self.source.as_deref() == Some(source.version.digest.as_str()))
+            && self.inputs_unchanged
+    }
+}
+
+fn pending_reservation(actor: &str, call_key: &str, pin: &FilePin) -> Reservation {
+    Reservation {
         actor: actor.into(),
         call_key: call_key.into(),
         pin: pin.clone(),
-        bound_dispatch: None,
-        output_label: None,
+        bound: None,
     }
 }
 
-fn matching_reservation<'a>(
-    state: &'a State,
-    actor: &str,
-    call_key: &str,
-) -> Result<&'a StoredReservation, FileStoreError> {
+fn matching_reservation<'a>(state: &'a State, actor: &str, call_key: &str) -> Result<&'a Reservation, FileStoreError> {
     state
         .reservation
         .as_ref()
@@ -788,7 +769,7 @@ fn matching_reservation_mut<'a>(
     state: &'a mut State,
     actor: &str,
     call_key: &str,
-) -> Result<&'a mut StoredReservation, FileStoreError> {
+) -> Result<&'a mut Reservation, FileStoreError> {
     state
         .reservation
         .as_mut()
@@ -800,13 +781,36 @@ fn current_state(state: &State, path: &str) -> Option<FileVersion> {
     state.current.get(path).and_then(|id| state.versions.get(id)).cloned()
 }
 
-fn snapshot_state(state: &State) -> Vec<FileVersion> {
-    state
-        .current
-        .values()
-        .filter_map(|id| state.versions.get(id))
-        .cloned()
-        .collect()
+/// A path's current version beside the digest of what is on disk now.
+struct Touched {
+    version: Option<FileVersion>,
+    actual: String,
+}
+
+/// Hash the path once and return its current version. A path the ledger has never versioned
+/// that holds a file on disk is adopted first, with the operator's initial label.
+fn touch(state: &mut State, workspace: &Path, path: &str) -> Result<Touched, FileStoreError> {
+    let actual = state_digest(workspace, path)?;
+    let version = match current_state(state, path) {
+        Some(version) => Some(version),
+        None if actual == ABSENT || state.versions.values().any(|version| version.path == path) => None,
+        None => {
+            let version = FileVersion {
+                id: state.next_id,
+                path: path.into(),
+                digest: actual.clone(),
+                label: state.initial.clone(),
+                previous: None,
+                content_dependencies: vec![],
+                dispatch: None,
+            };
+            state.next_id += 1;
+            state.versions.insert(version.id, version.clone());
+            state.current.insert(version.path.clone(), version.id);
+            Some(version)
+        }
+    };
+    Ok(Touched { version, actual })
 }
 
 #[cfg(all(test, unix))]
@@ -814,13 +818,27 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn published(receipt: &FileReceipt) -> FileVersion {
+        match &receipt.outcome {
+            FileOutcome::Succeeded { version: Some(version) } => version.clone(),
+            outcome => panic!("the receipt published no version: {outcome:?}"),
+        }
+    }
+
+    fn dispatch(occurrence: u32) -> DispatchId {
+        DispatchId::new(
+            appa_engine::value::TrajectoryId::new("a"),
+            serde_json::from_value(serde_json::json!("ab".repeat(32))).unwrap(),
+            occurrence,
+        )
+    }
+
     #[test]
     fn file_digest_preserves_sha256_lowercase_hex() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("value.txt");
-        std::fs::write(&path, b"abc").unwrap();
+        std::fs::write(dir.path().join("value.txt"), b"abc").unwrap();
         assert_eq!(
-            hash(&path).unwrap(),
+            state_digest(dir.path(), "value.txt").unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
@@ -847,20 +865,14 @@ mod tests {
     #[test]
     fn abandoning_releases_only_an_undisturbed_workspace() {
         let fixture = Fixture::new();
-        // Both paths exist before initialization, so both are classified and tracked.
         fs::write(fixture.workspace.join("destination.txt"), "before").unwrap();
         let store = fixture.store(&Label::top());
         // A released call the harness never ran: the workspace still shows the pin.
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
-        store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
-        assert_eq!(store.reservation().unwrap().unwrap().actor, "a");
-        assert!(
-            store
-                .pin_matches_workspace(&store.reservation().unwrap().unwrap().pin)
-                .unwrap()
-        );
+        store.bind("a", "unrun", &dispatch(0), &Label::top()).unwrap();
+        assert!(store.pin_for("a", "unrun").unwrap().is_some());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
-        assert!(store.reservation().unwrap().is_none());
+        assert!(store.pin_for("a", "unrun").unwrap().is_none());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);
         // The next call proceeds: the release did not leave the workspace wedged.
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
@@ -871,10 +883,10 @@ mod tests {
         store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "destination.txt")
             .unwrap();
-        store.bind("a", "copy", "dispatch-2", &Label::top()).unwrap();
+        store.bind("a", "copy", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("destination.txt"), "partial").unwrap();
         assert_eq!(store.abandon("a", "copy").unwrap(), AbandonOutcome::Quarantined);
-        assert!(store.reservation().unwrap().is_some());
+        assert!(store.pin_for("a", "copy").unwrap().is_some());
         assert!(matches!(
             store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
@@ -888,8 +900,10 @@ mod tests {
         let second = fixture.store(&Label::top());
         first.prepare("a", "one", FileOperation::Read, "tracked.txt").unwrap();
         second.prepare("b", "two", FileOperation::Read, "tracked.txt").unwrap();
-        assert_eq!(first.reservation().unwrap().unwrap().call_key, "one");
-        assert_eq!(second.reservation().unwrap().unwrap().call_key, "two");
+        assert!(first.pin_for("a", "one").unwrap().is_some());
+        assert!(first.pin_for("b", "two").unwrap().is_none());
+        assert!(second.pin_for("b", "two").unwrap().is_some());
+        assert!(second.pin_for("a", "one").unwrap().is_none());
     }
 
     #[test]
@@ -903,29 +917,39 @@ mod tests {
         let first = store
             .prepare("a", "replace", FileOperation::Replace, "tracked.txt")
             .unwrap();
-        store.bind("a", "replace", "dispatch-1", &output).unwrap();
+        store.bind("a", "replace", &dispatch(1), &output).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "replacement").unwrap();
         let replaced = store.finish("a", "replace", true).unwrap();
-        assert_eq!(replaced.version.as_ref().unwrap().label, output);
-        assert_eq!(replaced.version.as_ref().unwrap().previous, first.predecessor_version);
-        assert!(replaced.version.as_ref().unwrap().content_dependencies.is_empty());
+        assert_eq!(published(&replaced).label, output);
+        assert_eq!(
+            published(&replaced).previous,
+            first.basis.predecessor().map(|version| version.id)
+        );
+        assert!(published(&replaced).content_dependencies.is_empty());
         assert_eq!(store.finish("a", "replace", true).unwrap(), replaced);
 
         let pin = store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
-        store.bind("a", "edit", "dispatch-2", &Label::top()).unwrap();
+        store.bind("a", "edit", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
-        let edited = store.finish("a", "edit", true).unwrap();
+        let edited = published(&store.finish("a", "edit", true).unwrap());
         assert_eq!(
-            edited.version.unwrap().content_dependencies,
-            vec![pin.predecessor_version.unwrap()]
+            pin.basis.predecessor().map(|version| version.id),
+            Some(published(&replaced).id)
         );
-        assert_eq!(store.history("tracked.txt").unwrap().len(), 3);
+        assert_eq!(edited.previous, pin.basis.predecessor().map(|version| version.id));
+        assert_eq!(
+            edited.content_dependencies,
+            vec![pin.basis.predecessor().map(|version| version.id).unwrap()]
+        );
+        assert_eq!(store.current("tracked.txt").unwrap(), Some(edited));
     }
 
     #[test]
     fn mismatch_and_failed_partial_write_stay_pending() {
         let fixture = Fixture::new();
         let store = fixture.store(&Label::top());
+        store.prepare("a", "touch", FileOperation::Read, "tracked.txt").unwrap();
+        store.cancel("a", "touch").unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "foreign").unwrap();
         assert!(matches!(
             store.prepare("a", "bad", FileOperation::Read, "tracked.txt"),
@@ -933,13 +957,13 @@ mod tests {
         ));
         fs::write(fixture.workspace.join("tracked.txt"), "old").unwrap();
         store.prepare("a", "fail", FileOperation::Edit, "tracked.txt").unwrap();
-        store.bind("a", "fail", "dispatch", &Label::top()).unwrap();
-        assert!(!store.finish("a", "fail", false).unwrap().success);
+        store.bind("a", "fail", &dispatch(0), &Label::top()).unwrap();
+        assert_eq!(store.finish("a", "fail", false).unwrap().outcome, FileOutcome::Failed);
 
         store
             .prepare("a", "partial", FileOperation::Edit, "tracked.txt")
             .unwrap();
-        store.bind("a", "partial", "dispatch-2", &Label::top()).unwrap();
+        store.bind("a", "partial", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "partial").unwrap();
         assert!(matches!(
             store.finish("a", "partial", false),
@@ -949,6 +973,32 @@ mod tests {
             store.prepare("b", "next", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
         ));
+    }
+
+    #[test]
+    fn absolute_paths_through_a_symlinked_workspace_alias_resolve_to_the_workspace() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        let alias = fixture._root.path().join("alias");
+        std::os::unix::fs::symlink(&fixture.workspace, &alias).unwrap();
+        std::os::unix::fs::symlink(".", fixture.workspace.join("inner")).unwrap();
+        let absolute = |path: PathBuf| path.to_str().unwrap().to_string();
+
+        let pin = store
+            .prepare("a", "alias", FileOperation::Read, &absolute(alias.join("tracked.txt")))
+            .unwrap();
+        assert_eq!(pin.path, "tracked.txt");
+        store.cancel("a", "alias").unwrap();
+        for rejected in [
+            alias.join("inner/tracked.txt"),
+            alias.join("../workspace/tracked.txt"),
+            fixture._root.path().join("tracked.txt"),
+        ] {
+            assert!(matches!(
+                store.prepare("a", "rejected", FileOperation::Read, &absolute(rejected)),
+                Err(FileStoreError::InvalidPath(_))
+            ));
+        }
     }
 
     #[test]
@@ -973,6 +1023,29 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_swapped_for_a_symlink_after_prepare_is_never_followed() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.workspace.join("sub")).unwrap();
+        fs::write(fixture.workspace.join("sub/file.txt"), "old").unwrap();
+        let outside = fixture._root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file.txt"), "old").unwrap();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "edit", FileOperation::Edit, "sub/file.txt").unwrap();
+        let pinned = store.current("sub/file.txt").unwrap().unwrap();
+        store.bind("a", "edit", &dispatch(0), &Label::top()).unwrap();
+        fs::rename(fixture.workspace.join("sub"), fixture.workspace.join("real")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.workspace.join("sub")).unwrap();
+
+        assert!(store.abandon("a", "edit").is_err());
+        fs::write(outside.join("file.txt"), "escaped").unwrap();
+        assert!(store.finish("a", "edit", true).is_err());
+        fs::remove_file(fixture.workspace.join("sub")).unwrap();
+        fs::rename(fixture.workspace.join("real"), fixture.workspace.join("sub")).unwrap();
+        assert_eq!(store.current("sub/file.txt").unwrap(), Some(pinned));
+    }
+
+    #[test]
     fn copy_tracks_raw_content_source_not_same_byte_destination() {
         let fixture = Fixture::new();
         fs::write(fixture.workspace.join("tracked.txt"), [0, 255, 1, 128]).unwrap();
@@ -987,18 +1060,24 @@ mod tests {
             .prepare("a", "label-destination", FileOperation::Replace, "destination.bin")
             .unwrap();
         store
-            .bind("a", "label-destination", "dispatch-0", &destination_label)
+            .bind("a", "label-destination", &dispatch(0), &destination_label)
             .unwrap();
         store.finish("a", "label-destination", true).unwrap();
 
         let pin = store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "destination.bin")
             .unwrap();
-        let source = pin.source.as_ref().unwrap();
-        assert_ne!(Some(source.version), pin.predecessor_version);
-        assert_eq!(source.label, source_label);
-        assert_eq!(pin.predecessor_label, Some(destination_label));
-        store.bind("a", "copy", "dispatch", &source_label).unwrap();
+        let source = pin.basis.transferred().unwrap();
+        assert_ne!(
+            Some(source.version.id),
+            pin.basis.predecessor().map(|version| version.id)
+        );
+        assert_eq!(source.version.label, source_label);
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.label.clone()),
+            Some(destination_label)
+        );
+        store.bind("a", "copy", &dispatch(0), &source_label).unwrap();
         fs::copy(
             fixture.workspace.join("tracked.txt"),
             fixture.workspace.join("destination.bin"),
@@ -1006,33 +1085,39 @@ mod tests {
         .unwrap();
         let receipt = store.finish("a", "copy", true).unwrap();
         assert_eq!(receipt.source_label, Some(source_label));
-        assert_eq!(receipt.version.unwrap().content_dependencies, vec![source.version]);
+        assert_eq!(published(&receipt).content_dependencies, vec![source.version.id]);
     }
 
     #[test]
     fn move_marks_source_absent_preserves_history_and_allows_reuse() {
         let fixture = Fixture::new();
         let store = fixture.store(&Label::top());
-        let source_id = store.current("tracked.txt").unwrap().unwrap().id;
         store
             .prepare_transfer("a", "move", FileOperation::Move, "tracked.txt", "moved.txt")
             .unwrap();
-        store.bind("a", "move", "dispatch", &Label::top()).unwrap();
+        let source_id = store.current("tracked.txt").unwrap().unwrap().id;
+        store.bind("a", "move", &dispatch(0), &Label::top()).unwrap();
         fs::rename(
             fixture.workspace.join("tracked.txt"),
             fixture.workspace.join("moved.txt"),
         )
         .unwrap();
         let moved = store.finish("a", "move", true).unwrap();
-        assert_eq!(moved.version.unwrap().content_dependencies, vec![source_id]);
+        assert_eq!(published(&moved).content_dependencies, vec![source_id]);
         assert!(store.current("tracked.txt").unwrap().is_none());
-        assert_eq!(store.history("tracked.txt").unwrap().len(), 1);
-        assert!(!store.snapshot().unwrap().iter().any(|v| v.path == "tracked.txt"));
+        // The moved-away version stays in the ledger, so bytes reappearing out of band are
+        // not adopted as a fresh first touch.
+        fs::write(fixture.workspace.join("tracked.txt"), "out of band").unwrap();
+        assert!(matches!(
+            store.prepare("a", "reappeared", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::Untracked)
+        ));
+        fs::remove_file(fixture.workspace.join("tracked.txt")).unwrap();
 
         store
             .prepare("a", "reuse", FileOperation::Replace, "tracked.txt")
             .unwrap();
-        store.bind("a", "reuse", "dispatch-2", &Label::top()).unwrap();
+        store.bind("a", "reuse", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "new").unwrap();
         store.finish("a", "reuse", true).unwrap();
         assert!(store.current("tracked.txt").unwrap().is_some());
@@ -1049,7 +1134,7 @@ mod tests {
             store.prepare("b", "other", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
         ));
-        store.bind("a", "copy", "dispatch", &Label::top()).unwrap();
+        store.bind("a", "copy", &dispatch(0), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("copy.txt"), "partial").unwrap();
         assert!(matches!(
             store.finish("a", "copy", false),
@@ -1072,8 +1157,8 @@ mod tests {
         store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
             .unwrap();
-        store.bind("a", "copy", "dispatch", &Label::top()).unwrap();
-        assert!(!store.finish("a", "copy", false).unwrap().success);
+        store.bind("a", "copy", &dispatch(0), &Label::top()).unwrap();
+        assert_eq!(store.finish("a", "copy", false).unwrap().outcome, FileOutcome::Failed);
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
     }
 
@@ -1085,21 +1170,21 @@ mod tests {
         let store = fixture.store(&Label::top());
         let inputs = vec!["tracked.txt".to_string(), "second.bin".to_string()];
         let pin = store.prepare_process("a", "process", &inputs, "output.bin").unwrap();
-        let dependencies: Vec<_> = pin.inputs.iter().map(|input| input.version).collect();
-        let previous = pin.predecessor_version;
+        let dependencies: Vec<_> = pin.basis.inputs().iter().map(|input| input.version.id).collect();
+        let previous = pin.basis.predecessor().map(|version| version.id);
         let output = Label::new(
             appa_engine::label::Trust::new(3),
             appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("result")]),
         );
-        store.bind("a", "process", "dispatch", &output).unwrap();
+        store.bind("a", "process", &dispatch(0), &output).unwrap();
         fs::write(fixture.workspace.join("output.bin"), [128, 2, 0, 255]).unwrap();
         let receipt = store.finish("a", "process", true).unwrap();
-        let version = receipt.version.unwrap();
+        let version = published(&receipt);
         assert_eq!(version.label, output);
         assert_eq!(version.previous, previous);
         assert_eq!(version.content_dependencies, dependencies);
         assert_eq!(store.current("output.bin").unwrap().unwrap(), version);
-        assert_eq!(store.history("output.bin").unwrap().len(), 2);
+        assert!(previous.is_some());
     }
 
     #[test]
@@ -1133,11 +1218,263 @@ mod tests {
         store
             .prepare_process("a", "partial", &["tracked.txt".into()], "output")
             .unwrap();
-        store.bind("a", "partial", "dispatch", &Label::top()).unwrap();
+        store.bind("a", "partial", &dispatch(0), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("output"), "partial").unwrap();
         assert!(matches!(
             store.finish("a", "partial", false),
             Err(FileStoreError::Quarantined)
         ));
+    }
+
+    fn secret() -> Label {
+        Label::new(
+            appa_engine::label::Trust::new(2),
+            appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("operator")]),
+        )
+    }
+
+    #[test]
+    fn binding_reads_no_file_contents() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let sealed = fixture.workspace.join("sealed.bin");
+        fs::write(&sealed, "unreadable").unwrap();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&sealed).is_ok() {
+            return;
+        }
+        let store = fixture.store(&Label::top());
+        assert!(store.current("tracked.txt").unwrap().is_none());
+        assert!(matches!(
+            store.prepare("a", "sealed", FileOperation::Read, "sealed.bin"),
+            Err(FileStoreError::Io(_))
+        ));
+        store.prepare("a", "other", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn a_path_whose_parent_cannot_be_inspected_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let locked = fixture.workspace.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("file.txt"), "hidden").unwrap();
+        let store = fixture.store(&Label::top());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let inspectable = fs::symlink_metadata(locked.join("file.txt")).is_ok();
+        let lookup = store.current("locked/file.txt");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if inspectable {
+            return;
+        }
+        assert!(matches!(lookup, Err(FileStoreError::Io(_))));
+    }
+
+    #[test]
+    fn first_touch_adopts_current_bytes_and_later_drift_is_caught() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&secret());
+        fs::write(fixture.workspace.join("tracked.txt"), "edited before first touch").unwrap();
+        let pin = store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        let adopted = store.current("tracked.txt").unwrap().unwrap();
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.label.clone()),
+            Some(secret())
+        );
+        assert_eq!(adopted.label, secret());
+        assert_eq!(
+            pin.basis.predecessor().map(|version| version.digest.clone()),
+            Some(adopted.digest)
+        );
+        assert_eq!(adopted.previous, None);
+        store.cancel("a", "read").unwrap();
+
+        fs::write(fixture.workspace.join("tracked.txt"), "out of band").unwrap();
+        assert!(matches!(
+            store.prepare("a", "again", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::DigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn links_anywhere_in_the_workspace_refuse_binding() {
+        let symlinked = Fixture::new();
+        fs::create_dir_all(symlinked.workspace.join("deep/er")).unwrap();
+        std::os::unix::fs::symlink("../../tracked.txt", symlinked.workspace.join("deep/er/link")).unwrap();
+        assert!(matches!(
+            FileStore::new(&symlinked.workspace, &Label::top()),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+
+        let hard_linked = Fixture::new();
+        fs::create_dir(hard_linked.workspace.join("deep")).unwrap();
+        fs::hard_link(
+            hard_linked.workspace.join("tracked.txt"),
+            hard_linked.workspace.join("deep/hard"),
+        )
+        .unwrap();
+        assert!(matches!(
+            FileStore::new(&hard_linked.workspace, &Label::top()),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+    }
+
+    fn trust(level: u8) -> Label {
+        Label::new(
+            appa_engine::label::Trust::new(level),
+            appa_engine::label::Audience::public(),
+        )
+    }
+
+    #[test]
+    fn receipts_carry_the_label_of_what_each_operation_consumed() {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join("second.txt"), "second").unwrap();
+        let store = fixture.store(&secret());
+
+        store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        store.bind("a", "read", &dispatch(1), &trust(1)).unwrap();
+        let read = store.finish("a", "read", true).unwrap();
+        assert_eq!(read.source_label, Some(secret()));
+        assert_eq!(read.outcome, FileOutcome::Succeeded { version: None });
+
+        store
+            .prepare("a", "create", FileOperation::Replace, "fresh.txt")
+            .unwrap();
+        store.bind("a", "create", &dispatch(2), &trust(2)).unwrap();
+        fs::write(fixture.workspace.join("fresh.txt"), "fresh").unwrap();
+        let created = store.finish("a", "create", true).unwrap();
+        assert_eq!(created.source_label, None);
+        let version = published(&created);
+        assert_eq!(version.previous, None);
+        assert_eq!(version.label, trust(2));
+        assert_eq!(version.dispatch, Some(dispatch(2)));
+
+        store.prepare("a", "edit", FileOperation::Edit, "fresh.txt").unwrap();
+        store.bind("a", "edit", &dispatch(3), &trust(3)).unwrap();
+        let failed = store.finish("a", "edit", false).unwrap();
+        assert_eq!(failed.source_label, Some(trust(2)));
+        assert_eq!(failed.outcome, FileOutcome::Failed);
+        assert_eq!(failed.dispatch, dispatch(3));
+        assert_eq!(store.current("fresh.txt").unwrap(), Some(version));
+
+        store
+            .prepare_process("a", "process", &["tracked.txt".into(), "fresh.txt".into()], "out.txt")
+            .unwrap();
+        store.bind("a", "process", &dispatch(4), &trust(0)).unwrap();
+        fs::write(fixture.workspace.join("out.txt"), "derived").unwrap();
+        let processed = store.finish("a", "process", true).unwrap();
+        assert_eq!(processed.source_label, Some(secret().combine(&trust(2))));
+    }
+
+    #[test]
+    fn a_reservation_binds_once_and_finishes_only_after_binding() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
+        assert!(matches!(
+            store.finish("a", "edit", true),
+            Err(FileStoreError::UnknownReservation)
+        ));
+        assert!(matches!(
+            store.bind("a", "other", &dispatch(0), &Label::top()),
+            Err(FileStoreError::UnknownReservation)
+        ));
+        store.bind("a", "edit", &dispatch(0), &Label::top()).unwrap();
+        assert!(matches!(
+            store.bind("a", "edit", &dispatch(2), &Label::top()),
+            Err(FileStoreError::AlreadyBound)
+        ));
+        assert!(matches!(store.cancel("a", "edit"), Err(FileStoreError::AlreadyBound)));
+        fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
+        let version = published(&store.finish("a", "edit", true).unwrap());
+        assert_eq!(version.dispatch, Some(dispatch(0)));
+    }
+
+    #[test]
+    fn a_failed_call_whose_source_or_input_changed_is_quarantined() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
+            .unwrap();
+        store.bind("a", "copy", &dispatch(0), &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert!(matches!(
+            store.finish("a", "copy", false),
+            Err(FileStoreError::Quarantined)
+        ));
+
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store
+            .prepare_process("a", "process", &["tracked.txt".into()], "out.txt")
+            .unwrap();
+        store.bind("a", "process", &dispatch(0), &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert_eq!(store.abandon("a", "process").unwrap(), AbandonOutcome::Quarantined);
+        assert!(matches!(
+            store.finish("a", "process", false),
+            Err(FileStoreError::Quarantined)
+        ));
+        fs::write(fixture.workspace.join("tracked.txt"), "old").unwrap();
+        assert_eq!(
+            store.finish("a", "process", false).unwrap().outcome,
+            FileOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn a_read_whose_file_changed_during_the_call_is_refused() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        store.bind("a", "read", &dispatch(0), &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
+        assert!(matches!(
+            store.finish("a", "read", true),
+            Err(FileStoreError::DigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn transfers_and_process_from_untouched_sources_carry_the_initial_label() {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join("second.txt"), "second").unwrap();
+        fs::write(fixture.workspace.join("third.txt"), "third").unwrap();
+        let store = fixture.store(&secret());
+
+        let copy = store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
+            .unwrap();
+        assert_eq!(copy.basis.transferred().unwrap().version.label, secret());
+        store.bind("a", "copy", &dispatch(1), &secret()).unwrap();
+        fs::copy(
+            fixture.workspace.join("tracked.txt"),
+            fixture.workspace.join("copy.txt"),
+        )
+        .unwrap();
+        assert_eq!(store.finish("a", "copy", true).unwrap().source_label, Some(secret()));
+
+        let moved = store
+            .prepare_transfer("a", "move", FileOperation::Move, "second.txt", "moved.txt")
+            .unwrap();
+        assert_eq!(moved.basis.transferred().unwrap().version.label, secret());
+        store.bind("a", "move", &dispatch(2), &secret()).unwrap();
+        fs::rename(
+            fixture.workspace.join("second.txt"),
+            fixture.workspace.join("moved.txt"),
+        )
+        .unwrap();
+        assert_eq!(store.finish("a", "move", true).unwrap().source_label, Some(secret()));
+        assert!(store.current("second.txt").unwrap().is_none());
+
+        let process = store
+            .prepare_process("a", "process", &["third.txt".into()], "output.txt")
+            .unwrap();
+        assert_eq!(process.basis.inputs()[0].version.label, secret());
+        store.bind("a", "process", &dispatch(3), &secret()).unwrap();
+        fs::write(fixture.workspace.join("output.txt"), "derived").unwrap();
+        assert_eq!(store.finish("a", "process", true).unwrap().source_label, Some(secret()));
     }
 }

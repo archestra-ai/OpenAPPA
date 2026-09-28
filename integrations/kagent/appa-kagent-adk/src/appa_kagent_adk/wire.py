@@ -74,6 +74,9 @@ RESERVED_TOOL = "execute_remedy_plan"
 CONTROL_TOOL = "appa:execute_remedy_plan"
 """The reserved tool's spelling on the wire."""
 
+YELL_TOOL = "yell"
+"""The runtime's policy-gated diagnostic report tool."""
+
 RETURN_TOOL = "appa_return"
 """The name of the tool a child scope stops through.
 

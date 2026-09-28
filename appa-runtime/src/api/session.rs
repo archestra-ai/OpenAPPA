@@ -10,7 +10,7 @@ use crate::consult::{
 };
 use crate::engine::{
     Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
-    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
+    ForkStatus, InputRequest, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -304,6 +304,11 @@ impl Session {
         &self.trajectory
     }
 
+    #[cfg(test)]
+    pub(crate) fn deployment(&self) -> &Deployment {
+        &self.deployment
+    }
+
     /// The actor's turn is over. Calls still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
     /// refused at its permission prompt, and none for a turn the user
@@ -513,14 +518,13 @@ impl Session {
         };
         // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
         // Claude loads instruction files implicitly, outside the file-tool observation path.
+        let moved_from = match &pin.basis {
+            appa_eventlog::files::PinnedBasis::Move { source, .. } => Some(source.path.as_str()),
+            _ => None,
+        };
         if operation != appa_eventlog::files::FileOperation::Read
             && std::iter::once(pin.path.as_str())
-                .chain(
-                    pin.source
-                        .as_ref()
-                        .filter(|_| operation == appa_eventlog::files::FileOperation::Move)
-                        .map(|source| source.path.as_str()),
-                )
+                .chain(moved_from)
                 .flat_map(|path| path.split('/'))
                 .any(|part| {
                     matches!(
@@ -538,7 +542,7 @@ impl Session {
                 "execution-control files are not writable in file-tracking mode",
             ));
         }
-        let basis = super::files::basis(pin)?;
+        let basis = pin.file_basis();
         let decision = self.propose_tool_call(call, call_id, spawn, Some(basis)).await;
         match &decision {
             Ok(ToolCallDecision::Allow { dispatch, .. }) => {
@@ -551,7 +555,7 @@ impl Session {
                 files
                     .store(&self.root)
                     .map_err(super::files::refused)?
-                    .bind(&self.trajectory.0, &key, &key, &label)
+                    .bind(&self.trajectory.0, &key, dispatch, &label)
                     .map_err(super::files::refused)?;
             }
             _ => {
@@ -758,7 +762,7 @@ impl Session {
                 || policy.engine().canonical_bytes(&call),
                 &open,
                 log.call_bindings(),
-                &crate::engine::engine_id(&self.trajectory),
+                &self.trajectory,
             )
             .map_err(UnreportableOutcome::refusal)?;
             let key = super::files::key(&dispatch)?;
@@ -846,7 +850,7 @@ impl Session {
                 .map_err(|case| self.refuse_report(case, &call, &open))?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
-                ForkStatus::Bound(bound) if bound == engine_id(&child) => {}
+                ForkStatus::Bound(bound) if bound == child => {}
                 _ => return Err(EventError::BindingMismatch),
             }
             match context.policy.engine().liveness(context.view, &child) {
@@ -918,7 +922,7 @@ impl Session {
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
-                            (ForkStatus::Bound(bound), Some(child)) if engine_id(child) == bound => match &value {
+                            (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => SpawnPlan::Outcome,
                                 Some(said) if context.latest_return(child).as_deref() == Some(said.as_str()) => {
                                     SpawnPlan::Replay
@@ -1355,7 +1359,7 @@ impl Session {
             };
             let opens_dispatch = facts.iter().find_map(|fact| match fact {
                 appa_engine::fact::Fact::DispatchOpened { dispatch, .. }
-                    if dispatch.trajectory() == &crate::engine::engine_id(&self.trajectory) =>
+                    if dispatch.trajectory() == &self.trajectory =>
                 {
                     Some(dispatch.clone())
                 }
@@ -1385,10 +1389,9 @@ impl Session {
             let appended = match (opening_call_id, opens_dispatch) {
                 (Some(call_id), Some(dispatch)) => {
                     if call_id.is_empty()
-                        || log.call_bindings().any(|binding| {
-                            *binding.trajectory == crate::engine::engine_id(&self.trajectory)
-                                && binding.call_id == call_id
-                        })
+                        || log
+                            .call_bindings()
+                            .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
                     {
                         return Err(EventError::CallIdReused);
                     }
@@ -1396,7 +1399,7 @@ impl Session {
                         &log,
                         facts,
                         &appa_eventlog::HostObservation::CallBound {
-                            trajectory: crate::engine::engine_id(&self.trajectory),
+                            trajectory: self.trajectory.clone(),
                             call_id: call_id.to_string(),
                             dispatch,
                         },
@@ -1577,27 +1580,12 @@ impl Session {
             } => {
                 // Every input program answers first, together; one that does not refuses
                 // the annotation exactly as the annotator's own silence would.
-                let mut asked = Vec::with_capacity(inputs.len());
-                for input in inputs {
-                    asked.push(self.timed_consult(&input.consult, None, None, occasion, Some(call)));
-                }
-                let outcomes = crate::external::settle_batch(asked).await;
-                let mut args = args.clone();
-                let mut refused = None;
-                for (input, outcome) in inputs.iter().zip(outcomes) {
-                    match outcome {
-                        ConsultOutcome::Answer(answer) => {
-                            args.as_object_mut()
-                                .expect("an annotation with declared inputs carries an object artifact")
-                                .insert(input.input.clone(), answer);
-                        }
-                        ConsultOutcome::NoAnswer(reason) => {
-                            refused.get_or_insert((input, reason));
-                        }
-                    }
-                }
-                let answer = match refused {
-                    Some((input, reason)) => {
+                let joined = join_input_answers(args.clone(), inputs, |consult| {
+                    self.timed_consult(consult, None, None, occasion, Some(call))
+                })
+                .await;
+                let answer = match joined {
+                    Err((input, reason)) => {
                         tracing::warn!(
                             annotator,
                             input = input.input,
@@ -1607,7 +1595,7 @@ impl Session {
                         );
                         Err(reason)
                     }
-                    None => {
+                    Ok(args) => {
                         let consult = Consult {
                             name: annotator.clone(),
                             body: ConsultBody::Annotation {
@@ -1617,11 +1605,7 @@ impl Session {
                         };
                         match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
                             ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
-                                .ok_or_else(|| {
-                                    crate::external::NoAnswerReason::MalformedAnswer(
-                                        "detail=invalid_fields_or_value_types".to_string(),
-                                    )
-                                }),
+                                .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                             ConsultOutcome::NoAnswer(reason) => Err(reason),
                         }
                     }
@@ -1727,7 +1711,7 @@ impl Decided<'_> {
             || self.canonical_bytes(call),
             open,
             self.log.call_bindings(),
-            &crate::engine::engine_id(&self.session.trajectory),
+            &self.session.trajectory,
         )
     }
 
@@ -1735,12 +1719,11 @@ impl Decided<'_> {
     /// only be matched by tool and bytes, which cannot tell two calls apart, so nothing else may
     /// open beside it.
     fn has_unbound_open_dispatch(&self) -> bool {
-        let trajectory = crate::engine::engine_id(&self.session.trajectory);
         self.open_dispatches().iter().any(|open| {
             !self
                 .log
                 .call_bindings()
-                .any(|binding| *binding.trajectory == trajectory && *binding.dispatch == open.id)
+                .any(|binding| *binding.trajectory == self.session.trajectory && *binding.dispatch == open.id)
         })
     }
 
@@ -1776,6 +1759,35 @@ impl Decided<'_> {
             _ => Err(EventError::SpawnAmbiguous),
         }
     }
+}
+
+/// An annotation's artifact with each input program's answer joined under its input's name,
+/// the programs asked together; or the first input, in declaration order, that produced no
+/// answer.
+pub(super) async fn join_input_answers<'a, Asked>(
+    mut args: serde_json::Value,
+    inputs: &'a [InputRequest],
+    ask: impl Fn(&'a Consult) -> Asked,
+) -> Result<serde_json::Value, (&'a InputRequest, crate::external::NoAnswerReason)>
+where
+    Asked: std::future::Future<Output = ConsultOutcome>,
+{
+    let mut asked = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        asked.push(ask(&input.consult));
+    }
+    let outcomes = crate::external::settle_batch(asked).await;
+    for (input, outcome) in inputs.iter().zip(outcomes) {
+        match outcome {
+            ConsultOutcome::Answer(answer) => {
+                args.as_object_mut()
+                    .expect("an annotation with declared inputs carries an object artifact")
+                    .insert(input.input.clone(), answer);
+            }
+            ConsultOutcome::NoAnswer(reason) => return Err((input, reason)),
+        }
+    }
+    Ok(args)
 }
 
 fn remedy_presentation(
@@ -2766,9 +2778,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let tampered = serde_json::to_string(&runtime.log_facts(&root()))
             .expect("the opening serializes")
             .replace("cc:root", "cc:evil");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 0, tampered.as_bytes());
         let error = session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -2884,9 +2894,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root(), None).expect("a fresh id opens");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
+        runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
             Err(EventError::UntrustedLog(_)),
@@ -2911,9 +2919,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let tampered = serde_json::to_string(&released)
             .expect("the batch serializes")
             .replace("\"fetch\"", "\"wrench\"");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 1, tampered.as_bytes());
         assert!(matches!(
             session
                 .on_tool_result(
@@ -2994,9 +3000,7 @@ starting_label = { audience = ["alice@corp.example"] }
         );
         let tampered = persisted.replace("alice@corp.example", "mallory@evil.example");
         assert_ne!(tampered, persisted);
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
+        runtime.store().corrupt_batch(&root(), 1, tampered.as_bytes());
         assert!(matches!(
             session.on_tool_call(send, false).await,
             Err(EventError::UntrustedLog(_)),
@@ -4918,6 +4922,11 @@ context_control = true
         assert_eq!(status.trajectory, "cc:root");
         assert_eq!(status.trust, "trusted");
         assert_eq!(status.audience, "public");
+        assert_eq!(runtime.try_status(&root()).expect("the read succeeds"), status);
+        assert!(matches!(
+            runtime.try_status(&TrajectoryId("cc:ghost".to_string())),
+            Err(crate::api::StatusReadError::UnknownRoot { root }) if root == "cc:ghost"
+        ));
     }
 
     #[tokio::test]
@@ -4968,10 +4977,9 @@ context_control = true
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
         runtime.create_session(root(), None).expect("a fresh id opens");
-        runtime
-            .store()
-            .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
+        runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(runtime.status(&root()).is_none());
+        assert!(runtime.try_status(&root()).is_err());
     }
 
     #[tokio::test]
@@ -7037,14 +7045,7 @@ delta = {}
         use axum::routing::post;
         const REPLY: &str = r#"{"answers":{"delta_audience":{"probabilities":{"self":0.0,"internal":0.1,"public":0.9}},"delta_trust":{"probabilities":{"suspicious":0.1,"trusted":0.9}},"requires_audience":{"probabilities":{"public":0.0,"internal":0.1,"none":0.9}},"requires_trusted":{"noul":0.1}}}"#;
         let app = axum::Router::new().route("/v1/systemone", post(|| async { REPLY }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a loopback stub binds");
-        let url = format!(
-            "http://{}/v1/systemone",
-            listener.local_addr().expect("the stub has an address")
-        );
-        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let url = format!("http://{}/v1/systemone", crate::test_support::serve(app).await);
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
         std::fs::write(
@@ -7056,10 +7057,9 @@ delta = {}
         )
         .expect("the fixture writes");
         let mut config = Config::load(&path).expect("the fixture validates");
-        config.externals.jev = Some(crate::config::JevProfile {
-            url,
-            key: crate::config::JevKey::Set(crate::config::Token::new("jev-test-key".to_string())),
-        });
+        let jev = config.externals.jev.as_mut().expect("the profile is declared");
+        jev.url = url;
+        jev.key = crate::config::ProfileKey::Set(crate::config::Token::new("jev-test-key".to_string()));
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let recorder = Arc::new(Collected::default());
         let session = runtime

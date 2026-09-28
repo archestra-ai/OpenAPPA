@@ -71,7 +71,7 @@ use appa_engine::transition::{
 };
 use appa_engine::value::{
     DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, RawResultDigest,
-    ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody,
+    ResolvedCall, ToolName, ValueBody,
 };
 use appa_eventlog::Log;
 use std::collections::{BTreeMap, BTreeSet};
@@ -830,7 +830,7 @@ impl RuntimeEngine {
         principal: Option<ReaderId>,
     ) -> Vec<Fact> {
         self.engine
-            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), principal)
+            .open_trajectory(trajectory, EnginePolicyFileKey::of(policy_file), principal)
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
     }
@@ -845,14 +845,14 @@ impl RuntimeEngine {
         origin: RootForkOrigin,
     ) -> Result<Vec<Fact>, TransitionRefusal> {
         self.engine
-            .open_root_fork(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), origin)
+            .open_root_fork(trajectory, EnginePolicyFileKey::of(policy_file), origin)
             .map(ValidatedFactBatch::into_unsealed)
     }
 
     /// What an independent conversation-root fork of `trajectory` carries over from this view.
     /// `None` when the family never opened the trajectory or it has ended.
     pub(crate) fn root_fork_origin(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<RootForkOrigin> {
-        view.root_fork_origin(&engine_id(trajectory))
+        view.root_fork_origin(trajectory)
     }
 
     /// Refuse one root's log before it is trusted, including the
@@ -860,8 +860,7 @@ impl RuntimeEngine {
     /// exactly the deciding engine's policy. The root is the log's own, so a
     /// view cannot be built against a log it does not describe.
     pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
-        let root = TrajectoryId(log.root().as_str().to_string());
-        self.validated(log.facts().to_vec(), &root, log.basis())
+        self.validated(log.facts().to_vec(), log.root(), log.basis())
     }
 
     /// Where this trajectory stands in the log:
@@ -869,19 +868,15 @@ impl RuntimeEngine {
     /// binding — still taking events, or ended. The one replay-derived
     /// answer; the runtime keeps no flag of its own.
     pub(crate) fn liveness(&self, view: &EngineView, trajectory: &TrajectoryId) -> Liveness {
-        let id = engine_id(trajectory);
-        match view.views(&id) {
+        match view.views(trajectory) {
             None => Liveness::Unopened,
-            Some(views) if views.has_ended(&id) => Liveness::Ended,
+            Some(views) if views.has_ended(trajectory) => Liveness::Ended,
             Some(_) => Liveness::Live,
         }
     }
 
     pub(crate) fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
-        let child = engine_id(child);
-        view.views(&child)?
-            .parent_of(&child)
-            .map(|parent| TrajectoryId(parent.as_str().to_string()))
+        view.views(child)?.parent_of(child).cloned()
     }
 
     /// Would applying this batch leave the trajectory with more than one
@@ -889,16 +884,15 @@ impl RuntimeEngine {
     /// only when the host supplied no identity for the new call or an older
     /// open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
-        let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
-            .views(&owner)
+            .views(trajectory)
             .expect("the drive refuses an unopened trajectory before any dispatch bookkeeping")
             .open_dispatches()
             .map(|(dispatch, _)| dispatch.clone())
             .collect();
         for fact in facts {
             match fact {
-                Fact::DispatchOpened { dispatch, .. } if dispatch.trajectory() == &owner => {
+                Fact::DispatchOpened { dispatch, .. } if dispatch.trajectory() == trajectory => {
                     open.insert(dispatch.clone());
                 }
                 Fact::DispatchClosed { dispatch, .. } => {
@@ -926,11 +920,7 @@ impl RuntimeEngine {
         offer: &OfferId,
     ) -> Option<crate::api::OfferKind> {
         let engine_offer = parse_offer(offer)?;
-        match self
-            .engine
-            .offer_consults(view, &engine_id(trajectory), &engine_offer)
-            .ok()?
-        {
+        match self.engine.offer_consults(view, trajectory, &engine_offer).ok()? {
             OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
             OfferConsult::Withhold => Some(crate::api::OfferKind::Withhold),
             OfferConsult::Accept {
@@ -965,7 +955,7 @@ impl RuntimeEngine {
         } else {
             surfaced
         };
-        Some(TrajectoryId(pursuer.as_str().to_string()))
+        Some(pursuer)
     }
 
     /// The dispatches this trajectory has open, with the exact tool and
@@ -973,8 +963,7 @@ impl RuntimeEngine {
     /// persisted once, on the opening record, so this is where a live call is
     /// read back — the runtime keeps no row of its own.
     pub(crate) fn open_dispatches(&self, view: &EngineView, trajectory: &TrajectoryId) -> Vec<OpenDispatch> {
-        let owner = engine_id(trajectory);
-        let Some(views) = view.views(&owner) else {
+        let Some(views) = view.views(trajectory) else {
             return Vec::new();
         };
         views
@@ -1005,11 +994,11 @@ impl RuntimeEngine {
     /// the family never forked — for a child start the harness
     /// delivers again: it names the fork it already bound.
     pub(crate) fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ForkId> {
-        self.engine.fork_of(view, &engine_id(child))
+        self.engine.fork_of(view, child)
     }
 
     fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
-        self.engine.view(&engine_id(family), facts, revision).map_err(|error| {
+        self.engine.view(family, facts, revision).map_err(|error| {
             // The class is taken from the variant, not from the message: by the next
             // line the discriminant is gone and only prose is left.
             let class = ReplayRefusalClass::from(&error);
@@ -1050,11 +1039,10 @@ impl RuntimeEngine {
             .map_err(|error| EngineRefusal::Arguments {
                 detail: error.to_string(),
             })?;
-        let owner = engine_id(trajectory);
-        let views = view.views(&owner).ok_or(EngineRefusal::Ended)?;
+        let views = view.views(trajectory).ok_or(EngineRefusal::Ended)?;
         let digest = resolved.digest();
         let occurrence = views.dispatch_count(&digest);
-        Ok(EngineDispatchId::new(owner, digest, occurrence))
+        Ok(EngineDispatchId::new(trajectory.clone(), digest, occurrence))
     }
 
     pub(crate) fn file_output_label(
@@ -1072,7 +1060,7 @@ impl RuntimeEngine {
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
     pub(crate) fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let current = view.views(&engine_id(trajectory))?.current_label();
+        let current = view.views(trajectory)?.current_label();
         let label = self.render_label(&current)?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
@@ -1111,10 +1099,9 @@ impl RuntimeEngine {
     /// [`RuntimeEngine::trajectory_status`], a projection read.
     pub(crate) fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
         let facts = log.facts().to_vec();
-        let root = TrajectoryId(log.root().as_str().to_string());
         // The validator takes the records; this read keeps its own copy of
         // them, which is why the audit — and only the audit — clones a log.
-        self.validated(facts.clone(), &root, log.basis())?;
+        self.validated(facts.clone(), log.root(), log.basis())?;
         let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
         for fact in &facts {
             if let Fact::ForkPrepared {
@@ -1298,8 +1285,7 @@ impl RuntimeEngine {
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
             Err(error) => return Ok(deny(malformed_feedback(&error, self.naming))),
         };
-        let owner = engine_id(trajectory);
-        let Some(views) = view.views(&owner) else {
+        let Some(views) = view.views(trajectory) else {
             return Err(EngineRefusal::Invariant {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
@@ -1324,7 +1310,7 @@ impl RuntimeEngine {
                 let decide = |marked: bool| {
                     let batch = ProposalBatch {
                         id: batch_id(entropy),
-                        trajectory: engine_id(trajectory),
+                        trajectory: trajectory.clone(),
                         provider_results: Vec::new(),
                         proposals: vec![proposed.clone()],
                         spawn: marked.then(|| SpawnMark::at(0)),
@@ -1540,7 +1526,7 @@ impl RuntimeEngine {
         let Some(engine_offer) = parse_offer(offer) else {
             return Vec::new();
         };
-        match self.engine.offer_consults(view, &engine_id(trajectory), &engine_offer) {
+        match self.engine.offer_consults(view, trajectory, &engine_offer) {
             Ok(OfferConsult::Authorities { call, required }) => self.reviews_of(offer, &call, &required),
             _ => Vec::new(),
         }
@@ -1649,18 +1635,17 @@ impl RuntimeEngine {
                 "[appa] this offer no longer stands; re-propose the call".to_string(),
             ));
         };
-        let owner = engine_id(trajectory);
-        let Some(views) = view.views(&owner) else {
+        let Some(views) = view.views(trajectory) else {
             return Err(EngineRefusal::Invariant {
                 detail: "executing an offer for a trajectory the log has not opened".to_string(),
             });
         };
         let return_policy = self
-            .declared_return_policy(view, &owner, &views, &engine_offer, arguments)
+            .declared_return_policy(view, trajectory, &views, &engine_offer, arguments)
             .map_err(|detail| EngineRefusal::Arguments { detail })?;
         let outcome = match self
             .engine
-            .offer_consults(view, &owner, &engine_offer)
+            .offer_consults(view, trajectory, &engine_offer)
             .map_err(offer_refusal)?
         {
             OfferConsult::Stale => {
@@ -1741,7 +1726,7 @@ impl RuntimeEngine {
             UnresolvedAudience::OfferStands,
             |audience| {
                 let execution = OfferExecution {
-                    trajectory: engine_id(trajectory),
+                    trajectory: trajectory.clone(),
                     offer: engine_offer,
                     outcome,
                     return_policy,
@@ -1902,7 +1887,7 @@ impl RuntimeEngine {
     fn declared_return_policy(
         &self,
         view: &EngineView,
-        owner: &EngineTrajectoryId,
+        owner: &TrajectoryId,
         views: &Views,
         offer: &EngineOfferId,
         arguments: &RemedyArguments,
@@ -1976,7 +1961,7 @@ impl RuntimeEngine {
         parent: &TrajectoryId,
         fork: &appa_engine::value::ForkId,
     ) -> Option<String> {
-        let policy = self.engine.prepared_return_policy(view, &engine_id(parent), fork)?;
+        let policy = self.engine.prepared_return_policy(view, parent, fork)?;
         match policy.sanitizer? {
             ReturnSanitizer::Attest(shape) => Some(format!(
                 "[appa] Your final message is checked when you stop: it must be one JSON object matching this \
@@ -1997,7 +1982,7 @@ impl RuntimeEngine {
     /// The value `child` crossed most recently, as the harness would deliver it.
     pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
         self.engine
-            .latest_return_of(view, &engine_id(child))
+            .latest_return_of(view, child)
             .map(|body| body.as_str().to_string())
     }
 
@@ -2051,7 +2036,7 @@ impl RuntimeEngine {
     ) -> Result<EngineDecision, EngineRefusal> {
         let binding = ForkBinding {
             fork: fork.clone(),
-            child: engine_id(child),
+            child: child.clone(),
         };
         let decision = self
             .engine
@@ -2080,7 +2065,7 @@ impl RuntimeEngine {
     ) -> Result<EngineDecision, EngineRefusal> {
         let fork = self
             .engine
-            .fork_of(view, &engine_id(child))
+            .fork_of(view, child)
             .ok_or_else(|| EngineRefusal::Invariant {
                 detail: format!("child {} returned without an open fork", child.0),
             })?;
@@ -2101,7 +2086,7 @@ impl RuntimeEngine {
         };
         let judged = self.judge_under_audience(view.principal(), evidence, withheld, |audience| {
             let report = ChildReport {
-                child: engine_id(child),
+                child: child.clone(),
                 fork: fork.clone(),
                 submission: submission.clone(),
                 evidence: sanitizer_evidence(evidence),
@@ -2121,7 +2106,7 @@ impl RuntimeEngine {
                 ));
             }
             AudienceRound::Failed(TransitionError::ReturnShapeMismatch(mismatch)) => {
-                let policy = self.engine.return_policy_of(view, &engine_id(child));
+                let policy = self.engine.return_policy_of(view, child);
                 return blocked(shape_feedback(&mismatch, policy.as_ref()));
             }
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
@@ -2140,7 +2125,7 @@ impl RuntimeEngine {
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
-                &engine_id(child),
+                child,
                 None,
                 request,
                 evidence,
@@ -2432,7 +2417,7 @@ impl RuntimeEngine {
     fn resolve_or_withhold(
         &self,
         view: &EngineView,
-        trajectory: &EngineTrajectoryId,
+        trajectory: &TrajectoryId,
         dispatch: Option<&EngineDispatchId>,
         request: EvidenceRequest,
         evidence: &[ExternalEvidence],
@@ -2956,10 +2941,6 @@ fn no_answer(feedback: String) -> EngineDecision {
     EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback }))
 }
 
-pub fn engine_id(id: &TrajectoryId) -> appa_engine::value::TrajectoryId {
-    appa_engine::value::TrajectoryId::new(id.0.clone())
-}
-
 fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
     EngineOfferNonce::new(entropy.0)
 }
@@ -3032,11 +3013,11 @@ pub(crate) fn policy_file_key(bytes: &[u8]) -> String {
 /// identity it would have quoted back rather than reaching into the engine.
 #[cfg(test)]
 pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId> {
-    let owner = engine_id(trajectory);
+    let owner = trajectory;
     log.facts()
         .iter()
         .filter_map(|fact| match fact {
-            Fact::OfferOpened { trajectory, offer, .. } if trajectory == &owner => Some(offer_id(offer)),
+            Fact::OfferOpened { trajectory, offer, .. } if trajectory == owner => Some(offer_id(offer)),
             _ => None,
         })
         .collect()
@@ -3924,8 +3905,7 @@ mod tests {
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
         Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
-        audience_wire, block_feedback, engine_id, outcome_presentation, remedy_instruction, remedy_lines,
-        terminal_safe,
+        audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines, terminal_safe,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
@@ -4114,8 +4094,7 @@ mod tests {
             !matches!(again.then, Next::ResolveExternal(_)),
             "the offer the annotated call was blocked with stands, so its pin answers the re-proposal"
         );
-        let owner = engine_id(&trajectory);
-        let views = view.views(&owner).expect("the root is opened");
+        let views = view.views(&trajectory).expect("the root is opened");
         let resolved = engine
             .engine
             .resolve_call(ToolName::new("lookup"), br#"{"id": 7}"#)
@@ -4171,8 +4150,7 @@ mod tests {
             .expect("the call names its declaration");
         let trajectory = TrajectoryId("t".to_string());
         let view = opened_view(&engine, &trajectory);
-        let owner = engine_id(&trajectory);
-        let views = view.views(&owner).expect("the root is opened");
+        let views = view.views(&trajectory).expect("the root is opened");
         let asked = match engine.annotation_for(&views, declaration, &call, None, &[]) {
             Err(Resolution(requests)) => match requests.as_slice() {
                 [
@@ -4385,7 +4363,7 @@ mod tests {
                 ranks: String::new(),
             },
             BARE_CONTROL_TOOL,
-            Some(policy.registry()),
+            Some(policy.engine().registry()),
             "shell",
             false,
         );
@@ -4582,7 +4560,7 @@ mod tests {
         let feedback = block_feedback(
             &planned,
             &[(OfferId("0123456789abcdef".to_string()), PlanId::new(1))],
-            policy.registry(),
+            policy.engine().registry(),
             &ReturnBounds {
                 label: appa_engine::label::Label::top(),
                 lowest: Trust::new(0),
@@ -4642,7 +4620,7 @@ mod tests {
             block_feedback(
                 &planned,
                 &[],
-                policy.registry(),
+                policy.engine().registry(),
                 &ReturnBounds {
                     label: appa_engine::label::Label::top(),
                     lowest: Trust::new(0),

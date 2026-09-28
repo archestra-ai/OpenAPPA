@@ -1,9 +1,10 @@
 # Test the GitHub battery against GitHub
 
 This replay runs the shipped GitHub battery against real repositories. The battery's annotators call the GitHub API
-and mark each repository's content `suspicious`; a public repository's
-content keeps a public audience, a private repository's narrows to the
-collection `@github:repo/<owner>/<repo>/collaborators`, which the
+for each repository's visibility. Anyone can write into a public
+repository, so its content is `suspicious` and keeps a public audience. A
+private repository's content keeps the trajectory's trust and narrows to
+the collection `@github:repo/<owner>/<repo>/collaborators`, which the
 battery's audience source resolves from the repository's collaborators.
 
 The folder contains:

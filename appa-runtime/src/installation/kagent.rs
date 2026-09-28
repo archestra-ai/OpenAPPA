@@ -334,7 +334,8 @@ mod tests {
 
     fn installation(root: &Path) -> (Installation, Selection) {
         let installation = Installation::open(&root.join("config/my deployment.toml")).unwrap();
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
+        let shipped = super::super::tests::shipped_marketplace();
+        let source = shipped.path().join("marketplace");
         let catalog = fs::read(source.join("marketplace.toml")).unwrap();
         let mut descriptor = serde_json::to_value(super::super::tests::selection().generation()).unwrap();
         descriptor["catalog"] = serde_json::to_value(ArtifactDigest::of_bytes(&catalog)).unwrap();
@@ -544,10 +545,11 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(cwd.starts_with("/etc/appa/.appa/my deployment.toml/files/"));
-        let result = std::process::Command::new("./helper.sh")
-            .current_dir(prepared.join("assets").join(cwd.strip_prefix("/etc/appa/").unwrap()))
-            .output()
-            .unwrap();
+        let result = crate::child_process::output(
+            std::process::Command::new("./helper.sh")
+                .current_dir(prepared.join("assets").join(cwd.strip_prefix("/etc/appa/").unwrap())),
+        )
+        .unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"helper-ok");
         File::create(base.join("large.dat"))

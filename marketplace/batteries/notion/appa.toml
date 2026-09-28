@@ -5,9 +5,15 @@
 # the full permissions of the person who authorized it. So every read is
 # `internal`, the coarsest honest label: map it in the root config to the
 # people who may see everything this connection can reach, and narrow a
-# page or database in a root rule by argument. Page and database content
-# was written by whoever edits the workspace and by connected sources
-# (Slack, mail, calendar, drive), so reads enter `suspicious`.
+# page or database in a root rule by argument.
+#
+# Trust follows who can write the text. Pages, databases, and comments
+# are written by workspace members, so reads keep the session's trust;
+# form responses and integration-synced pages are trusted the same way,
+# since a member published the form or connected the source. Search also
+# reaches connected sources such as mail, and AI meeting notes carry what
+# outside participants said, so the searches and meeting-note queries
+# enter `suspicious`.
 #
 # Writes that stay in the workspace need trusted data that `internal` may
 # see and record `notion.changed`; what they return confirms the write and
@@ -21,11 +27,11 @@
 [policy]
 version = 2
 
-# --- reads: outside content, restricted to internal readers ---
+# --- reads: restricted to internal readers ---
 
 [[policy.tool]]
 name = "mcp/notion/notion-get-async-task"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -40,27 +46,27 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-search-skills"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-download-skill"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-fetch"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-download-attachment"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-query-data-sources"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -70,57 +76,57 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-get-comments"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-get-teams"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-get-users"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-list-agents"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-search-agents"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-query-sessions"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-search-sessions"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-get-session-status"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-wait-session"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-list-session-events"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/notion/notion-read-session-event"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 # --- writes inside the workspace: trusted internal data ---

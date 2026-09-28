@@ -16,7 +16,7 @@ mcp/github/issue_write {
 }
 expect deny
 
-# Commenting back onto the issue: suspicious input needs the reviewer.
+# Commenting back onto the issue: every Linear write needs the reviewer.
 mcp/linear/save_comment {
   issueId: "ARC-19"
   body: "summary"

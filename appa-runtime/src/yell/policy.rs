@@ -294,10 +294,10 @@ mod tests {
         // The fixtures read the selectors the shipped slack and google-workspace batteries
         // declare; a bare policy carries no bindings, so the declarations come from here.
         let declared = |provider: &str, templates: &[(&str, Option<ChainAudience>)]| SourceRegistration {
-            provider: provider.to_string(),
+            provider: appa_engine::names::ProviderName::new(provider),
             templates: templates
                 .iter()
-                .map(|(template, feeds)| DeclaredTemplate::new(*template, *feeds))
+                .map(|(template, feeds)| DeclaredTemplate::new(*template, *feeds).expect("a well-formed template"))
                 .collect(),
         };
         let sources = vec![

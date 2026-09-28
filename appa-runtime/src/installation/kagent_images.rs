@@ -447,14 +447,15 @@ mod tests {
                 let paths = std::iter::once(self.root.path().join("bin"))
                     .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))
                     .collect::<Vec<_>>();
-                Command::new("python3")
-                    .arg(self.root.path().join("verify-images.py"))
-                    .args(args)
-                    .env("PATH", std::env::join_paths(paths).unwrap())
-                    .env("APPA_IMAGE_TEST_FIXTURE", self.root.path().join("fixture.json"))
-                    .env("APPA_IMAGE_TEST_CALLS", self.root.path().join("calls.jsonl"))
-                    .output()
-                    .expect("image verifier subprocess tests require python3")
+                crate::child_process::output(
+                    Command::new("python3")
+                        .arg(self.root.path().join("verify-images.py"))
+                        .args(args)
+                        .env("PATH", std::env::join_paths(paths).unwrap())
+                        .env("APPA_IMAGE_TEST_FIXTURE", self.root.path().join("fixture.json"))
+                        .env("APPA_IMAGE_TEST_CALLS", self.root.path().join("calls.jsonl")),
+                )
+                .expect("image verifier subprocess tests require python3")
             }
 
             fn fails(&self, args: &[&str], message: &str) {
@@ -483,10 +484,11 @@ mod tests {
         #[test]
         fn emitted_helper_reaps_exited_and_live_processes() {
             let fixture = Fixture::new();
-            let output = Command::new("python3")
-                .arg("-c")
-                .arg(
-                    r#"
+            let output = crate::child_process::output(
+                Command::new("python3")
+                    .arg("-c")
+                    .arg(
+                        r#"
 import runpy
 import subprocess
 import sys
@@ -509,20 +511,21 @@ child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
 stop(child)
 assert child.returncode != 0
 "#,
-                )
-                .arg(fixture.root.path().join("verify-images.py"))
-                .output()
-                .unwrap();
+                    )
+                    .arg(fixture.root.path().join("verify-images.py")),
+            )
+            .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
 
         #[test]
         fn emitted_helper_handles_only_disappeared_darwin_zombie_groups() {
             let fixture = Fixture::new();
-            let output = Command::new("python3")
-                .arg("-c")
-                .arg(
-                    r#"
+            let output = crate::child_process::output(
+                Command::new("python3")
+                    .arg("-c")
+                    .arg(
+                        r#"
 import runpy
 import signal
 import sys
@@ -582,20 +585,21 @@ finally:
     os_module.killpg = old_killpg
     sys.platform = old_platform
 "#,
-                )
-                .arg(fixture.root.path().join("verify-images.py"))
-                .output()
-                .unwrap();
+                    )
+                    .arg(fixture.root.path().join("verify-images.py")),
+            )
+            .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
 
         #[test]
         fn emitted_helper_reports_primary_failures_when_cleanup_fails() {
             let fixture = Fixture::new();
-            let output = Command::new("python3")
-                .arg("-c")
-                .arg(
-                    r#"
+            let output = crate::child_process::output(
+                Command::new("python3")
+                    .arg("-c")
+                    .arg(
+                        r#"
 import runpy
 import sys
 import time
@@ -625,10 +629,10 @@ except RuntimeError as error:
 else:
     raise AssertionError('cleanup failure must preserve the excessive-output failure')
 "#,
-                )
-                .arg(fixture.root.path().join("verify-images.py"))
-                .output()
-                .unwrap();
+                    )
+                    .arg(fixture.root.path().join("verify-images.py")),
+            )
+            .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
 

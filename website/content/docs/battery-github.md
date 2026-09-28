@@ -14,10 +14,9 @@ The GitHub battery covers the MCP server's default profile, repository, issue, p
 ## Tool behavior
 
 - The viewer's own profile can be read without extra restrictions; team rosters and user search return untrusted profiles that stay with the viewer (`self`).
-- Repository, issue, pull-request, commit, search, and secret-scan results are untrusted.
-- Content read from a public repository is `public`; content read from a private or Enterprise-internal repository is read by the collection `@github:repo/<owner>/<repo>/collaborators`, which the battery's audience source resolves.
+- Anyone can open an issue or a pull request on a public repository, so content read from one is untrusted and `public`. Content read from a private or Enterprise-internal repository is written by the organization's people and its collaborators, so it keeps the session's trust and is read by the collection `@github:repo/<owner>/<repo>/collaborators`, which the battery's audience source resolves.
 - Writes into a public repository accept only trusted public data; writes into a private repository accept trusted data its collaborators may see. An Enterprise-internal repository is read by every enterprise member, which the source cannot list, so writes into it accept only public data unless a root rule maps those members.
-- Searches name no single repository and reach every private repository the token sees, so their results stay with the viewer (`self`). A root rule can treat a search of public repositories as public by its query.
+- Searches, secret scanning, and org-level listings name no single repository and reach public repositories as well as every private one the token sees, so their results are untrusted and stay with the viewer (`self`). A root rule can treat a search of public repositories as public by its query.
 
 The battery does not include optional GitHub tools. Add rules to the root config before enabling Actions, Discussions, Gists, Projects, or security alerts.
 

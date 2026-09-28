@@ -209,6 +209,7 @@ class ToolInventory:
         """
         builder = _Builder()
         builder.add(wire.RESERVED_TOOL, wire.CONTROL_TOOL, "the reserved tool")
+        builder.add(wire.YELL_TOOL, mcp_spelling("appa", wire.YELL_TOOL), "the runtime diagnostic tool")
         if guide_enabled(environ):
             for name in sorted(wire.MANAGEMENT_TOOLS):
                 builder.add(name, guide_spelling(name), "the appa-guide management set")

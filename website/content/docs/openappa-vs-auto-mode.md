@@ -29,7 +29,7 @@ When a classifier or reviewer denies an action, the agent must guess how to proc
 
 ## Composability: bounded classifiers within an algebraic engine
 
-This does not mean OpenAPPA rejects LLM classification. Real-world agent workflows often require semantic judgment — classifying unvetted payloads, evaluating ambiguous context, or redacting unstructured text. OpenAPPA supports model-backed components directly: an [annotator](/claude-code#use-claude-code-as-an-annotator), [authority](/contracts#authorities), or [sanitizer](/contracts#sanitizers) can bind an external LLM as a pluggable backend.
+This does not mean OpenAPPA rejects LLM classification. Real-world agent workflows often require semantic judgment — classifying unvetted payloads, evaluating ambiguous context, or redacting unstructured text. OpenAPPA supports model-backed components directly: an [annotator](/contracts#annotators), [authority](/contracts#authorities), or [sanitizer](/contracts#sanitizers) can bind an external LLM as a pluggable backend.
 
 The architectural difference is composability. In Claude Code and Codex, the LLM classifier acts as the unconstrained outer boundary: if it hallucinates or misinterprets an injection, the action executes. In OpenAPPA, model classifiers run inside mathematical bounds. An annotator or authority operates strictly within its declared mandate and permits. The outer information-flow engine maintains the global invariants: once data is labeled, it cannot legally flow into an unauthorized sink regardless of what any downstream model concludes. This architecture provides the best of both worlds: semantic flexibility where needed, backed by deterministic enforcement that cannot be bypassed.
 

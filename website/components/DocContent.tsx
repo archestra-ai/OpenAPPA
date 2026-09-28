@@ -35,6 +35,7 @@ import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
+import { BATTERY_REVIEW_CHECKLIST } from "@/lib/directive-content";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
 
@@ -69,6 +70,13 @@ const appaTraceLanguage: LanguageFn = (hljs) => ({
   ],
 });
 
+/** `backticks` in shared directive copy become <code>. */
+function inlineCode(text: string): ReactNode {
+  return text.split(/(`[^`]+`)/).map((part, i) =>
+    part.startsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : <Fragment key={i}>{part}</Fragment>,
+  );
+}
+
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
@@ -77,18 +85,14 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "battery-review-checklist": () => (
     <details className="my-5 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] px-4 py-3 text-sm text-[var(--text)]">
       <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
-        What should I review?
+        {BATTERY_REVIEW_CHECKLIST.summary}
       </summary>
       <div className="mt-3 border-t border-[var(--border)] pt-3 leading-relaxed">
-        <p>Open the links next to each rule and check:</p>
+        <p>{BATTERY_REVIEW_CHECKLIST.intro}</p>
         <ul className="mt-2 list-disc space-y-2 pl-5">
-          <li>The battery includes every tool in the server version it names.</li>
-          <li>It identifies every tool that sends data or changes something.</li>
-          <li>Each action sends data only to the people or services you expect.</li>
-          <li>Only the right people can see each result.</li>
-          <li>Data from sources you have not checked is <code>suspicious</code>, not <code>trusted</code>.</li>
-          <li>The battery asks a person before every action that needs approval.</li>
-          <li>The agent lists every question it could not answer from the server code or docs.</li>
+          {BATTERY_REVIEW_CHECKLIST.items.map((item) => (
+            <li key={item}>{inlineCode(item)}</li>
+          ))}
         </ul>
       </div>
     </details>

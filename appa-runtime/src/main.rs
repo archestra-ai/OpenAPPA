@@ -74,6 +74,8 @@ struct Args {
     )]
     batteries_dir: Vec<PathBuf>,
 
+    /// The address to serve. Port 0 takes a free port; the runtime prints the URL it
+    /// serves as the one line on stdout once it listens.
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
@@ -621,6 +623,19 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let listen = match listener.local_addr() {
+        Ok(listen) => listen,
+        Err(error) => {
+            eprintln!(
+                "appa runtime: cannot read the bound address of {}: {error}",
+                args.listen
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    // The one line the runtime writes to stdout: the address it serves, so a caller that
+    // asked for port 0 learns the port it got.
+    println!("http://{listen}");
     let guide = if let Some(address) = args.guide_listen {
         let listener = match tokio::net::TcpListener::bind(address).await {
             Ok(listener) => listener,
@@ -638,7 +653,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         None
     };
     tracing::info!(
-        listen = %args.listen,
+        listen = %listen,
         guide_listen = ?args.guide_listen,
         "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );

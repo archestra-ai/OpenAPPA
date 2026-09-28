@@ -56,6 +56,33 @@ def dispatch(session, call_id: str = "fc-1", invocation_id: str = "i1", **fields
 # -- session and prompt ----------------------------------------------
 
 
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_yell_crosses_the_call_gate_without_management_arguments(allowed):
+    from appa_kagent_adk.inventory import ToolInventory
+
+    hook = Hook(ALLOW if allowed else {"protocol": 1, "decision": "deny_call", "feedback": "private trajectory"})
+    plugin = plugin_over(hook, inventory=ToolInventory.from_config({}, environ={}))
+    arguments = {"message": "Demo diagnostic", "with_trajectory": True}
+    result = await plugin.before_tool_callback(
+        tool=FakeTool("yell"), tool_args=arguments, tool_context=dispatch(FakeSession("yell-session"))
+    )
+    assert hook.events == [
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "tool_call",
+            "root_id": "yell-session",
+            "tool": "mcp:appa/yell",
+            "arguments": {"message": "Demo diagnostic", "with_trajectory": True},
+        }
+    ]
+    assert arguments == {"message": "Demo diagnostic", "with_trajectory": True}
+    if allowed:
+        assert result is None
+    else:
+        assert "private trajectory" in str(result)
+
+
 async def test_a_fresh_session_opens_before_its_prompt_crosses():
     hook = Hook(ACK, ACK)
     plugin = plugin_over(hook)

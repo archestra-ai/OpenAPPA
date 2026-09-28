@@ -48,8 +48,8 @@
 //!
 //! Add `[file_tracking]` with `initial_trust` and `initial_audience` to the APPA
 //! configuration. The table's presence enables file tracking. Each root session binds to
-//! its first file call's working directory,
-//! then classifies and hashes the files that exist there. Its subagents share that workspace
+//! its first file call's working directory and checks it for links without reading content.
+//! Each file gets the initial Label when a call first touches it. Its subagents share that workspace
 //! and ledger; another root session can bind to a different workspace.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
@@ -72,11 +72,12 @@
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
-use appa_engine::value::{FileBasis, FileSource};
-use appa_eventlog::files::{FileOperation, FilePin, FileStore};
-use std::collections::HashMap;
 #[cfg(feature = "daemon")]
-use std::io::Write;
+use appa_eventlog::files::PinnedBasis;
+#[cfg(feature = "daemon")]
+use appa_eventlog::files::beneath::{self, Entry};
+use appa_eventlog::files::{FileOperation, FileStore};
+use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -105,17 +106,8 @@ impl FileTracking {
         workspace: &str,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
         let workspace = std::fs::canonicalize(workspace)?;
-        let mut stores = self
-            .stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
-        if let Some(store) = stores.get(&root.0) {
-            if store.workspace() != workspace {
-                return Err(appa_eventlog::files::FileStoreError::Configuration(
-                    "a session cannot change its tracked workspace".into(),
-                ));
-            }
-            return Ok(std::sync::Arc::clone(store));
+        if let Some(store) = self.bound(root, &workspace)? {
+            return Ok(store);
         }
         if self.protected_paths.iter().any(|path| path.starts_with(&workspace))
             || self
@@ -128,24 +120,54 @@ impl FileTracking {
             ));
         }
         let store = std::sync::Arc::new(FileStore::new(&workspace, &self.initial)?);
-        stores.insert(root.0.clone(), std::sync::Arc::clone(&store));
-        Ok(store)
+        let mut stores = self.lock_stores()?;
+        same_workspace(stores.entry(root.0.clone()).or_insert(store), &workspace)
+    }
+
+    fn bound(
+        &self,
+        root: &super::TrajectoryId,
+        workspace: &std::path::Path,
+    ) -> Result<Option<std::sync::Arc<FileStore>>, appa_eventlog::files::FileStoreError> {
+        self.lock_stores()?
+            .get(&root.0)
+            .map(|store| same_workspace(store, workspace))
+            .transpose()
+    }
+
+    fn lock_stores(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>,
+        appa_eventlog::files::FileStoreError,
+    > {
+        self.stores
+            .lock()
+            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))
     }
 
     pub(super) fn store(
         &self,
         root: &super::TrajectoryId,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-        let stores = self
-            .stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
-        stores.get(&root.0).cloned().ok_or_else(|| {
+        self.lock_stores()?.get(&root.0).cloned().ok_or_else(|| {
             appa_eventlog::files::FileStoreError::Configuration(
                 "the session has not supplied a working directory for file tracking".into(),
             )
         })
     }
+}
+
+fn same_workspace(
+    store: &std::sync::Arc<FileStore>,
+    workspace: &std::path::Path,
+) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+    if store.workspace() != workspace {
+        return Err(appa_eventlog::files::FileStoreError::Configuration(
+            "a session cannot change its tracked workspace".into(),
+        ));
+    }
+    Ok(std::sync::Arc::clone(store))
 }
 
 pub(crate) const TOOLS: [&str; 6] = [
@@ -245,46 +267,42 @@ pub(super) fn perform(
     call: &ProposedCall,
     pin: &appa_eventlog::files::FilePin,
 ) -> Result<String, String> {
-    let (operation, _) = operation(call).map_err(|error| error.to_string())?;
-    let path = workspace.join(&pin.path);
-    match operation {
-        FileOperation::Process => process::perform(files, workspace, call, pin),
-        FileOperation::Read => std::fs::read_to_string(path).map_err(|error| error.to_string()),
-        FileOperation::Replace => {
+    match &pin.basis {
+        PinnedBasis::Process { .. } => process::perform(files, workspace, call, pin),
+        PinnedBasis::Read(_) => read(workspace, &pin.path).map_err(|error| error.to_string()),
+        PinnedBasis::Replace(_) => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
-            replace(&path, &args.content)
+            replace(workspace, &pin.path, &args.content)
                 .map(|()| "file written".into())
                 .map_err(|error| error.to_string())
         }
-        FileOperation::Edit => {
+        PinnedBasis::Edit(_) => {
             let args: EditArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
             if args.old_string.is_empty() {
                 return Err("old_string must not be empty".into());
             }
-            let content = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            let content = read(workspace, &pin.path).map_err(|error| error.to_string())?;
             if content.matches(&args.old_string).count() != 1 {
                 return Err("old_string must match exactly once".into());
             }
-            replace(&path, &content.replacen(&args.old_string, &args.new_string, 1))
-                .map(|()| "file edited".into())
-                .map_err(|error| error.to_string())
+            replace(
+                workspace,
+                &pin.path,
+                &content.replacen(&args.old_string, &args.new_string, 1),
+            )
+            .map(|()| "file edited".into())
+            .map_err(|error| error.to_string())
         }
-        FileOperation::Copy | FileOperation::Move => {
-            let source = pin.source.as_ref().ok_or("the transfer pin carries no source")?;
+        PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => {
             let result = (|| -> std::io::Result<()> {
-                let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
-                std::fs::create_dir_all(parent)?;
-                let source = workspace.join(&source.path);
-                if operation == FileOperation::Move {
-                    std::fs::rename(source, &path)?;
+                let destination = Entry::create(workspace, &pin.path)?;
+                if matches!(pin.basis, PinnedBasis::Move { .. }) {
+                    Entry::locate(workspace, &source.path)?
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
+                        .rename_to(&destination)
                 } else {
-                    let mut input = std::fs::File::open(source)?;
-                    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-                    std::io::copy(&mut input, &mut staged)?;
-                    staged.as_file().sync_all()?;
-                    staged.persist(&path).map_err(|error| error.error)?;
+                    destination.publish(&mut existing(workspace, &source.path)?)
                 }
-                Ok(())
             })();
             // No source-derived error body is admitted at the acknowledgement Label.
             result
@@ -295,16 +313,18 @@ pub(super) fn perform(
 }
 
 #[cfg(feature = "daemon")]
-fn replace(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing parent directory"))?;
-    std::fs::create_dir_all(parent)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    staged.write_all(content.as_bytes())?;
-    staged.as_file().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
-    Ok(())
+fn replace(workspace: &Path, relative: &str, content: &str) -> std::io::Result<()> {
+    Entry::create(workspace, relative)?.publish(&mut content.as_bytes())
+}
+
+#[cfg(feature = "daemon")]
+fn existing(workspace: &Path, relative: &str) -> std::io::Result<std::fs::File> {
+    beneath::open(workspace, relative)?.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+#[cfg(feature = "daemon")]
+fn read(workspace: &Path, relative: &str) -> std::io::Result<String> {
+    std::io::read_to_string(existing(workspace, relative)?)
 }
 
 /// Where one constrained file launcher's runtime lives: the paths a private
@@ -378,53 +398,6 @@ impl super::Runtime {
     }
 }
 
-pub(super) fn basis(pin: FilePin) -> Result<FileBasis, EventError> {
-    let source = match (pin.predecessor_version, pin.predecessor_digest, pin.predecessor_label) {
-        (Some(version), Some(digest), Some(label)) => Some(FileSource {
-            version: version.to_string(),
-            digest,
-            label,
-        }),
-        (None, None, None) => None,
-        _ => return Err(refused("incomplete file ledger pin")),
-    };
-    Ok(match pin.operation {
-        FileOperation::Process => FileBasis::Process {
-            inputs: pin
-                .inputs
-                .into_iter()
-                .map(|input| FileSource {
-                    version: input.version.to_string(),
-                    digest: input.digest,
-                    label: input.label,
-                })
-                .collect(),
-            replaced: source,
-        },
-        FileOperation::Read => FileBasis::Read(source.ok_or_else(|| refused("missing read source"))?),
-        FileOperation::Edit => FileBasis::Edit(source.ok_or_else(|| refused("missing edit source"))?),
-        FileOperation::Replace => FileBasis::Replace(source),
-        FileOperation::Copy | FileOperation::Move => {
-            let input = pin.source.ok_or_else(|| refused("missing transfer source"))?;
-            let input = FileSource {
-                version: input.version.to_string(),
-                digest: input.digest,
-                label: input.label,
-            };
-            match pin.operation {
-                FileOperation::Copy => FileBasis::Copy {
-                    source: input,
-                    replaced: source,
-                },
-                _ => FileBasis::Move {
-                    source: input,
-                    replaced: source,
-                },
-            }
-        }
-    })
-}
-
 pub(super) fn refused(message: impl ToString) -> EventError {
     EventError::RemedyArguments {
         detail: format!("file tracking: {}", message.to_string()),
@@ -442,6 +415,8 @@ mod tests {
     use crate::config::Config;
     use crate::engine::RemedyArguments;
     use appa_engine::label::{Audience, Label, Trust};
+    use appa_engine::value::{FileBasis, FileSource};
+    use appa_eventlog::files::{FilePin, PinnedVersion};
     use std::path::Path;
 
     fn open(dir: &Path) -> Runtime {
@@ -535,8 +510,8 @@ max_body_bytes = 65536
         child
             .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
             .unwrap();
-        assert_eq!(parent.reservation().unwrap().unwrap().actor, "cc:session:child");
-        assert!(other.reservation().unwrap().is_none());
+        assert!(parent.pin_for("cc:session:child", "call").unwrap().is_some());
+        assert!(other.pin_for("cc:session:child", "call").unwrap().is_none());
     }
 
     fn bind(runtime: &Runtime, root: &TrajectoryId, dir: &Path) {
@@ -1212,6 +1187,78 @@ else:
         );
     }
 
+    #[test]
+    fn ledger_pins_derive_the_file_basis_the_engine_rules_on() {
+        let dir = fixture();
+        let work = dir.path().join("work");
+        std::fs::write(work.join("second.txt"), "second").unwrap();
+        std::fs::write(work.join("occupied.txt"), "occupied").unwrap();
+        let store = FileStore::new(&work, &Label::top()).unwrap();
+        let pinned = |path: &str| {
+            let version = store.current(path).unwrap().unwrap();
+            FileSource {
+                version: version.id.to_string(),
+                digest: version.digest,
+                label: version.label,
+            }
+        };
+        let derive = |key: &str, pin: FilePin| {
+            store.cancel("a", key).unwrap();
+            pin.file_basis()
+        };
+
+        let read = store.prepare("a", "read", FileOperation::Read, "source.txt").unwrap();
+        assert_eq!(derive("read", read), FileBasis::Read(pinned("source.txt")));
+        let edit = store.prepare("a", "edit", FileOperation::Edit, "source.txt").unwrap();
+        assert_eq!(derive("edit", edit), FileBasis::Edit(pinned("source.txt")));
+        let create = store
+            .prepare("a", "create", FileOperation::Replace, "fresh.txt")
+            .unwrap();
+        assert_eq!(derive("create", create), FileBasis::Replace(None));
+        let replace = store
+            .prepare("a", "replace", FileOperation::Replace, "source.txt")
+            .unwrap();
+        assert_eq!(
+            derive("replace", replace),
+            FileBasis::Replace(Some(pinned("source.txt")))
+        );
+        let copy = store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "source.txt", "occupied.txt")
+            .unwrap();
+        assert_eq!(
+            derive("copy", copy),
+            FileBasis::Copy {
+                source: pinned("source.txt"),
+                replaced: Some(pinned("occupied.txt")),
+            }
+        );
+        let moved = store
+            .prepare_transfer("a", "move", FileOperation::Move, "source.txt", "moved.txt")
+            .unwrap();
+        assert_eq!(
+            derive("move", moved),
+            FileBasis::Move {
+                source: pinned("source.txt"),
+                replaced: None,
+            }
+        );
+        let process = store
+            .prepare_process(
+                "a",
+                "process",
+                &["second.txt".into(), "source.txt".into()],
+                "occupied.txt",
+            )
+            .unwrap();
+        assert_eq!(
+            derive("process", process),
+            FileBasis::Process {
+                inputs: vec![pinned("second.txt"), pinned("source.txt")],
+                replaced: Some(pinned("occupied.txt")),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn managed_files_execute_the_pinned_path_not_the_argument_path() {
         let dir = fixture();
@@ -1232,12 +1279,7 @@ else:
             .unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
-            operation: FileOperation::Replace,
-            predecessor_version: None,
-            predecessor_label: None,
-            predecessor_digest: None,
-            source: None,
-            inputs: vec![],
+            basis: PinnedBasis::Replace(None),
         };
         assert_eq!(
             perform(files, &workspace, &call, &pin).unwrap(),
@@ -1248,6 +1290,48 @@ else:
             "pinned content"
         );
         assert!(!dir.path().join("work/elsewhere.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn managed_files_never_follow_a_parent_swapped_for_a_symlink() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let files = runtime.inner.shared.files.as_ref().unwrap();
+        let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
+        files
+            .bind(&TrajectoryId("parent-swap".into()), workspace.to_str().unwrap())
+            .unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("target.txt"), "outside bytes").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("sub")).unwrap();
+        let pin = |basis| FilePin {
+            path: "sub/target.txt".into(),
+            basis,
+        };
+        let write = ProposedCall {
+            tool: format!("{PREFIX}appa_write_file"),
+            arguments: super::super::session::raw(
+                serde_json::json!({"file_path": "sub/target.txt", "content": "escaped"}),
+            ),
+            cwd: None,
+        };
+        let read = ProposedCall {
+            tool: format!("{PREFIX}appa_read_file"),
+            arguments: super::super::session::raw(serde_json::json!({"file_path": "sub/target.txt"})),
+            cwd: None,
+        };
+        let outside_version = PinnedVersion {
+            id: 1,
+            digest: "unhashed".into(),
+            label: Label::top(),
+        };
+        assert!(perform(files, &workspace, &write, &pin(PinnedBasis::Replace(None))).is_err());
+        assert!(perform(files, &workspace, &read, &pin(PinnedBasis::Read(outside_version))).is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("target.txt")).unwrap(),
+            "outside bytes"
+        );
     }
 
     #[tokio::test]

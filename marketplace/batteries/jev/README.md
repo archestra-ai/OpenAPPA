@@ -9,23 +9,26 @@ declares no tool. A deployment routes its own tools to
 the Annotator.
 
 **Every annotated call's name, description, and arguments are sent to the
-TypeSafe API.** The runtime first redacts what it recognizes as a secret:
-well-known token and key shapes, private-key blocks, `Authorization` header
-values, and the value of any field named for a secret, such as `password`,
-`token`, or `auth`. It then cuts each string at 4,000 characters. Redaction
-is best effort, not a proof that no secret remains. Internal paths,
+TypeSafe API.** The runtime first redacts what it recognizes as a secret,
+as it does for every model provider: each string goes through the
+`redact-secrets` detector, and the whole value of any field named for a
+secret, such as `password`, `token`, or `auth`, is replaced. Each secret
+becomes `[redacted-secret]`; the tool name is not redacted. Redaction is
+best effort, not a proof that no secret remains. Internal paths,
 hostnames, and message text still leave. Install the battery only where
 that flow is acceptable.
 
 ## Install
 
 ```sh
-appa battery install jev
 export APPA_PROVIDER_JEV_API_KEY=<TypeSafe API key>
+appa battery install jev
 ```
 
-The runtime reads the key when the deployment opens or reloads. While it
-is unset, every Jev consult is no answer and the runtime refuses the call.
+The runtime reads the key when the deployment opens or reloads. A
+deployment that declares a `jev` Annotator refuses to open while the
+variable is unset, and a refused reload leaves the running deployment
+serving. A profile that no Annotator consults loads without its key.
 
 Route a tool to the Annotator in the root config:
 
@@ -47,12 +50,13 @@ builtin = "jev"
 ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []
-hint = "Output carrying text a third party wrote is suspicious."
+effects = []
+hint = "Hosts under corp.example.com are the organization's own; files under ~/clients/ hold customer data."
 ```
 
 With this battery installed, its `[externals.jev]` profile serves the
 replacement. Without it, the root config declares the profile itself; a
-deployment declares it once:
+deployment names the key once:
 
 ```toml
 [externals.jev]
@@ -71,7 +75,9 @@ always admissible.
 Each consult asks Jev four questions about the complete call: who may read
 its result, who wrote it, who the call delivers data to, and whether it
 carries trajectory data out of the operator's control. A read that only
-names what to read from an internal service does not. The Annotator's
+names what to read from an internal service does not. Each question
+carries OpenAPPA's label guide for its label: the rule, the criteria, and
+worked examples, the same guide a model builtin reads. The Annotator's
 `hint` is added to each question.
 
 | Jev's label | Annotation |
@@ -95,8 +101,20 @@ With no answer after 0.8 s on a connection that has answered before, or
 after 2 s on a new one, a second request goes out on a new connection and
 the first answer wins; a connection that answered that slowly is not
 reused. A 5xx answer or a connection failure is retried; a 4xx answer and
-an unreadable body are not. Every attempt ends inside the deployment's
-`externals.timeout_ms`.
+an unreadable body are not. Every attempt ends inside the profile's
+`timeout_ms`, which defaults to the deployment's `externals.timeout_ms`.
+At most `max_concurrent` consults, 16 by default, run at once across the
+runtime, all sessions included; an accepted reload applies a changed value
+to later consults of every session. The battery's profile names only the
+key. To change either limit with the battery installed, declare the limits
+in the root config; the profile takes the key from the battery and the
+limits from the root:
+
+```toml
+[externals.jev]
+timeout_ms = 3000
+max_concurrent = 8
+```
 
 The consult record carries one JSON object under `jev_diagnostics`, also
 logged at debug level: each label's probabilities and decision, the

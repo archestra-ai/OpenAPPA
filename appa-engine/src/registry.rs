@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
-use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
+use crate::authority::{Authority, DeclaredTransition, Sanitizer};
 use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
@@ -552,11 +552,11 @@ pub enum LoadError {
     #[error("duplicate trust rank {0:?} in the chain")]
     DuplicateRank(String),
     #[error(
-        "the wildcard tool \"*\" declares static semantics — it covers calls the policy does not name, so it routes through an annotator: give it `annotator` and nothing else"
+        "the wildcard tool \"*\" declares static semantics — it covers calls without a matching explicit contract, so it routes through an annotator: give it `annotator` and nothing else"
     )]
     WildcardStatic,
     #[error(
-        "the wildcard tool \"*\" carries metadata or an argument selector — it covers calls the policy does not name, so it describes none of them"
+        "the wildcard tool \"*\" carries metadata or an argument selector — it covers calls without a matching explicit contract, so it describes none of them"
     )]
     WildcardMetadata,
     #[error("the policy writes more than one wildcard tool \"*\"")]
@@ -963,7 +963,7 @@ fn worst_case_return_options(sanitizers: &[Sanitizer]) -> usize {
 }
 
 /// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
-/// does not name exactly, and routes each covered call through its annotator.
+/// has no matching explicit contract for, and routes each covered call through its annotator.
 pub(crate) const WILDCARD_SPELLING: &str = "*";
 
 /// How the registry classifies a proposed tool name: declared and checkable, declared as
@@ -994,7 +994,7 @@ pub struct Registry {
     mcp_order: BTreeMap<String, Vec<(ToolName, usize)>>,
     provider_run: BTreeMap<ToolName, ToolAnnotation>,
     /// The wildcard declaration, when the policy writes one: the Annotated declaration every
-    /// tool call the policy does not name exactly resolves to. In no listing or vector; the
+    /// tool call without a matching explicit contract resolves to. In no tool-name listing; the
     /// policy identity carries it through the declared configuration.
     wildcard: Option<ToolDeclaration>,
     annotators: BTreeMap<AnnotatorName, AnnotatorMandate>,
@@ -1078,7 +1078,6 @@ impl Registry {
                     direct.extend(check_declared(&audience, to, || format!("{} to", context()))?);
                 }
             }
-            check_hint(sanitizer.hint.as_ref(), context)?;
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
                 return Err(LoadError::DuplicateSanitizer(sanitizer.name.as_str().to_string()));
             }
@@ -1236,9 +1235,6 @@ impl Registry {
                     format!("authority {} reader ceiling", authority.name.as_str())
                 })?);
             }
-            check_hint(authority.hint.as_ref(), || {
-                format!("authority {}", authority.name.as_str())
-            })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
@@ -1385,7 +1381,7 @@ impl Registry {
         })
     }
 
-    /// The wildcard covers calls this policy knows nothing about, so it is an Annotated
+    /// The wildcard covers calls without a matching explicit contract, so it is an Annotated
     /// declaration and nothing more: metadata and an argument selector describe a specific
     /// tool, so it carries none.
     fn admit_wildcard(
@@ -1452,9 +1448,9 @@ impl Registry {
         std::iter::once("public".to_string()).chain(self.audience_vocabulary.entries())
     }
 
-    /// The one classification every name lookup derives from. An exact declaration always wins;
-    /// the wildcard covers only a name the policy does not write. `None` is a name no contract
-    /// covers: a proposal naming it is refused.
+    /// Classify by name before argument selection. Explicit variants classify a name as
+    /// declared even when a particular call will fall through to the wildcard. `None` is
+    /// a name no contract covers: a proposal naming it is refused.
     ///
     /// [`WILDCARD_SPELLING`] is the wildcard contract's own spelling and never a tool a host
     /// dispatches, so a proposal naming it names no tool: it classifies as `None` even under a
@@ -1491,11 +1487,15 @@ impl Registry {
         }
     }
 
-    /// The declaration a persisted call names. A wildcard-covered tool has exactly one, at
-    /// ordinal zero; a record naming another ordinal for it is forged.
+    /// The declaration a persisted call names. The wildcard follows all explicit variants,
+    /// at ordinal zero for an undeclared name. Larger ordinals name no contract.
     pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
         match self.classify(name)? {
-            ToolKind::Declared => self.matching_variants(name.clone()).nth(id.ordinal()).map(|(_, d)| d),
+            ToolKind::Declared => self
+                .matching_variants(name.clone())
+                .map(|(_, declaration)| declaration)
+                .chain(self.wildcard.iter())
+                .nth(id.ordinal()),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
         }
@@ -1545,17 +1545,22 @@ impl Registry {
         arguments: &serde_json::Value,
     ) -> Option<(ToolDeclarationId, &ToolDeclaration)> {
         match self.classify(name)? {
-            ToolKind::Declared => {
-                self.matching_variants(name.clone())
-                    .enumerate()
-                    .find_map(|(ordinal, (matcher, declaration))| {
-                        if matcher.matches(arguments) {
-                            ToolDeclarationId::new(ordinal).map(|id| (id, declaration))
-                        } else {
-                            None
-                        }
-                    })
-            }
+            ToolKind::Declared => self
+                .matching_variants(name.clone())
+                .map(|(matcher, declaration)| (matcher, declaration))
+                .chain(
+                    self.wildcard
+                        .iter()
+                        .map(|declaration| (&ToolMatcher::Bare, declaration)),
+                )
+                .enumerate()
+                .find_map(|(ordinal, (matcher, declaration))| {
+                    if matcher.matches(arguments) {
+                        ToolDeclarationId::new(ordinal).map(|id| (id, declaration))
+                    } else {
+                        None
+                    }
+                }),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => self
                 .wildcard
@@ -1576,7 +1581,15 @@ impl Registry {
     }
 
     pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolDeclaration> {
-        self.matching_variants(name.clone()).map(|(_, d)| d)
+        // A bare explicit contract always matches, making the wildcard unreachable. Otherwise
+        // planners must account for its per-call annotation when judging every possible variant.
+        let fallback = matches!(self.classify(name), Some(ToolKind::Declared | ToolKind::Wildcard))
+            && !self
+                .matching_variants(name.clone())
+                .any(|(matcher, _)| matches!(matcher, ToolMatcher::Bare));
+        self.matching_variants(name.clone())
+            .map(|(_, d)| d)
+            .chain(self.wildcard.iter().filter(move |_| fallback))
     }
 
     fn matching_variants(&self, name: ToolName) -> impl Iterator<Item = &(ToolMatcher, ToolDeclaration)> {
@@ -1786,11 +1799,12 @@ fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegist
         // leading `@` makes its members non-literal readers, and an empty name owns no
         // namespace at all. The one qualification rule (`ReaderId::provider_prefix`) stays
         // unambiguous only over names this shape.
-        if source.provider.is_empty() || source.provider.contains(':') || source.provider.starts_with('@') {
-            return Err(LoadError::MalformedAudienceProvider(source.provider.clone()));
+        let provider = source.provider.as_str();
+        if provider.is_empty() || provider.contains(':') || provider.starts_with('@') {
+            return Err(LoadError::MalformedAudienceProvider(provider.to_string()));
         }
-        if !providers.insert(source.provider.as_str()) {
-            return Err(LoadError::DuplicateAudienceProvider(source.provider.clone()));
+        if !providers.insert(provider) {
+            return Err(LoadError::DuplicateAudienceProvider(provider.to_string()));
         }
     }
     let mut named = BTreeSet::new();
@@ -1896,17 +1910,6 @@ fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> 
             reader: reader.as_str().to_string(),
         }),
         None => Ok(()),
-    }
-}
-
-fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), LoadError> {
-    match hint {
-        Some(hint) if hint.as_str().chars().count() > MAX_HINT_CHARS => Err(LoadError::HintTooLong {
-            context: context(),
-            len: hint.as_str().chars().count(),
-            max: MAX_HINT_CHARS,
-        }),
-        _ => Ok(()),
     }
 }
 
@@ -2026,8 +2029,10 @@ mod tests {
     fn slack_groups(handles: &[&str]) -> crate::audience::AudienceConfig {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: handles
                 .iter()
@@ -2226,11 +2231,11 @@ mod tests {
     fn audience_provider_and_group_names_are_shaped_at_load() {
         use crate::audience::{NamedAudience, SourceRegistration};
         let source = |provider: &str| SourceRegistration {
-            provider: provider.to_string(),
-            templates: vec![crate::audience::DeclaredTemplate::new(
-                "viewer",
-                Some(ChainAudience::Self_),
-            )],
+            provider: crate::names::ProviderName::new(provider),
+            templates: vec![
+                crate::audience::DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))
+                    .expect("a well-formed template"),
+            ],
         };
         // A `:` makes one member id qualified under two providers, `@` makes members
         // non-literal, and an empty name owns no namespace.
@@ -2598,8 +2603,10 @@ mod tests {
         let mut cfg = base();
         cfg.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("channel/<id>").expect("a well-formed template"),
+                ],
             }],
             ..crate::audience::AudienceConfig::default()
         };
@@ -2998,6 +3005,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unmatched_argument_selectors_fall_through_to_the_wildcard() {
+        for (rules, actual) in [
+            (
+                vec!["builtin:shell(command:git push)", "builtin:shell(cmd:kubectl *)"],
+                "builtin:shell",
+            ),
+            (
+                vec![
+                    "mcp/*/run_command(command:git push)",
+                    "mcp/archestra_staging/run_command(cmd:kubectl *)",
+                ],
+                "mcp/archestra_staging/run_command",
+            ),
+        ] {
+            let mut cfg = base();
+            // Even a wildcard authored first remains the final fallback.
+            cfg.tools = vec![annotated(WILDCARD_SPELLING, "any")];
+            cfg.tools.extend(declared(rules.into_iter().map(tool).collect()));
+            cfg.annotators = vec![annotator("any")];
+            let registry = Registry::build_covered(cfg).unwrap();
+            let name = ToolName::new(actual);
+            assert_eq!(registry.variants(&name).count(), 3);
+            for raw in [r#"{"command":"ls"}"#, r#"{"cmd":"pwd"}"#, "{}"] {
+                let arguments = crate::params::CanonicalArguments::parse(raw.as_bytes()).unwrap();
+                let (id, selected) = registry.select_tool(&name, arguments.value()).unwrap();
+                assert_eq!(id.ordinal(), 2);
+                assert_eq!(selected.annotator(), Some(&AnnotatorName::new("any")));
+                let call = crate::value::ResolvedCall::new_keyed(name.clone(), id, arguments);
+                assert_eq!(registry.declaration(&call), Some(selected));
+                assert!(registry.selection_matches(&call));
+                let persisted = serde_json::to_value(&call).unwrap();
+                let restored: crate::value::ResolvedCall = serde_json::from_value(persisted).unwrap();
+                assert_eq!(registry.declaration(&restored), Some(selected));
+                assert!(registry.selection_matches(&restored));
+            }
+            for (args, ordinal) in [
+                (serde_json::json!({"command":"git push"}), 0),
+                (serde_json::json!({"cmd":"kubectl get pods"}), 1),
+            ] {
+                let (id, selected) = registry.select_tool(&name, &args).unwrap();
+                assert_eq!(id.ordinal(), ordinal);
+                assert!(selected.declared().is_some());
+            }
+            assert!(registry.keyed_tool(&name, ToolDeclarationId::new(3).unwrap()).is_none());
+        }
+    }
+
     /// The wildcard's spelling is a contract, not a tool: a caller that proposes the literal
     /// `*` names a tool no host dispatches, so it resolves to nothing — the wildcard covers
     /// every *other* name — and the proposal is refused instead of annotated and checked.
@@ -3381,8 +3436,10 @@ mod tests {
             .collect();
         grouped.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
-                provider: "slack".to_string(),
-                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                provider: crate::names::ProviderName::new("slack"),
+                templates: vec![
+                    crate::audience::DeclaredTemplate::named("user-group/<handle>").expect("a well-formed template"),
+                ],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("desk"),
