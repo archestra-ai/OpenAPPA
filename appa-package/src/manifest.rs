@@ -63,7 +63,7 @@ pub enum ManifestError {
     },
     #[error("{path}: `{kind}` is not a package kind: a package is an plugin or a battery")]
     Kind { path: PathBuf, kind: String },
-    #[error("{path}: `{host}` is not a host: this build serves claude-code and kagent")]
+    #[error("{path}: `{host}` is not a supported host for this package")]
     Host { path: PathBuf, host: String },
     #[error("{path}: packages `{first}` and `{second}` share the path `{shared}`")]
     DuplicatePath {

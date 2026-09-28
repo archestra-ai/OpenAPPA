@@ -67,6 +67,7 @@ fi
 run "Battery script linter" python3 scripts/lint_batteries.py
 run "Rust tests" cargo test --workspace --locked
 run "Runtime binary" cargo build --package appa --locked
+run "amppa plugin and runtime integration" bun test integrations/amp
 
 run "Repository Python tests" uv run --with 'pyyaml==6.0.2' python3 -m unittest \
   scripts/test_lint_batteries.py \

@@ -26,9 +26,9 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
             });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
-        // Neither keeps MCP servers in files on this machine: kagent's live in the cluster,
-        // an embedding host's in its own store.
-        Host::Kagent | Host::Embedded => BTreeSet::new(),
+        // kagent and embedding hosts keep their own inventories. amppa does not
+        // participate in marketplace installation or automatic battery discovery.
+        Host::Kagent | Host::Amp | Host::Embedded => BTreeSet::new(),
     }
 }
 

@@ -424,6 +424,7 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, sess
     let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
     let mut served_policy = None;
     let served = match adapter {
+        "amp" => Some(appa_adapter_amp::adapter()),
         "claude-code" => Some(appa_adapter_claude_code::adapter()),
         "kagent" => Some(appa_adapter_kagent::adapter()),
         _ => None,
@@ -696,6 +697,7 @@ fn validation(
     adapter: &str,
 ) -> Result<crate::tool_validation::ValidationReport, String> {
     let adapter = match adapter {
+        "amp" => appa_adapter_amp::adapter(),
         "claude-code" => appa_adapter_claude_code::adapter(),
         "kagent" => appa_adapter_kagent::adapter(),
         _ => return Err(format!("unsupported adapter {adapter:?}")),

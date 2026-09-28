@@ -44,7 +44,13 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
     if let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
         return answered;
     }
-    let handled = handle_internal(runtime, event).await;
+    let presentation = EmbeddedPresentationOptions {
+        // amppa v1 has no checked child-return lifecycle. Do not advise a model
+        // to delegate on the assumption that the child's labels are inherited.
+        supports_delegation: adapter.name != appa_runtime_api::AdapterName::Amp,
+        ..EmbeddedPresentationOptions::default()
+    };
+    let handled = handle_internal_with_options(runtime, event, presentation).await;
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
