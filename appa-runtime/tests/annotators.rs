@@ -1080,6 +1080,55 @@ async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never
     );
 }
 
+/// Shell aliases with only argument-specific contracts still consult the wildcard for
+/// ordinary reads. The selected annotation survives result recording and later replay.
+#[tokio::test]
+async fn an_unmatched_shell_selector_uses_the_wildcard_and_replays_its_annotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("gatekeeper", Answer::Wire(produced("trusted")));
+    let config = wildcard_policy(&url).replace(
+        "[[policy.tool]]\nname = \"read\"\ndelta = {}",
+        r#"[[policy.tool]]
+name = "builtin:shell(command:git push*)"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "read"
+delta = {}"#,
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    let shell = call("builtin:shell", serde_json::json!({"command":"ls"}));
+    assert_eq!(
+        propose(&runtime, shell.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator.requests().len(), 1);
+    assert_eq!(annotator.requests()[0]["artifact"]["args"]["name"], "builtin:shell");
+    ran(&runtime, shell).await;
+
+    // Recording and replay must use the pinned wildcard annotation, without a fresh consult.
+    annotator.set("gatekeeper", Answer::Down);
+    let read = call("read", serde_json::json!({"path":"a.txt"}));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read).await;
+    let protected = propose(
+        &runtime,
+        call("builtin:shell", serde_json::json!({"command":"git push"})),
+    )
+    .await;
+    assert!(matches!(protected, HookDecision::DenyCall { .. }));
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the matched rule and replay require no consult"
+    );
+}
+
 /// A produced restricting delta blocks a wildcard-covered call before release, and
 /// proposing it again holds the block.
 #[tokio::test]

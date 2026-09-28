@@ -8631,9 +8631,8 @@ mod tests {
         );
     }
 
-    /// Two-tier selection on the proposal path: a name the policy writes decides under its
-    /// exact declaration and never falls to the wildcard; only a name it does not write owes
-    /// the wildcard annotator's annotation.
+    /// A bare explicit declaration always matches and beats the wildcard. Calls without
+    /// a matching explicit declaration require the wildcard annotator's annotation.
     #[test]
     fn an_exact_declaration_beats_the_wildcard_on_a_proposal() {
         let mut cfg = test_config(vec![plain_tool("read")]);
@@ -8905,6 +8904,47 @@ mod tests {
         assert_ne!(conjunction, base, "a second clause is a different predicate");
         assert_ne!(identity(&["read(path:secret*,mode:ro)", "read"]), conjunction);
         assert_ne!(identity(&["read(path:secret*,scope:rw)", "read"]), conjunction);
+    }
+
+    #[test]
+    fn wildcard_fallback_does_not_bypass_a_matched_contract_schema() {
+        let mut strict = plain_tool("builtin:shell(command:git push*)");
+        strict.parameters = crate::params::ToolParameters::compile(&json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" }, "token": { "type": "string" } },
+            "required": ["command", "token"]
+        }))
+        .unwrap();
+        let mut cfg = test_config(vec![strict]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let e = open_engine(cfg);
+        let shell = ToolName::new("builtin:shell");
+        let fallback = e.resolve_call(shell.clone(), br#"{"command":"ls"}"#).unwrap();
+        assert_eq!(
+            fallback.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
+        assert_eq!(
+            e.registry.declaration(&fallback).unwrap().annotator(),
+            Some(&crate::names::AnnotatorName::new("any"))
+        );
+        assert!(matches!(
+            e.resolve_call(shell.clone(), br#"{"command":"git push"}"#),
+            Err(EngineError::InvalidCall(ArgumentError::Schema(_)))
+        ));
+        let matched = e
+            .resolve_call(shell, br#"{"command":"git push","token":"ok"}"#)
+            .unwrap();
+        assert_eq!(matched.declaration_id(), crate::value::ToolDeclarationId::default());
+        assert!(
+            !e.registry
+                .selection_matches(&fallback.substituting(matched.canonical_arguments().clone()))
+        );
+        assert!(
+            !e.registry
+                .selection_matches(&matched.substituting(fallback.canonical_arguments().clone()))
+        );
     }
 
     #[test]

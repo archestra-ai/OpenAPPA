@@ -85,7 +85,7 @@ A policy can use a host-native name or a canonical tool id. Canonical ids have t
 | `host` | A tool the host itself provides. The namespace is the host. | `host/claude-code/Bash` |
 | `agent` | An agent called as a tool. The namespace is where the agent lives. | `agent/kagent/log-analyst` |
 
-`appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[policy.tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#handling-undeclared-tools)).
+`appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[policy.tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every call without a matching explicit tool contract (see [the wildcard](#handling-undeclared-tools)).
 
 The agent keeps using its host's tool names. A plugin implements the host lifecycle; the runtime's adapter translates tool identities and events. The runtime records canonical ids, even when the policy uses native names. Where it tells the model to run a tool, it uses the host's dispatch spelling. Claude Code and kagent have these mappings:
 
@@ -214,7 +214,7 @@ OpenAPPA selects a contract before it validates the contract's `parameters` sche
 
 ### Handling undeclared tools
 
-The tool name `"*"` covers tool names that the policy does not declare. The current format requires an annotator for this entry:
+The tool name `"*"` covers calls without a matching explicit tool contract, including calls to declared tools whose argument selectors do not match. The current format requires an annotator for this entry:
 
 ```toml
 [[policy.annotator]]
@@ -228,7 +228,7 @@ annotator = "classify_unknown_tool"
 
 Declare and bind `classify_unknown_tool` as shown in [Annotators](#annotators). The wildcard cannot contain static `delta`, `requires`, or `effects` fields. It also cannot contain metadata or argument selectors.
 
-A policy can contain one wildcard entry. An exact tool declaration takes precedence over it. If no declaration covers a call, OpenAPPA refuses the call before execution.
+A policy can contain one wildcard entry. Explicit tool contracts take precedence over it, regardless of where the wildcard appears in the policy. If none of a tool's argument selectors match, the call falls through to the wildcard annotator. A matched contract's schema error still refuses the call; it does not fall through. Without a wildcard, a call with no matching contract is refused before execution.
 
 ## Restrictions and requirements
 

@@ -42,6 +42,8 @@ OpenAPPA operates with three concepts:
    - **`requires`:** Which requirements the session must satisfy for OpenAPPA to allow the action.
    - **`effects`:** Which effects are recorded after a tool runs successfully.
 
+   OpenAPPA uses the first explicit contract whose argument selectors match. If none match, the policy can route the call through a wildcard (`name = "*"`) annotator. Once a contract matches, a schema error refuses the call without falling through.
+
    For example, a CRM tool can label its result as internal, while an email tool can require the recipient to be included in the session's audience.
 
 3. **Remedy Plans**
