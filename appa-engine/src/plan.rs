@@ -105,6 +105,26 @@ pub enum RemedyStep {
 
 /// The result treatment a selected call remedy binds to its eventual dispatch. `None` on an
 /// approval means the raw result crosses normally.
+///
+/// `Withhold` is an engine remedy, not a sanitizer that returns a constant. The reasons:
+///
+/// - A sanitizer always admits a Value, labelled by its `permits`. A permit relabels either
+///   audience or trust, and a plan binds one sanitizer, so a constant could not shed a
+///   result's restriction on both dimensions. `Withhold` admits no Value, so the result leaves
+///   the trajectory Label unchanged.
+/// - A sanitizer's `permits` is a declassification grant that the engine trusts the external
+///   implementation to earn. The engine enforces `Withhold` itself by never admitting the
+///   result bytes, so no external implementation has to be trusted.
+/// - `Withhold` is offered only for a confined tool that declares effects. Without effects,
+///   running a tool and discarding its result achieves nothing. Sanitizer applicability reads
+///   tags and `permits`, not effects.
+/// - `Withhold` also covers failure output ([`crate::admit::ResultAdmission::FailureNoValue`]),
+///   needs no consult, and cannot fail.
+///
+/// A reserved builtin sanitizer, as `attest-schema` is, would need the same engine special
+/// cases under a sanitizer name. The cost of the engine remedy is that policies do not opt in:
+/// every confined tool that declares effects gains a settlement, which the registry's planner
+/// bound counts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputRemedy {
     Withhold,
