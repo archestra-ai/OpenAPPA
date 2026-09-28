@@ -54,17 +54,6 @@ For most tools, OpenAPPA checks the call when the harness proposes it and labels
 
 So the runtime runs the file operations itself. The session gets six MCP tools from the runtime's `appa` server: `appa_read_file`, `appa_write_file`, `appa_edit_file`, `appa_copy_file`, `appa_move_file`, and, with a sandbox backend configured, `appa_process_files`. The model proposes paths and content. It never supplies a Label, a file version, or a session identity.
 
-### How one call is checked
-
-Every file call follows the same steps:
-
-1. **Pin.** The runtime reserves the workspace and records the current state of each path it touches: version, content hash, and Label, or "absent".
-2. **Check.** OpenAPPA checks the call against the policy, using the pinned Labels. The same call over different file content is a different flow.
-3. **Run.** The runtime runs the operation on the pinned path. A write goes to a staged file beside the target, which then replaces the target in one atomic step. An edit searches for its match string only after the check passes.
-4. **Publish.** The runtime hashes the result and records a new version with its Label and the versions it was derived from. Only then does the result reach the model.
-
-The reservation lets one file operation run at a time in a root session. If an operation does not finish cleanly, for example because the file changed under the runtime, the session fails closed: the runtime keeps the reservation and refuses every later file call in that session until it restarts. It does not guess a Label for bytes it cannot account for.
-
 ### Two Labels per call
 
 A file call produces two Labels. The **session Label** is the session's Label after the call's result enters the model's context. The **file Label** is what the runtime records for the new file content.
