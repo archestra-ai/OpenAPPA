@@ -84,4 +84,4 @@ digest = "sha256:96e45c0b9753e058ed7d5027d5e9a35a3c79039863524b0cc5f1c6ca6d9fbeb
 
 [packages.plugin.kagent]
 path = "plugins/kagent"
-digest = "sha256:d135d16717e1ecb7f7358362d10364c3bab8016a5c7b191fb94ba171515a7811"
+digest = "sha256:196b57ce4401864ff59e03d987c2029cdf81c6af643d20e93452697779cb0e32"
