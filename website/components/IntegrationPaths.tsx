@@ -1,15 +1,10 @@
 import { PixelMark } from "@/components/Logo";
-
-const paths = [
-  { href: "#embed-the-appa-runtime-in-your-agents-code", method: "Your own agent", detail: "Any language. You own the agent loop and tool execution." },
-  { href: "#connect-a-coding-agent-through-hooks", method: "Agents through hooks", detail: "Claude Code, or harnesses such as omp and Hermes with a custom adapter." },
-  { href: "#use-appa-at-the-llm-proxy", method: "LLM proxy", detail: "Apply policies centrally through Archestra." },
-];
+import { INTEGRATION_PATHS } from "@/lib/directive-content";
 
 export function IntegrationPaths() {
   return (
     <nav aria-label="Choose an integration path" className="not-prose my-7 grid gap-3 sm:grid-cols-3">
-      {paths.map((path, index) => (
+      {INTEGRATION_PATHS.map((path, index) => (
         <a key={path.href} href={path.href} style={{ textDecoration: "none" }} className="group rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 transition-colors hover:border-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--accent)]">
           <div aria-hidden="true" className="my-4 flex h-28 items-center justify-center text-[var(--text-weak)]">
             <div className={`grid h-28 w-32 grid-rows-[28px_20px_44px] content-center justify-items-center [&_.appa-mark-float]:animate-none ${index === 0 ? "rounded border border-[var(--border)] bg-[var(--bg)]" : ""}`}>

@@ -1,7 +1,7 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
-import { getMcpDoc, getMcpDocs, searchMcpDocs } from "@/lib/mcp-content";
+import { getTextDoc, getTextDocs, searchTextDocs } from "@/lib/doc-text";
 import { TERM_NAMES, termDefinition } from "@/lib/terms";
 
 /* Auth-less MCP server exposing the OpenAPPA documentation over streamable
@@ -23,7 +23,7 @@ const handler = createMcpHandler(
         inputSchema: z.object({}),
       },
       async () => {
-        const lines = getMcpDocs().map((doc) => {
+        const lines = getTextDocs().map((doc) => {
           const sections = doc.sections.map((s) => `  - ${s.heading} (section: "${s.anchor}")`).join("\n");
           return `## ${doc.title}\nslug: "${doc.slug}"\n${doc.description}\n${sections}`;
         });
@@ -43,9 +43,9 @@ const handler = createMcpHandler(
         }),
       },
       async ({ slug, section }) => {
-        const doc = getMcpDoc(slug);
+        const doc = getTextDoc(slug);
         if (!doc) {
-          const known = getMcpDocs()
+          const known = getTextDocs()
             .map((d) => `"${d.slug}"`)
             .join(", ");
           return text(`No doc with slug "${slug}". Known slugs: ${known}.`);
@@ -73,7 +73,7 @@ const handler = createMcpHandler(
         }),
       },
       async ({ query }) => {
-        const hits = searchMcpDocs(query);
+        const hits = searchTextDocs(query);
         if (hits.length === 0) return text(`No matches for "${query}". Try list_docs for the page map.`);
         const lines = hits.map((h) => {
           const where = h.heading ? `${h.title} › ${h.heading} (slug: "${h.slug}", section: "${h.anchor}")` : `${h.title} (slug: "${h.slug}")`;
@@ -109,7 +109,7 @@ const handler = createMcpHandler(
         argsSchema: z.object({}),
       },
       () => {
-        const doc = getMcpDoc("how-it-works");
+        const doc = getTextDoc("how-it-works");
         return {
           messages: [
             {
@@ -124,7 +124,7 @@ const handler = createMcpHandler(
       },
     );
 
-    for (const doc of getMcpDocs()) {
+    for (const doc of getTextDocs()) {
       server.registerResource(
         `doc-${doc.slug}`,
         `openappa://docs/${doc.slug}`,

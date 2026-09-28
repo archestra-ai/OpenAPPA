@@ -4,6 +4,7 @@ import path from "path";
 import GithubSlugger from "github-slugger";
 import matter from "gray-matter";
 
+import { DIRECTIVE_LINE, isDirectiveName } from "@/lib/directive-content";
 import { PROPOSAL_CLOSE, PROPOSAL_OPEN, proposalSlug } from "@/lib/proposals";
 
 const DOCS_DIR = path.join(process.cwd(), "content", "docs");
@@ -45,6 +46,15 @@ export interface TocItem {
 /** A `##`/`###` heading with the markdown that follows it, up to the next heading. */
 export interface DocSection extends TocItem {
   body: string;
+}
+
+/** A battery page as the catalog cards and their text form show it. */
+export interface BatteryCard {
+  slug: string;
+  name: string;
+  description: string;
+  url: string;
+  logo: string;
 }
 
 export interface DocCategory {
@@ -159,6 +169,9 @@ export function getAllDocs(): DocPage[] {
     // Strip release-please markers so public docs and clipboard copies stay clean,
     // while git source files retain the markers for the release pipeline.
     let cleanContent = content.replace(/[ \t]*#\s*x-release-please-[a-z0-9_-]+/g, "");
+    for (const [, , name] of cleanContent.matchAll(DIRECTIVE_LINE)) {
+      if (!isDirectiveName(name)) throw new Error(`${file}: unknown directive :::${name}::: (add it to DIRECTIVE_NAMES in lib/directive-content.ts)`);
+    }
     if (file === "kagent.md" && isDevMode()) {
       cleanContent = substituteKagentDevSnippets(cleanContent);
     }
@@ -177,6 +190,22 @@ export function getAllDocs(): DocPage[] {
     };
   });
   return docs.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+}
+
+/* The battery pages are the ones with a breadcrumb, in sidebar order. Each
+   card is the page's own breadcrumb and description, and its logo is
+   public/images/batteries/<slug without "battery-">.svg. */
+export function getBatteryCards(docs: DocPage[] = getAllDocs()): BatteryCard[] {
+  return docs.flatMap((doc) => {
+    if (!doc.breadcrumb) return [];
+    const logo = `/images/batteries/${doc.slug.replace(/^battery-/, "")}.svg`;
+    return [{ slug: doc.slug, name: doc.breadcrumb, description: doc.description, url: `/${doc.slug}`, logo }];
+  });
+}
+
+/** The cards a page's :::battery-catalog::: needs, so other pages do not carry them. */
+export function batteriesFor(content: string): BatteryCard[] | undefined {
+  return content.includes(":::battery-catalog:::") ? getBatteryCards() : undefined;
 }
 
 export function getDocBySlug(slug: string): DocPage | undefined {

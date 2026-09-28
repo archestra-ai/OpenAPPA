@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { DocContent } from "@/components/DocContent";
 import { DocShell } from "@/components/DocShell";
 import { SpellItButton } from "@/components/SpellItButton";
-import { generateTableOfContents, getDocBySlug } from "@/lib/docs";
+import { batteriesFor, generateTableOfContents, getDocBySlug } from "@/lib/docs";
 
 export default function HomePage() {
   const doc = getDocBySlug("index");
@@ -20,7 +20,7 @@ export default function HomePage() {
           <h1>{doc.title}</h1>
           <SpellItButton />
         </div>
-        <DocContent content={doc.content} />
+        <DocContent content={doc.content} batteries={batteriesFor(doc.content)} />
       </div>
     </DocShell>
   );

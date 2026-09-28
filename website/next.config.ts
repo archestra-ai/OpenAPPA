@@ -1,11 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // The MCP and llms.txt routes read doc markdown from disk on every request;
-  // make sure the content directory ships with their serverless functions.
+  // The MCP route reads doc markdown from disk on every request; make sure the
+  // content directory ships with its serverless function. /llms.txt and
+  // /search-index render at build and need no runtime files.
   outputFileTracingIncludes: {
     "/mcp": ["./content/**/*"],
-    "/llms.txt": ["./content/**/*"],
   },
   // PostHog is reached through this origin rather than directly. Two reasons:
   // requests to a posthog.com hostname are blocked by most content blockers,

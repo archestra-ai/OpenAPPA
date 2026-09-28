@@ -9,7 +9,7 @@ import type { LanguageFn } from "highlight.js";
 import { common } from "lowlight";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
-import { BatteryCatalog } from "@/components/BatteryCatalog";
+import { BatteryCardsContext, BatteryCatalog } from "@/components/BatteryCatalog";
 import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { BrandAssets } from "@/components/BrandKit";
 import {
@@ -35,7 +35,8 @@ import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
-import { BATTERY_REVIEW_CHECKLIST } from "@/lib/directive-content";
+import { BATTERY_REVIEW_CHECKLIST, isDirectiveName, type DirectiveName } from "@/lib/directive-content";
+import type { BatteryCard } from "@/lib/docs";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
 
@@ -79,7 +80,7 @@ function inlineCode(text: string): ReactNode {
 
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
-const DIRECTIVES: Record<string, () => ReactNode> = {
+const DIRECTIVES: Record<DirectiveName, () => ReactNode> = {
   "advisory-signup": () => <AdvisorySignup />,
   "battery-catalog": () => <BatteryCatalog />,
   "battery-review-checklist": () => (
@@ -118,32 +119,6 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "sponsor-note": () => <SponsorNote />,
   "video-how-it-works": () => (
     <YouTubeEmbed title="How OpenAPPA works" videoId="XKdN90IYy0Y" />
-  ),
-  "details-7pc-leak": () => (
-    <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">
-      <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
-        Why the 7% leak occurred under GPT-4o (and why the algebra held)
-      </summary>
-      <div className="mt-3 space-y-3 border-t border-[var(--border)] pt-3 leading-relaxed">
-        <p>
-          You might notice that under GPT-4o, OpenAPPA allowed 3 breaches out of 42 episodes (a 7% Attack Success Rate). Does this mean the label algebra failed?
-        </p>
-        <p>
-          <strong>No—OpenAPPA&apos;s mathematical label invariants held 100% of the time.</strong> Every non-zero breach traced back to two specific scenario configurations, neither of which was an enforcement bypass:
-        </p>
-        <ol className="list-decimal space-y-2 pl-5">
-          <li>
-            <strong>Authorized recipient smuggling (<code>hide-secret-in-status</code>)</strong>: An injected prompt tricked the agent into emailing data to <code>finance-lead@</code>. Because <code>finance-lead@</code> was explicitly listed in the policy as an authorized internal finance reader, OpenAPPA&apos;s label algebra permitted the send. The label algebra enforces <em>who</em> is legally allowed to receive data (reader sets); detecting secret text hidden inside an email sent to an authorized recipient requires content scrubbers, which recipient label algebra does not claim to provide.
-          </li>
-          <li>
-            <strong>Unannotated write contract (<code>joint-merger-brief</code>)</strong>: The agent copied an HR value into a finance data store whose tool contract had no destination restriction declared on creation, then read it back under the finance contract. OpenAPPA prospectively enforces declared tool contracts; if a custom write contract omits a restriction, the engine permits the call.
-          </li>
-        </ol>
-        <p>
-          In short: the policy algebra executed perfectly according to its declared rules. Prospective enforcement is as complete as the tool contracts provided to it.
-        </p>
-      </div>
-    </details>
   ),
 };
 
@@ -213,7 +188,7 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
         p: ({ children }) => {
           // Indented directives stay inside their Markdown list item.
           const match = typeof children === "string" ? children.match(/^:::([a-z0-9-]+):::$/) : null;
-          const render = match ? DIRECTIVES[match[1]] : undefined;
+          const render = match && isDirectiveName(match[1]) ? DIRECTIVES[match[1]] : undefined;
           return render ? <>{render()}</> : <p>{children}</p>;
         },
         pre: (props) => <CodeBlock {...props} />,
@@ -246,7 +221,7 @@ function MarkdownWithDirectives({ content, terms = true }: { content: string; te
     <>
       {parts.map((part, index) =>
         index % 2 === 1 ? (
-          <Fragment key={index}>{DIRECTIVES[part]?.()}</Fragment>
+          <Fragment key={index}>{isDirectiveName(part) && DIRECTIVES[part]()}</Fragment>
         ) : (
           <Markdown key={index} content={part} terms={terms} />
         ),
@@ -255,20 +230,23 @@ function MarkdownWithDirectives({ content, terms = true }: { content: string; te
   );
 }
 
-export function DocContent({ content }: { content: string }) {
+/** `batteries` feeds :::battery-catalog:::; pages without it pass nothing. */
+export function DocContent({ content, batteries = [] }: { content: string; batteries?: BatteryCard[] }) {
   // proposals split first, so a directive inside one still renders in place
   const blocks = content.split(PROPOSAL_SPLIT);
   return (
-    <div className="prose">
-      {blocks.map((block, index) => {
-        if (index % 2 === 0) return <MarkdownWithDirectives key={index} content={block} />;
-        const proposal = parseProposal(block);
-        return (
-          <ProposalBlock key={index} proposal={proposal}>
-            <MarkdownWithDirectives content={proposal.body} terms={false} />
-          </ProposalBlock>
-        );
-      })}
-    </div>
+    <BatteryCardsContext.Provider value={batteries}>
+      <div className="prose">
+        {blocks.map((block, index) => {
+          if (index % 2 === 0) return <MarkdownWithDirectives key={index} content={block} />;
+          const proposal = parseProposal(block);
+          return (
+            <ProposalBlock key={index} proposal={proposal}>
+              <MarkdownWithDirectives content={proposal.body} terms={false} />
+            </ProposalBlock>
+          );
+        })}
+      </div>
+    </BatteryCardsContext.Provider>
   );
 }

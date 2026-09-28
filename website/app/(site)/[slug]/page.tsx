@@ -6,7 +6,7 @@ import { DocContent } from "@/components/DocContent";
 import { DocShell } from "@/components/DocShell";
 import { Oversimplified } from "@/components/Oversimplified";
 import { UnderConstruction } from "@/components/UnderConstruction";
-import { generateTableOfContents, getAllDocs, getDocBySlug } from "@/lib/docs";
+import { batteriesFor, generateTableOfContents, getAllDocs, getDocBySlug } from "@/lib/docs";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -47,7 +47,7 @@ export default async function DocPage({ params }: Props) {
         <h1>{doc.title}</h1>
       </div>
       {doc.oversimplified && <Oversimplified text={doc.oversimplified} />}
-      {doc.content.trim() === "" ? <UnderConstruction /> : <DocContent content={doc.content} />}
+      {doc.content.trim() === "" ? <UnderConstruction /> : <DocContent content={doc.content} batteries={batteriesFor(doc.content)} />}
     </DocShell>
   );
 }

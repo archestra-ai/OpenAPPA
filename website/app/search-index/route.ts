@@ -1,14 +1,13 @@
 import { buildSearchIndex } from "@/lib/search-index";
 
 /* The docs search index as JSON, fetched by the search modal the first time
-   it opens. Built from the content/docs *.md files on every request, like
-   /llms.txt, so the dev server reflects edits without a restart; the
-   Cache-Control header keeps repeat opens off the server in production. */
+   it opens. Rendered at build from the content/docs *.md files, like
+   /llms.txt, so every deploy ships an index of exactly the docs it deploys and
+   a doc the text renderers refuse fails the build; the dev server still runs
+   it on every request. */
 
-export const dynamic = "force-dynamic";
+export const dynamic = "force-static";
 
 export async function GET() {
-  return Response.json(buildSearchIndex(), {
-    headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=3600" },
-  });
+  return Response.json(buildSearchIndex());
 }

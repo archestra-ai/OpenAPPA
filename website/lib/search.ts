@@ -13,6 +13,8 @@ export interface IndexedDoc {
   category: string;
   url: string;
   description: string;
+  /** Text above the page's first heading, as plain text. */
+  text: string;
 }
 
 export interface IndexedSection {
@@ -80,12 +82,22 @@ export function searchDocs(index: SearchIndex, query: string): SearchResult[] {
   const scored: { result: SearchResult; score: number; rank: number }[] = [];
 
   for (const doc of index.docs) {
-    const s = score(q, words, doc.title, doc.description);
+    const s = score(q, words, doc.title, `${doc.description} ${doc.text}`);
     if (s === 0) continue;
+    /* The description is the page's summary; the intro is quoted only when
+       the match is there and nowhere in the summary. */
+    const inDescription = words.some((w) => doc.description.toLowerCase().includes(w));
     scored.push({
       score: s,
       rank: 0,
-      result: { id: `doc-${doc.slug}`, title: doc.title, subtitle: doc.category, type: "doc", url: doc.url, snippet: doc.description },
+      result: {
+        id: `doc-${doc.slug}`,
+        title: doc.title,
+        subtitle: doc.category,
+        type: "doc",
+        url: doc.url,
+        snippet: s === 1 && !inDescription ? snippet(words, doc.text) : doc.description,
+      },
     });
   }
 
