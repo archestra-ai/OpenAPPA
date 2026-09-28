@@ -4846,6 +4846,13 @@ context_control = true
         assert_eq!(status.trajectory, "cc:root");
         assert_eq!(status.trust, "trusted");
         assert_eq!(status.audience, "public");
+        assert_eq!(runtime.try_status(&root()).expect("the read succeeds"), Some(status));
+        assert!(
+            runtime
+                .try_status(&TrajectoryId("cc:ghost".to_string()))
+                .expect("a missing root is not a read failure")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4898,6 +4905,7 @@ context_control = true
         runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(runtime.status(&root()).is_none());
+        assert!(runtime.try_status(&root()).is_err());
     }
 
     #[tokio::test]

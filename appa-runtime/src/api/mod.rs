@@ -24,6 +24,18 @@ pub use appa_runtime_api::{
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
+/// Why a host could not read a root's current status. An absent root is
+/// `Ok(None)` from [`Runtime::try_status`], not one of these failures.
+#[derive(Debug, thiserror::Error)]
+pub enum StatusReadError {
+    #[error("the trajectory log could not be read: {0}")]
+    Read(appa_eventlog::ReadError),
+    #[error("the trajectory's opening policy could not be resolved: {0}")]
+    Policy(String),
+    #[error("the trajectory log could not be replayed: {0}")]
+    Replay(String),
+}
+
 use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
@@ -2064,16 +2076,42 @@ impl Runtime {
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let deployment = self.inner.deployment();
-        let (policy, log) = self.root_log(&deployment, id, "status")?;
-        let view = match policy.engine().rebuild_view(&log) {
-            Ok(view) => view,
-            Err(refusal) => {
-                tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
-                return None;
+        match self.try_status(id) {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::warn!(trajectory = %id.0, %error, "status read refused the persisted log");
+                None
+            }
+        }
+    }
+
+    /// Read a root's current label for an embedded host. Unlike [`Runtime::status`],
+    /// this distinguishes an unopened root from a failed store, policy, or replay read.
+    /// It appends nothing to the trajectory log.
+    pub fn try_status(&self, id: &TrajectoryId) -> Result<Option<TrajectoryStatus>, StatusReadError> {
+        let log = match self.inner.store.log(id) {
+            Ok(log) => log,
+            Err(appa_eventlog::ReadError::UnknownRoot { .. }) => return Ok(None),
+            Err(error) => {
+                self.inner
+                    .note_store_error(Some(id), crate::events::StoreOperation::Read, &error);
+                return Err(StatusReadError::Read(error));
             }
         };
-        policy.engine().trajectory_status(&view, id)
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .map_err(|error| StatusReadError::Policy(error.to_string()))?;
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
+            .map_err(|error| StatusReadError::Replay(error.to_string()))?;
+        policy
+            .engine()
+            .trajectory_status(&view, id)
+            .map(Some)
+            .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -4070,6 +4108,19 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookDecision::Ack
         );
         assert!(store.has_root(&root).expect("the store reads"));
+        let status = runtime
+            .on(Arc::clone(&lease))
+            .try_status(&root)
+            .expect("the leased store reads status")
+            .expect("the opened root has status");
+        assert_eq!((status.trust.as_str(), status.audience.as_str()), ("trusted", "public"));
+        assert_eq!(
+            runtime
+                .on(Arc::new(store.lease().expect("another connection leases")))
+                .try_status(&root)
+                .expect("another leased store reads status"),
+            Some(status),
+        );
 
         let key = root.0.clone();
         lease
