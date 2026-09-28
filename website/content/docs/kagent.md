@@ -6,7 +6,7 @@ order: 7
 description: Protect kagent declarative Python and Go Agents with OpenAPPA policy.
 ---
 
-[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/concepts/agents/), checking tool calls, subagents, and data flows against deterministic policy before any action runs.
+[kagent](https://kagent.dev/docs/kagent/0.x/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/0.x/concepts/agents/), checking tool calls, subagents, and data flows against deterministic policy before any action runs.
 
 ## How it works
 
@@ -29,7 +29,7 @@ This quickstart deploys the kagent controller, the OpenAPPA runtime, and demo ag
 #### Prerequisites
 
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) (or any local [Kubernetes cluster](https://kubernetes.io/docs/setup/)), [Helm](https://helm.sh/docs/intro/install/) v4, and [kubectl](https://kubernetes.io/docs/tasks/tools/).
-- An [OpenAI API key](https://platform.openai.com/api-keys) (or another [supported provider](https://kagent.dev/docs/kagent/supported-providers/)).
+- An [OpenAI API key](https://platform.openai.com/api-keys) (or another [supported provider](https://kagent.dev/docs/kagent/0.x/supported-providers/)).
 
 #### 1. Deploy the demo stack
 
