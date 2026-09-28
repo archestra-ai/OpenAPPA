@@ -293,6 +293,42 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     );
 }
 
+/// Older releases registered their hooks through the `appa-runtime@appa`
+/// Claude plugin. Reinstalling with the current release migrates that profile
+/// to one native hook set, without changing another plugin's state.
+#[test]
+fn reinstall_migrates_a_legacy_plugin_install_to_native_hooks() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.settings(),
+        serde_json::json!({
+            "enabledPlugins": {
+                "appa-runtime@appa": true,
+                "formatter@example": true
+            }
+        })
+        .to_string(),
+    )
+    .expect("the legacy Claude settings are written");
+
+    fixture.successful_activation();
+
+    let settings = fixture.settings_value();
+    assert_eq!(settings["enabledPlugins"]["appa-runtime@appa"], false);
+    assert_eq!(settings["enabledPlugins"]["formatter@example"], true);
+    let entries = fixture.owned_hook_entries();
+    assert_eq!(
+        entries.iter().filter(|(event, _)| event == "PreToolUse").count(),
+        1,
+        "the reinstall registers one native authorization hook"
+    );
+    assert_eq!(
+        entries.iter().filter(|(event, _)| event == "SessionStart").count(),
+        2,
+        "the native post and context hooks are each registered once"
+    );
+}
+
 #[test]
 fn a_rerun_keeps_the_config_and_rewrites_nothing_it_already_wrote() {
     let fixture = Fixture::new();
