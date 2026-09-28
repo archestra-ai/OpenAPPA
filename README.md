@@ -85,7 +85,9 @@ and preserves an existing policy. Fresh policies use a fail-closed Claude annota
 net for MCP tools they do not yet name. Start `clappa`, then run
 `/appa-guide` to replace that fallback with exact connector contracts; the
 same skill explains blocks and tunes the defaults.
-Plain `claude` sessions stay untouched.
+Plain `claude` sessions stay untouched. Resume a protected conversation with
+`clappa --resume`, because `claude --resume` starts an unprotected process.
+Exit and restart a conversation already resumed through plain `claude`.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 

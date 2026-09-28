@@ -85,6 +85,10 @@ OpenAPPA intercepts Claude Code events through native lifecycle hooks:
 
 Installing OpenAPPA does not force every Claude Code session through it. Use `clappa` when you want policy enforcement. Use `claude` when you do not.
 
+Protection belongs to the Claude Code process, not the saved conversation. Resume a protected conversation with `clappa --resume`, not `claude --resume`.
+Plain `claude` starts an unprotected process.
+Exit and restart a conversation already resumed through plain `claude`. It cannot become protected in place.
+
 :::claude-session-choice:::
 
 Projects configured with `disableAllHooks: true` disable all hooks, preventing `clappa` from enforcing policy in that session.

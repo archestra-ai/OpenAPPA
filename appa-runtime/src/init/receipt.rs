@@ -39,6 +39,8 @@ impl Receipt {
         // version, so a session running across an upgrade keeps talking to the
         // runtime it started with.
         receipt.push_str("\nRestart any running `clappa` session to pick this up.\n");
+        receipt.push_str("Resume a protected conversation with `clappa --resume`, not `claude --resume`.\n");
+        receipt.push_str("Exit and restart any conversation already resumed through plain `claude`.\n");
         receipt.push_str("\nNext: run `clappa`, then `/appa-guide`.\n");
         receipt
     }
