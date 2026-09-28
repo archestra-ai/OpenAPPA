@@ -102,11 +102,7 @@ covers, what protection it adds, and any important assumption. Keep it under
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
-Use only the credential status reported by `appa describe`. Do not read or
-print environment variables, credential files, or process environments to
-check access. Name the required variable, never its value. GitHub can use `gh`
-even when its token variable is unset. Never run `gh auth token` yourself;
-the battery handles that internally.
+Name each credential variable `appa describe` reports, and whether it is set.
 Check what each battery's README expects the root config to provide, and record
 anything missing. Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
