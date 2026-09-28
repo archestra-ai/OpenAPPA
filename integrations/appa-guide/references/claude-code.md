@@ -104,10 +104,13 @@ covers, what protection it adds, and any important assumption. Keep it under
 
 Use only the credential status reported by `appa describe`. Do not read or
 print environment variables, credential files, or process environments to
-check access. Name the required variable, never its value.
+check access. Name the required variable, never its value. Account for login
+fallbacks the README documents: GitHub can use `gh` even when its token variable
+is unset. Never run `gh auth token` yourself; the battery handles that internally.
 Check what each battery's README expects the root config to provide, and record
-anything missing. Leave new membership sources out when runtime access is
-missing or unknown; a shell status alone does not establish runtime access.
+anything missing. Leave new membership sources out when a required credential
+is missing and there is no documented login fallback. If fallback access has
+not been verified, briefly say so; an unset variable alone does not mean it fails.
 Include the battery if supported, and briefly say what remains unavailable.
 Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
@@ -242,7 +245,8 @@ After approval:
    variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
    states; it belongs in the runtime's environment, never in the config.
    Map `self` and `internal` onto the source's collections under
-   `[policy.audience]` as the README shows, only when their credentials are ready.
+   `[policy.audience]` as the README shows, accounting for credentials and
+   documented login fallbacks as above.
 5. Add the approved rules for the remaining tools to the root config. Do not
    remove overlapping root rules; they intentionally override batteries. To
    treat a battery's tool differently, add a root rule for it; never edit the
