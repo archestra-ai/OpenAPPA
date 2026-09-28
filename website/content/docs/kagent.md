@@ -6,7 +6,7 @@ order: 7
 description: Protect kagent declarative Python and Go Agents with OpenAPPA policy.
 ---
 
-[kagent](https://kagent.dev/docs/kagent/0.x/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/0.x/concepts/agents/), checking tool calls, subagents, and data flows against deterministic policy before any action runs.
+[kagent](https://kagent.dev/docs/kagent/0.x/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/0.x/concepts/agents/), checking mapped tool and subagent flows against deterministic policy at the plugin's lifecycle boundaries.
 
 ## How it works
 
@@ -19,6 +19,8 @@ The OpenAPPA plugin checks tool calls before dispatch and checks returned values
 - **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New policies apply automatically to new chats.
 
 The plugin runs inside the Python or Go agent image. The separate `appa-runtime` chart owns policy evaluation and storage. The `appa-kagent-demo` chart supplies demo agents, fixture tools, and an inert policy template; it does not own the shared runtime. Batteries supply policy defaults, not agent runtimes or MCP servers.
+
+The boundary is not every value that kagent handles. Memory prefetch enters model attention without a hook. The agent's final reply leaves through an A2A event that provides liveness checking but no flow decision. On Python runtimes, a compaction summary also re-enters attention without a hook. Disable memory before claiming complete ingress coverage, and do not treat plugin installation as policy enforcement over final replies or compaction summaries.
 
 ## Quickstart
 
@@ -297,7 +299,7 @@ spec:
           value: "http://appa-runtime.appa.svc.cluster.local:18787"
 ```
 
-When `APPA_ENABLED` is true, all tool calls route through OpenAPPA (failing closed if unreachable). Unset or `false` runs the agent without protection.
+When `APPA_ENABLED` is true, ordinary tool calls exposed by the supported runtime route through OpenAPPA and fail closed if it is unreachable. Unset or `false` runs the agent without protection. This gate excludes the flows listed under [How it works](#how-it-works).
 
 #### Multiple policies across agent groups
 

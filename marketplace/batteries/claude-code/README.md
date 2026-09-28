@@ -59,11 +59,12 @@ and `host/claude-code/Edit`:
   repository's collaborators are not resolved as readers. On Windows, the
   Unix-only publishing selectors are absent, so these otherwise undeclared
   calls are refused.
-- **Read** — Reading a hidden path, a credential file, a private key, or a
-  system secret location narrows the session to `self`, the requester: nothing
-  built from it reaches a sink that requires `internal` or `public`. The rules
-  match the path as written, absolute or relative. Other paths keep the
-  session's label. No rule blocks a read or lowers its trust.
+- **Read** — Reading one of the listed credential files, private keys, or
+  system secret locations narrows the session to `self`, the requester:
+  nothing built from it reaches a sink that requires `internal` or `public`.
+  The rules match the path as written, absolute or relative. They do not match
+  every dot-prefixed path. Other paths keep the session's label. No rule blocks
+  a read or lowers its trust.
 - **Grep** — A search inside one of the same paths is a read of it and
   narrows the session to `self`. A search over a directory that holds such
   a file is not matched; only the path as written is.
@@ -71,11 +72,11 @@ and `host/claude-code/Edit`:
   later process reads as instructions or runs as code (`CLAUDE.md`,
   `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, `.git/hooks/`,
   shell startup files, `Library/LaunchAgents/`), requires a `trusted`
-  session: content that arrived at `suspicious` lands there only when the
+  session: content classified as `suspicious` lands there only when the
   person running the session approves the exact call. Writing a file that can
-  turn the protection off asks that person every time: the harness's settings
-  (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server list
-  (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
+  turn the protection off requires fresh operator approval: the harness's
+  settings (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server
+  list (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
   `appa/batteries/`). Every other path takes the session's label as it is.
 
 On Unix, the default config `appa plugin install claude-code` writes declares

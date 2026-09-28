@@ -13,10 +13,11 @@ version = 2
 
 # A command naming a credential path narrows the session to `self`, the
 # requester. The battery withholds the command's result (`confined_results`
-# below) and the `redact-secrets` sanitizer masks every token before the
-# output reaches the model and returns the value to `public`: the session
-# keeps its label and the masked text is what the model reads. The `credentials`
-# tag records why a rule is here; the sanitizer is not scoped to it.
+# below) and the `redact-secrets` sanitizer masks private-key blocks, known
+# token shapes, secret assignments, and long high-entropy values before the
+# output reaches the model and returns the value to `public`: the session keeps
+# its label and the masked text is what the model reads. The `credentials` tag
+# records why a rule is here; the sanitizer is not scoped to it.
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.env*)"
 delta = { audience = ["self"] }
