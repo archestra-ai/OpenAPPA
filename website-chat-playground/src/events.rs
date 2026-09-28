@@ -228,6 +228,10 @@ impl AuditReader {
                 trajectory,
                 sanitizer: sanitizer.clone(),
             }],
+            AuditEvent::OutputWithheld => vec![WireEvent::Remedy {
+                trajectory,
+                text: "tool result withheld".to_string(),
+            }],
             AuditEvent::Forked { parent, .. } => vec![WireEvent::Fork {
                 parent: parent.clone(),
                 child: trajectory,
