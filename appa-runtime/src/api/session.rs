@@ -4846,13 +4846,11 @@ context_control = true
         assert_eq!(status.trajectory, "cc:root");
         assert_eq!(status.trust, "trusted");
         assert_eq!(status.audience, "public");
-        assert_eq!(runtime.try_status(&root()).expect("the read succeeds"), Some(status));
-        assert!(
-            runtime
-                .try_status(&TrajectoryId("cc:ghost".to_string()))
-                .expect("a missing root is not a read failure")
-                .is_none()
-        );
+        assert_eq!(runtime.try_status(&root()).expect("the read succeeds"), status);
+        assert!(matches!(
+            runtime.try_status(&TrajectoryId("cc:ghost".to_string())),
+            Err(crate::api::StatusReadError::UnknownRoot { root }) if root == "cc:ghost"
+        ));
     }
 
     #[tokio::test]

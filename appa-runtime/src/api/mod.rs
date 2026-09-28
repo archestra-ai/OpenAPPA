@@ -24,10 +24,11 @@ pub use appa_runtime_api::{
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
-/// Why a host could not read a root's current status. An absent root is
-/// `Ok(None)` from [`Runtime::try_status`], not one of these failures.
+/// Why a host could not read a root's current status.
 #[derive(Debug, thiserror::Error)]
 pub enum StatusReadError {
+    #[error("no log for root {root} exists")]
+    UnknownRoot { root: String },
     #[error("the trajectory log could not be read: {0}")]
     Read(appa_eventlog::ReadError),
     #[error("the trajectory's opening policy could not be resolved: {0}")]
@@ -2077,7 +2078,8 @@ impl Runtime {
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         match self.try_status(id) {
-            Ok(status) => status,
+            Ok(status) => Some(status),
+            Err(StatusReadError::UnknownRoot { .. }) => None,
             Err(error) => {
                 tracing::warn!(trajectory = %id.0, %error, "status read refused the persisted log");
                 None
@@ -2086,12 +2088,12 @@ impl Runtime {
     }
 
     /// Read a root's current label for an embedded host. Unlike [`Runtime::status`],
-    /// this distinguishes an unopened root from a failed store, policy, or replay read.
+    /// this reports an unopened root separately from a failed store, policy, or replay read.
     /// It appends nothing to the trajectory log.
-    pub fn try_status(&self, id: &TrajectoryId) -> Result<Option<TrajectoryStatus>, StatusReadError> {
+    pub fn try_status(&self, id: &TrajectoryId) -> Result<TrajectoryStatus, StatusReadError> {
         let log = match self.inner.store.log(id) {
             Ok(log) => log,
-            Err(appa_eventlog::ReadError::UnknownRoot { .. }) => return Ok(None),
+            Err(appa_eventlog::ReadError::UnknownRoot { root }) => return Err(StatusReadError::UnknownRoot { root }),
             Err(error) => {
                 self.inner
                     .note_store_error(Some(id), crate::events::StoreOperation::Read, &error);
@@ -2110,7 +2112,6 @@ impl Runtime {
         policy
             .engine()
             .trajectory_status(&view, id)
-            .map(Some)
             .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
@@ -4111,15 +4112,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let status = runtime
             .on(Arc::clone(&lease))
             .try_status(&root)
-            .expect("the leased store reads status")
-            .expect("the opened root has status");
+            .expect("the leased store reads status");
         assert_eq!((status.trust.as_str(), status.audience.as_str()), ("trusted", "public"));
         assert_eq!(
             runtime
                 .on(Arc::new(store.lease().expect("another connection leases")))
                 .try_status(&root)
                 .expect("another leased store reads status"),
-            Some(status),
+            status,
         );
 
         let key = root.0.clone();
