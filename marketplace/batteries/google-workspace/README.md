@@ -1,8 +1,80 @@
 # Google Workspace battery
 
-The `google-workspace` audience source. This battery carries no tool
-rules yet: it exists so a policy can build its audiences from the
-Workspace directory.
+Rules for the claude.ai Google Drive connector, all 11 of its tools,
+and the `google-workspace` audience source, which builds a policy's
+audiences from the Workspace directory.
+
+## Rules
+
+*Reads* — `read_file_content`, `download_file_content`,
+`get_file_metadata`, `get_file_permissions`, `search_files`,
+`list_recent_files`. They return `self` data and enter `suspicious`.
+The connector keeps its own Drive token, and no tool reports who can
+see a file, so only the viewer is known to read every file the
+connection reaches. Anyone, inside or outside the organization, can
+share a file with the viewer or comment on one, so the text is
+untrusted.
+
+*Writes* — `create_file`, `copy_file`, `update_file`, `trash_file` need
+trusted data that `internal` may see, and record
+`google-workspace.changed`. A trashed file can be restored, so trashing
+needs no review.
+
+*Sharing* — `share_file` exposes the whole file, which is not a value
+the policy tracks. It needs public input and the
+`google-workspace-review` mark, and records `google-workspace.sensitive`.
+
+The Claude Code plugin default ships a human authority permitting every
+mark (`attention = ["*"]`), so `google-workspace-review` needs no wiring
+there. Another root config must permit it itself:
+
+```toml
+[[policy.authority]]
+name = "google-workspace-operator"
+hint = "Review who gets access to the file."
+permits = { trust_below = "trusted", attention = ["google-workspace-review"] }
+
+[externals.authorities.google-workspace-operator]
+builtin = "hitl"
+```
+
+## Limits
+
+A doc read through this battery is `self` data, even when the whole
+organization can see it: the file's sharing never reaches the policy. A
+trajectory that reads a file cannot then write to Drive or send what it
+read to `internal` without a remedy. A root rule can label one file by
+argument, for a file the organization shares with `internal`; root
+rules run first.
+
+The Gmail and Calendar connectors are not covered. A tool the policy
+does not name is blocked, so add root rules for them.
+
+```sh
+cargo test --locked -p appa --test google_workspace_policy --test marketplace
+python3 marketplace/batteries/google-workspace/test_audience_source.py
+```
+
+## Credentials
+
+The tool rules need no credential. The audience source does: the
+`self`, `internal`, and group audiences come from the Admin SDK
+Directory API, called with the organization's own OAuth client.
+
+A Workspace admin sets it up once per organization:
+
+1. Create a Google Cloud project and enable the Admin SDK API.
+2. Configure the OAuth consent screen as *Internal*. Only accounts in
+   the organization can use the client, and Google does not review it.
+3. Create an OAuth client of type *Desktop app* and share its client
+   JSON with the people who run the agent. A desktop client's secret is
+   not confidential.
+
+Each user then signs in once in a browser with that client, granting
+the scopes below. Google access tokens expire after about an hour, so
+the token must be refreshed from the stored refresh token before it is
+passed through `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`. Reading the
+directory may need a user with admin rights.
 
 ## Files
 

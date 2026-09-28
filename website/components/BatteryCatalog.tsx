@@ -33,7 +33,7 @@ const BATTERIES = [
   },
   {
     name: "Google Workspace",
-    description: "Uses your Workspace directory and groups to build audiences.",
+    description: "Rules for 11 Google Drive tools and reviewed sharing, with audiences from your Workspace directory and groups.",
     href: "/battery-google-workspace",
     logo: "/images/batteries/google-workspace.svg",
   },

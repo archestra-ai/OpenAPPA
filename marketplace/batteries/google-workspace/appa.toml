@@ -1,16 +1,28 @@
-# Google Workspace battery.
+# Google Workspace battery: the claude.ai Google Drive connector, plus the
+# `google-workspace` audience source.
 #
-# This battery binds `audience-source.py`, the `google-workspace`
-# audience source, and declares the selectors it serves; it carries no
-# tool rules yet. The root config maps `self` and `internal` onto the
-# selectors — the README shows the wiring.
+# The connector keeps its own Drive token, and no connector tool reports
+# who can see a file, so a file's sharing never reaches the policy. The
+# only reader known to see every file the connection reaches is the viewer,
+# so every read is `self`. Anyone, inside or outside the organization, can
+# share a file with the viewer or comment on one, so every read also enters
+# `suspicious`.
 #
-# TODO: tool rules for the claude.ai Gmail, Drive and Calendar connectors,
-# in the Notion shape: reads enter `suspicious` for `internal`, writes need
-# trusted internal data and a `google-workspace-review` mark. Per-file
-# Drive readers stay out: they need a Drive-scoped token the runtime has
-# no path to (the connectors keep theirs), so `internal` is the audience
-# until domain-wide delegation is wired.
+# Writes need trusted data that `internal` may see and record
+# `google-workspace.changed`; trashing is a write, since a trashed file can
+# be restored. Sharing a file exposes its whole content, which is not a
+# value the policy tracks, so `share_file` needs public input and the
+# `google-workspace-review` mark, and records `google-workspace.sensitive`.
+# The root config supplies an authority permitting the mark.
+#
+# Gmail and Calendar connector tools are not named here, so they stay
+# blocked until a root rule names them.
+#
+# The battery also binds `audience-source.py` and declares the selectors
+# it serves. The root config maps `self` and `internal` onto them. The
+# source needs an OAuth token from a Google Cloud OAuth client that a
+# Workspace admin creates once per organization — the README shows the
+# wiring and the token setup.
 
 [policy]
 version = 2
@@ -23,3 +35,63 @@ selectors = [
   { template = "full-members", feeds = "internal" },
   { template = "group/<group-address>" },
 ]
+
+# --- reads: the viewer only, untrusted ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/read_file_content"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/download_file_content"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/get_file_metadata"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/get_file_permissions"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/search_files"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/list_recent_files"
+delta = { trust = "suspicious", audience = ["self"] }
+
+# --- writes: trusted data that internal may see ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/create_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["google-workspace.changed"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/copy_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["google-workspace.changed"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/update_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["google-workspace.changed"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/trash_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["google-workspace.changed"]
+
+# --- sharing: public input, reviewed ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Google_Drive/share_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["google-workspace-review"] }
+effects = ["google-workspace.sensitive"]
