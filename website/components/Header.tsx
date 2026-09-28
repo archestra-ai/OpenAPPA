@@ -53,9 +53,6 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
             <span>Search...</span>
             <kbd className="header-kbd">⌘K</kbd>
           </button>
-          <Link href="/" className="nav-docs">
-            Docs
-          </Link>
           <a href="/paper" target="_blank" rel="noreferrer">
             Paper
           </a>
