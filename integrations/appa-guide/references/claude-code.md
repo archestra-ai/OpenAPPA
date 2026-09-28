@@ -104,22 +104,11 @@ covers, what protection it adds, and any important assumption. Keep it under
 
 Name each credential variable `appa describe` reports, and whether it is set.
 Check what each battery's README expects the root config to provide, and record
-anything missing. Only name a group if `appa describe` lists it as a named
+anything missing. Leave new membership sources out until the runtime has the
+credentials or login they need; a shell check alone does not establish that.
+Include the battery if supported, and briefly say what remains unavailable.
+Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
-
-Before proposing a new `self` or `internal` mapping, check whether the source
-has the credentials or documented login fallback it needs. Distinguish a
-credential checked in this shell from one verified for the running runtime;
-never display its value. If runtime readiness is unknown, say so and leave
-that source out of the new mapping. Do not run battery scripts to check it.
-Preserve existing mappings unless the operator approves changing them.
-
-A missing credential need not prevent including the battery when its README
-supports that setup. Propose the supported configuration without the new
-mapping. Explain which operations still work and which membership checks are
-unavailable, using the README and observed results. Do not promise that all
-reads work or all sends fail without evidence. Explain that adding an
-unavailable membership source can prevent the whole configuration from loading.
 
 ### Cover the remaining tools
 
@@ -215,11 +204,6 @@ are included. Then group the proposal by server. Show:
 - every configured MCP server whose tools could not be inspected: "<server>
   is configured, but I could not inspect its tools in this session."
 
-Describe who may receive private information in everyday words. For example:
-"I'll use GitHub organization membership to check who may receive company
-information. Slack membership checks need a credential first." Keep technical
-names for when the user asks, except the credential variable they need to set.
-
 At the end of the proposal, add **Needed for this to work** when any required
 support is missing. Group every missing requirement there and propose the
 concrete fix. For example: "Slack needs your approval before publishing, but
@@ -255,8 +239,8 @@ After approval:
 4. When the battery binds an Annotator or an audience source, name the
    variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
    states; it belongs in the runtime's environment, never in the config.
-   Add only the approved, ready sources to `self` and `internal` under
-   `[policy.audience]`, following the readiness check above and the README.
+   Map `self` and `internal` onto the source's collections under
+   `[policy.audience]` as the README shows, only when their credentials are ready.
 5. Add the approved rules for the remaining tools to the root config. Do not
    remove overlapping root rules; they intentionally override batteries. To
    treat a battery's tool differently, add a root rule for it; never edit the
@@ -284,9 +268,8 @@ not guess.
    If it is unavailable or does not answer the question, stop and report an
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
-4. Explain what happens now, what you propose, and the practical effect. Add
-   a plain explanation of who may receive private information. Ask only for a
-   decision that changes the result.
+4. Explain what happens now, what you propose, and the practical effect.
+   Ask only for a decision that changes the result.
 5. If a battery would help, propose it with the same one-sentence rule used in
    the checkup. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
@@ -380,20 +363,9 @@ before installing it. If reload is refused, the previous config keeps serving.
 Explain the error plainly and fix it. Ask for approval again if the fix changes
 the behavior the user approved.
 
-Report partial success concretely: name the changes already accepted, the
-changes rejected, and whether the file was restored. Distinguish the policy
-still running from any rejected changes left in the file. Confirm restoration
-before claiming it happened. Name the protections that remain, rather than
-describing the result only by a battery count.
-
-If a fix changes who may receive information, explain that change before
-asking for approval. For example: "The added protections are active, but the
-remaining changes could not load because Slack membership could not be checked.
-I restored the previous file. I propose using GitHub organization members alone
-to decide who may receive company information; Slack membership will not be
-used." Use this wording only when those facts are established. Do not say
-"everything else stays unchanged" in place of explaining the changed boundary.
-State only the credential failure and tool behavior the evidence establishes.
+Briefly say what succeeded, what failed, and whether the file was restored.
+If the fix changes who may receive information, say how before asking for
+approval. Describe only behavior supported by the README or observed results.
 
 After a successful reload, add:
 
