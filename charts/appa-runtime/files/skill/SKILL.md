@@ -111,11 +111,11 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   Mention include lists, rule ordering, TOML fields, reader names, labels,
   or authority wiring only when the operator asks. Show TOML only when
   asked.
-- The one exception is a single **OpenAPPA pieces** line in every
-  proposal, naming the primitives it uses: battery, tool contract,
-  Annotator, audience source, Authority, or sanitizer, and what implements
-  each. For example: "OpenAPPA pieces: tool contract and an annotator
-  backed by `gh`."
+- Use everyday words in proposals and failure reports. Say who may receive
+  information, what works, what failed, and what the user needs to do.
+  Avoid terms such as "audience source", "selector", "mapping", and "probe"
+  unless the user asks for technical details. If a host requires an
+  **OpenAPPA pieces** line, describe its parts in plain words.
 - Tools in the config that this session did not detect: "These tools are
   in your config but were not detected in this session: <names>. I'll
   leave them unchanged."
