@@ -1,12 +1,9 @@
-import { PixelMark } from "@/components/Logo";
-
 /* Rendered by the :::sponsor-note::: directive at the top of the Archestra
    page. One panel, one message: who pays for OpenAPPA, and that this changes
    nothing about who may ship it. */
 export function SponsorNote() {
   return (
     <aside className="sponsor-note">
-      <PixelMark className="sponsor-note-mark" size={56} />
       <p className="sponsor-note-text">
         The development of OpenAPPA is sponsored by Archestra. We intentionally made OpenAPPA
         vendor-agnostic: the engine, the batteries, and this website belong to no single product. If

@@ -9,10 +9,11 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const docs = getMcpDocs();
+  const home = docs.find((doc) => doc.slug === "index");
   const index = [
     "# OpenAPPA",
     "",
-    "> A deterministic policy engine for LLM agents — tracking data origins and enforcing information flow before tool calls dispatch.",
+    `> ${home?.description ?? "An information-flow policy engine for LLM agents."}`,
     "",
     "## Docs",
     "",

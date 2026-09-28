@@ -394,6 +394,11 @@ async fn accepting_authorizes_the_exact_call() {
     let reviews = reviewer.reviews();
     assert_eq!(reviews.len(), 1, "one decision asks one time");
     let review = &reviews[0];
+    // A harness may show only the first few lines, so the question leads, beside APPA's mark.
+    assert!(
+        review.starts_with("▄█▄▄▄█▄  ▀▀█  Approve this call?\n██▄█▄██   ▄   "),
+        "the review opens with APPA's question: {review}",
+    );
     assert!(review.contains("publish"), "the review names the tool: {review}");
     assert!(
         review.contains("the quarterly figures"),

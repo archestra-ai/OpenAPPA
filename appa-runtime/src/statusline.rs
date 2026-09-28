@@ -9,12 +9,10 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use crate::elicit::{MARK_BOTTOM, MARK_TOP};
 use crate::hook_client::session_is_gated;
 use crate::loopback_http::{Deadline, Endpoint, get};
 use crate::runtime_url::RuntimeTarget;
-
-const MARK_TOP: &str = "▄█▄▄▄█▄";
-const MARK_BOTTOM: &str = "██▄█▄██";
 
 pub fn run(target: &RuntimeTarget) -> ExitCode {
     if !session_is_gated() {
