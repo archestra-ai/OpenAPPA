@@ -102,10 +102,12 @@ covers, what protection it adds, and any important assumption. Keep it under
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
-Name each credential variable `appa describe` reports, and whether it is set.
+Use only the credential status reported by `appa describe`. Do not read or
+print environment variables, credential files, or process environments to
+check access. Name the required variable, never its value.
 Check what each battery's README expects the root config to provide, and record
-anything missing. Leave new membership sources out until the runtime has the
-credentials or login they need; a shell check alone does not establish that.
+anything missing. Leave new membership sources out when runtime access is
+missing or unknown; a shell status alone does not establish runtime access.
 Include the battery if supported, and briefly say what remains unavailable.
 Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
