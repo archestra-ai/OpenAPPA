@@ -291,8 +291,8 @@ verifies the checksum of the binary for Linux or macOS and places it in
 `~/.local/bin` (Windows: unpack the zip from the releases page):
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 A checkout build has no published version, so it installs itself: the version

@@ -921,12 +921,6 @@ samp {
   line-height: 1.15;
 }
 
-/* ```prompt blocks are what a user types to the agent: prose, so they
-   wrap instead of scrolling a sentence out of view. */
-.prose pre code.language-prompt {
-  white-space: pre-wrap;
-}
-
 .battery-figure {
   width: 100%;
   max-width: 45rem;
