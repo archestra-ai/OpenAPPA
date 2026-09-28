@@ -299,6 +299,11 @@ fn asks_by_form(request: &RequestContext<RoleServer>) -> bool {
         .is_some_and(|elicitation| elicitation.form.is_some() || elicitation.url.is_none())
 }
 
+/// APPA's two-row mark, drawn wherever APPA itself speaks in the harness: the status
+/// line and the head of a review.
+pub(crate) const MARK_TOP: &str = "▄█▄▄▄█▄";
+pub(crate) const MARK_BOTTOM: &str = "██▄█▄██";
+
 /// The review as the person reads it: a pure rendering of the consult, nothing from the
 /// trajectory beside it.
 pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
@@ -317,7 +322,8 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
         None => String::new(),
     };
     format!(
-        "APPA asks you to rule as the authority \"{authority}\".\n\
+        "{headline}\n\
+         APPA asks you to rule as the authority \"{authority}\".\n\
          {hint}\
          \n\
          Tool: {tool}\n\
@@ -329,8 +335,44 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
          may run. Decline refuses it. Cancel answers nothing and \
          leaves the call blocked. The agent's own description of what \
          it is doing is not shown here on purpose.",
+        headline = headline(artifact),
         tool = artifact.tool,
     )
+}
+
+/// The widest a headline line's call text runs: a harness counts a wrapped row against
+/// the few lines it shows, so a longer line would push the rest of the headline out.
+const HEADLINE_WIDTH: usize = 64;
+
+/// The review's first lines, for a harness that shows only a few of them — Claude Code
+/// folds the rest behind "+N more lines". APPA's mark asks the question beside the call
+/// in brief: a shell command and the description it carries, or else the tool and its
+/// arguments on one line. The full review below repeats all of it untrimmed.
+fn headline(artifact: &AuthorityArtifact) -> String {
+    let indent = " ".repeat(MARK_TOP.chars().count() + 7);
+    let text = |key: &str| artifact.arguments.get(key).and_then(serde_json::Value::as_str);
+    let (call, description) = match text("command") {
+        Some(command) => (format!("$ {command}"), text("description")),
+        None => (format!("{} {}", artifact.tool, artifact.arguments), None),
+    };
+    let mut lines = format!(
+        "{MARK_TOP}  ▀▀█  Approve this call?\n{MARK_BOTTOM}   ▄   {}\n",
+        one_line(&call)
+    );
+    if let Some(description) = description {
+        lines.push_str(&format!("{indent}{}\n", one_line(description)));
+    }
+    lines
+}
+
+/// `text` on one row of at most [`HEADLINE_WIDTH`] characters: whitespace runs, line
+/// breaks included, become one space, and a cut shows as `…`.
+fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(HEADLINE_WIDTH - 1) {
+        Some((cut, _)) => format!("{}…", &flat[..cut]),
+        None => flat,
+    }
 }
 
 fn requirement_text(requirement: &Requirement) -> String {
@@ -349,6 +391,50 @@ fn requirement_text(requirement: &Requirement) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn artifact(arguments: serde_json::Value) -> AuthorityArtifact {
+        AuthorityArtifact {
+            tool: "host/claude-code/Bash".to_string(),
+            arguments,
+            requirements: Vec::new(),
+        }
+    }
+
+    /// A shell command leads with the command and the description it carries, each on
+    /// one row, beside APPA's question.
+    #[test]
+    fn a_shell_command_heads_the_review_with_its_description() {
+        let headline = headline(&artifact(serde_json::json!({
+            "command": "appa battery install slack\n  grain sentry",
+            "description": "Add the batteries",
+        })));
+        assert_eq!(
+            headline,
+            "▄█▄▄▄█▄  ▀▀█  Approve this call?\n\
+             ██▄█▄██   ▄   $ appa battery install slack grain sentry\n\
+             \x20             Add the batteries\n"
+        );
+    }
+
+    /// Any other call leads with its tool and arguments on one row, cut to fit.
+    #[test]
+    fn any_other_call_heads_the_review_with_its_tool_and_arguments_cut_to_fit() {
+        let long = "x".repeat(200);
+        let headline = headline(&AuthorityArtifact {
+            tool: "mcp/slack/send".to_string(),
+            ..artifact(serde_json::json!({ "text": long }))
+        });
+        let call = headline.lines().nth(1).expect("the call row");
+        assert!(
+            call.starts_with("██▄█▄██   ▄   mcp/slack/send {\"text\":\"xxx"),
+            "{call}"
+        );
+        assert!(call.ends_with('…'), "a cut shows: {call}");
+        assert_eq!(call.chars().count(), "██▄█▄██   ▄   ".chars().count() + HEADLINE_WIDTH);
+        assert_eq!(headline.lines().count(), 2, "no description row: {headline}");
+    }
+
     #[test]
     fn the_review_never_leaves_the_handler_task() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

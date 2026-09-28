@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.27.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.1...v0.27.0) (2026-09-28)
+
+
+### Features
+
+* **runtime:** lead the approval card with APPA's question and the call ([#504](https://github.com/archestra-ai/OpenAPPA/issues/504)) ([234e070](https://github.com/archestra-ai/OpenAPPA/commit/234e0702c832a8adecd896be1d5f328fa00ba7d8))
+* **website:** derive search and directive content from the docs ([#500](https://github.com/archestra-ai/OpenAPPA/issues/500)) ([e6c16c7](https://github.com/archestra-ai/OpenAPPA/commit/e6c16c7c6c9016aa859a36f91fea68bbeffa406d))
+
+## [0.26.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.0...v0.26.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **claude-code:** preserve symlinked settings during activation ([#494](https://github.com/archestra-ai/OpenAPPA/issues/494)) ([2da0c61](https://github.com/archestra-ai/OpenAPPA/commit/2da0c61d68e6621b757f6caf3c1605f444564455))
+* **website:** drop the sponsor-note mark and the Docs nav link ([#499](https://github.com/archestra-ai/OpenAPPA/issues/499)) ([db91806](https://github.com/archestra-ai/OpenAPPA/commit/db918065feb5498ca6ade403d46d010398e72676))
+
+## [0.26.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.25.0...v0.26.0) (2026-09-28)
+
+
+### Features
+
+* **install:** one visual vocabulary for the installer and its bootstrap script ([#489](https://github.com/archestra-ai/OpenAPPA/issues/489)) ([8d7304c](https://github.com/archestra-ai/OpenAPPA/commit/8d7304c50e6fa9407c0ff78a123c0baea614097f))
+* **kagent:** expose policy-gated agent yell tool ([#491](https://github.com/archestra-ai/OpenAPPA/issues/491)) ([1623934](https://github.com/archestra-ai/OpenAPPA/commit/1623934a7149959a8f60677e0eddc3cf1b89a540))
+* **runtime:** export opt-in yell diagnostic snapshots to OTLP ([#485](https://github.com/archestra-ai/OpenAPPA/issues/485)) ([942335c](https://github.com/archestra-ai/OpenAPPA/commit/942335c00562bcaa46fb2bd0398fe86b8b5a3d55))
+
+
+### Bug Fixes
+
+* **docs:** repair kagent documentation links ([#492](https://github.com/archestra-ai/OpenAPPA/issues/492)) ([0f51629](https://github.com/archestra-ai/OpenAPPA/commit/0f51629c56d1f2f4a61b83d340a74b48bcda9bc8))
+* **docs:** use versioned kagent documentation links ([0f51629](https://github.com/archestra-ai/OpenAPPA/commit/0f51629c56d1f2f4a61b83d340a74b48bcda9bc8))
+* **runtime:** turn verbose off in claude-code consults ([#488](https://github.com/archestra-ai/OpenAPPA/issues/488)) ([cf606d6](https://github.com/archestra-ai/OpenAPPA/commit/cf606d603d66ebefc7fb3b2577560193bf421fc6))
+* **website:** box the OpenAPPA benchmark line, song button loading state ([#483](https://github.com/archestra-ai/OpenAPPA/issues/483)) ([cc39a62](https://github.com/archestra-ai/OpenAPPA/commit/cc39a62678c4339e9cdd1ef6b29977aebf6d45b8))
+* **website:** highlight the OpenAPPA benchmark line with a faint band ([#486](https://github.com/archestra-ai/OpenAPPA/issues/486)) ([2668d3f](https://github.com/archestra-ai/OpenAPPA/commit/2668d3fea3e7141683a974bbee03e4c4f2b3a70e))
+* **website:** one accent box around the OpenAPPA benchmark line; loading state for the song button ([cc39a62](https://github.com/archestra-ai/OpenAPPA/commit/cc39a62678c4339e9cdd1ef6b29977aebf6d45b8))
+* **website:** OpenAPPA first in the landing benchmark ([#481](https://github.com/archestra-ai/OpenAPPA/issues/481)) ([b11eb28](https://github.com/archestra-ai/OpenAPPA/commit/b11eb28278e4270bd77cdbca4d2a8be999f95829))
+
+
+### Documentation
+
+* **claude-code:** revert walk through a real /appa-guide run and a blocked flow ([#496](https://github.com/archestra-ai/OpenAPPA/issues/496)) ([3f1217c](https://github.com/archestra-ai/OpenAPPA/commit/3f1217c8367401ca3f91c5c8b73e8844b7cab2b7))
+* **claude-code:** walk through a real /appa-guide run and a blocked flow ([#490](https://github.com/archestra-ai/OpenAPPA/issues/490)) ([00639ff](https://github.com/archestra-ai/OpenAPPA/commit/00639ffafc199dd65f43ada0a89a895e10767068))
+* fix copyable Claude Code installation commands ([#493](https://github.com/archestra-ai/OpenAPPA/issues/493)) ([7b09e90](https://github.com/archestra-ai/OpenAPPA/commit/7b09e9044a03f425aea909a737c996680c939cc8))
+* shorten Grafana report setup ([#487](https://github.com/archestra-ai/OpenAPPA/issues/487)) ([b13d779](https://github.com/archestra-ai/OpenAPPA/commit/b13d7790f432c1e8b758f50797285363a765f1e2))
+* streamline Claude Code guide and clean up docs boilerplate ([#484](https://github.com/archestra-ai/OpenAPPA/issues/484)) ([e9a3e3e](https://github.com/archestra-ai/OpenAPPA/commit/e9a3e3ee422dcd474209500dc15c98edace8cc37))
+* **website:** add Coding agents deep dive page ([#469](https://github.com/archestra-ai/OpenAPPA/issues/469)) ([8f29b38](https://github.com/archestra-ai/OpenAPPA/commit/8f29b3840d71a5b2e55b258d0d5778854e3ad957))
+
 ## [0.25.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.24.0...v0.25.0) (2026-09-27)
 
 

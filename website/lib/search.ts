@@ -1,5 +1,41 @@
 import { termDefinition } from "@/lib/terms";
 
+/* Client-safe search over the index that lib/search-index.ts builds from the
+   markdown on the server and app/search-index/route.ts serves as JSON. The
+   modal fetches it the first time search opens, so no page carries it, and
+   matches in the browser. Term definitions are not in the index:
+   lib/terms.ts already ships to the client for the term popovers, so the
+   index carries only where each term is introduced. */
+
+export interface IndexedDoc {
+  slug: string;
+  title: string;
+  category: string;
+  url: string;
+  description: string;
+}
+
+export interface IndexedSection {
+  /** Page URL with the heading's anchor, e.g. "/contracts#audiences". */
+  url: string;
+  title: string;
+  docTitle: string;
+  /** Section body as plain text, markdown syntax stripped and whitespace collapsed. */
+  text: string;
+}
+
+export interface IndexedTerm {
+  term: string;
+  /** The section that first mentions the term as a code chip. */
+  url: string;
+}
+
+export interface SearchIndex {
+  docs: IndexedDoc[];
+  sections: IndexedSection[];
+  terms: IndexedTerm[];
+}
+
 export interface SearchResult {
   id: string;
   title: string;
@@ -9,152 +45,80 @@ export interface SearchResult {
   snippet?: string;
 }
 
-const STATIC_DOCS = [
-  {
-    slug: "index",
-    title: "What is OpenAPPA",
-    category: "Get started",
-    url: "/",
-    description: "A deterministic policy engine for LLM agents — tracking data origins and enforcing information flow before tool calls dispatch.",
-  },
-  {
-    slug: "how-it-works",
-    title: "How OpenAPPA works",
-    category: "Get started",
-    url: "/how-it-works",
-    description: "The whole model in one sitting — what OpenAPPA guarantees and what it costs.",
-  },
-  {
-    slug: "contracts",
-    title: "Policy configuration",
-    category: "Get started",
-    url: "/contracts",
-    description: "TOML configuration for tool contracts, restrictions, annotations, and remedy plans.",
-  },
-  {
-    slug: "evaluation",
-    title: "Evaluating OpenAPPA",
-    category: "Get started",
-    url: "/evaluation",
-    description: "Empirical evaluation and bench-corp benchmark results.",
-  },
-];
+const MAX_RESULTS = 12;
+const SNIPPET_RADIUS = 80;
 
-const STATIC_SECTIONS = [
-  { title: "OpenAPPA enforces information-flow policy before tool dispatch", url: "/how-it-works#openappa-enforces-information-flow-policy-before-tool-dispatch", docTitle: "How OpenAPPA works" },
-  { title: "Labels only move one way", url: "/how-it-works#labels-only-move-one-way", docTitle: "How OpenAPPA works" },
-  { title: "Reading data costs the agent reach", url: "/how-it-works#reading-data-costs-the-agent-reach", docTitle: "How OpenAPPA works" },
-  { title: "A child's narrowing dies with it", url: "/how-it-works#a-childs-narrowing-dies-with-it", docTitle: "How OpenAPPA works" },
-  { title: "Engine refusals enumerate every valid remedy", url: "/how-it-works#engine-refusals-enumerate-every-valid-remedy", docTitle: "How OpenAPPA works" },
-  { title: "A wildcard annotator covers the tools the policy never names", url: "/how-it-works#a-wildcard-annotator-covers-the-tools-the-policy-never-names", docTitle: "How OpenAPPA works" },
-  { title: "Model guarantees depend on four explicit assumptions", url: "/how-it-works#model-guarantees-depend-on-four-explicit-assumptions", docTitle: "How OpenAPPA works" },
-  { title: "Policy file", url: "/contracts#policy-file", docTitle: "Policy configuration" },
-  { title: "Pattern matching", url: "/contracts#pattern-matching", docTitle: "Policy configuration" },
-  { title: "Handling undeclared tools", url: "/contracts#handling-undeclared-tools", docTitle: "Policy configuration" },
-  { title: "Tool contracts", url: "/contracts#tool-contracts", docTitle: "Policy configuration" },
-  { title: "Audiences", url: "/contracts#audiences", docTitle: "Policy configuration" },
-  { title: "Trust", url: "/contracts#trust", docTitle: "Policy configuration" },
-  { title: "Effects", url: "/contracts#effects", docTitle: "Policy configuration" },
-  { title: "Attention", url: "/contracts#attention", docTitle: "Policy configuration" },
-  { title: "Annotators", url: "/contracts#annotators", docTitle: "Policy configuration" },
-  { title: "Sanitizers", url: "/contracts#sanitizers", docTitle: "Policy configuration" },
-  { title: "Authorities", url: "/contracts#authorities", docTitle: "Policy configuration" },
-  { title: "Remedy plans and child returns", url: "/contracts#remedy-plans-and-child-returns", docTitle: "Policy configuration" },
-  { title: "Subagent Returns", url: "/contracts#subagent-returns", docTitle: "Policy configuration" },
-  { title: "Structured child returns", url: "/contracts#structured-child-returns", docTitle: "Policy configuration" },
-  { title: "Externals", url: "/contracts#externals", docTitle: "Policy configuration" },
-  { title: "Empirical evaluation", url: "/evaluation#bench-corp-realistic-enterprise-workflows", docTitle: "Evaluating OpenAPPA" },
-];
+/* Every query word must appear in the title or the body. A title that starts
+   with the whole query ranks first, then a title containing it, then a title
+   containing every word, then a body-only match. */
+function score(query: string, words: string[], title: string, body: string): number {
+  const t = title.toLowerCase();
+  const b = body.toLowerCase();
+  if (!words.every((w) => t.includes(w) || b.includes(w))) return 0;
+  if (t.startsWith(query)) return 4;
+  if (t.includes(query)) return 3;
+  if (words.every((w) => t.includes(w))) return 2;
+  return 1;
+}
 
-export const GLOSSARY_TERMS = [
-  "delta",
-  "requires",
-  "audience",
-  "trust",
-  "trusted",
-  "suspicious",
-  "public",
-  "internal",
-  "egress",
-  "mutation",
-  "effects",
-  "emits",
-  "contains",
-  "within",
-  "excludes",
-  "attention",
-  "permits",
-  "trust_below",
-  "audience_missing",
-  "effects_containing",
-  "tags",
-  "annotator",
-  "annotation",
-  "resolver",
-  "hint",
-  "declaration",
-  "artifact",
-  "return_schema",
-  "narrowing",
-  "remedy_plans",
-  "trajectory",
-];
+/** The body around its first query word, or its opening when the title matched. */
+function snippet(words: string[], body: string): string | undefined {
+  if (!body) return undefined;
+  const lower = body.toLowerCase();
+  const hits = words.map((w) => lower.indexOf(w)).filter((i) => i >= 0);
+  const at = hits.length > 0 ? Math.min(...hits) : 0;
+  const start = Math.max(0, at - SNIPPET_RADIUS);
+  const end = Math.min(body.length, at + SNIPPET_RADIUS * 2);
+  return `${start > 0 ? "…" : ""}${body.slice(start, end).trim()}${end < body.length ? "…" : ""}`;
+}
 
-export function searchDocs(query: string): SearchResult[] {
+export function searchDocs(index: SearchIndex, query: string): SearchResult[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
+  const words = q.split(/\s+/);
 
-  const results: SearchResult[] = [];
+  const scored: { result: SearchResult; score: number; rank: number }[] = [];
 
-  // Match static docs
-  for (const doc of STATIC_DOCS) {
-    if (doc.title.toLowerCase().includes(q) || doc.description.toLowerCase().includes(q)) {
-      results.push({
-        id: `doc-${doc.slug}`,
-        title: doc.title,
-        subtitle: doc.category,
-        type: "doc",
-        url: doc.url,
-        snippet: doc.description,
-      });
-    }
+  for (const doc of index.docs) {
+    const s = score(q, words, doc.title, doc.description);
+    if (s === 0) continue;
+    scored.push({
+      score: s,
+      rank: 0,
+      result: { id: `doc-${doc.slug}`, title: doc.title, subtitle: doc.category, type: "doc", url: doc.url, snippet: doc.description },
+    });
   }
 
-  // Match section headings
-  for (const sec of STATIC_SECTIONS) {
-    if (sec.title.toLowerCase().includes(q)) {
-      results.push({
+  for (const sec of index.sections) {
+    const s = score(q, words, sec.title, sec.text);
+    if (s === 0) continue;
+    scored.push({
+      score: s,
+      rank: 1,
+      result: {
         id: `sec-${sec.url}`,
         title: sec.title,
         subtitle: `${sec.docTitle} section`,
         type: "section",
         url: sec.url,
-      });
-    }
+        snippet: snippet(words, sec.text),
+      },
+    });
   }
 
-  // Match Glossary Terms
-  for (const term of GLOSSARY_TERMS) {
-    if (term.toLowerCase().includes(q)) {
-      const def = termDefinition(term);
-      if (def) {
-        results.push({
-          id: `term-${term}`,
-          title: term,
-          subtitle: "Glossary Term",
-          type: "term",
-          url: "/contracts#restrictions-and-requirements",
-          snippet: def,
-        });
-      }
-    }
+  for (const term of index.terms) {
+    const definition = termDefinition(term.term) ?? "";
+    const s = score(q, words, term.term, definition);
+    if (s === 0) continue;
+    scored.push({
+      score: s,
+      rank: 2,
+      result: { id: `term-${term.term}`, title: term.term, subtitle: "Glossary term", type: "term", url: term.url, snippet: definition },
+    });
   }
 
-  // Deduplicate and return top 10 results
-  const seen = new Set<string>();
-  return results.filter((item) => {
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  }).slice(0, 10);
+  return scored
+    .sort((a, b) => b.score - a.score || a.rank - b.rank)
+    .slice(0, MAX_RESULTS)
+    .map((s) => s.result);
 }

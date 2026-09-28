@@ -209,9 +209,9 @@ concrete fix. For example: "Slack needs your approval before publishing, but
 approval is not set up yet. I'll add it." Do not merely report "no HITL
 authority," and do not mix missing requirements with unchanged rules.
 
-Close with one line saying the defaults can be made stricter or looser on
-request, naming one option of each kind from **Tune the defaults** that fits
-this machine.
+Close with one plain sentence: "You can ask later to change what requires
+approval or what gets blocked." Keep specific tuning options for when the
+user asks for a change.
 
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
@@ -305,8 +305,8 @@ per-call review.
 
 The defaults are a middle ground: a normal coding session keeps running, and
 the common ways private data leaks or outside text steers the agent are
-caught. Offer these options only when the user asks for stricter or looser
-behavior, or in the one closing line of a checkup. Each one is a root rule or
+caught. Offer these options when the user asks for a change they fit. Explain
+each option's behavior and cost in plain words. Each one is a root rule or
 a change to one root declaration. Mark it with a comment
 `# appa-guide: <option>` so a later "undo <option>" removes exactly that.
 Apply one through the `adjust` steps.

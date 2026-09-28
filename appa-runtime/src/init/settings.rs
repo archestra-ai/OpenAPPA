@@ -9,6 +9,7 @@
 //! they are, and the file is rewritten only when its value would change.
 
 use serde_json::{Map, Value, json};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -298,27 +299,59 @@ fn edit(
     compensation: Option<&mut Compensation>,
     edit: impl FnOnce(&mut Map<String, Value>) -> Result<(), InitError>,
 ) -> Result<(), InitError> {
-    let before = file_before(path)?;
+    let destination = destination(path)?;
+    let before = file_before(&destination)?;
     let mut settings = parse(path, before.as_deref())?;
     let original = settings.clone();
     edit(&mut settings)?;
     if settings == original {
         return Ok(());
     }
+    check_destination(path, &destination)?;
     if let Some(compensation) = compensation {
         compensation.record(Undo::File {
-            path: path.to_path_buf(),
+            path: destination.clone(),
             before,
         });
     }
     let mut encoded = serde_json::to_vec_pretty(&Value::Object(settings)).expect("JSON values encode");
     encoded.push(b'\n');
-    write_state(path, &encoded)
+    write_state(&destination, &encoded)?;
+    check_destination(path, &destination)
 }
 
 fn read(path: &Path) -> Result<Map<String, Value>, InitError> {
-    let bytes = file_before(path)?;
+    let bytes = file_before(&destination(path)?)?;
     parse(path, bytes.as_deref())
+}
+
+/// Replace a symlink's regular-file destination rather than replacing the link.
+/// A missing settings file is still created at the usual profile path.
+fn destination(path: &Path) -> Result<PathBuf, InitError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).map_err(|source| InitError::NativeState {
+                path: path.to_path_buf(),
+                message: format!("cannot resolve settings link: {source}"),
+            })
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(source) => Err(InitError::NativeState {
+            path: path.to_path_buf(),
+            message: format!("cannot inspect settings path: {source}"),
+        }),
+    }
+}
+
+fn check_destination(path: &Path, expected: &Path) -> Result<(), InitError> {
+    if destination(path)? != expected {
+        return Err(InitError::NativeState {
+            path: path.to_path_buf(),
+            message: "settings link changed during the operation; rerun the command".into(),
+        });
+    }
+    Ok(())
 }
 
 /// An absent or blank file is an empty object; anything else must be an object.

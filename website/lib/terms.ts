@@ -193,6 +193,9 @@ const TERMS = {
     "An independent family opened from an identified source trajectory. It freezes the source label and denials, family effects and unsettled reservations, and opening policy. Later activity stays separate; there is no spawn dispatch or child-return contract.",
 } as const satisfies Record<string, string>;
 
+/** Every chip with a definition, in declaration order. */
+export const TERM_NAMES: string[] = Object.keys(TERMS);
+
 export function termDefinition(chip: string): string | undefined {
   const direct = (TERMS as Record<string, string>)[chip];
   if (direct) return direct;

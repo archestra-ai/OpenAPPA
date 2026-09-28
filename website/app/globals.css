@@ -921,12 +921,6 @@ samp {
   line-height: 1.15;
 }
 
-/* ```prompt blocks are what a user types to the agent: prose, so they
-   wrap instead of scrolling a sentence out of view. */
-.prose pre code.language-prompt {
-  white-space: pre-wrap;
-}
-
 .battery-figure {
   width: 100%;
   max-width: 45rem;
@@ -2376,18 +2370,11 @@ samp {
    Sponsor note — who pays for OpenAPPA
    ———————————————————————————————————————————————— */
 .sponsor-note {
-  display: flex;
-  align-items: center;
-  gap: 20px;
   margin: 1.5rem 0 2rem;
   padding: 18px 22px;
   border: 1px solid var(--warn);
   border-radius: 10px;
   background: var(--warn-bg);
-}
-
-.sponsor-note-mark {
-  flex: none;
 }
 
 .sponsor-note-text {
@@ -2401,14 +2388,6 @@ samp {
   color: var(--warn);
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-
-@media (max-width: 480px) {
-  .sponsor-note {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
 }
 
 .under-construction {
