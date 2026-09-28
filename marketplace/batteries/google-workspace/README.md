@@ -51,7 +51,7 @@ The Gmail and Calendar connectors are not covered. A tool the policy
 does not name is blocked, so add root rules for them.
 
 ```sh
-cargo test --locked -p appa --test google_workspace_policy --test marketplace
+cargo test --locked -p appa --test marketplace
 python3 marketplace/batteries/google-workspace/test_audience_source.py
 ```
 
