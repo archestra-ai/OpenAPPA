@@ -22,8 +22,8 @@ the release archive, verifies its checksum, and places `appa` in
 release, verifies it, and retains it:
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 A build from a checkout carries its exact Git commit, so the same command

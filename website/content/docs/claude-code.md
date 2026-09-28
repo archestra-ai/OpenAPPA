@@ -12,8 +12,8 @@ OpenAPPA brings deterministic information-flow control directly to Claude Code. 
 You need Claude Code and `curl`.
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 `appa plugin install claude-code` configures Claude Code's user environment:

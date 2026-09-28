@@ -64,8 +64,8 @@ The Claude Code integration is a playground for the model, not the product. It i
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa plugin install claude-code
+curl -fsSL https://openappa.com/install.sh | sh &&
+  ~/.local/bin/appa plugin install claude-code
 ```
 
 The installer verifies the checksum of the release binary for Linux or macOS
