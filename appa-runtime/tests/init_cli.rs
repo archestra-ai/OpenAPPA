@@ -619,6 +619,35 @@ fn foreign_settings_survive_activation_and_removal() {
     assert_eq!(fixture.settings_value(), original);
 }
 
+#[test]
+fn settings_symlink_survives_activation_removal_and_rollback() {
+    let fixture = Fixture::new();
+    let target = fixture.root.join("dotfiles/claude/settings.json");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let original = serde_json::json!({"theme": "dark"});
+    fs::write(&target, original.to_string()).unwrap();
+    std::os::unix::fs::symlink(&target, fixture.settings()).unwrap();
+
+    let failed = fixture
+        .activate()
+        .env("FAKE_CLAUDE_FAIL_ONCE", "mcp-add")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
+    assert_eq!(fixture.settings_value(), original);
+
+    fixture.successful_activation();
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
+    assert_eq!(fixture.settings_value()["theme"], "dark");
+    assert!(fixture.settings_value()["hooks"].is_object());
+
+    let removed = fixture.remove().output().unwrap();
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+    assert_eq!(fs::read_link(fixture.settings()).unwrap(), target);
+    assert_eq!(fixture.settings_value(), original);
+}
+
 /// An MCP server under APPA's name that no install wrote is someone else's:
 /// activation refuses before it has written anything, and removal leaves it.
 #[test]
