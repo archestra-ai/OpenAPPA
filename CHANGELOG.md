@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.1...v0.27.0) (2026-09-28)
+
+
+### Features
+
+* **runtime:** lead the approval card with APPA's question and the call ([#504](https://github.com/archestra-ai/OpenAPPA/issues/504)) ([234e070](https://github.com/archestra-ai/OpenAPPA/commit/234e0702c832a8adecd896be1d5f328fa00ba7d8))
+* **website:** derive search and directive content from the docs ([#500](https://github.com/archestra-ai/OpenAPPA/issues/500)) ([e6c16c7](https://github.com/archestra-ai/OpenAPPA/commit/e6c16c7c6c9016aa859a36f91fea68bbeffa406d))
+
 ## [0.26.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.0...v0.26.1) (2026-09-28)
 
 
