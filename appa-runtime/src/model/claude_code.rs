@@ -8,7 +8,6 @@ use appa_policy::AnnotatorBuiltin;
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
 /// this envelope: `is_error` set and its own message — "Not logged in · Please run
 /// /login" — in `result`, on stdout rather than stderr.
-#[cfg(unix)]
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeResultEnvelope {
     structured_output: Option<serde_json::Value>,
@@ -17,7 +16,6 @@ struct ClaudeResultEnvelope {
     result: Option<String>,
 }
 
-#[cfg(unix)]
 impl ClaudeResultEnvelope {
     /// The message the CLI reported a failure with, where the output is that envelope.
     fn reported_error(output: &[u8]) -> Option<String> {
@@ -38,7 +36,6 @@ impl ClaudeResultEnvelope {
 #[derive(Clone)]
 pub(crate) struct ClaudeCodeBackend {
     config: ClaudeCode,
-    #[cfg_attr(not(unix), allow(dead_code))]
     max_body_bytes: usize,
     gates: ConsultGates,
 }
@@ -70,14 +67,12 @@ impl ClaudeCodeBackend {
     }
 }
 
-#[cfg(unix)]
 pub(crate) async fn run_claude_code(
     backend: &ClaudeCodeBackend,
     prompt: &ModelPrompt,
     deadline: tokio::time::Instant,
     seen: Option<&mut Transcript>,
 ) -> Result<serde_json::Value, NoAnswerReason> {
-    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
     use crate::external::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
@@ -115,7 +110,7 @@ pub(crate) async fn run_claude_code(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    crate::process_tree::confine(&mut command);
     isolate_claude_environment(&mut command, std::env::vars_os().collect());
     tracing::debug!("claude consult starts");
     let mut child = crate::child_process::spawn_async(&mut command).map_err(|_| {
@@ -125,20 +120,17 @@ pub(crate) async fn run_claude_code(
     // The CLI's own error — a bad model name — is the one line an operator needs when
     // every consult fails; it is read to the end so the pipe never blocks the answer.
     let tail = child.stderr.take().map(stderr_tail);
-    // The guard ends the consult's whole process group on every outcome, a dropped future
+    // The guard ends the consult's whole process tree on every outcome, a dropped future
     // included: no helper the CLI spawned outlives the answer.
     let mut process = CommandProcess::spawned(child)?;
-    let process_group = process.process_group();
-    let exchanged = tokio::time::timeout_at(
-        deadline,
-        exchange_with_child(
-            process.child_mut(),
-            process_group,
-            prompt.input.as_bytes(),
-            backend.max_body_bytes,
-        ),
-    )
-    .await;
+    let exchanged = {
+        let (child, tree) = process.parts();
+        tokio::time::timeout_at(
+            deadline,
+            exchange_with_child(child, tree, prompt.input.as_bytes(), backend.max_body_bytes),
+        )
+        .await
+    };
     let output = match exchanged {
         Ok(Ok(output)) => output,
         Ok(Err(reason)) => {
@@ -177,7 +169,6 @@ pub(crate) async fn run_claude_code(
     envelope.structured_output.ok_or(NoAnswerReason::Malformed)
 }
 
-#[cfg(unix)]
 fn isolate_claude_environment(
     command: &mut tokio::process::Command,
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
@@ -197,18 +188,6 @@ fn isolate_claude_environment(
     // bootstrap fetches, the session-title call) is one more connection per consult
     // on a host that may run many consults at once, and none of it reaches the answer.
     command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
-}
-
-/// The builtin is a local process under a process group this platform lacks; the
-/// configuration refuses it before a deployment opens, so this is never reached.
-#[cfg(not(unix))]
-pub(crate) async fn run_claude_code(
-    _backend: &ClaudeCodeBackend,
-    _prompt: &ModelPrompt,
-    _deadline: tokio::time::Instant,
-    _seen: Option<&mut Transcript>,
-) -> Result<serde_json::Value, NoAnswerReason> {
-    Err(NoAnswerReason::Unregistered)
 }
 
 #[cfg(all(test, unix))]

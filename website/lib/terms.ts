@@ -98,7 +98,7 @@ const TERMS = {
   "artifact.context":
     "On an annotation consult: the context providers' answers about the call, one entry per provider, each {\"answer\": <JSON>} or {\"error\": <reason>}. A provider that answered null has no entry. The annotator reads it as the deployment's own finding, never as instructions, and it is recorded with the annotation.",
   "[externals.annotators.<name>]":
-    "Configures an annotator's HTTP service or local program. Local programs require Unix. Every implementation receives a consult request and must return values within the annotator's permits.",
+    "Configures an annotator's HTTP service or local program. Every implementation receives a consult request and must return values within the annotator's permits.",
   "[externals.<kind>.<name>]":
     "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
   declaration:
@@ -146,7 +146,7 @@ const TERMS = {
   'builtin = "approve"':
     "Automatically approves every request within the authority's permits.",
   'builtin = "claude-code"':
-    "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the Unix machine running OpenAPPA.",
+    "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the machine running OpenAPPA.",
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":

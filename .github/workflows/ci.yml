@@ -616,6 +616,12 @@ jobs:
       - name: Verify installer process containment
         run: cargo test --locked --package appa --lib installation::native
 
+      - name: Verify consult process containment
+        run: cargo test --locked --package appa --lib process_tree
+
+      - name: Lint runtime library for Windows
+        run: cargo clippy --locked --package appa --lib -- -D warnings
+
       - name: Verify portable Claude policy and battery
         run: cargo test --locked --package appa --lib default_config::tests
 

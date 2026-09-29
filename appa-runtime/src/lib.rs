@@ -63,6 +63,7 @@ mod events;
 mod external;
 mod label_guide;
 mod model;
+mod process_tree;
 mod recorder;
 mod secrets;
 mod telemetry;

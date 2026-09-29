@@ -458,10 +458,6 @@ pub enum OpenError {
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
     JevTrustRanks(String),
-    #[error(
-        "annotator {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
-    )]
-    UnsupportedClaudeCodePlatform(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
     #[error("storage failure: {0}")]
@@ -3101,9 +3097,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
                 return Err(OpenError::LlmNotConfigured(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::ClaudeCode if !cfg!(unix) => {
-                return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
-            }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
@@ -3890,7 +3883,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         use appa_policy::AnnotatorBuiltin;
         use appa_runtime_api::inventory::ToolInventory;
 
-        let mut tables = vec![
+        let tables = vec![
             (
                 AnnotatorBuiltin::Llm,
                 "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
@@ -3899,10 +3892,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 AnnotatorBuiltin::Jev,
                 "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
             ),
+            (AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"),
         ];
-        if cfg!(unix) {
-            tables.push((AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"));
-        }
         // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
         const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\
                                [[policy.tool]]\nname = \"other\"\ndescription = \"Looks another record up.\"\nannotator = \"refused\"\n";

@@ -7,8 +7,7 @@ appa replay --config examples/tests/secret-stays-inside/appa.toml examples/tests
 ```
 
 Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
-`local-annotator` binds a command, which the runtime accepts on Unix only;
-it needs `python3`.
+`local-annotator` binds a command; it needs `python3`.
 
 | Example | What it pins |
 |---|---|

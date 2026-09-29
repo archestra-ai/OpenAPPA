@@ -796,12 +796,6 @@ pub enum ConfigError {
     LlmNotConfigured { section: &'static str, name: String },
     #[error("the {section} entry {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { section: &'static str, name: String },
-    #[error("the {section} entry {name:?} uses a local command, which this platform does not support")]
-    UnsupportedCommandPlatform { section: &'static str, name: String },
-    #[error(
-        "the {section} entry {name:?} names the builtin \"claude-code\", which runs a local process this platform does not support"
-    )]
-    UnsupportedClaudeCodePlatform { section: &'static str, name: String },
     #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
     HostedKey { key: String },
     #[error("the hosted {section} entry {name:?} runs a local command, which a hosted document cannot declare")]
@@ -886,15 +880,6 @@ impl Section {
             }
             Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
         };
-        // The subscription transport is a local process under a process group, which only
-        // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
-        #[cfg(not(unix))]
-        if builtin == CLAUDE_CODE_BUILTIN {
-            return Err(ConfigError::UnsupportedClaudeCodePlatform {
-                section: self.name(),
-                name: name.to_string(),
-            });
-        }
         if !allowed {
             return Err(ConfigError::InvalidBuiltinName {
                 section: self.name(),
@@ -2241,25 +2226,14 @@ fn resolve_command(
             prefix: PROVIDER_CREDENTIAL_PREFIX,
         });
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (argv, origins, token_env);
-        return Err(ConfigError::UnsupportedCommandPlatform {
-            section: section.name(),
-            name: name.to_string(),
-        });
-    }
-    #[cfg(unix)]
-    {
-        Ok(ResolverCommand {
-            argv,
-            cwd: origins
-                .get(&section.origin_key(name))
-                .expect("every composed command binding records its source")
-                .clone(),
-            token_env,
-        })
-    }
+    Ok(ResolverCommand {
+        argv,
+        cwd: origins
+            .get(&section.origin_key(name))
+            .expect("every composed command binding records its source")
+            .clone(),
+        token_env,
+    })
 }
 
 /// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
@@ -2545,8 +2519,7 @@ mod tests {
     /// The transport one resolved entry selected, the same view over every section.
     enum Bound<'a> {
         Url,
-        // Config rejects command bindings on non-Unix hosts.
-        Command(#[cfg_attr(not(unix), allow(dead_code))] &'a ResolverCommand),
+        Command(&'a ResolverCommand),
         Builtin(&'a str),
         Readers,
     }
@@ -3024,26 +2997,6 @@ mod tests {
             toml::from_str::<RawConfig>(&singleton_audience).is_err(),
             "an audience source binds by provider name like every other section"
         );
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn a_command_binding_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.annotators.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
-        assert!(matches!(
-            parse(&text),
-            Err(ConfigError::UnsupportedCommandPlatform { name, .. }) if name == "classifier"
-        ));
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.sanitizers.classifier]\nbuiltin = \"claude-code\"\n");
-        assert!(matches!(
-            parse(&text),
-            Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
-        ));
     }
 
     #[test]
