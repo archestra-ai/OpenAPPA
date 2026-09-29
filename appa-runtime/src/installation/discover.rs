@@ -164,8 +164,7 @@ fn is_program(directory: &Path, program: &ExecutableName) -> bool {
 
 #[cfg(not(unix))]
 fn is_program(directory: &Path, program: &ExecutableName) -> bool {
-    let bare = directory.join(program.as_str());
-    bare.is_file() || bare.with_extension("exe").is_file()
+    directory.join(program.as_str()).is_file() || directory.join(format!("{}.exe", program.as_str())).is_file()
 }
 
 /// One battery an install would suggest for the servers it covers.

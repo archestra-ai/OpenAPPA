@@ -131,7 +131,7 @@ class Call:
         tool = name.rsplit("/", 1)[-1] if isinstance(name, str) else ""
         arguments = args["arguments"]
         numbers = (arguments.get(key) for key in NUMBER_ARGUMENTS)
-        number = next((value for value in numbers if isinstance(value, int) and not isinstance(value, bool)), None)
+        number = next((value for value in numbers if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
         entry = context.get("github") if isinstance(context, dict) else None
         return Call(tool, number, entry if isinstance(entry, dict) else None)
 
