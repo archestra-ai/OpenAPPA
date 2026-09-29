@@ -197,6 +197,86 @@ delta = {}
 
 # --- tools that bring outside content into the session ---
 
+# Vendor-written docs and OpenAPPA's own sites: the operator may see the URL,
+# and strangers do not write the page. Each host ends in `/` so a lookalike
+# host such as `code.claude.com.example` falls through to the bare rule.
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://openappa.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://archestra.ai/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://code.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.anthropic.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://platform.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://developers.openai.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://learn.chatgpt.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://doc.rust-lang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.python.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.astral.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://www.typescriptlang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://nodejs.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://developer.mozilla.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://modelcontextprotocol.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://kubernetes.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://helm.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.github.com/*)"
+delta = {}
+
+# Google sees the search query; strangers write the results.
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://www.google.com/search?*)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://google.com/search?*)"
+delta = { trust = "suspicious" }
+
 # Web pages and search results are authored outside the session, and the URL
 # or query itself leaves it: a public sink and an untrusted source at once.
 [[policy.tool]]
