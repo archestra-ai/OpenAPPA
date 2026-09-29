@@ -116,7 +116,6 @@ function refresh() { return work(async () => { state = await api('state'); rende
 const serversOpen = new Set();
 const rulesOpen = new Set();
 let query = '';
-let serverFilter = 'all';
 const CUSTOM = 'root configuration';
 const kinds = [
   { key: 'battery', label: 'Battery rules' },
@@ -281,9 +280,6 @@ function clickable(row, open, toggle) {
   });
 }
 function serverMatches(server) {
-  if (serverFilter === 'setup' && !server.sources.some(source => brokenBattery(batteryByName(source)))) return false;
-  if (serverFilter === 'battery' && !server.sources.some(source => source !== CUSTOM)) return false;
-  if (serverFilter === 'custom' && !server.sources.includes(CUSTOM)) return false;
   return !query || server.title.toLowerCase().includes(query) || server.rules.some(rule => rule.name.toLowerCase().includes(query));
 }
 function serverTable(list) {
@@ -293,13 +289,8 @@ function serverTable(list) {
   const search = el('input', undefined, 'search');
   search.type = 'search'; search.placeholder = 'Search servers and rules'; search.value = query;
   search.setAttribute('aria-label', 'Search servers and rules');
-  const filter = el('select');
-  filter.setAttribute('aria-label', 'Filter servers');
-  [['all', 'All'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Your rules']]
-    .forEach(([value, label]) => { const option = el('option', label); option.value = value; filter.append(option); });
-  filter.value = serverFilter;
   const total = el('span', undefined, 'muted');
-  toolbar.append(search, filter, total);
+  toolbar.append(search, total);
   content.append(toolbar);
   const result = table(['Server or tool set', 'Rules come from', 'Rules', ''], 'servers');
   const body = el('tbody');
@@ -330,7 +321,6 @@ function serverTable(list) {
     }
   }
   search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); draw(); });
-  filter.addEventListener('change', () => { serverFilter = filter.value; draw(); });
   draw();
 }
 function serverDetail(server, redraw) {
