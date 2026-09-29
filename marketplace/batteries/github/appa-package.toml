@@ -7,5 +7,14 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
 detect = ["gh"]
-helpers = ["audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
+helpers = ["check.py", "audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
 setup = "Falls back to your gh login (gh auth login) when the variable is unset; a token needs the repo and read:org scopes, and user:email to name the viewer by address."
+
+[battery.readiness]
+command = ["python3", "check.py"]
+required_executables = ["python3"]
+
+[[battery.readiness.cli_alternatives]]
+executable = "gh"
+credential = "APPA_PROVIDER_GITHUB_TOKEN"
+login_hint = "gh auth login"

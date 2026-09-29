@@ -337,9 +337,29 @@ async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries
     axum::Json(catalog)
 }
 
+/// What `appa ui` shows while this runtime serves: the policy it runs, and which tokens and
+/// programs this process itself can reach. Loopback management only.
+async fn dashboard(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    let mut data = state.runtime.dashboard(state.adapter);
+    data["config"] = serde_json::json!(state.config);
+    data["prerequisites"] = crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default();
+    axum::Json(data)
+}
+
+/// Battery checks run in this process's environment, which is the one enforcement uses.
+async fn battery_check(
+    State(state): State<AppState>,
+    axum::Json(names): axum::Json<Vec<String>>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    crate::ui::runtime_check(&state.config, &state.battery_dirs, &names)
+        .await
+        .map(axum::Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let _reload = state.reload_gate.lock().await;
-    let config = Config::load_from(&state.config, &state.battery_dirs)
+    let config = Config::load_local(&state.config, &state.battery_dirs)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let battery_state = mcp::BatteryState {
         catalog: crate::batteries::snapshot(&state.battery_dirs),
@@ -474,7 +494,7 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
     } else {
         crate::batteries::prepare(batteries_dir)?
     };
-    let config = Config::load_from(config_path, &battery_dirs).map_err(|error| error.to_string())?;
+    let config = Config::load_local(config_path, &battery_dirs).map_err(|error| error.to_string())?;
     Ok((config, battery_dirs))
 }
 
@@ -595,6 +615,8 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .route("/status", get(status))
         .route("/report", post(report))
         .route("/reload", post(reload))
+        .route("/dashboard", get(dashboard))
+        .route("/battery-check", post(battery_check))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()
         .route("/health", get(health))
@@ -691,7 +713,7 @@ async fn loopback_management_only(
     request: Request,
     next: Next,
 ) -> Response {
-    if !management_peer_is_allowed(peer) {
+    if !management_peer_is_allowed(peer) || request.headers().contains_key("origin") {
         return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
     }
     next.run(request).await

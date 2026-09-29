@@ -7,3 +7,6 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["google-workspace", "claude_ai_Google_Drive"]
 helpers = ["audience-source.py"]
+
+[battery.readiness]
+required_executables = ["python3"]

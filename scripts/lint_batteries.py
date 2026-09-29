@@ -19,6 +19,11 @@ import tomllib
 from typing import Any, Iterator, Sequence
 
 
+# The runtime runs a battery's readiness check directly, not through an
+# appa.toml command, so reachability does not apply to it.
+READINESS_CHECK = "check.py"
+
+
 @dataclass(frozen=True)
 class Location:
     path: Path
@@ -520,8 +525,9 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                     )
                 )
 
+    readiness_check = root / READINESS_CHECK
     for path, (raw, location) in sorted(helper_paths.items()):
-        if path not in reachable:
+        if path not in reachable and path != readiness_check:
             diagnostics.append(
                 _diagnostic(
                     battery,
@@ -532,7 +538,7 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                 )
             )
     for path in _production_scripts(root):
-        if path not in reachable:
+        if path not in reachable and path != readiness_check:
             diagnostics.append(
                 _diagnostic(
                     battery,

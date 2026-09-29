@@ -38,6 +38,8 @@ fn duration(metric: &'static str, seconds: f64, attributes: &[KeyValue]) {
 }
 
 pub(crate) fn policy(result: &Result<ToolCallDecision, EventError>, tool: &str, seconds: f64) {
+    #[cfg(feature = "daemon")]
+    dashboard_record(result, seconds);
     let outcome = match result {
         Ok(ToolCallDecision::Allow { .. }) => "allowed",
         Ok(ToolCallDecision::Deny { .. }) => "denied",
@@ -255,4 +257,41 @@ mod tests {
             "non_success"
         );
     }
+}
+
+#[cfg(feature = "daemon")]
+#[derive(Default, serde::Serialize)]
+struct DashboardCounts {
+    allowed: u64,
+    denied: u64,
+    errors: u64,
+    total_seconds: f64,
+}
+#[cfg(feature = "daemon")]
+static DASHBOARD_COUNTS: std::sync::Mutex<DashboardCounts> = std::sync::Mutex::new(DashboardCounts {
+    allowed: 0,
+    denied: 0,
+    errors: 0,
+    total_seconds: 0.0,
+});
+#[cfg(feature = "daemon")]
+fn dashboard_record(result: &Result<ToolCallDecision, EventError>, seconds: f64) {
+    let mut counts = DASHBOARD_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match result {
+        Ok(ToolCallDecision::Allow { .. }) => counts.allowed += 1,
+        Ok(ToolCallDecision::Deny { .. }) => counts.denied += 1,
+        Err(_) => counts.errors += 1,
+    }
+    counts.total_seconds += seconds;
+}
+#[cfg(feature = "daemon")]
+pub(crate) fn dashboard_counts() -> serde_json::Value {
+    let counts = DASHBOARD_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let total = counts.allowed + counts.denied + counts.errors;
+    serde_json::json!({"allowed": counts.allowed, "denied": counts.denied, "errors": counts.errors,
+        "average_ms": if total == 0 { 0.0 } else { counts.total_seconds * 1000.0 / total as f64 }})
 }

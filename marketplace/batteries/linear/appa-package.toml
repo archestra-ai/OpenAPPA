@@ -7,3 +7,6 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["linear"]
 helpers = ["audience-source.py"]
+
+[battery.readiness]
+required_executables = ["python3"]
