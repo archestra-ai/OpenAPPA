@@ -256,7 +256,7 @@ function fallbackText() {
 function sourceChip(source) {
   if (source === CUSTOM) return el('span', 'your rules', 'chip');
   const battery = batteryByName(source);
-  return brokenBattery(battery) ? el('span', `${displayName(source)} · ${statusInfo(battery).label.toLowerCase()}`, 'chip alert') : el('span', displayName(source), 'chip battery');
+  return brokenBattery(battery) ? el('span', `🔋 ${displayName(source)} · ${statusInfo(battery).label.toLowerCase()}`, 'chip alert') : el('span', `🔋 ${displayName(source)}`, 'chip battery');
 }
 function shortName(name) {
   const parts = name.split('/');
