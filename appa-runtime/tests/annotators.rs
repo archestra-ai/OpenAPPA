@@ -448,7 +448,10 @@ fn context_service(service: &Annotator) {
         "repo",
         Answer::Wire(serde_json::json!({ "version": 1, "answer": { "visibility": "private" } })),
     );
-    service.set("quiet", Answer::Wire(serde_json::json!({ "version": 1, "answer": null })));
+    service.set(
+        "quiet",
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": null })),
+    );
     service.set("down", Answer::Down);
 }
 
@@ -464,7 +467,14 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open_with_store(config, store.clone(), None).expect("the deployment opens"));
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root(), principal: None }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
 
@@ -523,7 +533,10 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
         .map(|proposal| &proposal["annotation"])
         .collect();
     assert_eq!(pins.len(), 1);
-    assert_eq!(pins[0]["context"], context, "the decision records the context it was made with");
+    assert_eq!(
+        pins[0]["context"], context,
+        "the decision records the context it was made with"
+    );
 }
 
 #[tokio::test]

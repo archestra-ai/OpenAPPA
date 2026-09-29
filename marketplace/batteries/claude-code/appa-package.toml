@@ -6,4 +6,4 @@ description = "Static Claude Code tool rules: credential paths and commands narr
 policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude-code"]
-helpers = ["repository.py"]
+helpers = []

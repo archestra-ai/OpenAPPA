@@ -1241,7 +1241,7 @@ mod tests {
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
-        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, ContextArtifact,
+        AuthorityArtifact, AuthorityDeclaration, ContextArtifact, DeclaredPermits, DeclaredSanitizerTransition,
         MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
     #[cfg(unix)]
@@ -1427,7 +1427,10 @@ mod tests {
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },
-                artifact: AnnotationArtifact { args, context: Default::default() },
+                artifact: AnnotationArtifact {
+                    args,
+                    context: Default::default(),
+                },
             },
         }
     }

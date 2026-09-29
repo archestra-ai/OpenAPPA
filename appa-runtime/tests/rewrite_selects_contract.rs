@@ -248,7 +248,8 @@ fn policy_with_context(base: &str) -> String {
 #[tokio::test]
 async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, stubs) = narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_context).await;
+    let (runtime, stubs) =
+        narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_context).await;
 
     let mut proposal = read_file("private/q3.md");
     proposal.cwd = Some("/work/checkout".to_string());

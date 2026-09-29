@@ -1456,7 +1456,10 @@ mod tests {
                                 ContextProviderName::new("github"),
                                 ContextEntry::Answer(serde_json::json!({"viewer": "octocat", "token": "t0k3n"})),
                             ),
-                            (ContextProviderName::new("databricks"), ContextEntry::Error("timeout".to_string())),
+                            (
+                                ContextProviderName::new("databricks"),
+                                ContextEntry::Error("timeout".to_string()),
+                            ),
                         ]
                         .into(),
                     ),

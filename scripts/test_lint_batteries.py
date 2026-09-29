@@ -142,9 +142,9 @@ class BatteryLinterTests(unittest.TestCase):
         plugin = marketplace / "plugins" / "claude-code"
         plugin.mkdir(parents=True)
         policy = plugin / "default.appa.toml"
-        policy.write_text('[externals.inputs.helper]\ncommand = ["python3", "batteries/fixture/entry.py"]\n')
+        policy.write_text('[externals.context.helper]\ncommand = ["python3", "batteries/fixture/entry.py"]\n')
         self.assertEqual(self.kinds(battery), [])
-        policy.write_text('[externals.inputs.helper]\ncommand = ["python3", "batteries/other/entry.py"]\n')
+        policy.write_text('[externals.context.helper]\ncommand = ["python3", "batteries/other/entry.py"]\n')
         self.assertIn("unused manifest helper", self.kinds(battery))
 
     def test_commands_are_discovered_inside_nested_toml_values(self):

@@ -842,7 +842,10 @@ mod tests {
                     ContextProviderName::new("github"),
                     ContextEntry::Answer(serde_json::json!({"repo": {"visibility": "public"}})),
                 ),
-                (ContextProviderName::new("databricks"), ContextEntry::Error("timeout".to_string())),
+                (
+                    ContextProviderName::new("databricks"),
+                    ContextEntry::Error("timeout".to_string()),
+                ),
             ]
             .into(),
         );

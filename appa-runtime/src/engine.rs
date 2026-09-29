@@ -39,8 +39,8 @@
 
 use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims, Unroutable};
 use appa_engine::contract::{
-    AnnotationContext, AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
-    ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
+    AnnotationContext, AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements,
+    PinnedAnnotation, ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
-    ContextArtifact, HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
+    HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
@@ -2199,7 +2199,10 @@ impl RuntimeEngine {
                 cwd,
             )]));
         };
-        Ok(PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer)).with_context(context.clone()))
+        Ok(
+            PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
+                .with_context(context.clone()),
+        )
     }
 
     /// `cwd` is the directory the harness proposed the call from, when it reports one; only

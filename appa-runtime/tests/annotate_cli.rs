@@ -135,7 +135,13 @@ fn the_annotator_asked_by_the_cli_sees_what_the_context_providers_answered() {
          [externals.context.broken]\ncommand = [\"/bin/sh\", \"-c\", \"exit 1\"]\n"
     );
     let rows = annotate_with(&policy, CONTEXT_CLASSIFIER, "1");
-    let page = rows.iter().find(|row| row["id"] == "page").expect("the page call is reported");
-    assert_eq!(page["outcome"], "answer", "a provider that fails does not refuse the call");
+    let page = rows
+        .iter()
+        .find(|row| row["id"] == "page")
+        .expect("the page call is reported");
+    assert_eq!(
+        page["outcome"], "answer",
+        "a provider that fails does not refuse the call"
+    );
     assert_eq!(page["answer"]["delta"]["trust"], "trusted");
 }

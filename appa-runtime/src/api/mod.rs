@@ -1576,7 +1576,8 @@ impl Runtime {
             return Ok(None);
         };
         let consults = deployment.externals.context_consults(&context);
-        let context = session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
+        let context =
+            session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {

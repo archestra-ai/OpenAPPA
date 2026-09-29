@@ -28,11 +28,6 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
         target.join("appa.toml"),
     )
     .unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/claude-code/repository.py"),
-        target.join("repository.py"),
-    )
-    .unwrap();
     let command = fake_claude(dir.path(), "exit 1");
     let path = dir.path().join("appa.toml");
     let root_policy =

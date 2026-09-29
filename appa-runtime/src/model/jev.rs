@@ -31,9 +31,9 @@ use tokio::time::Instant;
 use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
-use appa_engine::contract::{AnnotationContext, ContextEntry};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
+use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_policy::AnnotatorBuiltin;
 use questions::Questions;
 
@@ -176,14 +176,20 @@ impl JevBackend {
                 },
             })?;
             if size > MAX_CONSULT_BYTES {
-                tracing::debug!(bytes = size, limit = MAX_CONSULT_BYTES, "the jev consult is too large to send");
+                tracing::debug!(
+                    bytes = size,
+                    limit = MAX_CONSULT_BYTES,
+                    "the jev consult is too large to send"
+                );
                 return Err((JevFailure::ConsultTooLarge, NoAnswerReason::Oversized));
             }
             &trimmed
         };
         let args = crate::secrets::redact_args(&artifact.args);
         let context = (!artifact.context.is_empty()).then(|| {
-            crate::secrets::redact_args(&serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"))
+            crate::secrets::redact_args(
+                &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
+            )
         });
         let state = State::of(&args, context.as_ref()).ok_or(unsupported)?;
         let key = self
@@ -510,7 +516,9 @@ fn without_context_answers(artifact: &AnnotationArtifact) -> AnnotationArtifact 
         .map(|provider| {
             (
                 provider.clone(),
-                ContextEntry::Error(format!("the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap")),
+                ContextEntry::Error(format!(
+                    "the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap"
+                )),
             )
         })
         .collect();
@@ -813,7 +821,10 @@ mod tests {
             name: "jev.tool-call".to_string(),
             body: ConsultBody::Annotation {
                 declaration: declaration(&["suspicious", "trusted"], &["self", "internal"]),
-                artifact: AnnotationArtifact { args, context: Default::default() },
+                artifact: AnnotationArtifact {
+                    args,
+                    context: Default::default(),
+                },
             },
         }
     }

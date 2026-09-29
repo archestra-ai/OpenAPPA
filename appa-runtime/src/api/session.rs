@@ -1777,7 +1777,11 @@ where
                 ConsultOutcome::Answer(serde_json::Value::Null) => return None,
                 ConsultOutcome::Answer(answer) => ContextEntry::Answer(answer),
                 ConsultOutcome::NoAnswer(reason) => {
-                    tracing::debug!(provider = consult.name, ?reason, "a context provider produced no answer");
+                    tracing::debug!(
+                        provider = consult.name,
+                        ?reason,
+                        "a context provider produced no answer"
+                    );
                     ContextEntry::Error(reason.diagnostic())
                 }
             };
