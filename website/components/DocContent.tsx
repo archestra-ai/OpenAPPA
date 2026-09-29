@@ -28,6 +28,7 @@ import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
 import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigure";
+import { TokenDistributionFigure } from "@/components/figures/TokenDistributionFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
 import { Oversimplified } from "@/components/Oversimplified";
@@ -118,6 +119,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-policy-stack": () => <PolicyStackFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-runtime-overview": () => <RuntimeOverviewFigure overview />,
+  "fig-token-distribution": () => <TokenDistributionFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "mascot-board": () => <MascotBoard />,
   "integration-paths": () => <IntegrationPaths />,

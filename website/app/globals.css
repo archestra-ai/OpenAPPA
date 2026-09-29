@@ -1684,6 +1684,165 @@ samp {
   color: var(--accent-hover);
 }
 
+/* Bench-Corp per-scenario token distribution. */
+.token-distribution-figure {
+  margin: 1.75rem 0 2rem;
+  overflow: hidden;
+  border: 1px solid var(--border-weak);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.token-distribution-header {
+  padding: 12px 14px 11px;
+  border-bottom: 1px solid var(--border-weak);
+  background: var(--bg-weak);
+}
+
+.token-distribution-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-strong);
+}
+
+.token-distribution-meta {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-weak);
+}
+
+.token-distribution-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 18px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.token-distribution-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.token-distribution-legend i {
+  width: 17px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.token-distribution-legend i.permissive {
+  background: var(--icon);
+}
+
+.token-distribution-legend i.budget-finalized {
+  border: 1px solid var(--danger);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--danger-bg) 0,
+    var(--danger-bg) 3px,
+    var(--danger) 3px,
+    var(--danger) 5px
+  );
+}
+
+.token-distribution-chart {
+  overflow-x: auto;
+  padding: 4px 12px 0;
+}
+
+.token-distribution-scroll-cue {
+  display: none;
+}
+
+.token-distribution-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--font-mono);
+}
+
+.token-distribution-gridline {
+  stroke: var(--border-weak);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.token-distribution-tick,
+.token-distribution-axis-title,
+.token-distribution-scenario {
+  fill: var(--text-weak);
+  font-size: 9px;
+}
+
+.token-distribution-axis-title {
+  font-size: 8px;
+}
+
+.token-distribution-column.guarded {
+  fill: var(--accent);
+}
+
+.token-distribution-column.permissive {
+  fill: var(--icon);
+}
+
+.token-distribution-column.budget-finalized {
+  fill: url(#token-budget-hatch);
+  stroke: var(--danger);
+  stroke-width: 1;
+}
+
+.token-budget-hatch-bg {
+  fill: var(--danger-bg);
+}
+
+.token-budget-hatch-line {
+  stroke: var(--danger);
+  stroke-width: 3;
+}
+
+.token-distribution-figure figcaption {
+  padding: 9px 14px 10px;
+  border-top: 1px solid var(--border-weak);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-weak);
+}
+
+@media (max-width: 560px) {
+  .token-distribution-header {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .token-distribution-chart svg {
+    width: 700px;
+    max-width: none;
+  }
+
+  .token-distribution-scroll-cue {
+    position: sticky;
+    left: 0;
+    display: block;
+    width: max-content;
+    padding: 2px 0;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-weak);
+  }
+
+  .token-distribution-figure figcaption {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+}
+
 /* ————————————————————————————————————————————————
    Advisory Board signup
    ———————————————————————————————————————————————— */
