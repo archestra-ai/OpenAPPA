@@ -152,7 +152,7 @@ pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search:
                 .map(|(name, _)| name.clone())
                 .collect()
         }
-        Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
+        Host::Codex | Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
     }
 }
 

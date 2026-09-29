@@ -186,7 +186,9 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     let codec = match host {
         AdapterName::ClaudeCode => appa_adapter_claude_code::codec(),
         AdapterName::Codex => appa_adapter_codex::codec(),
-        AdapterName::Kagent | AdapterName::Embedded => return block("the hook client does not serve this adapter"),
+        AdapterName::Kagent | AdapterName::Amp | AdapterName::Embedded => {
+            return block("the hook client does not serve this adapter");
+        }
     };
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {

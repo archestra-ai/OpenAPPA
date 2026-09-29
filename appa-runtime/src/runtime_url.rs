@@ -49,7 +49,9 @@ impl RuntimeUrl {
             (None, None) => RuntimeTarget {
                 url: match adapter {
                     AdapterName::Codex => DEFAULT_CODEX_RUNTIME_URL,
-                    AdapterName::ClaudeCode | AdapterName::Kagent | AdapterName::Embedded => DEFAULT_RUNTIME_URL,
+                    AdapterName::ClaudeCode | AdapterName::Kagent | AdapterName::Amp | AdapterName::Embedded => {
+                        DEFAULT_RUNTIME_URL
+                    }
                 }
                 .to_owned(),
                 user_owned: false,
