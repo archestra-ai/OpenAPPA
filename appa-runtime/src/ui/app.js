@@ -530,32 +530,65 @@ function credentialField(b, c) {
   if (c.source === 'environment') field.append(el('small', 'Environment overrides saved credentials.'));
   return field;
 }
+function stepList(b, title) {
+  const steps = el('div', undefined, 'steps');
+  if (title) steps.append(el('h3', title));
+  const list = el('ol');
+  b.setup.forEach(step => list.append(rich(step, 'li')));
+  steps.append(list);
+  return steps;
+}
+// Which way of signing in the latest ready check used.
+function inUse(b, authentication) { return b.check?.status === 'ready' && b.check.authentication === authentication; }
+function option(title, active) {
+  const card = el('div', undefined, `option${active ? ' active' : ''}`);
+  const head = el('div', undefined, 'option-head');
+  head.append(el('h3', title));
+  if (active) head.append(el('span', 'In use', 'in-use'));
+  card.append(head);
+  return card;
+}
 function configuration(b) {
   const form = el('form', undefined, 'battery-configuration');
-  form.setAttribute('aria-label', `Configure ${names[b.name] ?? b.name}`);
+  form.setAttribute('aria-label', `Configure ${displayName(b.name)}`);
   form.addEventListener('submit', event => { event.preventDefault(); save([b]); });
   if (b.benefit) {
     const why = el('div', undefined, 'why');
     why.append(el('h3', `Why connect ${displayName(b.name)}`), rich(b.benefit, 'p'));
     form.append(why);
   }
-  if (b.setup?.length) {
-    const steps = el('div', undefined, 'steps');
-    steps.append(el('h3', b.credentials.length ? 'How to get the token' : 'Setup steps'));
-    const list = el('ol');
-    b.setup.forEach(step => list.append(rich(step, 'li')));
-    steps.append(list);
-    form.append(steps);
-  }
-  b.credentials.forEach(c => form.append(credentialField(b, c)));
-  if (needsSetup(b)) b.alternatives.forEach(a => {
-    form.append(el('p', `${b.credentials.length ? 'Or sign in' : 'Sign in'} with ${a.executable}${a.installed ? '' : ' (install it first)'}. Run this in a terminal, then check again:`, 'requirement'), el('code', a.login_hint, 'login-hint'));
-  });
+  const tokenPart = [];
+  b.credentials.forEach(c => tokenPart.push(credentialField(b, c)));
   if (b.credentials.length) {
     const actions = el('div', undefined, 'actions');
     const submit = button('Save and check', () => {}); submit.type = 'submit'; actions.append(submit);
-    form.append(actions);
+    tokenPart.push(actions);
   }
+  if (!b.alternatives.length) {
+    if (b.setup?.length) form.append(stepList(b, b.credentials.length ? 'How to get the token' : 'Setup steps'));
+    form.append(...tokenPart);
+    return form;
+  }
+  // A CLI sign-in and a token are two ways to one result: show them side by side.
+  form.append(el('h3', `Choose how APPA signs in to ${displayName(b.name)}`, 'choose'));
+  const choices = el('div', undefined, 'choices');
+  for (const a of b.alternatives) {
+    const active = inUse(b, 'cli');
+    const card = option(`Sign in with ${a.executable}`, active);
+    card.append(el('p', active ? 'You are signed in, and APPA uses this login. To sign in again, run:'
+      : a.installed ? 'Run this in a terminal:' : `Install ${a.executable} first, then run this in a terminal:`),
+      el('code', a.login_hint, 'login-hint'));
+    const actions = el('div', undefined, 'actions');
+    actions.append(button('Check again', () => check([b]), 'secondary'));
+    card.append(actions);
+    choices.append(card);
+  }
+  choices.append(el('span', 'or', 'or'));
+  const card = option('Use a token', inUse(b, 'token'));
+  if (b.setup?.length) card.append(stepList(b));
+  card.append(...tokenPart);
+  choices.append(card);
+  form.append(choices);
   return form;
 }
 function save(list) {
