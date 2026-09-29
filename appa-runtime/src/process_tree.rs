@@ -238,8 +238,9 @@ mod tests {
     /// Starts a helper that holds the shell's stdout open for a minute.
     #[cfg(unix)]
     const HELPER: &str = "sleep 60 &";
+    /// The redirect is the inner `cmd`'s, so that `cmd` itself keeps the pipe.
     #[cfg(windows)]
-    const HELPER: &str = "start /b cmd /c ping -n 60 127.0.0.1 >nul &";
+    const HELPER: &str = r#"start /b cmd /c "ping -n 60 127.0.0.1 >nul" &"#;
     #[cfg(unix)]
     const BLOCK: &str = "sleep 60";
     #[cfg(windows)]
