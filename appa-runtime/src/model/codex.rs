@@ -9,6 +9,7 @@ use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 #[derive(Clone)]
 pub(crate) struct CodexBackend {
     config: Codex,
+    #[cfg_attr(not(unix), allow(dead_code))]
     max_body_bytes: usize,
     gates: ConsultGates,
 }
@@ -319,6 +320,7 @@ pub(crate) fn codex_schema(mut schema: serde_json::Value) -> Result<serde_json::
 }
 
 /// A completed answer is usable only if no tool could have run during the consult.
+#[cfg(unix)]
 fn validate_events(output: &[u8]) -> Result<(), NoAnswerReason> {
     #[derive(Clone, Copy, PartialEq)]
     enum State {
@@ -335,6 +337,7 @@ fn validate_events(output: &[u8]) -> Result<(), NoAnswerReason> {
             (State::AwaitThread, Some("thread.started")) => state = State::AwaitTurn,
             (State::AwaitTurn, Some("turn.started")) => state = State::InTurn,
             (State::InTurn, Some("turn.completed")) if saw_answer => state = State::Complete,
+            (State::InTurn, Some("error")) if recoverable_retry(&event) => {}
             (State::InTurn, Some("item.started" | "item.updated" | "item.completed")) => match event
                 .get("item")
                 .and_then(|item| item.get("type"))
@@ -350,6 +353,28 @@ fn validate_events(output: &[u8]) -> Result<(), NoAnswerReason> {
     (state == State::Complete)
         .then_some(())
         .ok_or(NoAnswerReason::Malformed)
+}
+
+/// `codex exec --json` omits the app-server's `will_retry` flag. Its reconnect
+/// diagnostic is the only top-level error that can precede a successful turn.
+#[cfg(unix)]
+fn recoverable_retry(event: &serde_json::Value) -> bool {
+    let Some(message) = event.get("message").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(counts) = message
+        .strip_prefix("Reconnecting... ")
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    let Some((attempt, limit)) = counts.split_once('/') else {
+        return false;
+    };
+    match (attempt.parse::<u32>(), limit.parse::<u32>()) {
+        (Ok(attempt), Ok(limit)) => attempt > 0 && attempt <= limit,
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -406,7 +431,7 @@ async fn run(
     Err(NoAnswerReason::Unregistered)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -444,6 +469,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_tool_events_and_incomplete_turns() {
         assert_eq!(
@@ -475,6 +501,30 @@ mod tests {
         );
         assert_eq!(
             validate_events(b"{\"type\":\"turn.failed\"}\n"),
+            Err(NoAnswerReason::Malformed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_recovered_retry_but_rejects_other_errors() {
+        let prefix: &[u8] = b"{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n";
+        let answer: &[u8] = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n";
+        let complete: &[u8] = b"{\"type\":\"turn.completed\"}\n";
+        let retry: &[u8] = b"{\"type\":\"error\",\"message\":\"Reconnecting... 1/5 (connection lost)\"}\n";
+        assert_eq!(validate_events(&[prefix, retry, answer, complete].concat()), Ok(()));
+        for error in [
+            b"{\"type\":\"error\",\"message\":\"authentication failed\"}\n".as_slice(),
+            b"{\"type\":\"error\",\"message\":\"Reconnecting... 6/5\"}\n".as_slice(),
+            b"{\"type\":\"error\",\"message\":\"Reconnecting... invalid\"}\n".as_slice(),
+        ] {
+            assert_eq!(
+                validate_events(&[prefix, error, answer, complete].concat()),
+                Err(NoAnswerReason::Malformed)
+            );
+        }
+        assert_eq!(
+            validate_events(&[prefix, retry, complete].concat()),
             Err(NoAnswerReason::Malformed)
         );
     }
