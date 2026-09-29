@@ -403,9 +403,10 @@ function journey() {
     { name: 'Claude Code', key: 'claude', ask: 'hnn? zorp?', answer: 'hmm… k!' },
   ];
   const figure = el('figure', undefined, 'journey');
-  const scene = svg('svg', { viewBox: '0 17 240 41', role: 'img', 'shape-rendering': 'crispEdges',
+  const scene = svg('svg', { viewBox: '0 17 250 41', role: 'img', 'shape-rendering': 'crispEdges',
     'aria-label': 'The APPA mascot visits GitHub, Slack and Claude Code and asks each one a question.' });
-  scene.append(svg('rect', { x: 0, y: 56, width: 240, height: 1, class: 'ground' }));
+  // The mascot's first stop starts at x 15 and the last kiosk ends at 235: 250 leaves 15 on each side.
+  scene.append(svg('rect', { x: 0, y: 56, width: 250, height: 1, class: 'ground' }));
   stops.forEach((stop, i) => {
     const cx = 55 + 80 * i;
     const kiosk = svg('g', { class: `kiosk ${stop.key}` });
