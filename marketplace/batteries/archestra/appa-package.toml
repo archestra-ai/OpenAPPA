@@ -12,7 +12,6 @@ setup = [
   "Set `ARCHESTRA_BASE_URL` to your Archestra API base, for example `https://archestra.example.com`.",
   "In Archestra, click your name in the sidebar, open your personal settings, then API Keys.",
   "Create a personal API key as a user whose role can read the organization's members and teams. The key starts with `arch_`.",
-  "Set `APPA_PROVIDER_ARCHESTRA_TOKEN` to the key.",
 ]
 
 [battery.readiness]

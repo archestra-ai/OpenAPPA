@@ -9,6 +9,5 @@ helpers = []
 benefit = "APPA asks TypeSafe's Jev model for the audience and trust of each tool call that you route to it. With this, APPA can label calls that have no static rule."
 setup = [
   "Get an API key from TypeSafe. APPA sends every annotated call's name, description, and arguments to https://api.typesafe.ai.",
-  "Set `APPA_PROVIDER_JEV_API_KEY` to the key where the APPA runtime runs.",
   "Route a tool to the annotator in your root config with `annotator = \"jev.tool-call\"`.",
 ]

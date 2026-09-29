@@ -10,9 +10,7 @@ detect = ["gh"]
 helpers = ["check.py", "audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
 benefit = "APPA asks GitHub if a repository is public or private, who its collaborators are, and who wrote each issue and pull request. With this, APPA lets private-repository data flow only to its collaborators and marks text from outside authors as suspicious."
 setup = [
-  "To use your GitHub CLI login, run `gh auth login`, then `gh auth refresh -s user:email`.",
-  "Or create a classic personal access token at https://github.com/settings/tokens/new with the `repo`, `read:org`, and `user:email` scopes.",
-  "Set `APPA_PROVIDER_GITHUB_TOKEN` to the token. A classic token starts with `ghp_`. When it is not set, APPA uses your `gh` login.",
+  "Create a classic personal access token at https://github.com/settings/tokens/new with the `repo`, `read:org`, and `user:email` scopes. It starts with `ghp_`.",
   "To list a repository's collaborators, the token's owner needs push access to that repository.",
   "For GitHub Enterprise Server, set `GITHUB_API_URL` to its API root, for example `https://github.example.com/api/v3`.",
 ]
@@ -24,4 +22,4 @@ required_executables = ["python3"]
 [[battery.readiness.cli_alternatives]]
 executable = "gh"
 credential = "APPA_PROVIDER_GITHUB_TOKEN"
-login_hint = "gh auth login"
+login_hint = "gh auth login -s user:email"

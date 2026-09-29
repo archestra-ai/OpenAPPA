@@ -9,9 +9,7 @@ namespaces = ["huggingface"]
 helpers = ["check.py", "audience-source.py", "repo-visibility.py", "hf_token.py"]
 benefit = "APPA asks the Hugging Face Hub if each repository a call names is public, private, or gated. With this, APPA keeps private and gated content with you, and writes to a public repository only data that anyone may see."
 setup = [
-  "To use your Hugging Face CLI login, run `hf auth login`.",
-  "Or create a token of type Read at https://huggingface.co/settings/tokens. It starts with `hf_`.",
-  "Set `APPA_PROVIDER_HUGGINGFACE_TOKEN` to the token. When it is not set, APPA uses the token that `hf auth login` stored.",
+  "Create a token of type Read at https://huggingface.co/settings/tokens. It starts with `hf_`.",
   "The MCP server connection has its own token: it needs Write only for `hf_fs_write` and `create_repo`.",
   "For a private Hub endpoint, set `HF_ENDPOINT` to its root URL.",
 ]

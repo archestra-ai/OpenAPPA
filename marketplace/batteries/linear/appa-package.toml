@@ -11,7 +11,6 @@ benefit = "APPA asks Linear who can see each team, issue, project, and document.
 setup = [
   "In Linear, open Settings, then Security & access: https://linear.app/settings/account/security",
   "Create a personal API key. The key needs only read access. It starts with `lin_api_`.",
-  "Set `APPA_PROVIDER_LINEAR_TOKEN` to the key.",
 ]
 
 [battery.readiness]

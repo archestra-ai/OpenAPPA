@@ -65,7 +65,7 @@ benefit = "APPA asks the Slack API who can read each channel. With this, APPA le
 setup = [
   "Create a Slack app at https://api.slack.com/apps.",
   "In OAuth & Permissions, add the User Token Scopes `users:read` and `channels:read`.",
-  "Set `APPA_PROVIDER_SLACK_TOKEN` to the User OAuth Token. It starts with `xoxp-`.",
+  "Click Install to Workspace and copy the User OAuth Token. It starts with `xoxp-`.",
 ]
 ```
 
@@ -75,14 +75,17 @@ setup = [
 - `setup` is a list of steps, one line each, in imperative mood. Say
   which kind of token to make, where to make it, which scopes it needs,
   the prefix it starts with, and any other variable to set. Name the
-  scopes the helpers' API calls need, not more.
+  scopes the helpers' API calls need, not more. Do not describe a CLI
+  sign-in here: declare it as a CLI alternative (see below), and `appa ui`
+  shows it as a separate choice beside the token field.
 
 A step may contain `code spans` in backticks and bare `https://` URLs.
 `appa ui` shows code spans as code and URLs as links. No other Markdown
 is rendered. `appa battery install` prints the benefit and the numbered
 steps after the battery is included, beside every `token_env` variable
-the policy's bindings name. Thus a step does not have to name a variable
-only to say that it exists. A blank or multi-line `benefit` or step makes
+the policy's bindings name, and `appa ui` labels the token field with the
+variable. Thus a step does not tell the person to set the credential
+variable. A blank or multi-line `benefit` or step makes
 the manifest invalid.
 
 Run `bash scripts/appa-marketplace.sh` to generate the catalog entry and
@@ -110,13 +113,15 @@ required_executables = ["python3"]
 [[battery.readiness.cli_alternatives]]
 executable = "gh"
 credential = "APPA_PROVIDER_GITHUB_TOKEN"
-login_hint = "gh auth login"
+login_hint = "gh auth login -s user:email"
 ```
 
 List `check.py` in `battery.helpers`. The command must name `python3` and one
 packaged helper, and `required_executables` must then include `python3`. Omit
 `command` to declare executable prerequisites without a provider check. A CLI alternative is optional when its credential is supplied;
 a CLI needed even with a token belongs in `required_executables` too.
+`login_hint` is the one command that signs the person in with every scope
+the helpers need.
 
 The readiness helper receives only this battery's declared APPA credential
 variables. It must perform read-only checks, reuse the battery's authentication
