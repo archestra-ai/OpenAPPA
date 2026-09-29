@@ -1114,7 +1114,6 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
 /// `parent` without the runtime's own namespace. A consult child starts from exactly this,
 /// its environment cleared first: filtering one read of the environment, rather than
 /// removing names from the live one, leaves no gap for a variable set in between.
-#[cfg(unix)]
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {

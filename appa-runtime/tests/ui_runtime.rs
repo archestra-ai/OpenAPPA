@@ -85,7 +85,18 @@ selectors = [{ template = "viewer", feeds = "self" }]
     let ui = |runtime_url: &str| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
         command
-            .args(["ui", "--no-open", "--setup", "--battery", "demo", "--port", "0", "--runtime-url", runtime_url, "--config"])
+            .args([
+                "ui",
+                "--no-open",
+                "--setup",
+                "--battery",
+                "demo",
+                "--port",
+                "0",
+                "--runtime-url",
+                runtime_url,
+                "--config",
+            ])
             .arg(&config)
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -118,7 +129,10 @@ selectors = [{ template = "viewer", feeds = "self" }]
     let mut refused = runtime("refused.log");
     let status = refused.0.wait().unwrap();
     assert!(!status.success(), "the runtime must refuse to start");
-    assert!(first_line(&mut refused).is_empty(), "a refused runtime announces no address");
+    assert!(
+        first_line(&mut refused).is_empty(),
+        "a refused runtime announces no address"
+    );
 
     // Setup needs no runtime: `appa ui` serves the page and saves the token.
     let mut page = ui("http://127.0.0.1:1");
@@ -126,7 +140,15 @@ selectors = [{ template = "viewer", feeds = "self" }]
     assert!(link.query().unwrap().contains("batteries=demo"));
     assert!(link.fragment().is_none(), "UI URLs need no authentication token");
     let origin = link.origin().ascii_serialization();
-    assert!(client.get(format!("{origin}/api/state")).send().await.unwrap().status().is_success());
+    assert!(
+        client
+            .get(format!("{origin}/api/state"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     let state = save(origin.clone()).await;
     assert_eq!(state["batteries"][0]["check"]["status"], "ready");
     assert!(state["runtime"].is_null());
@@ -146,7 +168,10 @@ selectors = [{ template = "viewer", feeds = "self" }]
 
     // With a runtime serving this configuration, the page reports it and a save reloads it.
     let mut page = ui(&url);
-    let origin = url::Url::parse(&first_line(&mut page)).unwrap().origin().ascii_serialization();
+    let origin = url::Url::parse(&first_line(&mut page))
+        .unwrap()
+        .origin()
+        .ascii_serialization();
     let state = save(origin.clone()).await;
     assert!(!state["runtime"].is_null());
     assert_eq!(state["applied"], "reloaded");
@@ -181,7 +206,12 @@ selectors = [{ template = "viewer", feeds = "self" }]
     );
     // The runtime's management routes refuse browser requests.
     assert_eq!(
-        get("/dashboard").header("Origin", &origin).send().await.unwrap().status(),
+        get("/dashboard")
+            .header("Origin", &origin)
+            .send()
+            .await
+            .unwrap()
+            .status(),
         StatusCode::FORBIDDEN
     );
 }

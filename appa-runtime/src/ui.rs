@@ -262,7 +262,9 @@ impl Local {
                 }
             }
         }
-        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}))
+        Ok(
+            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}),
+        )
     }
 
     async fn check(&self, names: &[String]) -> Result<(), String> {
@@ -546,9 +548,9 @@ fn launch(args: Args) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .map_err(|e| match e.kind() {
-                std::io::ErrorKind::AddrInUse => format!(
-                    "port {port} is in use; is appa ui already running? Use --port to choose another."
-                ),
+                std::io::ErrorKind::AddrInUse => {
+                    format!("port {port} is in use; is appa ui already running? Use --port to choose another.")
+                }
                 _ => format!("cannot listen on 127.0.0.1:{port}: {e}"),
             })?;
         let authority = listener.local_addr().map_err(|e| e.to_string())?.to_string();
@@ -564,13 +566,20 @@ fn launch(args: Args) -> Result<(), String> {
         if !args.no_open {
             open_browser(url.as_str());
         }
-        let web = Web { local, authority, origin };
-        axum::serve(listener, router(web).into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
-            .map_err(|e| e.to_string())
+        let web = Web {
+            local,
+            authority,
+            origin,
+        };
+        axum::serve(
+            listener,
+            router(web).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .map_err(|e| e.to_string())
     })
 }
 /// The page sits one port above the runtime it manages, so its address stays the same.
@@ -595,7 +604,13 @@ async fn reload_runtime(url: String) -> Applied {
             Ok(endpoint) => endpoint,
             Err(error) => return Applied::Refused(error),
         };
-        match crate::loopback_http::request(&endpoint, "POST", "/reload", b"", &Deadline::spanning(Duration::from_secs(90))) {
+        match crate::loopback_http::request(
+            &endpoint,
+            "POST",
+            "/reload",
+            b"",
+            &Deadline::spanning(Duration::from_secs(90)),
+        ) {
             Ok(answer) if answer.is_success() => Applied::Reloaded,
             Ok(answer) => Applied::Refused(String::from_utf8_lossy(&answer.body).into_owned()),
             Err(_) => Applied::NotRunning,
