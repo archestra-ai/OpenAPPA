@@ -55,8 +55,9 @@ A battery is ready when nothing it needs is missing: its declared executables,
 the variables its policy binds as `token_env`, and the result of its provider
 check when it declares one. A battery that declares nothing is ready. Without
 a provider check, a set token is ready but untested.
-`appa ui` serves the page itself on a random loopback port and keeps serving
-until you press Ctrl-C. It works whether or not the runtime is running, so a
+`appa ui` serves the page itself on `127.0.0.1`, one port above the runtime's
+(8788 by default; `--port` overrides it), and keeps serving until you press
+Ctrl-C. If that port is busy, it stops and says so. It works whether or not the runtime is running, so a
 runtime that refuses to start for a missing token or an invalid policy can be
 fixed from the page.
 

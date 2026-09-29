@@ -39,6 +39,9 @@ pub struct Args {
     /// Print the browser URL without opening the browser.
     #[arg(long)]
     no_open: bool,
+    /// Loopback port for the page; the runtime's port + 1 when absent.
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[derive(clap::Args)]
@@ -331,6 +334,7 @@ fn runtime_local(config: &Path, dirs: &[PathBuf]) -> Result<Local, String> {
         setup: false,
         runtime_url: String::new(),
         no_open: true,
+        port: None,
     })
 }
 /// Inspect the daemon's actual environment, never the browser launcher's approximation.
@@ -538,9 +542,15 @@ fn launch(args: Args) -> Result<(), String> {
     let local = Arc::new(Local::new(&args)?);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let port = page_port(&args)?;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
-            .map_err(|e| format!("cannot listen on loopback: {e}"))?;
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AddrInUse => format!(
+                    "port {port} is in use; is appa ui already running? Use --port to choose another."
+                ),
+                _ => format!("cannot listen on 127.0.0.1:{port}: {e}"),
+            })?;
         let authority = listener.local_addr().map_err(|e| e.to_string())?.to_string();
         let origin = format!("http://{authority}");
         let mut url = url::Url::parse(&origin).expect("loopback origin");
@@ -562,6 +572,17 @@ fn launch(args: Args) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())
     })
+}
+/// The page sits one port above the runtime it manages, so its address stays the same.
+fn page_port(args: &Args) -> Result<u16, String> {
+    if let Some(port) = args.port {
+        return Ok(port);
+    }
+    url::Url::parse(&args.runtime_url)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+        .and_then(|port| port.checked_add(1))
+        .ok_or_else(|| format!("cannot derive a page port from {}; use --port", args.runtime_url))
 }
 enum Applied {
     Reloaded,
@@ -654,6 +675,7 @@ pub fn describe_readiness(config: &Path, dirs: &[PathBuf]) -> Result<String, Str
         battery: vec![],
         setup: false,
         no_open: true,
+        port: None,
         runtime_url: std::env::var("APPA_RUNTIME_URL")
             .unwrap_or_else(|_| crate::runtime_url::DEFAULT_RUNTIME_URL.into()),
     };
@@ -687,6 +709,7 @@ pub fn status(args: StatusArgs) -> ExitCode {
         runtime_url: std::env::var("APPA_RUNTIME_URL")
             .unwrap_or_else(|_| crate::runtime_url::DEFAULT_RUNTIME_URL.into()),
         no_open: true,
+        port: None,
     };
     let result = (|| {
         let local = Local::new(&options)?;
@@ -739,6 +762,7 @@ mod tests {
             setup: true,
             runtime_url: "http://127.0.0.1:1".into(),
             no_open: true,
+            port: None,
         }
     }
 
@@ -833,6 +857,18 @@ mod tests {
         );
         assert!(local.store.values().unwrap().is_empty());
         task.abort();
+    }
+
+    #[test]
+    fn the_page_sits_one_port_above_the_runtime_unless_a_port_is_given() {
+        let mut args = fixture(tempfile::tempdir().unwrap().path());
+        args.runtime_url = "http://127.0.0.1:8787".into();
+        assert_eq!(page_port(&args), Ok(8788));
+        args.port = Some(9000);
+        assert_eq!(page_port(&args), Ok(9000));
+        args.port = None;
+        args.runtime_url = "http://127.0.0.1:65535".into();
+        assert!(page_port(&args).is_err());
     }
 
     #[tokio::test]

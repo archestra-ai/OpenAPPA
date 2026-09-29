@@ -85,7 +85,7 @@ selectors = [{ template = "viewer", feeds = "self" }]
     let ui = |runtime_url: &str| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
         command
-            .args(["ui", "--no-open", "--setup", "--battery", "demo", "--runtime-url", runtime_url, "--config"])
+            .args(["ui", "--no-open", "--setup", "--battery", "demo", "--port", "0", "--runtime-url", runtime_url, "--config"])
             .arg(&config)
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
