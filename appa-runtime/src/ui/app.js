@@ -99,8 +99,7 @@ const CUSTOM = 'root configuration';
 const kinds = [
   { key: 'battery', label: 'Battery rules' },
   { key: 'custom', label: 'Custom rules only' },
-  { key: 'unknown', label: 'Rules, source unknown' },
-  { key: 'none', label: 'No rules' },
+  { key: 'unknown', label: 'Source unknown' },
 ];
 function namespaceOf(rule) {
   const name = rule.name ?? '';
@@ -123,20 +122,18 @@ function sourceOf(rule) { return state.origins[rule.name] ?? null; }
 function servers() {
   const map = new Map();
   const entry = key => {
-    if (!map.has(key)) map.set(key, { key, title: serverTitle(key), rules: [], configured: false });
+    if (!map.has(key)) map.set(key, { key, title: serverTitle(key), rules: [] });
     return map.get(key);
   };
   for (const rule of state.policy?.tool ?? []) {
     const key = namespaceOf(rule);
     if (key && key !== 'appa') entry(key).rules.push(rule);
   }
-  for (const name of state.configured_servers) if (name !== 'appa') entry(name).configured = true;
   for (const server of map.values()) {
     const sources = server.rules.map(sourceOf);
     server.sources = [...new Set(sources.filter(Boolean))];
     server.tools = new Set(server.rules.map(rule => rule.name.split('(')[0])).size;
-    server.kind = !server.rules.length ? 'none'
-      : server.sources.some(source => source !== CUSTOM) ? 'battery'
+    server.kind = server.sources.some(source => source !== CUSTOM) ? 'battery'
       : sources.every(Boolean) ? 'custom' : 'unknown';
   }
   return [...map.values()].sort((a, b) => Number(isMcp(a.key)) - Number(isMcp(b.key)) || a.title.localeCompare(b.title));
@@ -152,24 +149,19 @@ function svg(tag, attrs) {
 function overview() {
   heading('Policy coverage', '', button('Refresh', refresh, 'secondary'));
   const list = servers(), mcp = list.filter(s => isMcp(s.key));
-  const wildcard = (state.policy?.tool ?? []).some(rule => rule.name === '*');
   const cards = el('div', undefined, 'cards');
-  cards.append(coverageCard(mcp, wildcard), batteriesCard());
+  cards.append(coverageCard(mcp), batteriesCard());
   content.append(cards);
-  if (!Object.keys(state.origins).length && (state.policy?.tool ?? []).length) {
-    content.append(el('p', 'Rule sources are unavailable: the running policy differs from the configuration on disk.', 'muted'));
-  }
-  serverTable(list, wildcard);
+  serverTable(list);
   errors();
 }
-function coverageCard(mcp, wildcard) {
+function coverageCard(mcp) {
   const card = el('section', undefined, 'card');
   const head = el('div');
-  head.append(el('h2', 'MCP servers'), el('p', `What decides calls to each of your ${plural(mcp.length, 'MCP server')}.`, 'muted'));
+  head.append(el('h2', 'MCP servers'), el('p', 'Where the rules for each MCP server in the policy come from.', 'muted'));
   card.append(head);
-  if (!mcp.length) { card.append(el('p', 'No MCP servers are configured or named by a rule.', 'empty')); return card; }
+  if (!mcp.length) { card.append(el('p', 'No rule names an MCP server.', 'empty')); return card; }
   const count = key => mcp.filter(s => s.kind === key).length;
-  const covered = mcp.length - count('none');
   const pct = n => Math.round(n * 100 / mcp.length);
   const body = el('div', undefined, 'coverage');
   const donut = el('div', undefined, 'donut');
@@ -179,16 +171,16 @@ function coverageCard(mcp, wildcard) {
   let offset = 0;
   for (const kind of kinds) {
     const length = count(kind.key) / mcp.length * circumference;
-    if (!length || kind.key === 'none') { offset += length; continue; }
+    if (!length) continue;
     chart.append(svg('circle', { cx: 60, cy: 60, r: radius, class: `arc ${kind.key}`,
       'stroke-dasharray': `${length} ${circumference}`, 'stroke-dashoffset': -offset }));
     offset += length;
   }
   const center = el('div', undefined, 'donut-center');
-  center.append(el('strong', `${pct(covered)}%`), el('span', 'have a rule'));
+  center.append(el('strong', mcp.length), el('span', mcp.length === 1 ? 'MCP server' : 'MCP servers'));
   donut.append(chart, center);
   donut.setAttribute('role', 'img');
-  donut.setAttribute('aria-label', `${covered} of ${mcp.length} MCP servers have a rule`);
+  donut.setAttribute('aria-label', `${plural(mcp.length, 'MCP server')} in the policy`);
   const legend = el('ul', undefined, 'legend');
   for (const kind of kinds) {
     const n = count(kind.key);
@@ -198,19 +190,24 @@ function coverageCard(mcp, wildcard) {
     legend.append(item);
   }
   body.append(donut, legend);
-  card.append(body);
-  if (count('none')) {
-    card.append(el('p', wildcard
-      ? 'Calls to tools without a rule go to the wildcard annotator, one call at a time.'
-      : 'Calls to tools without a rule are refused.', 'muted'));
-  }
+  card.append(body, el('p', fallbackText(), 'muted'));
   return card;
+}
+// What happens to a call no rule names, read from the policy's `*` rule.
+function fallbackText() {
+  const policy = state.policy ?? {};
+  const wildcard = (policy.tool ?? []).find(rule => rule.name === '*');
+  if (!wildcard || (wildcard.requires?.attention ?? []).includes('blocked')) return 'Calls to tools without a rule are refused.';
+  if (!wildcard.annotator) return 'Calls to tools without a rule get the wildcard rule: one fixed rule for all of them.';
+  const annotator = (policy.annotator ?? []).find(a => a.name === wildcard.annotator);
+  const asks = (annotator?.marks ?? []).length > 0;
+  return `Calls to tools without a rule go to the wildcard rule. Before each call runs, the ${wildcard.annotator} annotator reads the call and writes a rule for that call only${asks ? '. That rule can ask you to approve the call' : ''}.`;
 }
 function batteriesCard() {
   const card = el('section', undefined, 'card');
   const head = el('div');
-  head.append(el('h2', 'Batteries'), el('p', 'Ready-made rules for common MCP servers.', 'muted'));
-  const inUse = state.batteries.filter(b => b.included || b.configured);
+  head.append(el('h2', 'Batteries'), el('p', "Reusable policy for a set of tools, such as an MCP server or Claude Code's built-in tools.", 'muted'));
+  const inUse = state.batteries.filter(b => b.configured);
   const broken = inUse.filter(brokenBattery);
   const tiles = el('div', undefined, 'tiles');
   const tile = (label, value, names, kind = '') => {
@@ -256,13 +253,12 @@ function clickable(row, open, toggle) {
   });
 }
 function serverMatches(server) {
-  if (serverFilter === 'none' && server.rules.length) return false;
   if (serverFilter === 'setup' && !server.sources.some(source => brokenBattery(batteryByName(source)))) return false;
   if (serverFilter === 'battery' && !server.sources.some(source => source !== CUSTOM)) return false;
   if (serverFilter === 'custom' && !server.sources.includes(CUSTOM)) return false;
   return !query || server.title.toLowerCase().includes(query) || server.rules.some(rule => rule.name.toLowerCase().includes(query));
 }
-function serverTable(list, wildcard) {
+function serverTable(list) {
   content.append(el('h2', 'Servers and built-in tools'));
   const toolbar = el('div', undefined, 'toolbar');
   const search = el('input', undefined, 'search');
@@ -270,7 +266,7 @@ function serverTable(list, wildcard) {
   search.setAttribute('aria-label', 'Search servers and rules');
   const filter = el('select');
   filter.setAttribute('aria-label', 'Filter servers');
-  [['all', 'All servers'], ['none', 'No rules'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Custom rules']]
+  [['all', 'All servers'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Custom rules']]
     .forEach(([value, label]) => { const option = el('option', label); option.value = value; filter.append(option); });
   filter.value = serverFilter;
   const total = el('span', undefined, 'muted');
@@ -289,16 +285,15 @@ function serverTable(list, wildcard) {
       const row = el('tr', undefined, 'server-row');
       const name = el('td');
       name.append(el('span', server.title, 'server-name'));
-      if (isMcp(server.key)) name.append(el('span', server.configured ? 'Configured in Claude Code' : 'Named by rules', 'server-origin'));
       const sources = el('td');
       if (server.sources.length) sources.append(...server.sources.map(sourceChip));
-      else sources.append(el('span', server.rules.length ? 'Unknown' : 'None', 'muted'));
-      const rules = el('td', server.rules.length ? `${plural(server.rules.length, 'rule')} · ${plural(server.tools, 'tool')}` : 'No rules', server.rules.length ? '' : 'muted');
+      else sources.append(el('span', 'Unknown', 'muted'));
+      const rules = el('td', `${plural(server.rules.length, 'rule')} · ${plural(server.tools, 'tool')}`);
       const chevron = el('td', open ? '▾' : '▸', 'chevron');
       row.append(name, sources, rules, chevron);
       clickable(row, open, () => { open ? serversOpen.delete(server.key) : serversOpen.add(server.key); draw(); });
       body.append(row);
-      if (open) body.append(serverDetail(server, wildcard, draw));
+      if (open) body.append(serverDetail(server, draw));
     }
     if (!shown.length) {
       const row = el('tr'), cell = el('td', 'No matching servers.', 'empty'); cell.colSpan = 4; row.append(cell); body.append(row);
@@ -308,16 +303,10 @@ function serverTable(list, wildcard) {
   filter.addEventListener('change', () => { serverFilter = filter.value; draw(); });
   draw();
 }
-function serverDetail(server, wildcard, redraw) {
+function serverDetail(server, redraw) {
   const row = el('tr', undefined, 'server-detail'), cell = el('td');
   cell.colSpan = 4;
   row.append(cell);
-  if (!server.rules.length) {
-    cell.append(el('p', wildcard
-      ? 'No rule names this server. The wildcard annotator judges each call to its tools.'
-      : 'No rule names this server. Calls to its tools are refused.', 'muted'));
-    return row;
-  }
   const groups = new Map();
   for (const rule of server.rules) {
     if (query && !rule.name.toLowerCase().includes(query) && !server.title.toLowerCase().includes(query)) continue;
@@ -369,7 +358,7 @@ function readinessDetail(b) {
 }
 function configurable(b) { return b.credentials.length > 0 || (needsSetup(b) && b.alternatives.length > 0); }
 function batteries() {
-  heading('Batteries', 'Ready means nothing a battery needs is missing. A battery without a connection check cannot tell whether the provider accepts its token.');
+  heading('Batteries', "Reusable policy for a set of tools, such as an MCP server or Claude Code's built-in tools.");
   const list = state.batteries.filter(relevant);
   if (!list.length) content.append(el('p', 'No batteries in use. Include one with appa battery install <name>.', 'empty'));
   else {

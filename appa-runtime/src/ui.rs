@@ -230,27 +230,14 @@ impl Local {
                 errors.push(format!("{name}: configured battery is unavailable"));
             }
         }
-        let configured_policy = config.as_ref().map(|c| json!(c.policy_file().value()));
-        let policy = runtime
+        // The overview reads the configuration on disk: the composed policy, and each
+        // rule's origin from the root file or the included battery that names it first.
+        let policy = config
             .as_ref()
-            .map(|r| r["policy"].clone())
-            .or(configured_policy)
+            .map(|c| json!(c.policy_file().value()))
             .unwrap_or(json!({}));
-        let configured_servers: Vec<_> = std::env::current_dir()
-            .ok()
-            .map(|cwd| {
-                crate::installation::discover::servers(appa_package::Host::ClaudeCode, &cwd)
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Policy origins are hints only when the loaded policy matches the current disk configuration.
-        let disk_matches = config
-            .as_ref()
-            .is_some_and(|c| json!(c.policy_file().value()) == policy);
         let mut origins = BTreeMap::new();
-        if disk_matches {
+        if config.is_some() {
             let paths = std::iter::once(("root configuration".to_string(), self.config.clone())).chain(
                 entries
                     .iter()
@@ -276,12 +263,7 @@ impl Local {
                 }
             }
         }
-        let policy_source = if runtime.is_some() { "active" } else { "configured" };
-        Ok(
-            json!({"batteries": batteries, "errors": errors, "runtime": runtime, "policy": policy,
-            "policy_source": policy_source,
-            "origins": origins, "configured_servers": configured_servers}),
-        )
+        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime, "policy": policy, "origins": origins}))
     }
 
     async fn check(&self, names: &[String]) -> Result<(), String> {
