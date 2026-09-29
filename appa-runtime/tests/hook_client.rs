@@ -84,6 +84,53 @@ fn run_client(url: &str, stdin: &str) -> (i32, String) {
     )
 }
 
+#[test]
+fn codex_bash_is_denied_until_an_approved_wrapper_job_exists() {
+    let event = r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"c1","tool_input":{"command":"printf secret"}}"#;
+    let (status, output) = finish(
+        child_process::spawn(client("http://127.0.0.1:1").arg("--adapter").arg("codex"))
+            .expect("the Codex hook client starts"),
+        event,
+    );
+    assert_eq!(status, 0);
+    let answer: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(!output.contains("printf secret"));
+}
+
+#[test]
+fn codex_hook_refuses_claude_runtime_auto_start() {
+    let event = r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#;
+    let output = finish_output(
+        child_process::spawn(
+            client("http://127.0.0.1:8787")
+                .arg("--adapter")
+                .arg("codex")
+                .arg("--ensure-runtime")
+                .stderr(Stdio::piped()),
+        )
+        .expect("the Codex hook client starts"),
+        event,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("separate deployment"));
+}
+
+#[test]
+fn codex_runtime_lifecycle_refuses_until_its_deployment_is_available() {
+    for operation in ["ensure", "stop"] {
+        let output = Command::new(built_binary())
+            .args(["runtime", "--adapter", "codex", operation])
+            .output()
+            .expect("the runtime lifecycle command starts");
+        assert!(
+            !output.status.success(),
+            "{operation} must not act on Claude's endpoint"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Codex lifecycle commands"));
+    }
+}
+
 /// Exit code, stdout and stderr together, for the tests that assert which channel an
 /// answer took.
 fn run_client_heard(url: &str, stdin: &str) -> (i32, String, String) {

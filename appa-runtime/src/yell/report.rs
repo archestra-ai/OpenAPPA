@@ -172,6 +172,7 @@ pub(crate) enum RuntimeSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Harness {
     ClaudeCode,
+    Codex,
     Kagent,
     Amp,
     Embedded(HarnessName),
@@ -225,6 +226,7 @@ impl Harness {
     pub(crate) fn served(adapter: AdapterName) -> Self {
         match adapter {
             AdapterName::ClaudeCode => Harness::ClaudeCode,
+            AdapterName::Codex => Harness::Codex,
             AdapterName::Kagent => Harness::Kagent,
             AdapterName::Amp => Harness::Amp,
             AdapterName::Embedded => unreachable!("a served runtime is started with a served adapter"),
@@ -234,6 +236,7 @@ impl Harness {
     fn as_str(&self) -> &str {
         match self {
             Harness::ClaudeCode => "claude-code",
+            Harness::Codex => "codex",
             Harness::Kagent => "kagent",
             Harness::Amp => "amp",
             Harness::Embedded(name) => name.as_str(),

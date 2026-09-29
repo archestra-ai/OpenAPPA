@@ -107,6 +107,10 @@ pub enum Plugin {
         default_policy: RelativePath,
         batteries: Vec<PackageName>,
     },
+    Codex {
+        default_policy: RelativePath,
+        batteries: Vec<PackageName>,
+    },
     Kagent {
         default_policy: RelativePath,
         batteries: Vec<PackageName>,
@@ -120,13 +124,16 @@ impl Plugin {
     pub fn host(&self) -> Host {
         match self {
             Self::ClaudeCode { .. } => Host::ClaudeCode,
+            Self::Codex { .. } => Host::Codex,
             Self::Kagent { .. } => Host::Kagent,
         }
     }
 
     pub fn default_policy(&self) -> &RelativePath {
         match self {
-            Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
+            Self::ClaudeCode { default_policy, .. }
+            | Self::Codex { default_policy, .. }
+            | Self::Kagent { default_policy, .. } => default_policy,
         }
     }
 
@@ -135,7 +142,9 @@ impl Plugin {
     /// choice.
     pub fn batteries(&self) -> &[PackageName] {
         match self {
-            Self::ClaudeCode { batteries, .. } | Self::Kagent { batteries, .. } => batteries,
+            Self::ClaudeCode { batteries, .. } | Self::Codex { batteries, .. } | Self::Kagent { batteries, .. } => {
+                batteries
+            }
         }
     }
 }
@@ -407,6 +416,13 @@ impl RawPlugin {
                     batteries,
                 })
             }
+            Host::Codex => {
+                absent(self.images.is_some(), "images")?;
+                Ok(Plugin::Codex {
+                    default_policy,
+                    batteries,
+                })
+            }
             Host::Kagent => {
                 let declared = self.images.ok_or_else(|| missing("images"))?;
                 let mut images = BTreeMap::new();
@@ -672,11 +688,11 @@ mod tests {
     #[test]
     fn a_host_outside_the_closed_set_is_refused() {
         assert!(matches!(
-            manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"codex\"")),
+            manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"cursor\"")),
             Err(ManifestError::Host { .. })
         ));
         assert!(matches!(
-            manifest(&BATTERY.replace("[\"claude-code\"]", "[\"codex\"]")),
+            manifest(&BATTERY.replace("[\"claude-code\"]", "[\"cursor\"]")),
             Err(ManifestError::Host { .. })
         ));
     }

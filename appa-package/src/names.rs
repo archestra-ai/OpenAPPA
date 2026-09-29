@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn hosts_and_kinds_are_closed() {
         assert_eq!(Host::parse("kagent"), Some(Host::Kagent));
-        assert_eq!(Host::parse("codex"), None);
+        assert_eq!(Host::parse("codex"), Some(Host::Codex));
         assert_eq!(PackageKind::parse("battery"), Some(PackageKind::Battery));
         assert_eq!(PackageKind::parse("skill"), None);
     }

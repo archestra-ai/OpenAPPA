@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, WireDecision, WireEvent};
 
-use crate::loopback_http::{Answer, Deadline, Endpoint, request};
+use crate::loopback_http::{Answer, Deadline, Endpoint, get, request};
 use crate::runtime_start::{self, Deployment};
 use crate::runtime_url::RuntimeTarget;
 
@@ -91,8 +91,6 @@ fn refusal(answer: &Answer) -> String {
 
 /// The host whose hook bytes this client translates. It is not a choice: the kagent plugin
 /// posts the canonical wire itself, so this bridge is Claude Code's alone.
-const HOST: AdapterName = AdapterName::ClaudeCode;
-
 /// The round-trip budgets the hook entries' timeouts are declared above.
 pub(crate) const AUTHORIZATION_BUDGET: Duration = Duration::from_secs(120);
 pub(crate) const TURN_END_BUDGET: Duration = Duration::from_secs(30);
@@ -138,8 +136,8 @@ fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent
 /// One parsed event on the canonical wire. Crossing is a step of its own because the event
 /// outlives its failure: an event that cannot cross still reports what the host did, so a
 /// result the tool already produced is withheld rather than left in front of the model.
-fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
-    let wire = WireEvent::from_event(HOST, event).map_err(|refusal| match refusal {
+fn wire_body(host: AdapterName, event: &HookEvent) -> Result<Vec<u8>, String> {
+    let wire = WireEvent::from_event(host, event).map_err(|refusal| match refusal {
         ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
     })?;
     serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
@@ -158,12 +156,19 @@ pub(crate) fn session_is_gated() -> bool {
 /// SessionStart entry that starts the runtime is the one that posts to it, and a
 /// start that fails blocks like an unanswered hook rather than posting into
 /// nothing.
-pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) -> ExitCode {
+pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Option<&Deployment>) -> ExitCode {
     if !session_is_gated() {
         return ExitCode::SUCCESS;
     }
+    if host == AdapterName::Codex && ensure.is_some() {
+        return block("Codex runtime auto-start requires its separate deployment and is not active yet");
+    }
     let decides = Decides::of_a_turn_end(turn_end);
-    let codec = appa_adapter_claude_code::codec();
+    let codec = match host {
+        AdapterName::ClaudeCode => appa_adapter_claude_code::codec(),
+        AdapterName::Codex => appa_adapter_codex::codec(),
+        AdapterName::Kagent | AdapterName::Embedded => return block("the hook client does not serve this adapter"),
+    };
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
@@ -198,10 +203,28 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         // the output the tool produced does not stay in front of the model.
         Err(failure) => return unanswered(&codec, Unanswered::Unparsed(&host_event), &failure, decides),
     };
+    // A Codex Bash call is the transport for an APPA-owned child execution.
+    // Until the runtime has registered an opaque job and supplied the fixed
+    // wrapper command, returning an ordinary allow would run the raw command
+    // and expose its streaming output outside result admission.
+    if host == AdapterName::Codex
+        && let HookEvent::ToolCall { call, .. } = &event
+        && call.tool == "appa_exec"
+    {
+        return deliver(&(codec.render)(
+            &event,
+            &HookDecision::DenyCall {
+                feedback: "OpenAPPA's Codex command wrapper is not active for this deployment".into(),
+                offers: Vec::new(),
+                review: Vec::new(),
+            },
+        ));
+    }
     // A prompt is refused while a subagent definition in reach declares `maxTurns`:
     // Claude Code ends such a subagent at its cap with no SubagentStop, so its
     // partial output would reach the parent unchecked.
-    if let HookEvent::Prompt { .. } = &event
+    if host == AdapterName::ClaudeCode
+        && let HookEvent::Prompt { .. } = &event
         && let Some(refusal) = crate::agent_scan::refusal()
     {
         eprintln!("{refusal}");
@@ -210,12 +233,19 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     // A parsed event that cannot cross the wire is still an event to answer: it is handed
     // to the withholding path rather than dropped, so a result that already ran is taken
     // out of the model's attention instead of staying in front of it.
-    let body = match wire_body(&event) {
+    let body = match wire_body(host, &event) {
         Ok(body) => body,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
-    let answered =
-        Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+    let answered = Endpoint::parse(&target.url).and_then(|endpoint| {
+        if host == AdapterName::Codex {
+            let identity = get(&endpoint, "/adapter", &Deadline::spanning(Duration::from_secs(2)))?;
+            if !identity.is_success() || identity.body != b"codex" {
+                return Err(format!("{} does not serve the Codex adapter", target.url));
+            }
+        }
+        post(&endpoint, &body, &Deadline::spanning(decides.budget()))
+    });
     let answer = match answered {
         Ok(answer) => answer,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
@@ -458,7 +488,7 @@ mod tests {
             .expect("the event parses")
             .expect("PreToolUse is gated");
         assert!(matches!(event, HookEvent::ToolCall { .. }));
-        let body = wire_body(&event).expect("the event crosses");
+        let body = wire_body(AdapterName::ClaudeCode, &event).expect("the event crosses");
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("the wire is JSON");
         assert_eq!(wire["protocol"], appa_runtime_api::PROTOCOL);
         assert_eq!(wire["adapter"], "claude-code");
@@ -497,7 +527,7 @@ mod tests {
             .expect("PostToolUse is gated");
         assert!(matches!(event, HookEvent::ToolResult { .. }));
         assert!(
-            wire_body(&event).is_err(),
+            wire_body(AdapterName::ClaudeCode, &event).is_err(),
             "an empty root id names no trajectory the wire can carry"
         );
         assert!(reports_a_result(&event));
