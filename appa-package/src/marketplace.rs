@@ -145,7 +145,7 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
     let batteries: Vec<(&PackageName, &Battery)> = packages
         .iter()
         .filter_map(|package| match &package.role {
-            Role::Battery(battery) => Some((&package.name, battery)),
+            Role::Battery(battery) => Some((&package.name, &**battery)),
             Role::Plugin(_) => None,
         })
         .collect();

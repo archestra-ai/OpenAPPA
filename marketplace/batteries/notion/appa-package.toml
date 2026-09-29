@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["notion"]
 helpers = []
+benefit = "Rules for the 36 tools of the hosted Notion server: APPA keeps page reads internal, lets only trusted data into pages, and asks a person before structural and agent-session changes."

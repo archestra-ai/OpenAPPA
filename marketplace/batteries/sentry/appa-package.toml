@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["sentry"]
 helpers = []
+benefit = "Rules for the Sentry server's 9 listed tools and the 55 tools behind `execute_sentry_tool`: APPA keeps error data internal and asks a person before each write."

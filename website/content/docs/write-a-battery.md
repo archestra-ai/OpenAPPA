@@ -57,14 +57,37 @@ marketplace/batteries/
 
 `appa-package.toml` is the package manifest: the battery's name and
 description, the policy file, the hosts it is composed with, and the helper
-scripts its bindings name. An optional `setup` line says what the person
-has to do after the install that the policy cannot: the scopes a token
-needs, or a login the helpers fall back to. `appa battery install` prints
-it after the battery is included, beside every `token_env` variable the
-policy's bindings name, so a battery never restates its own variables. Run
-`bash scripts/appa-marketplace.sh` to generate the catalog entry and content
-digest, then commit `marketplace/marketplace.toml` with the package. CI
-checks that the generated catalog is current.
+scripts its bindings name. Two optional fields in `[battery]` speak to the
+person who sets the battery up:
+
+```toml
+benefit = "APPA asks the Slack API who can read each channel. With this, APPA lets channel text flow only to people who can already read it."
+setup = [
+  "Create a Slack app at https://api.slack.com/apps.",
+  "In OAuth & Permissions, add the User Token Scopes `users:read` and `channels:read`.",
+  "Set `APPA_PROVIDER_SLACK_TOKEN` to the User OAuth Token. It starts with `xoxp-`.",
+]
+```
+
+- `benefit` is one line. Say what the helpers ask the provider, and what
+  APPA does better with the answer. A battery without helpers says what
+  its rules give. Do not claim more than the helpers and rules do.
+- `setup` is a list of steps, one line each, in imperative mood. Say
+  which kind of token to make, where to make it, which scopes it needs,
+  the prefix it starts with, and any other variable to set. Name the
+  scopes the helpers' API calls need, not more.
+
+A step may contain `code spans` in backticks and bare `https://` URLs.
+`appa ui` shows code spans as code and URLs as links. No other Markdown
+is rendered. `appa battery install` prints the benefit and the numbered
+steps after the battery is included, beside every `token_env` variable
+the policy's bindings name. Thus a step does not have to name a variable
+only to say that it exists. A blank or multi-line `benefit` or step makes
+the manifest invalid.
+
+Run `bash scripts/appa-marketplace.sh` to generate the catalog entry and
+content digest, then commit `marketplace/marketplace.toml` with the
+package. CI checks that the generated catalog is current.
 
 `appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies the members of the provider's collections: the viewer, the full membership, groups, and per-resource readers such as one channel's members. The battery binds it under `[externals.audience.<provider>]` with `command`, `token_env`, and the `selectors` it serves. Contracts in the battery may then name those collections with selector placeholders, such as `@slack:channel/$channel_id`.
 

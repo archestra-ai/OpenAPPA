@@ -7,6 +7,16 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["google-workspace", "claude_ai_Google_Drive"]
 helpers = ["audience-source.py"]
+benefit = "APPA asks Google Workspace who you are, who the active users are, and who is in each group. With this, APPA checks a call to a named recipient against the real directory."
+setup = [
+  "A Workspace admin creates a Google Cloud project and enables the Admin SDK API, once per organization.",
+  "The admin sets the OAuth consent screen to Internal and creates an OAuth client of type Desktop app.",
+  "The admin shares the client JSON with the people who run the agent.",
+  "Each user signs in with that client and grants `openid`, `email`, `admin.directory.user.readonly`, and `admin.directory.group.member.readonly`.",
+  "Set `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN` to the OAuth access token. It starts with `ya29.`.",
+  "An access token expires after about one hour. Refresh it from the stored refresh token before you pass it again.",
+  "Reading the directory can need a user with admin rights.",
+]
 
 [battery.readiness]
 required_executables = ["python3"]

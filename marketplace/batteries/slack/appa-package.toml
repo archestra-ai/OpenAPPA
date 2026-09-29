@@ -7,6 +7,13 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude_ai_Slack"]
 helpers = ["check.py", "audience-source.py", "conversation-trust.py", "slack_api.py"]
+benefit = "APPA asks the Slack API who can read each channel and if the channel is shared with another organization. With this, APPA lets channel text flow only to people who can already read it, and marks Slack Connect text as suspicious."
+setup = [
+  "Create a Slack app at https://api.slack.com/apps: click Create New App, then From scratch, and pick your workspace.",
+  "In OAuth & Permissions, add these User Token Scopes: `users:read`, `users:read.email`, `usergroups:read`, `channels:read`, `groups:read`, `im:read`, `mpim:read`.",
+  "Click Install to Workspace and copy the User OAuth Token. It starts with `xoxp-`.",
+  "Set `APPA_PROVIDER_SLACK_TOKEN` to the token. A bot token (`xoxb-`) also works, but APPA then treats the bot, not you, as `self`.",
+]
 
 [battery.readiness]
 command = ["python3", "check.py"]

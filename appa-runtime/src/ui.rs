@@ -213,7 +213,8 @@ impl Local {
             let alternatives: Vec<_> = battery.readiness.as_ref().into_iter().flat_map(|r| &r.cli_alternatives)
                 .map(|alt| json!({"executable": alt.executable, "credential": alt.credential,
                     "login_hint": alt.login_hint, "installed": runtime_info.as_ref().and_then(|r| r["prerequisites"]["executables"][&alt.executable].as_bool()).unwrap_or_else(|| readiness::executable_available(&alt.executable))})).collect();
-            json!({"name": entry.name, "description": entry.package.description, "setup": battery.setup,
+            json!({"name": entry.name, "description": entry.package.description,
+                "benefit": battery.benefit, "setup": battery.setup,
                 "included": active.contains(&entry.name), "configured": configured.contains(&entry.name),
                 "selected": configured.contains(&entry.name) || self.selected.contains(&entry.name),
                 "credentials": credentials, "dependencies": dependencies, "alternatives": alternatives,

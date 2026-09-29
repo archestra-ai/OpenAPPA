@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["posthog"]
 helpers = []
+benefit = "Rules for all 44 tools of PostHog's MCP server: APPA keeps end-user analytics internal, lets documentation search results be public, and asks a person before each write."

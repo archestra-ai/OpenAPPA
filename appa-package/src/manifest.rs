@@ -34,8 +34,10 @@ pub enum ManifestError {
     Detect { path: PathBuf, name: String },
     #[error("{path}: `battery.detect` names `{name}` twice")]
     RepeatedDetect { path: PathBuf, name: String },
-    #[error("{path}: `battery.setup` must be one non-empty line")]
-    Setup { path: PathBuf },
+    #[error("{path}: `battery.benefit` must be one non-empty line")]
+    Benefit { path: PathBuf },
+    #[error("{path}: `battery.setup` step {step} must be one non-empty line")]
+    Setup { path: PathBuf, step: usize },
     #[error("{path} is not valid TOML: {source}")]
     Syntax {
         path: PathBuf,

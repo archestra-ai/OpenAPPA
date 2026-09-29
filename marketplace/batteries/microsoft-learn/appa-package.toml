@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["microsoft-learn"]
 helpers = []
+benefit = "Rules for the 3 read-only tools of the Microsoft Learn server: APPA treats its documentation as suspicious and sends it only queries that anyone may see."

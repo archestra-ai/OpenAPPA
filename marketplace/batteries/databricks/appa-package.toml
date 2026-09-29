@@ -7,7 +7,15 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["databricks"]
 helpers = ["check.py", "audience-source.py"]
-setup = "Bind both managed servers: appa battery install databricks --server <genie-server> --server <sql-server>. The audience source runs the Databricks CLI: install it where the runtime runs and log in with `databricks auth login`, or set APPA_PROVIDER_DATABRICKS_TOKEN beside DATABRICKS_HOST; the login needs to read SCIM users and groups and Genie space permissions."
+benefit = "APPA asks Databricks, through the Databricks CLI, who the workspace users are, who is in each group, and who can use a Genie space. With this, APPA lets workspace data flow only to workspace members."
+setup = [
+  "Bind both managed servers: `appa battery install databricks --server <genie-server> --server <sql-server>`.",
+  "Install the Databricks CLI where the APPA runtime runs: https://docs.databricks.com/aws/en/dev-tools/cli/install",
+  "Log in with `databricks auth login --host <workspace-url>`. APPA then uses this CLI login.",
+  "Or make a personal access token: in the workspace, click your username, then Settings, Developer, Access tokens, Manage, Generate new token.",
+  "For a token, set `APPA_PROVIDER_DATABRICKS_TOKEN` to it and `DATABRICKS_HOST` to the workspace URL. The CLI must still be installed.",
+  "The login or token must read SCIM users and groups, and the permissions of each Genie space your rules name.",
+]
 
 [battery.readiness]
 command = ["python3", "check.py"]

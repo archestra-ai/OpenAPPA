@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["launchdarkly"]
 helpers = []
+benefit = "Rules for all 20 tools of LaunchDarkly's MCP server: APPA keeps flag, environment, and audit-log reads internal, and asks a person before each write."
