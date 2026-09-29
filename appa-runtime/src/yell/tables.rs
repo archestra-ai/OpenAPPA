@@ -212,6 +212,9 @@ static PINNED_ANNOTATION: Table = Table {
         ("annotator", Rule::Token(Class::Annotator)),
         ("call", DIGEST),
         ("produced", Rule::Table(&PRODUCED_ANNOTATION)),
+        // What the deployment's context providers answered about the call: repository
+        // names, logins, grants — the deployment's own findings, which never leave.
+        ("context", Rule::Never),
     ],
 };
 

@@ -629,7 +629,6 @@ mod tests {
         AnnotationDeclaration {
             hint: None,
             inputs: vec![],
-            established: vec![],
             trust_ranks: ranks.iter().map(|rank| rank.to_string()).collect(),
             audiences: AudienceVocabulary::parse_entries(
                 &audiences.iter().map(|entry| entry.to_string()).collect::<Vec<_>>(),

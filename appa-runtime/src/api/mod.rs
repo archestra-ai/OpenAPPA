@@ -1569,31 +1569,19 @@ impl Runtime {
             annotator,
             declaration,
             args,
-            inputs,
+            context,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
             return Ok(None);
         };
-        let args = match session::join_input_answers(args, &inputs, |consult| {
-            deployment.externals.consult(consult, None, None)
-        })
-        .await
-        {
-            Ok(args) => args,
-            Err((_, reason)) => {
-                return Ok(Some(AnnotationConsult {
-                    annotator,
-                    outcome: crate::external::ConsultOutcome::NoAnswer(reason),
-                    admitted: false,
-                }));
-            }
-        };
+        let consults = deployment.externals.context_consults(&context);
+        let context = session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
                 declaration: declaration.clone(),
-                artifact: crate::consult::AnnotationArtifact { args },
+                artifact: crate::consult::AnnotationArtifact { args, context },
             },
         };
         let outcome = deployment.externals.consult(&consult, None, None).await;
@@ -3166,21 +3154,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
-    // Every program an annotator input reads is bound. A bound program no annotator reads
-    // stays idle rather than refused, as an audience source does: a battery binds the
-    // program beside the annotator that reads it, and a root that replaces that annotator
-    // may read nothing of the kind.
-    no_unbound(
-        "annotator input",
-        policy
-            .annotators()
-            .flat_map(|(_, binding)| binding.inputs.values())
-            .filter_map(|source| match source {
-                appa_policy::InputSource::External(program) => Some(program.as_str()),
-                appa_policy::InputSource::Call(_) => None,
-            }),
-        &externals.inputs,
-    )?;
     // Every provider the policy references is bound, and so is every entry a provider's
     // `lookup` names. A bound provider the policy never references stays idle rather than
     // refused: a battery binds its own source, and a deployment may include the battery

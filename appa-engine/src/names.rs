@@ -42,6 +42,11 @@ name_newtype!(
     /// of every member id that source qualifies.
     ProviderName
 );
+name_newtype!(
+    /// A context provider: the name one `[externals.context.<name>]` program is bound under,
+    /// and the key its answer carries in an Annotator's context.
+    ContextProviderName
+);
 
 impl std::fmt::Display for GroupName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

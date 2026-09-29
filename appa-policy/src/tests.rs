@@ -9,7 +9,7 @@ use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
-use crate::{AnnotatorBuiltin, Config, ConfigError, InputSource};
+use crate::{AnnotatorBuiltin, Config, ConfigError};
 
 /// The sources the shipped batteries declare, as a deployment's bindings would supply them.
 fn declared_sources() -> Vec<SourceRegistration> {
@@ -716,7 +716,7 @@ fn a_written_audience_list_refuses_a_repeated_entry() {
 }
 
 #[test]
-fn an_input_reads_a_tool_call_value_or_names_a_program() {
+fn an_input_reads_a_tool_call_value() {
     let policy = |spelling: &str| {
         format!(
             "version = 2\n[[annotator]]\nname = \"r\"\ninputs = {{ subject = \"{spelling}\" }}\n\
@@ -731,27 +731,16 @@ fn an_input_reads_a_tool_call_value_or_names_a_program() {
         "$tool_call.description",
         "$tool_call.arguments",
         "$tool_call.arguments.id",
-        "$input.github.repository",
     ] {
         assert!(load(&policy(supported)).is_ok(), "{supported} is an input source");
     }
-    // A program input is checked against no tool schema: the tool declares nothing
-    // about a value the deployment establishes.
-    let loaded = load(&policy("$input.repo")).expect("a program input loads");
-    assert_eq!(
-        loaded
-            .annotators()
-            .next()
-            .map(|(_, binding)| binding.inputs["subject"].clone()),
-        Some(InputSource::External("repo".to_string()))
-    );
     for unsupported in [
         "$tool",
         "$tool_call.foo",
         "$tool_call.arguments.id.deep",
         "$tool_call.arguments.",
-        "$input.",
-        "$input",
+        "$input.repo",
+        "$context",
         "id",
     ] {
         assert!(

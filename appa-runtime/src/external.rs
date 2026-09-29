@@ -211,7 +211,7 @@ fn kind_of(section: Section) -> ConsultKind {
         Section::Sanitizers => ConsultKind::Sanitizer,
         Section::Annotators => ConsultKind::Annotation,
         Section::Audience => ConsultKind::AudienceSource,
-        Section::Inputs => ConsultKind::Input,
+        Section::Context => ConsultKind::Context,
     }
 }
 
@@ -229,6 +229,18 @@ pub struct ExternalServices {
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
     gates: ConsultGates,
+}
+
+impl ExternalServices {
+    /// One context consult per bound provider, each asking about the same call.
+    pub(crate) fn context_consults(&self, artifact: &crate::consult::ContextArtifact) -> Vec<Consult> {
+        self.backends
+            .get(&ConsultKind::Context)
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .map(|provider| Consult::context(provider, artifact.clone()))
+            .collect()
+    }
 }
 
 /// How many `command` consults may run at once across a runtime: every trajectory's
@@ -403,7 +415,7 @@ impl ExternalServices {
                 })
                 .collect()
         };
-        backends.insert(ConsultKind::Input, bound(config.inputs));
+        backends.insert(ConsultKind::Context, bound(config.context));
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = builtin_backend(
@@ -766,7 +778,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Inputs => None,
+        Section::Annotators | Section::Audience | Section::Context => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -1229,7 +1241,7 @@ mod tests {
     use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
-        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, InputArtifact,
+        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, ContextArtifact,
         MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
     #[cfg(unix)]
@@ -1304,7 +1316,7 @@ mod tests {
             sanitizers: BTreeMap::new(),
             annotators,
             audience,
-            inputs: BTreeMap::new(),
+            context: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
             jev: None,
@@ -1406,7 +1418,6 @@ mod tests {
                 declaration: AnnotationDeclaration {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
                     inputs: vec![],
-                    established: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&[
                         "bob@example.com".to_string(),
@@ -1416,7 +1427,7 @@ mod tests {
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },
-                artifact: AnnotationArtifact { args },
+                artifact: AnnotationArtifact { args, context: Default::default() },
             },
         }
     }
@@ -1941,7 +1952,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             serde_json::from_slice(&std::fs::read(input_path).expect("the fake captured stdin"))
                 .expect("stdin is JSON");
         assert_eq!(sent, consult.artifact_json());
-        for absent in ["context", "declaration", "trajectory_label"] {
+        for absent in ["declaration", "trajectory_label"] {
             assert!(sent.get(absent).is_none(), "stdin carries no {absent:?} key");
         }
         let child_env = std::fs::read_to_string(capture.path().join("env.txt")).expect("the fake captured its env");
@@ -2167,12 +2178,12 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let consults: [fn(&str) -> Consult; 2] = [
             |name| Consult::audience_selector(name, "user-group/eng", vec![]),
             |name| {
-                let input = InputArtifact {
+                let input = ContextArtifact {
                     tool: "fetch".to_string(),
                     arguments: serde_json::json!({}),
                     cwd: None,
                 };
-                Consult::input(name, input)
+                Consult::context(name, input)
             },
         ];
         let mut bound = ConsultKind::Annotation;

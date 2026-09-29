@@ -45,9 +45,14 @@ const CALLS: &str = r#"{"id": "page", "tool": "fetch", "arguments": {"url": "htt
 "#;
 
 fn annotate(repeat: &str) -> Vec<serde_json::Value> {
+    annotate_with(POLICY, CLASSIFIER, repeat)
+}
+
+fn annotate_with(policy: &str, classifier: &str, repeat: &str) -> Vec<serde_json::Value> {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
-    std::fs::write(dir.path().join("classifier.sh"), CLASSIFIER).expect("the annotator is written");
+    std::fs::write(dir.path().join("appa.toml"), policy).expect("the policy is written");
+    std::fs::write(dir.path().join("classifier.sh"), classifier).expect("the annotator is written");
+    std::fs::write(dir.path().join("owner.sh"), OWNER).expect("the context provider is written");
     let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
         .args(["runtime", "annotate", "--repeat", repeat, "--config"])
         .arg(dir.path().join("appa.toml"))
@@ -102,4 +107,35 @@ fn a_call_is_asked_once_per_repeat() {
         .map(|row| row["repeat"].as_u64().unwrap())
         .collect();
     assert_eq!(repeats, [0, 1, 2]);
+}
+
+/// A context provider that knows who owns what `fetch` reads, and declines every other call.
+const OWNER: &str = r#"
+case "$(cat)" in
+  *'"tool":"fetch"'*) echo '{"version":1,"answer":{"owner":"etl"}}' ;;
+  *) echo '{"version":1,"answer":null}' ;;
+esac
+"#;
+
+/// Trusts a call only when its context carries the owner's answer and the failed
+/// provider's error beside it.
+const CONTEXT_CLASSIFIER: &str = r#"
+input="$(cat)"
+case "$input" in
+  *'"broken":{"error":'*'"owner":{"answer":{"owner":"etl"}}'*) trust=trusted ;;
+  *) trust=suspicious ;;
+esac
+echo "{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"$trust\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}"
+"#;
+
+#[test]
+fn the_annotator_asked_by_the_cli_sees_what_the_context_providers_answered() {
+    let policy = format!(
+        "{POLICY}\n[externals.context.owner]\ncommand = [\"/bin/sh\", \"owner.sh\"]\n\n\
+         [externals.context.broken]\ncommand = [\"/bin/sh\", \"-c\", \"exit 1\"]\n"
+    );
+    let rows = annotate_with(&policy, CONTEXT_CLASSIFIER, "1");
+    let page = rows.iter().find(|row| row["id"] == "page").expect("the page call is reported");
+    assert_eq!(page["outcome"], "answer", "a provider that fails does not refuse the call");
+    assert_eq!(page["answer"]["delta"]["trust"], "trusted");
 }

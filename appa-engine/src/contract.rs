@@ -2,13 +2,13 @@
 //! and the declarations that produce them — statically from policy, or per call through a
 //! registered Annotator.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
 use crate::label::{Audience, Clause, DeclaredAudience, GroupRef, Label, SymbolicAtom, Trust};
-use crate::names::{AnnotatorName, MarkName, TagName};
+use crate::names::{AnnotatorName, ContextProviderName, MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
@@ -473,6 +473,38 @@ struct PinnedParts {
     annotator: AnnotatorName,
     call: crate::value::CanonicalDigest,
     produced: ProducedAnnotation,
+    #[serde(default, skip_serializing_if = "AnnotationContext::is_empty")]
+    context: AnnotationContext,
+}
+
+/// What the deployment's context providers answered about a call before its Annotator judged
+/// it, by provider. A provider that answered that the call is not its concern is absent.
+/// Recorded with the pin so a decision keeps the facts it was made from; the engine never
+/// reads the answers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AnnotationContext(BTreeMap<ContextProviderName, ContextEntry>);
+
+/// One provider's part of an Annotator's context: its answer, or why there is none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextEntry {
+    Answer(serde_json::Value),
+    Error(String),
+}
+
+impl AnnotationContext {
+    pub fn new(entries: BTreeMap<ContextProviderName, ContextEntry>) -> Self {
+        AnnotationContext(entries)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn entries(&self) -> &BTreeMap<ContextProviderName, ContextEntry> {
+        &self.0
+    }
 }
 
 impl PinnedAnnotation {
@@ -481,7 +513,19 @@ impl PinnedAnnotation {
             annotator,
             call,
             produced,
+            context: AnnotationContext::default(),
         }))
+    }
+
+    /// The same pin, recording the context its Annotator was given.
+    pub fn with_context(mut self, context: AnnotationContext) -> Self {
+        self.0.context = context;
+        self
+    }
+
+    /// What the context providers answered about the call before the Annotator judged it.
+    pub fn context(&self) -> &AnnotationContext {
+        &self.0.context
     }
 
     /// The Annotator that produced this pin.
@@ -775,5 +819,44 @@ mod tests {
         );
         assert_eq!(pinned.call(), &digest);
         assert_eq!(pinned.annotator().as_str(), "bash-classifier");
+    }
+
+    #[test]
+    fn a_pin_records_its_context_and_a_pin_without_one_keeps_its_wire_shape() {
+        let digest = crate::value::CanonicalDigest::of_call(
+            &ToolName::new("Bash"),
+            &crate::params::test_arguments(&serde_json::json!({ "command": "gh pr view 1" })),
+        );
+        let produced = ProducedAnnotation {
+            delta: Delta::NONE,
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        };
+        let bare = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced);
+        let bare_wire = serde_json::to_value(&bare).expect("a pinned annotation serializes");
+        assert!(bare_wire.get("context").is_none(), "an empty context is not written");
+
+        let context = AnnotationContext::new(
+            [
+                (
+                    ContextProviderName::new("github"),
+                    ContextEntry::Answer(serde_json::json!({"repo": {"visibility": "public"}})),
+                ),
+                (ContextProviderName::new("databricks"), ContextEntry::Error("timeout".to_string())),
+            ]
+            .into(),
+        );
+        let pinned = bare.clone().with_context(context.clone());
+        let wire = serde_json::to_value(&pinned).expect("a pinned annotation serializes");
+        assert_eq!(
+            wire["context"],
+            serde_json::json!({
+                "databricks": {"error": "timeout"},
+                "github": {"answer": {"repo": {"visibility": "public"}}},
+            })
+        );
+        let read = serde_json::from_value::<PinnedAnnotation>(wire).expect("a pinned annotation reads back");
+        assert_eq!(read.context(), &context);
+        assert_ne!(read, bare, "the context the Annotator saw is part of the pin");
     }
 }
