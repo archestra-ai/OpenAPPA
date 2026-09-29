@@ -872,9 +872,8 @@ pub(crate) struct CommandProcess {
 }
 
 impl CommandProcess {
-    /// Adopt a child spawned from a [`crate::process_tree::confine`]d command.
-    pub(crate) fn spawned(child: tokio::process::Child) -> Result<CommandProcess, NoAnswerReason> {
-        let tree = ProcessTree::adopt(&child)?;
+    pub(crate) fn spawn(command: &mut tokio::process::Command) -> Result<CommandProcess, NoAnswerReason> {
+        let (child, tree) = crate::process_tree::spawn(command)?;
         Ok(CommandProcess {
             child: Some(child),
             tree: Some(tree),
@@ -889,7 +888,7 @@ impl CommandProcess {
         )
     }
 
-    fn child_mut(&mut self) -> &mut tokio::process::Child {
+    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.child.as_mut().expect("a live command process owns its child")
     }
 
@@ -990,9 +989,9 @@ pub(crate) async fn exchange_with_child(
         bytes = &mut output => {
             let bytes = bytes?;
             // The answer is already complete here, so an unobservable exit must not
-            // discard it: `waitid` reports `ECHILD` for a child something else reaped,
-            // and that says nothing about the answer. Whether the child exited well is
-            // still decided by the status `terminate_and_reap` returns to the caller.
+            // discard it: a child something else reaped says nothing about the answer.
+            // Whether the child exited well is still decided by the status
+            // `terminate_and_reap` returns to the caller.
             let _ = tree.root_exited().await;
             Ok(bytes)
         }
@@ -1109,7 +1108,6 @@ async fn run_command_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    crate::process_tree::confine(&mut configured);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
     // variable, reaches the child. The binding's own provider credential is put back
     // afterwards, so a command inherits the one variable it reads and no other's.
@@ -1119,9 +1117,8 @@ async fn run_command_process(
         .envs(without_runtime_variables(parent))
         .envs(credential);
 
-    let mut child = crate::child_process::spawn_async(&mut configured).map_err(|_| NoAnswerReason::Unreachable)?;
-    let tail = child.stderr.take().map(stderr_tail);
-    let mut process = CommandProcess::spawned(child)?;
+    let mut process = CommandProcess::spawn(&mut configured)?;
+    let tail = process.child_mut().stderr.take().map(stderr_tail);
     let outcome = {
         let (child, tree) = process.parts();
         let exchange = exchange_with_child(child, tree, &input, max_body_bytes);

@@ -6,8 +6,19 @@
 
 use crate::external::NoAnswerReason;
 
-/// Prepare `command` so the child it spawns can be adopted as a [`ProcessTree`].
-pub(crate) fn confine(command: &mut tokio::process::Command) {
+/// Spawn `command` as a process tree: confined before it starts, adopted once it has.
+/// A command that does not start is unreachable; a child that cannot be adopted is
+/// refused, and its `kill_on_drop` ends it.
+pub(crate) fn spawn(
+    command: &mut tokio::process::Command,
+) -> Result<(tokio::process::Child, ProcessTree), NoAnswerReason> {
+    confine(command);
+    let child = crate::child_process::spawn_async(command).map_err(|_| NoAnswerReason::Unreachable)?;
+    let tree = ProcessTree::adopt(&child)?;
+    Ok((child, tree))
+}
+
+fn confine(command: &mut tokio::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -31,9 +42,7 @@ pub(crate) struct ProcessTree {
 }
 
 impl ProcessTree {
-    /// Adopt a child spawned from a [`confine`]d command. A child that cannot be adopted
-    /// is refused, and the caller's `kill_on_drop` ends it.
-    pub(crate) fn adopt(child: &tokio::process::Child) -> Result<ProcessTree, NoAnswerReason> {
+    fn adopt(child: &tokio::process::Child) -> Result<ProcessTree, NoAnswerReason> {
         #[cfg(unix)]
         {
             let group = child
@@ -73,8 +82,9 @@ impl ProcessTree {
     }
 
     /// Unix observes the exit without reaping: the zombie keeps its pid and group id
-    /// reserved, so a group kill that follows cannot hit a recycled id. On Windows the
-    /// open process handle reserves the pid.
+    /// reserved, so a group kill that follows cannot hit a recycled id. `ECHILD` here
+    /// means something else reaped the child. On Windows the open process handle
+    /// reserves the pid.
     #[cfg(unix)]
     fn root_has_exited(&self) -> Result<bool, NoAnswerReason> {
         loop {
@@ -266,16 +276,13 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        super::confine(&mut command);
         command
     }
 
     #[tokio::test]
     async fn an_answer_is_read_although_a_helper_holds_the_pipe() {
-        let child = shell(&format!("{HELPER} echo answer"))
-            .spawn()
-            .expect("the shell starts");
-        let mut process = CommandProcess::spawned(child).expect("the child is adopted");
+        let mut process =
+            CommandProcess::spawn(&mut shell(&format!("{HELPER} echo answer"))).expect("the shell starts as a tree");
         let (child, tree) = process.parts();
         let answer = tokio::time::timeout(WITHIN, exchange_with_child(child, tree, b"input", 1024))
             .await
@@ -286,9 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn killing_the_tree_ends_every_process_holding_the_pipe() {
-        let mut child = shell(&format!("{HELPER} {BLOCK}")).spawn().expect("the shell starts");
+        let (mut child, tree) = super::spawn(&mut shell(&format!("{HELPER} {BLOCK}"))).expect("the shell starts");
         let mut stdout = child.stdout.take().expect("stdout is piped");
-        let tree = super::ProcessTree::adopt(&child).expect("the child is adopted");
         tree.kill();
         let mut rest = Vec::new();
         tokio::time::timeout(WITHIN, stdout.read_to_end(&mut rest))

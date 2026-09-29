@@ -110,19 +110,18 @@ pub(crate) async fn run_claude_code(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    crate::process_tree::confine(&mut command);
     isolate_claude_environment(&mut command, std::env::vars_os().collect());
     tracing::debug!("claude consult starts");
-    let mut child = crate::child_process::spawn_async(&mut command).map_err(|_| {
-        tracing::warn!(command = %backend.config.command.display(), "the claude executable did not start");
-        NoAnswerReason::Unreachable
+    // The guard ends the consult's whole process tree on every outcome, a dropped future
+    // included: no helper the CLI spawned outlives the answer.
+    let mut process = CommandProcess::spawn(&mut command).inspect_err(|reason| {
+        if matches!(reason, NoAnswerReason::Unreachable) {
+            tracing::warn!(command = %backend.config.command.display(), "the claude executable did not start");
+        }
     })?;
     // The CLI's own error — a bad model name — is the one line an operator needs when
     // every consult fails; it is read to the end so the pipe never blocks the answer.
-    let tail = child.stderr.take().map(stderr_tail);
-    // The guard ends the consult's whole process tree on every outcome, a dropped future
-    // included: no helper the CLI spawned outlives the answer.
-    let mut process = CommandProcess::spawned(child)?;
+    let tail = process.child_mut().stderr.take().map(stderr_tail);
     let exchanged = {
         let (child, tree) = process.parts();
         tokio::time::timeout_at(
