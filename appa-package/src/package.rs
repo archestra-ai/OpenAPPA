@@ -91,6 +91,27 @@ pub struct Battery {
     /// What the manifest tells the person after an install and the variable
     /// names cannot: the token's scopes, or a login the helpers fall back to.
     pub setup: Option<String>,
+    pub readiness: Option<Readiness>,
+}
+
+/// Optional, bounded, read-only battery authentication check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Readiness {
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub required_executables: Vec<String>,
+    #[serde(default)]
+    pub cli_alternatives: Vec<CliAlternative>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliAlternative {
+    pub executable: String,
+    pub credential: String,
+    pub login_hint: String,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -236,6 +257,7 @@ struct RawBattery {
     #[serde(default)]
     helpers: Vec<String>,
     setup: Option<String>,
+    readiness: Option<Readiness>,
 }
 
 impl RawBattery {
@@ -293,6 +315,7 @@ impl RawBattery {
             audiences: Vec::new(),
             credentials: Vec::new(),
             setup,
+            readiness: self.readiness,
         })
     }
 }
@@ -426,6 +449,7 @@ mod tests {
                 audiences: vec![],
                 credentials: vec![],
                 setup: None,
+                readiness: None,
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );

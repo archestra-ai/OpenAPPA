@@ -7,9 +7,7 @@ mod common;
 use common::{ServedRuntime, http, serve_runtime};
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
 
 use appa_runtime_api::{AdapterName, WireEvent};
 
@@ -46,46 +44,6 @@ fn wire(claude_hook_json: &str) -> String {
 fn post_hook(server: &ServedRuntime, claude_hook_json: &str) -> Option<serde_json::Value> {
     let body = http(&format!("{}/hook", server.url), "POST", Some(&wire(claude_hook_json)))?;
     Some(serde_json::from_str(&body).expect("a 2xx answer is a wire decision"))
-}
-
-fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
-        .arg("runtime")
-        .arg("--config")
-        .arg(config)
-        .arg("--db")
-        .arg(db)
-        .arg("--listen")
-        .arg("127.0.0.1:0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the binary spawns");
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("the child polls") {
-            break status;
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the binary kept running instead of refusing");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(!status.success(), "the binary must refuse to serve");
-    let mut stderr = String::new();
-    use std::io::Read;
-    child
-        .stderr
-        .take()
-        .expect("stderr is piped")
-        .read_to_string(&mut stderr)
-        .expect("stderr reads");
-    assert!(
-        stderr.contains(needle),
-        "the refusal must name its cause ({needle}); stderr was: {stderr}",
-    );
 }
 
 fn write_config(dir: &Path, text: &str) -> PathBuf {
@@ -397,11 +355,32 @@ fn deployment_fields_accept_native_names_at_startup_and_reload() {
 }
 
 #[test]
-fn a_damaged_database_refuses_to_serve() {
+fn a_damaged_database_keeps_setup_available_but_refuses_enforcement() {
     let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
     std::fs::write(&db, b"not a sqlite database at all").expect("the file writes");
-    expect_startup_refusal(&config, &db, "database");
+    let server = serve_runtime(&config, &db);
+    assert!(
+        http(&format!("{}/", server.url), "GET", None).is_some(),
+        "setup stays available"
+    );
+    assert!(
+        http(&format!("{}/ready", server.url), "GET", None).is_none(),
+        "enforcement is not ready"
+    );
+    assert!(
+        http(&format!("{}/hook", server.url), "POST", Some("{}")).is_none(),
+        "hooks fail closed"
+    );
+    assert!(
+        http(&format!("{}/reload", server.url), "POST", None).is_none(),
+        "a damaged database cannot be activated"
+    );
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        b"not a sqlite database at all",
+        "setup never repairs or overwrites the database"
+    );
 }

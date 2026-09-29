@@ -7,3 +7,6 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude-code"]
 helpers = ["repository.py"]
+
+[battery.readiness]
+required_executables = ["python3", "git", "gh"]

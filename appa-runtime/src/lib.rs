@@ -9,6 +9,7 @@ pub mod batteries;
 #[cfg(feature = "daemon")]
 pub mod claude_files;
 pub mod config;
+mod credentials;
 #[cfg(feature = "daemon")]
 mod default_config;
 pub mod describe;
@@ -45,6 +46,8 @@ pub mod statusline;
 mod style;
 pub mod tls;
 pub mod tool_validation;
+#[cfg(feature = "daemon")]
+pub mod ui;
 
 mod batteries_layout;
 #[cfg(feature = "daemon")]

@@ -15,6 +15,8 @@ use crate::tree::{self, EntryKind, TreeDigestError};
 /// Why a directory is not a package. Every variant names the file it read.
 #[derive(Debug, Error)]
 pub enum PackageError {
+    #[error("{policy}: invalid battery readiness metadata: {reason}")]
+    Readiness { policy: PathBuf, reason: String },
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     #[error("{root} is not a distributable tree: {source}")]
@@ -116,6 +118,26 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             let bindings = check_policy(&policy, &package.name, battery)?;
             battery.audiences = bindings.audiences;
             battery.credentials = bindings.credentials;
+            if let Some(check) = &battery.readiness {
+                let executable = |name: &str| {
+                    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                };
+                let valid = (check.command.is_empty()
+                    || (check.command.len() == 2
+                        && check.command[0] == "python3"
+                        && battery.helpers.iter().any(|helper| helper.as_str() == check.command[1])))
+                    && check.required_executables.iter().any(|name| name == "python3")
+                    && check.required_executables.iter().all(|name| executable(name))
+                    && check.cli_alternatives.iter().all(|alt| {
+                        executable(&alt.executable)
+                            && battery.credentials.contains(&alt.credential)
+                            && !alt.login_hint.trim().is_empty()
+                            && !alt.login_hint.contains(['\n', '\r'])
+                    });
+                if !valid {
+                    return Err(PackageError::Readiness { policy, reason: "use python3 and a declared helper, declare required python3, and reference owned credentials".into() });
+                }
+            }
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
@@ -672,6 +694,36 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
         directory
+    }
+
+    #[test]
+    fn readiness_cannot_execute_an_undeclared_helper_or_read_foreign_credentials() {
+        let directory = battery(BATTERY_POLICY);
+        let path = directory.path().join("appa-package.toml");
+        let valid = format!(
+            "{BATTERY_MANIFEST}\n[battery.readiness]\ncommand = [\"python3\", \"audience-source.py\"]\nrequired_executables = [\"python3\"]\n"
+        );
+        fs::write(&path, &valid).unwrap();
+        assert!(validate_package(directory.path()).is_ok());
+        for invalid in [
+            valid.replace(
+                "command = [\"python3\", \"audience-source.py\"]",
+                "command = [\"python3\", \"../escape.py\"]",
+            ),
+            valid.replace(
+                "required_executables = [\"python3\"]",
+                "required_executables = [\"/tmp/python3\"]",
+            ),
+            format!(
+                "{valid}\n[[battery.readiness.cli_alternatives]]\nexecutable = \"gh\"\ncredential = \"APPA_PROVIDER_SLACK_TOKEN\"\nlogin_hint = \"gh auth login\"\n"
+            ),
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(matches!(
+                validate_package(directory.path()),
+                Err(PackageError::Readiness { .. })
+            ));
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ required-features = ["daemon"]
 default = ["daemon"]
 # The server stack: the MCP endpoint, the HTTP surface, the CLI and its log
 # setup. An in-process host links the library without any of it.
-daemon = ["dep:rmcp", "dep:axum", "dep:clap", "dep:tracing-subscriber", "dep:opentelemetry-appender-tracing", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "tokio/signal"]
+daemon = ["dep:rmcp", "dep:axum", "dep:tower", "dep:clap", "dep:tracing-subscriber", "dep:opentelemetry-appender-tracing", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "tokio/signal"]
 # PostgreSQL storage for an embedding host whose migrations install the schema.
 postgres = ["appa-eventlog/postgres"]
 
@@ -48,6 +48,8 @@ name = "replay"
 required-features = ["daemon"]
 
 [dependencies]
+tower = { version = "0.5", features = ["util"], optional = true }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,

@@ -43,7 +43,7 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "appa runtime", version)]
 struct Args {
     #[command(subcommand)]
@@ -100,7 +100,7 @@ struct Args {
     verbose: u8,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Clone)]
 enum RuntimeCommand {
     /// Bring the deployed runtime up when nothing healthy answers its endpoint.
     #[command(hide = true)]
@@ -257,7 +257,6 @@ struct AppState {
     battery_dirs: Vec<PathBuf>,
     battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
-    executable: Option<ExecutableAtStart>,
 }
 
 async fn hook(
@@ -288,13 +287,6 @@ async fn validate_tools(
     )
 }
 
-/// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
-/// install replaced that file, naming the process to stop before starting the new build.
-async fn health(State(state): State<AppState>) -> String {
-    let stale = state.executable.as_ref().is_some_and(ExecutableAtStart::is_replaced);
-    health_answer(stale, std::process::id())
-}
-
 /// The policy this process serves, so an install can tell whether a runtime it left
 /// running still answers under the configuration on disk. Read-only: reloading is the
 /// caller's separate, deliberate step.
@@ -307,14 +299,6 @@ async fn policy_key(State(state): State<AppState>) -> String {
 /// The build alone does not identify a deployment. Two installs of one build are
 /// byte-identical, so an install that compared digests alone would take another
 /// deployment's runtime for its own. The configuration path is what separates them.
-async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
-    state
-        .executable
-        .as_ref()
-        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id(), &state.config))
-        .ok_or(axum::http::StatusCode::NOT_FOUND)
-}
-
 /// The first line's fields are read positionally, so the configuration follows the first
 /// newline and runs to the end of the answer. A path may hold spaces and, on Unix, newlines;
 /// taking the whole remainder verbatim keeps either from being mistaken for a field break.
@@ -338,7 +322,7 @@ async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries
 
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let _reload = state.reload_gate.lock().await;
-    let config = Config::load_from(&state.config, &state.battery_dirs)
+    let config = Config::load_local(&state.config, &state.battery_dirs)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let battery_state = mcp::BatteryState {
         catalog: crate::batteries::snapshot(&state.battery_dirs),
@@ -473,7 +457,7 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
     } else {
         crate::batteries::prepare(batteries_dir)?
     };
-    let config = Config::load_from(config_path, &battery_dirs).map_err(|error| error.to_string())?;
+    let config = Config::load_local(config_path, &battery_dirs).map_err(|error| error.to_string())?;
     Ok((config, battery_dirs))
 }
 
@@ -496,24 +480,138 @@ async fn serve(args: Args) -> ExitCode {
     result
 }
 
-async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
-    let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
+#[derive(Clone)]
+struct Active {
+    state: AppState,
+    app: axum::Router,
+    guide: axum::Router,
+}
 
-    match ensure_default_config(&config_path) {
-        Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
-            return ExitCode::FAILURE;
-        }
+/// Owns the HTTP process even when no valid enforcement deployment is available.
+pub(crate) struct RuntimeHost {
+    args: Args,
+    pub(crate) config: PathBuf,
+    pub(crate) dirs: Vec<PathBuf>,
+    active: RwLock<Option<Active>>,
+    gate: tokio::sync::Mutex<()>,
+    executable: Option<ExecutableAtStart>,
+    initialized: std::sync::atomic::AtomicBool,
+}
+impl RuntimeHost {
+    fn current(&self) -> Option<Active> {
+        self.active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
-    let (config, battery_dirs) = match load_config(&config_path, &args.batteries_dir) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            eprintln!("appa runtime: {error}");
-            return ExitCode::FAILURE;
+    pub(crate) fn dashboard(&self) -> Option<serde_json::Value> {
+        self.current().map(|active| {
+            let mut data = active.state.runtime.dashboard(active.state.adapter);
+            data["config"] = serde_json::json!(self.config);
+            data
+        })
+    }
+    pub(crate) async fn activate(&self) -> Result<serde_json::Value, String> {
+        let _gate = self.gate.lock().await;
+        if let Some(active) = self.current() {
+            return reload(State(active.state))
+                .await
+                .map(|result| serde_json::json!(result.0))
+                .map_err(|(_, error)| error);
         }
-    };
+        let active = build_active(&self.args, &self.config, &self.dirs).await?;
+        let key = active.state.runtime.serving_policy_key();
+        *self.active.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(active);
+        Ok(serde_json::json!({"policy_key": key}))
+    }
+}
+async fn host_health(State(host): State<Arc<RuntimeHost>>) -> String {
+    // Existing starters wait for the first preparation attempt before posting a
+    // session hook. The UI remains accessible while this liveness probe waits.
+    while !host.initialized.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    health_answer(
+        host.executable.as_ref().is_some_and(ExecutableAtStart::is_replaced),
+        std::process::id(),
+    )
+}
+async fn host_ready(State(host): State<Arc<RuntimeHost>>) -> StatusCode {
+    if host.current().is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+async fn host_fingerprint(State(host): State<Arc<RuntimeHost>>) -> Result<String, StatusCode> {
+    host.executable
+        .as_ref()
+        .map(|exe| binary_fingerprint_answer(&exe.digest, std::process::id(), &host.config))
+        .ok_or(StatusCode::NOT_FOUND)
+}
+async fn host_dashboard(State(host): State<Arc<RuntimeHost>>) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    let mut data = host
+        .dashboard()
+        .unwrap_or_else(|| serde_json::json!({"config": host.config, "enforcement_ready": false}));
+    data["prerequisites"] = crate::ui::runtime_prerequisites(&host.config, &host.dirs).unwrap_or_default();
+    Ok(axum::Json(data))
+}
+async fn host_check(
+    State(host): State<Arc<RuntimeHost>>,
+    axum::Json(names): axum::Json<Vec<String>>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    crate::ui::runtime_check(&host.config, &host.dirs, &names)
+        .await
+        .map(axum::Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+async fn host_reload(
+    State(host): State<Arc<RuntimeHost>>,
+) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    host.activate()
+        .await
+        .map(axum::Json)
+        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error))
+}
+async fn dispatch(State(host): State<Arc<RuntimeHost>>, request: Request) -> Response {
+    use tower::ServiceExt;
+    match host.current() {
+        Some(active) => active.app.oneshot(request).await.unwrap(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Enforcement unavailable. Complete setup in the runtime UI.",
+        )
+            .into_response(),
+    }
+}
+async fn guide_dispatch(State(host): State<Arc<RuntimeHost>>, request: Request) -> Response {
+    use tower::ServiceExt;
+    match host.current() {
+        Some(active) => active.guide.oneshot(request).await.unwrap(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Enforcement unavailable. Complete setup in the runtime UI.",
+        )
+            .into_response(),
+    }
+}
+fn host_router(host: Arc<RuntimeHost>) -> axum::Router {
+    let management = axum::Router::new()
+        .route("/binary-fingerprint", get(host_fingerprint))
+        .route("/dashboard", get(host_dashboard))
+        .route("/battery-check", post(host_check))
+        .route("/reload", post(host_reload))
+        .route_layer(axum::middleware::from_fn(loopback_management_only));
+    axum::Router::new()
+        .route("/health", get(host_health))
+        .route("/ready", get(host_ready))
+        .merge(management)
+        .fallback(dispatch)
+        .with_state(host)
+}
+
+async fn build_active(args: &Args, config_path: &Path, battery_dirs: &[PathBuf]) -> Result<Active, String> {
+    let config = Config::load_local(config_path, battery_dirs).map_err(|e| e.to_string())?;
     let file_tracking = config.file_tracking.clone();
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
@@ -524,13 +622,8 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
         serving_tools: config.tool_names().into_iter().collect(),
     }));
-    let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("appa runtime: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let runtime =
+        Runtime::open_served(config, args.db.clone(), args.modules_dir.clone(), adapter).map_err(|e| e.to_string())?;
     let runtime = if let Some(file_tracking) = file_tracking {
         let configure = || -> Result<Runtime, String> {
             use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
@@ -547,56 +640,42 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
                 .file_initial_label(&file_tracking.initial_trust, audience)
                 .map_err(|error| error.to_string())?;
             let runtime = runtime
-                .with_file_tracking(initial, config_path.clone())
+                .with_file_tracking(initial, config_path.to_path_buf())
                 .map_err(|error| error.to_string())?;
-            match args.file_process_backend {
+            match args.file_process_backend.clone() {
                 Some(backend) => runtime
                     .with_file_process_backend(backend)
                     .map_err(|error| error.to_string()),
                 None => Ok(runtime),
             }
         };
-        match configure() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("appa runtime: {error}");
-                return ExitCode::FAILURE;
-            }
-        }
+        configure()?
     } else {
         if args.file_process_backend.is_some() {
-            eprintln!("appa runtime: --file-process-backend requires [file_tracking] in the configuration");
-            return ExitCode::FAILURE;
+            return Err("--file-process-backend requires [file_tracking] in the configuration".into());
         }
         runtime
     };
     let runtime = Arc::new(runtime);
     // Every audience source the policy references answers once before the runtime serves:
     // a source that is down or reports a malformed reader stops the start here.
-    if let Err(error) = runtime.probe_sources().await {
-        eprintln!("appa runtime: {error}");
-        return ExitCode::FAILURE;
-    }
+    runtime.probe_sources().await.map_err(|e| e.to_string())?;
 
     let state = AppState {
         runtime: Arc::clone(&runtime),
         adapter,
-        config: config_path,
+        config: config_path.to_path_buf(),
         battery_state: Arc::clone(&battery_state),
-        battery_dirs,
+        battery_dirs: battery_dirs.to_vec(),
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
-        executable: ExecutableAtStart::of_this_process(),
     };
     let management = axum::Router::new()
-        .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/file-tools", get(file_tools))
         .route("/status", get(status))
         .route("/report", post(report))
-        .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()
-        .route("/health", get(health))
         .route("/batteries", get(batteries))
         .route("/hook", post(hook))
         .route(
@@ -614,8 +693,41 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             ),
         )
         .merge(management)
-        .with_state(state);
+        .with_state(state.clone());
 
+    let guide = axum::Router::new().nest_service(
+        "/guide-mcp",
+        mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
+    );
+    Ok(Active { state, app, guide })
+}
+
+async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
+    let config_path = args.config.clone().unwrap_or_else(|| PathBuf::from("appa.toml"));
+    if let Err(error) = ensure_default_config(&config_path) {
+        eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
+        return ExitCode::FAILURE;
+    }
+    let battery_dirs = if args.batteries_dir.is_empty() {
+        crate::batteries::default_search_path(&config_path)
+    } else {
+        match crate::batteries::prepare(&args.batteries_dir) {
+            Ok(dirs) => dirs,
+            Err(error) => {
+                eprintln!("appa runtime: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    let host = Arc::new(RuntimeHost {
+        args: args.clone(),
+        config: config_path,
+        dirs: battery_dirs,
+        active: RwLock::new(None),
+        gate: tokio::sync::Mutex::new(()),
+        executable: ExecutableAtStart::of_this_process(),
+        initialized: std::sync::atomic::AtomicBool::new(false),
+    });
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -633,9 +745,24 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The one line the runtime writes to stdout: the address it serves, so a caller that
-    // asked for port 0 learns the port it got.
-    println!("http://{listen}");
+    let ui = match crate::ui::runtime_router(Arc::clone(&host), listen) {
+        Ok(router) => router,
+        Err(error) => {
+            eprintln!("appa runtime: cannot serve UI: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let app = host_router(Arc::clone(&host)).merge(ui);
+    // Keep management available while policy preparation probes external sources.
+    let starting = Arc::clone(&host);
+    tokio::spawn(async move {
+        if let Err(error) = starting.activate().await {
+            tracing::warn!(%error, "enforcement unavailable; complete setup in the runtime UI");
+        }
+        starting.initialized.store(true, std::sync::atomic::Ordering::Release);
+        // Announce after initial preparation, preserving the CLI startup contract.
+        println!("http://{listen}");
+    });
     let guide = if let Some(address) = args.guide_listen {
         let listener = match tokio::net::TcpListener::bind(address).await {
             Ok(listener) => listener,
@@ -644,10 +771,9 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let app = axum::Router::new().nest_service(
-            "/guide-mcp",
-            mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
-        );
+        let app = axum::Router::new()
+            .fallback(guide_dispatch)
+            .with_state(Arc::clone(&host));
         Some((address, listener, app))
     } else {
         None
@@ -690,7 +816,7 @@ async fn loopback_management_only(
     request: Request,
     next: Next,
 ) -> Response {
-    if !management_peer_is_allowed(peer) {
+    if !management_peer_is_allowed(peer) || request.headers().contains_key("origin") {
         return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
     }
     next.run(request).await
