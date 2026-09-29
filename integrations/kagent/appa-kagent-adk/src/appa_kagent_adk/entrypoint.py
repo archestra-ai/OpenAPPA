@@ -272,9 +272,7 @@ def build_server(filepath: str, runtime_url: str):
         {
             name: spelling
             for name, spelling in inventory.spellings.items()
-            if not spelling.startswith("mcp:")
-            or spelling.startswith("mcp:appa-guide/")
-            or spelling == "mcp:appa/yell"
+            if not spelling.startswith("mcp:") or spelling.startswith("mcp:appa-guide/") or spelling == "mcp:appa/yell"
         }
     )
     plugin = AppaPluginKagent(runtime_url, inventory=base_inventory, identity=identity)
