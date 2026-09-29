@@ -453,11 +453,12 @@ function statusInfo(b) {
     const missing = b.dependencies.filter(d => !d.installed).map(d => `\`${d.executable}\``);
     if (missing.length) return { label, kind, detail: `Install ${missing.join(', ')}, then check again.` };
     const alternatives = b.alternatives.filter(a => !a.installed).map(a => `\`${a.executable}\``);
-    if (alternatives.length) return { label, kind, detail: `Add a token, or install ${alternatives.join(', ')} and sign in.` };
+    if (alternatives.length) return { label, kind, detail: `Install ${alternatives.join(' or ')} and sign in, or add a token.` };
   }
   if (b.check.reason === 'cli_not_authenticated' || b.check.reason === 'missing_credential') {
-    const hints = b.alternatives.map(a => a.installed ? `\`${a.login_hint}\`` : `install \`${a.executable}\`, then \`${a.login_hint}\``);
-    if (hints.length) return { label, kind, detail: `Add a token, or run ${hints.join('; ')} in a terminal.` };
+    // The panel shows the command; the status line only names the two ways.
+    const clis = b.alternatives.map(a => a.executable);
+    if (clis.length) return { label, kind, detail: `Sign in with ${clis.join(' or ')}, or add a token.` };
   }
   return { label: fill(label), kind, detail: fill(text) };
 }
@@ -486,7 +487,7 @@ function batteries() {
       const action = el('td', undefined, 'battery-action');
       const broken = brokenBattery(b);
       if (configurable(b)) {
-        const label = open ? 'Close' : broken ? (b.credentials.length ? 'Add token' : 'Set up') : 'Configure';
+        const label = open ? 'Close' : !broken ? 'Configure' : b.alternatives.length ? 'Connect' : b.credentials.length ? 'Add token' : 'Set up';
         const toggle = button(label, () => { expanded.set(b.name, !open); render(); }, open || !broken ? 'link' : 'small');
         toggle.setAttribute('aria-expanded', String(open));
         toggle.setAttribute('aria-controls', `configure-${b.name}`);
