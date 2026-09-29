@@ -622,53 +622,6 @@ jobs:
       - name: Verify committed marketplace bytes under Windows Git
         run: cargo test --locked --package appa --lib export_commit_preserves_committed_bytes_with_windows_autocrlf
 
-      # Start from an empty directory, as the release package check does. The
-      # generated policy must both open and omit the subprocess fallback this
-      # platform cannot serve.
-      - name: Verify fresh deployment
-        shell: pwsh
-        run: |
-          $work = Join-Path $env:RUNNER_TEMP "appa-windows-deployment"
-          New-Item -ItemType Directory -Path $work | Out-Null
-          $stdout = Join-Path $work "runtime.stdout.log"
-          $stderr = Join-Path $work "runtime.stderr.log"
-          $start = @{
-            FilePath = Join-Path $PWD "target/debug/appa.exe"
-            ArgumentList = @("runtime")
-            WorkingDirectory = $work
-            PassThru = $true
-            RedirectStandardOutput = $stdout
-            RedirectStandardError = $stderr
-          }
-          $process = Start-Process @start
-          try {
-            $healthy = $false
-            for ($attempt = 0; $attempt -lt 30; $attempt++) {
-              try {
-                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8787/health" -TimeoutSec 1
-                if ("$health".Trim() -eq "ok") {
-                  $healthy = $true
-                  break
-                }
-              } catch {
-                $process.Refresh()
-                if ($process.HasExited) { break }
-              }
-              Start-Sleep -Seconds 1
-            }
-            if (-not $healthy) {
-              if (Test-Path $stderr) { Get-Content $stderr }
-              throw "Fresh Windows runtime did not become healthy"
-            }
-            $policy = Get-Content (Join-Path $work "appa.toml") -Raw
-            if ($policy -match 'builtin = "claude-code"' -or $policy -match '(?m)^name = "\*"\r?$') {
-              throw "Fresh Windows policy contains the unsupported Claude subprocess fallback"
-            }
-          } finally {
-            $process.Refresh()
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-          }
-
   # AgentThreatBench and TauBench both depend on the appa-agent-python binding,
   # so their tests share the job (and the Rust cache) that builds it. Each
   # harness's filter is the rust filter plus its own tree.

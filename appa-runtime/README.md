@@ -102,12 +102,9 @@ cargo build -p appa
 
 `appa.toml` holds the policy — the dialect the policy-review guide
 documents, nested under `[policy]` — and the settings for calls to
-outside services. If the configured path does not exist at startup, the
-process creates it from the complete Claude Code starting policy. It
-never replaces an existing file.
-
-You can instead write the file before startup. A minimal configuration
-that releases one tool:
+outside services. The runtime never writes it: a missing file stops
+startup. `appa plugin install <host>` writes the host's starting policy,
+or you write your own. A minimal configuration that releases one tool:
 
 ```toml
 [policy]
@@ -148,7 +145,7 @@ appa describe --config appa.toml
 ```
 
 `describe` is read-only. It works for a missing, malformed, or incomplete
-config and never creates the default config or database. It reports config
+config and never creates a config or database. It reports config
 state, includes and battery names, effective policy tools, referenced groups,
 and membership wiring. Claude's session tool inventory and authenticated
 connector identities are explicitly reported as unavailable because the

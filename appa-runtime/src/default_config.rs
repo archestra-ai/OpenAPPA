@@ -1,18 +1,20 @@
-//! The fresh deployment policy, adapted only where a platform cannot serve one
-//! of its builtins.
+//! The Claude Code plugin's policy, adapted only where a platform cannot serve
+//! one of its builtins.
 
 use std::borrow::Cow;
 
+#[cfg(test)]
 const TEMPLATE: &str = include_str!("../../marketplace/plugins/claude-code/default.appa.toml");
 const UNIX_FALLBACK_BEGIN: &str = "# APPA-UNIX-FALLBACK-BEGIN";
 const UNIX_FALLBACK_END: &str = "# APPA-UNIX-FALLBACK-END";
 
-/// The policy written for a fresh deployment on this platform.
+/// The shipped plugin policy as a first install on this platform writes it.
+#[cfg(test)]
 pub(crate) fn text() -> Cow<'static, str> {
     for_installed_policy(TEMPLATE).expect("the bundled default policy marks its Unix-only fallback")
 }
 
-/// Adapt the selected version's Claude policy, not this executable's embedded version.
+/// Adapt the selected version's Claude policy to this platform.
 pub(crate) fn for_installed_policy(template: &str) -> Result<Cow<'_, str>, &'static str> {
     for_template(template, cfg!(unix))
 }

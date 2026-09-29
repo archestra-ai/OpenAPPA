@@ -500,12 +500,17 @@ async fn a_decision_that_cannot_be_written_does_not_exit_zero() {
 
 /// The SessionStart entry brings the runtime up before it posts: pointed at a
 /// port nothing answers, `--ensure-runtime` starts this same binary there over
-/// the given config and data directory, then the session's first event is
+/// the given policy and data directory, then the session's first event is
 /// decided by the runtime it started. The runtime outlives the hook.
 #[test]
 fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let config = dir.path().join("config").join("appa.toml");
+    let config = dir.path().join("appa.toml");
+    std::fs::write(
+        &config,
+        "[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+    )
+    .expect("the policy is written");
     let data = dir.path().join("data");
     let url = format!("http://127.0.0.1:{}", common::free_port());
     let session_start = r#"{"hook_event_name":"SessionStart","session_id":"client-test","source":"startup"}"#;
@@ -540,10 +545,6 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
         "the started runtime answers healthy"
     );
     assert!(
-        config.is_file(),
-        "the runtime wrote the default policy on its first start"
-    );
-    assert!(
         data.join("appa.db").exists(),
         "the runtime keeps its log under the data directory"
     );
@@ -569,6 +570,38 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
         session_start,
     );
     assert_eq!(code, 0);
+}
+
+/// Without a policy on disk the hook blocks at once: nothing is started, and
+/// the hook does not wait out the runtime's 20s health budget.
+#[test]
+fn a_missing_policy_blocks_the_session_start_hook_without_starting_a_runtime() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = dir.path().join("appa.toml");
+    let data = dir.path().join("data");
+    let url = format!("http://127.0.0.1:{}", common::free_port());
+    let session_start = r#"{"hook_event_name":"SessionStart","session_id":"client-test","source":"startup"}"#;
+    let started = std::time::Instant::now();
+    let (code, stdout) = finish(
+        child_process::spawn(
+            client(&url)
+                .arg("--ensure-runtime")
+                .arg("--config")
+                .arg(&config)
+                .arg("--data-dir")
+                .arg(&data),
+        )
+        .expect("the hook client spawns"),
+        session_start,
+    );
+    assert_eq!(code, 2, "a missing policy blocks: {stdout}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the hook failed fast, not after the health budget: {:?}",
+        started.elapsed()
+    );
+    assert!(common::http(&format!("{url}/health"), "GET", None).is_none());
+    assert!(!data.exists());
 }
 
 /// A start that fails blocks the hook like an unanswered one, without posting:

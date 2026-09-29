@@ -350,8 +350,9 @@ The harness binary is APPA's own, not something you put on `PATH`: the hook
 entries and `clappa`'s status line name that absolute path. `clappa` stays where a
 shell can find it.
 
-The runtime creates the starting policy only when the policy path does
-not exist. It never replaces the policy or database.
+The runtime never writes the policy: without one it refuses to start, and a
+SessionStart hook blocks with the path it looked for. It never replaces the
+database.
 
 Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` in the
 environment to change these locations; the install and the hooks follow them.

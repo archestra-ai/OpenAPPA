@@ -1,11 +1,11 @@
 //! Internal `appa runtime` command: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
-//! parses flags, initializes a missing deployment config, opens the
-//! runtime, picks the adapter codec, and serves.
+//! parses flags, opens the runtime over an existing deployment config, picks the
+//! adapter codec, and serves.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -23,25 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
 use crate::config::{Config, InitialFileAudience};
-use crate::default_config;
 use crate::{hooks, mcp};
-
-fn ensure_default_config(path: &Path) -> io::Result<bool> {
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if let Err(error) = file
-        .write_all(default_config::text().as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error);
-    }
-    Ok(true)
-}
 
 #[derive(Parser)]
 #[command(name = "appa runtime", version)]
@@ -522,13 +504,9 @@ async fn serve(args: Args) -> ExitCode {
 async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
-    match ensure_default_config(&config_path) {
-        Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
-            return ExitCode::FAILURE;
-        }
+    if let Err(error) = crate::runtime_start::require_policy(&config_path) {
+        eprintln!("appa runtime: {error}");
+        return ExitCode::FAILURE;
     }
     let (config, battery_dirs) = match load_config(&config_path, &args.batteries_dir) {
         Ok(loaded) => loaded,
@@ -728,26 +706,6 @@ fn management_peer_is_allowed(peer: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_missing_config_is_created_without_replacing_an_existing_file() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("appa.toml");
-
-        assert!(ensure_default_config(&path).expect("default config is created"));
-        assert_eq!(
-            fs::read_to_string(&path).expect("default config is readable"),
-            default_config::text()
-        );
-        Config::load(&path).expect("the embedded default config validates");
-
-        fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
-        assert!(!ensure_default_config(&path).expect("existing config is preserved"));
-        assert_eq!(
-            fs::read_to_string(path).expect("existing config is readable"),
-            "existing deployment"
-        );
-    }
 
     #[test]
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {

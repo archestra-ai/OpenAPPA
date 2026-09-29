@@ -405,3 +405,11 @@ fn a_damaged_database_refuses_to_serve() {
     std::fs::write(&db, b"not a sqlite database at all").expect("the file writes");
     expect_startup_refusal(&config, &db, "database");
 }
+
+#[test]
+fn a_missing_policy_refuses_to_serve_and_writes_none() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = dir.path().join("appa.toml");
+    expect_startup_refusal(&config, &dir.path().join("appa.db"), &config.display().to_string());
+    assert!(!config.exists());
+}
