@@ -140,6 +140,7 @@ pub(super) async fn check(dir: &Path, battery: &appa_package::Battery, store: &C
         return CheckResult::new(Status::Unavailable, Reason::CheckFailed);
     };
     // Kill the whole group on timeout/cancellation, including CLI subprocesses holding pipes.
+    #[cfg(unix)]
     let _group = ProcessGroup(child.id());
     let Some(stdout) = child.stdout.take() else {
         return CheckResult::new(Status::Unavailable, Reason::CheckFailed);
@@ -168,10 +169,11 @@ pub(super) async fn check(dir: &Path, battery: &appa_package::Battery, store: &C
         Err(_) => CheckResult::new(Status::Unavailable, Reason::CheckTimedOut),
     }
 }
+#[cfg(unix)]
 struct ProcessGroup(Option<u32>);
+#[cfg(unix)]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         if let Some(pid) = self.0 {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
