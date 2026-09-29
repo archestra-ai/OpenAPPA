@@ -42,11 +42,23 @@ pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
     ))
 }
 
-/// Keep manifests in deployed batteries: local setup reads their readiness metadata.
+/// The per-package marketplace manifest, by the one name every package uses.
+const PACKAGE_MANIFEST: &str = "appa-package.toml";
+
+/// What a mapped directory carries that the archive does not.
+///
+/// Generated Python caches are not source: a developer's checkout has them
+/// while a GitHub source archive and a clean release runner never do, so
+/// excluding them keeps every staging path byte-identical.
+/// `appa-package.toml` is marketplace metadata — it describes the package to
+/// the marketplace, and a deployment reads the policy beside it, never the
+/// manifest. A battery's `test_*.py` suites exercise its scripts in the
+/// repository; a deployment runs the scripts, never the suites.
 fn excluded_from_staging(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     name == "__pycache__"
         || name.ends_with(".pyc")
         || name.ends_with(".pyo")
+        || name == PACKAGE_MANIFEST
         || (name.starts_with("test_") && name.ends_with(".py"))
 }

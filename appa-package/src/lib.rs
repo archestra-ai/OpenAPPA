@@ -24,9 +24,7 @@ pub use names::{
     CredentialPrefix, ExecutableName, Host, NameError, Namespace, NamespaceError, PackageKind, PackageName,
     RelativePath, RelativePathError,
 };
-pub use package::{
-    Battery, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,
-};
+pub use package::{Battery, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Role};
 pub use tree::canonical_tree_digest;
 pub use validate::{
     BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, INCLUDABLE_POLICY_FIELDS, PackageError, validate_package,

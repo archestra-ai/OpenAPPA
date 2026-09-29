@@ -12,7 +12,6 @@ pub(crate) struct Telemetry {
 impl Telemetry {
     pub(crate) fn init(level: &str) -> Self {
         let stderr = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
             .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)))
             .with_filter(filter_fn(|metadata| metadata.target() != "appa_yell_snapshot"));
         let providers = if configured() {

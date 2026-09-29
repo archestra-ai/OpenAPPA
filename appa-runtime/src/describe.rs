@@ -353,11 +353,7 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
                     let _ = describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
-                #[cfg(feature = "daemon")]
-                let loaded = Config::load_local(path, battery_dirs);
-                #[cfg(not(feature = "daemon"))]
-                let loaded = Config::load_from(path, battery_dirs);
-                match loaded {
+                match Config::load_from(path, battery_dirs) {
                     Ok(loaded) => {
                         config.state = ConfigState::Loadable;
                         config.diagnostic = None;

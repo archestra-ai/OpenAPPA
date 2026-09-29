@@ -94,27 +94,6 @@ pub struct Battery {
     /// The programs whose presence on `PATH` means the battery is relevant
     /// on this machine: a Claude Code install includes it when one is found.
     pub detect: Vec<ExecutableName>,
-    pub readiness: Option<Readiness>,
-}
-
-/// Optional, bounded, read-only battery authentication check.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Readiness {
-    #[serde(default)]
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub required_executables: Vec<String>,
-    #[serde(default)]
-    pub cli_alternatives: Vec<CliAlternative>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CliAlternative {
-    pub executable: String,
-    pub credential: String,
-    pub login_hint: String,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -260,7 +239,6 @@ struct RawBattery {
     #[serde(default)]
     helpers: Vec<String>,
     setup: Option<String>,
-    readiness: Option<Readiness>,
     #[serde(default)]
     detect: Vec<String>,
 }
@@ -334,7 +312,6 @@ impl RawBattery {
             audiences: Vec::new(),
             credentials: Vec::new(),
             setup,
-            readiness: self.readiness,
             detect,
         })
     }
@@ -474,7 +451,6 @@ mod tests {
                 audiences: vec![],
                 credentials: vec![],
                 setup: None,
-                readiness: None,
                 detect: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }

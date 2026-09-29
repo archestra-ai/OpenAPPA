@@ -48,7 +48,6 @@ impl KeySource<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub(crate) credential_store: Option<crate::credentials::CredentialStore>,
     keys: Keys,
     policy: PolicyFile,
     /// Each policy namespace bound to the connection identities the host reports for it.
@@ -661,8 +660,6 @@ impl std::fmt::Debug for Token {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("local credential database is unavailable")]
-    CredentialStore,
     #[error("cannot read {path}: {source}")]
     Unreadable { path: String, source: std::io::Error },
     #[error("cannot parse {path}: {source}")]
@@ -1089,26 +1086,6 @@ impl Config {
     /// Load `path`, resolving `batteries/<name>/appa.toml` includes against
     /// `battery_dirs` in the given order before the root config directory.
     pub fn load_from(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        Self::load_with_keys(path, battery_dirs, KeySource::Lookup(&|var| std::env::var(var).ok()))
-    }
-
-    /// Standalone configuration only: embedding hosts keep their existing environment interface.
-    #[cfg(feature = "daemon")]
-    pub(crate) fn load_local(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        let store = crate::credentials::CredentialStore::for_config(path).map_err(|_| ConfigError::CredentialStore)?;
-        let saved = store.values().map_err(|_| ConfigError::CredentialStore)?;
-        let lookup = |var: &str| std::env::var(var).ok().or_else(|| saved.get(var).cloned());
-        let mut config = Self::load_with_keys(path, battery_dirs, KeySource::Lookup(&lookup))?;
-        config.credential_store = Some(store);
-        Ok(config)
-    }
-
-    #[cfg(feature = "daemon")]
-    pub(crate) fn inspect_local(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        Self::load_with_keys(path, battery_dirs, KeySource::Deferred)
-    }
-
-    fn load_with_keys(path: &Path, battery_dirs: &[PathBuf], keys: KeySource<'_>) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
             path: path.display().to_string(),
             source,
@@ -1223,7 +1200,7 @@ impl Config {
             file_tracking,
             origins,
             included_batteries.into_iter().collect(),
-            keys,
+            KeySource::Lookup(&|var| std::env::var(var).ok()),
         )
     }
 
@@ -1523,7 +1500,6 @@ impl Config {
             resolve_bindings(section, entries, &origins, keys, llm.is_some())
         };
         Ok(Config {
-            credential_store: None,
             keys: keys.keys(),
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
             server_aliases: raw.server_aliases,

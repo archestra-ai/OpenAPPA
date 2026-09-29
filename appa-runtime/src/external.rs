@@ -220,7 +220,6 @@ fn kind_of(section: Section) -> ConsultKind {
 /// gate inside a blocking task. The store's mutex is never in scope
 /// here.
 pub struct ExternalServices {
-    pub(crate) credential_store: Option<crate::credentials::CredentialStore>,
     http: reqwest::Client,
     /// The client for every loopback endpoint. It refuses proxies, so a request
     /// meant for this machine — and the bearer token cleartext is permitted to
@@ -445,7 +444,6 @@ impl ExternalServices {
             .collect();
         backends.insert(ConsultKind::AudienceSource, audience);
         Ok(ExternalServices {
-            credential_store: None,
             http,
             http_loopback,
             timeout: config.timeout,
@@ -613,14 +611,7 @@ impl ExternalServices {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
-        let credential = match command.token_env.as_deref() {
-            Some(var) => crate::credentials::resolve(self.credential_store.as_ref(), var)
-                .map_err(|_| NoAnswerReason::Unreachable)?
-                .map(|value| (std::ffi::OsString::from(var), value)),
-            None => None,
-        };
-        let (output, transcript) =
-            run_command(command, input, deadline, self.max_body_bytes, transcript, credential).await;
+        let (output, transcript) = run_command(command, input, deadline, self.max_body_bytes, transcript).await;
         drop(permit);
         if let (Some(seen), Some(transcript)) = (seen, transcript) {
             *seen = transcript;
@@ -819,21 +810,12 @@ async fn run_command(
     deadline: tokio::time::Instant,
     max_body_bytes: usize,
     mut transcript: Option<Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> CommandRun {
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     let command = command.clone();
     let task = tokio::spawn(async move {
-        let output = run_command_process(
-            command,
-            input,
-            max_body_bytes,
-            deadline,
-            cancelled,
-            transcript.as_mut(),
-            credential,
-        )
-        .await;
+        let output =
+            run_command_process(command, input, max_body_bytes, deadline, cancelled, transcript.as_mut()).await;
         (output, transcript)
     });
     CommandTask {
@@ -851,7 +833,6 @@ async fn run_command(
     _deadline: tokio::time::Instant,
     _max_body_bytes: usize,
     transcript: Option<Transcript>,
-    _credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> CommandRun {
     (Err(NoAnswerReason::Unregistered), transcript)
 }
@@ -1114,6 +1095,7 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
 /// `parent` without the runtime's own namespace. A consult child starts from exactly this,
 /// its environment cleared first: filtering one read of the environment, rather than
 /// removing names from the live one, leaves no gap for a variable set in between.
+#[cfg(unix)]
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
@@ -1131,7 +1113,6 @@ async fn run_command_process(
     deadline: tokio::time::Instant,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
     seen: Option<&mut Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<Vec<u8>, NoAnswerReason> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
@@ -1152,6 +1133,10 @@ async fn run_command_process(
     // variable, reaches the child. The binding's own provider credential is put back
     // afterwards, so a command inherits the one variable it reads and no other's.
     let parent: Vec<_> = std::env::vars_os().collect();
+    let credential = command
+        .token_env
+        .as_ref()
+        .and_then(|var| parent.iter().find(|(key, _)| key == var.as_str()).cloned());
     configured
         .env_clear()
         .envs(without_runtime_variables(parent))
@@ -1642,44 +1627,6 @@ mod tests {
                 assert_eq!(counted, expected, "one permit runs one command at a time");
             }
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn database_credentials_are_injected_only_into_the_declared_helper_and_refresh_per_launch() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::credentials::CredentialStore::for_config(&dir.path().join("appa.toml")).unwrap();
-        let variable = "APPA_PROVIDER_DB_FIXTURE_TOKEN";
-        store
-            .update(&BTreeMap::from([
-                (variable.to_string(), Some("first".into())),
-                (
-                    "APPA_PROVIDER_OTHER_DB_FIXTURE_TOKEN".into(),
-                    Some("other-secret".into()),
-                ),
-            ]))
-            .unwrap();
-        let script = |value: &str| {
-            format!(
-                "test \"$APPA_PROVIDER_DB_FIXTURE_TOKEN\" = {value} || exit 1\ntest -z \"$APPA_PROVIDER_OTHER_DB_FIXTURE_TOKEN\" || exit 1\nprintf '%s' '{{\"version\":1,\"answer\":{{\"delta.trust\":\"trusted\"}}}}'"
-            )
-        };
-        let mut config = command_config(dir.path(), &script("first"), budget_ms(), 1024);
-        if let AnnotatorImplementation::Command(command) = config.annotators.get_mut("classifier").unwrap() {
-            command.token_env = Some(variable.into());
-        }
-        let mut services = services_over(config);
-        // An embedding host has no attached store and sees no saved credential.
-        assert!(matches!(resolve_command(&services).await, ConsultOutcome::NoAnswer(_)));
-        services.credential_store = Some(store.clone());
-        assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
-        store
-            .update(&BTreeMap::from([(variable.into(), Some("second".into()))]))
-            .unwrap();
-        std::fs::write(dir.path().join("resolver.sh"), script("second")).unwrap();
-        assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
-        store.update(&BTreeMap::from([(variable.into(), None)])).unwrap();
-        assert!(matches!(resolve_command(&services).await, ConsultOutcome::NoAnswer(_)));
     }
 
     #[cfg(unix)]

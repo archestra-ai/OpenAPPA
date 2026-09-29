@@ -234,7 +234,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
@@ -391,7 +391,7 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
@@ -629,7 +629,7 @@ pub fn install(args: Install) -> ExitCode {
         }
         let path = plugin_path(&args.target, &name)?;
         if path.exists() {
-            crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
@@ -1545,7 +1545,6 @@ mod tests {
             audiences: vec![],
             credentials: credentials.iter().map(|variable| variable.to_string()).collect(),
             setup: setup.map(str::to_owned),
-            readiness: None,
             detect: vec![],
         };
         let github = PackageName::parse("github").unwrap();

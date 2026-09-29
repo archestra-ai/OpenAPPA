@@ -41,62 +41,6 @@ APPA's statusline for the sessions it starts, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../marketplace/plugins/claude-code/README.md)
 covers the complete flow.
 
-## Local dashboard and battery setup
-
-Run `appa ui` to open the local dashboard. Overview shows the MCP servers and
-built-in tool sets the policy has rules for and where each rule comes from (the
-root configuration or a battery), and opens each one into its contracts. It
-reads the configuration on disk only, so a server no rule names does not appear.
-Batteries shows readiness and inline configuration.
-The UI checks battery readiness on opening and uses the battery result as its
-status; absence of a token alone is not a failure when CLI login is supported.
-`appa describe` runs the same readiness checks for configured batteries.
-A battery is ready when nothing it needs is missing: its declared executables,
-the variables its policy binds as `token_env`, and the result of its provider
-check when it declares one. A battery that declares nothing is ready. Without
-a provider check, a set token is ready but untested.
-`appa ui` serves the page itself on `127.0.0.1`, one port above the runtime's
-(8788 by default; `--port` overrides it), and keeps serving until you press
-Ctrl-C. If that port is busy, it stops and says so. It works whether or not the runtime is running, so a
-runtime that refuses to start for a missing token or an invalid policy can be
-fixed from the page.
-
-Configure several proposed batteries on one screen:
-
-```sh
-appa ui --config /path/to/appa.toml --setup --battery github,slack
-appa battery status --config /path/to/appa.toml --battery github,slack --json --check
-```
-
-Use `--no-open` to print the browser address. `--runtime-url` names the runtime
-to ask; the page uses it only when it serves the same configuration. No login,
-session token, or expiring link is required. The page and its credential API are
-restricted to loopback, with Host and browser-origin checks.
-
-**Save and check** saves all submitted credentials and runs bounded read-only
-checks. If a runtime is running, it then reloads that runtime; a failed reload
-keeps the running policy and the page shows why. If no runtime is running, the
-next session starts one, and that start reads the saved credentials. The runtime
-still refuses to start when its policy is invalid or an audience source it uses
-cannot answer.
-
-Credentials live in `credentials.db` beside the canonical configuration file,
-scoped by that configuration's path. This is separate from the trajectory database
-and its diagnostic exports. Values are plaintext at rest; Unix database permissions
-are `0600`. Do not include this file in source control or deployment bundles.
-
-The runtime's environment takes precedence over saved values, including an explicitly
-empty environment value. Otherwise APPA supplies the saved value under the same
-`APPA_PROVIDER_*` variable the helper already reads. An absent value leaves existing
-battery CLI fallbacks available. Each helper receives only its declared APPA
-credential. Embedding hosts, including Archestra, retain environment-only behavior.
-
-While a runtime is running, the page's prerequisite inspection and connection
-checks run in the runtime's environment, through its loopback-only `/dashboard`
-and `/battery-check` routes. Without a runtime they run in the environment of
-`appa ui`, which can differ, for example in `PATH`.
-The UI configures battery helpers; it does not authenticate MCP connectors.
-
 ## Development quickstart
 
 ### 1. Build
