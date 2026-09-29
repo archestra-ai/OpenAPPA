@@ -43,13 +43,11 @@ covers the complete flow.
 
 ## Local dashboard and battery setup
 
-Run `appa ui` to open the local dashboard. Overview shows which MCP servers
-have rules and where each rule comes from (the root configuration or a
-battery), and opens each server into its contracts. Its server list joins the
-MCP servers Claude Code configures with the namespaces the policy names; it
-excludes APPA's internal namespace. Claude Code reports no tool inventory, so
-coverage is per server, not per tool. Batteries shows readiness and inline
-configuration.
+Run `appa ui` to open the local dashboard. Overview shows the MCP servers and
+built-in tool sets the policy has rules for and where each rule comes from (the
+root configuration or a battery), and opens each one into its contracts. It
+reads the configuration on disk only, so a server no rule names does not appear.
+Batteries shows readiness and inline configuration.
 The UI checks battery readiness on opening and uses the battery result as its
 status; absence of a token alone is not a failure when CLI login is supported.
 `appa describe` runs the same readiness checks for configured batteries.
@@ -57,9 +55,10 @@ A battery is ready when nothing it needs is missing: its declared executables,
 the variables its policy binds as `token_env`, and the result of its provider
 check when it declares one. A battery that declares nothing is ready. Without
 a provider check, a set token is ready but untested.
-The runtime serves the UI on the same port as its APIs. Missing credentials or an
-invalid policy leave enforcement unavailable while the UI stays accessible.
-`appa ui` opens the running server; it never starts a separate UI process.
+`appa ui` serves the page itself on a random loopback port and keeps serving
+until you press Ctrl-C. It works whether or not the runtime is running, so a
+runtime that refuses to start for a missing token or an invalid policy can be
+fixed from the page.
 
 Configure several proposed batteries on one screen:
 
@@ -68,19 +67,17 @@ appa ui --config /path/to/appa.toml --setup --battery github,slack
 appa battery status --config /path/to/appa.toml --battery github,slack --json --check
 ```
 
-Use `--no-open` to print the browser address. `--runtime-url` selects the running
-loopback runtime; `--config` verifies that it serves the expected configuration.
-Open the runtime URL directly, or use `appa ui`; no login, session token, or
-expiring link is required. The UI and credential API are restricted to loopback,
-with Host and browser-origin checks. The web server has the runtime's lifetime.
+Use `--no-open` to print the browser address. `--runtime-url` names the runtime
+to ask; the page uses it only when it serves the same configuration. No login,
+session token, or expiring link is required. The page and its credential API are
+restricted to loopback, with Host and browser-origin checks.
 
-**Save and check** saves all submitted credentials, runs bounded read-only checks,
-and attempts to apply the configuration. A failed reload preserves an already active
-policy; saved credential changes remain saved and are used by subsequent helper
-launches. Provider credentials retained by HTTP/model bindings refresh on a
-successful reload. Before the first valid deployment, enforcement endpoints
-return HTTP 503. `/health` reports process liveness; `/ready` returns HTTP 200 only
-when enforcement is active, and HTTP 503 otherwise.
+**Save and check** saves all submitted credentials and runs bounded read-only
+checks. If a runtime is running, it then reloads that runtime; a failed reload
+keeps the running policy and the page shows why. If no runtime is running, the
+next session starts one, and that start reads the saved credentials. The runtime
+still refuses to start when its policy is invalid or an audience source it uses
+cannot answer.
 
 Credentials live in `credentials.db` beside the canonical configuration file,
 scoped by that configuration's path. This is separate from the trajectory database
@@ -93,8 +90,10 @@ empty environment value. Otherwise APPA supplies the saved value under the same
 battery CLI fallbacks available. Each helper receives only its declared APPA
 credential. Embedding hosts, including Archestra, retain environment-only behavior.
 
-Browser prerequisite inspection and connection checks always run in the runtime's
-environment. The CLI status command can also inspect local setup without a server.
+While a runtime is running, the page's prerequisite inspection and connection
+checks run in the runtime's environment, through its loopback-only `/dashboard`
+and `/battery-check` routes. Without a runtime they run in the environment of
+`appa ui`, which can differ, for example in `PATH`.
 The UI configures battery helpers; it does not authenticate MCP connectors.
 
 ## Development quickstart

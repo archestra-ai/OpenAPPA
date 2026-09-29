@@ -1,4 +1,6 @@
-//! Local management UI. It can serve setup while enforcement cannot start.
+//! Local management UI, served by `appa ui` itself, never by the runtime. Setup works
+//! while the runtime is stopped; when a runtime serves this configuration, the page shows
+//! what that process reaches and reloads it after a save.
 mod readiness;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,7 +62,6 @@ struct Local {
     selected: BTreeSet<String>,
     store: CredentialStore,
     runtime_url: String,
-    host: Option<Arc<crate::runtime_cli::RuntimeHost>>,
     checks: Mutex<BTreeMap<String, readiness::CheckResult>>,
     gate: tokio::sync::Mutex<()>,
 }
@@ -97,7 +98,6 @@ impl Local {
             selected: args.battery.iter().cloned().collect(),
             store,
             runtime_url: args.runtime_url.clone(),
-            host: None,
             checks: Mutex::new(BTreeMap::new()),
             gate: tokio::sync::Mutex::new(()),
         })
@@ -157,9 +157,6 @@ impl Local {
     }
 
     async fn runtime(&self) -> Option<Value> {
-        if let Some(host) = &self.host {
-            return host.dashboard();
-        }
         let url = self.runtime_url.clone();
         let data = tokio::task::spawn_blocking(move || {
             let endpoint = Endpoint::parse(&url).ok()?;
@@ -185,8 +182,7 @@ impl Local {
         let saved = self.store.values()?;
         let configured = self.configured();
         let runtime_info = self.runtime().await;
-        let runtime = runtime_info.clone().filter(|data| data["enforcement_ready"] != false);
-        let active: BTreeSet<String> = runtime
+        let active: BTreeSet<String> = runtime_info
             .as_ref()
             .and_then(|r| r["included"].as_array())
             .into_iter()
@@ -263,7 +259,7 @@ impl Local {
                 }
             }
         }
-        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime, "policy": policy, "origins": origins}))
+        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}))
     }
 
     async fn check(&self, names: &[String]) -> Result<(), String> {
@@ -281,7 +277,7 @@ impl Local {
                 }
             })
             .collect();
-        let results = if self.host.is_none() && self.runtime().await.is_some() {
+        let results = if self.runtime().await.is_some() {
             let names: Vec<_> = selected.iter().map(|e| e.name.clone()).collect();
             let url = self.runtime_url.clone();
             tokio::task::spawn_blocking(move || {
@@ -426,43 +422,6 @@ async fn guard(
     response.headers_mut().insert("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     response
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OpenRequest {
-    config: Option<PathBuf>,
-    #[serde(default)]
-    batteries: Vec<String>,
-    #[serde(default)]
-    setup: bool,
-}
-async fn open_ui(State(web): State<Web>, axum::Json(request): axum::Json<OpenRequest>) -> ApiResult {
-    if request
-        .config
-        .as_ref()
-        .is_some_and(|path| !same_config(path, &web.local.config))
-    {
-        return Err((StatusCode::CONFLICT, "The runtime serves a different configuration"));
-    }
-    let (entries, _) = web.local.catalog();
-    if request
-        .batteries
-        .iter()
-        .any(|name| !entries.iter().any(|entry| &entry.name == name))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Requested battery is not installed in this runtime",
-        ));
-    }
-    let mut url = url::Url::parse(&web.origin).expect("runtime origin");
-    url.query_pairs_mut()
-        .append_pair("configure", if request.setup { "true" } else { "false" });
-    if !request.batteries.is_empty() {
-        url.query_pairs_mut()
-            .append_pair("batteries", &request.batteries.join(","));
-    }
-    Ok(axum::Json(json!({"url": url.as_str()})))
-}
 async fn snapshot(State(web): State<Web>) -> ApiResult {
     web.local
         .snapshot()
@@ -523,26 +482,28 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
         .check(&affected)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Cannot check batteries"))?;
-    let activation_failed = if let Some(host) = &web.local.host {
-        match host.activate().await {
-            Ok(_) => false,
-            Err(error) => {
-                tracing::warn!(%error, "credentials saved; enforcement reload refused");
-                true
-            }
-        }
+    // A running runtime reloads now. A stopped one reads the saved tokens when a new
+    // session starts it; its startup refuses if they still do not work.
+    let applied = if web.local.runtime().await.is_some() {
+        reload_runtime(web.local.runtime_url.clone()).await
     } else {
-        false
+        Applied::NotRunning
     };
     let mut snapshot = web
         .local
         .snapshot()
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Saved; cannot refresh setup"))?;
-    if activation_failed {
-        snapshot["errors"].as_array_mut().expect("errors array").push(json!(
-            "Credentials saved. Enforcement configuration could not be applied; inspect runtime diagnostics."
-        ));
+    snapshot["applied"] = json!(match &applied {
+        Applied::Reloaded => "reloaded",
+        Applied::NotRunning => "not_running",
+        Applied::Refused(_) => "refused",
+    });
+    if let Applied::Refused(error) = applied {
+        snapshot["errors"]
+            .as_array_mut()
+            .expect("errors array")
+            .push(json!(format!("Saved. The runtime kept its previous policy: {error}")));
     }
     Ok(axum::Json(snapshot))
 }
@@ -564,25 +525,6 @@ async fn check(State(web): State<Web>, axum::Json(check): axum::Json<Check>) -> 
         .map(axum::Json)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Cannot inspect local setup"))
 }
-async fn apply(State(web): State<Web>) -> ApiResult {
-    let _gate = web.local.gate.lock().await;
-    let host = web
-        .local
-        .host
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Runtime unavailable"))?;
-    host.activate()
-        .await
-        .map(|_| axum::Json(json!({"active": true})))
-        .map_err(|error| {
-            tracing::warn!(%error, "enforcement reload refused");
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Configuration could not be applied. Inspect runtime diagnostics.",
-            )
-        })
-}
-
 pub fn run(args: Args) -> ExitCode {
     match launch(args) {
         Ok(()) => ExitCode::SUCCESS,
@@ -593,32 +535,53 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 fn launch(args: Args) -> Result<(), String> {
-    let endpoint = Endpoint::parse(&args.runtime_url)?;
-    let body = serde_json::to_vec(&json!({"config": args.config, "batteries": args.battery, "setup": args.setup}))
-        .map_err(|e| e.to_string())?;
-    let answer = crate::loopback_http::request(
-        &endpoint,
-        "POST",
-        "/ui/open",
-        &body,
-        &Deadline::spanning(Duration::from_secs(5)),
-    )
-    .map_err(|_| {
-        format!(
-            "No runtime is reachable at {}. Start appa runtime first.",
-            args.runtime_url
-        )
-    })?;
-    if !answer.is_success() {
-        return Err(String::from_utf8_lossy(&answer.body).into_owned());
-    }
-    let response: Value = serde_json::from_slice(&answer.body).map_err(|_| "Invalid UI response")?;
-    let url = response["url"].as_str().ok_or("Runtime did not provide a UI address")?;
-    println!("{url}");
-    if !args.no_open {
-        open_browser(url);
-    }
-    Ok(())
+    let local = Arc::new(Local::new(&args)?);
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("cannot listen on loopback: {e}"))?;
+        let authority = listener.local_addr().map_err(|e| e.to_string())?.to_string();
+        let origin = format!("http://{authority}");
+        let mut url = url::Url::parse(&origin).expect("loopback origin");
+        url.query_pairs_mut()
+            .append_pair("configure", if args.setup { "true" } else { "false" });
+        if !args.battery.is_empty() {
+            url.query_pairs_mut().append_pair("batteries", &args.battery.join(","));
+        }
+        println!("{url}");
+        eprintln!("Serving the page until you press Ctrl-C.");
+        if !args.no_open {
+            open_browser(url.as_str());
+        }
+        let web = Web { local, authority, origin };
+        axum::serve(listener, router(web).into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+enum Applied {
+    Reloaded,
+    NotRunning,
+    Refused(String),
+}
+async fn reload_runtime(url: String) -> Applied {
+    tokio::task::spawn_blocking(move || {
+        let endpoint = match Endpoint::parse(&url) {
+            Ok(endpoint) => endpoint,
+            Err(error) => return Applied::Refused(error),
+        };
+        match crate::loopback_http::request(&endpoint, "POST", "/reload", b"", &Deadline::spanning(Duration::from_secs(90))) {
+            Ok(answer) if answer.is_success() => Applied::Reloaded,
+            Ok(answer) => Applied::Refused(String::from_utf8_lossy(&answer.body).into_owned()),
+            Err(_) => Applied::NotRunning,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Applied::Refused("reload task failed".into()))
 }
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
@@ -671,37 +634,12 @@ fn router(web: Web) -> axum::Router {
                 )
             }),
         )
-        .route("/ui/open", post(open_ui))
         .route("/api/state", get(snapshot))
         .route("/api/credentials", post(save))
         .route("/api/check", post(check))
-        .route("/api/apply", post(apply))
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .layer(axum::middleware::from_fn_with_state(web.clone(), guard))
         .with_state(web)
-}
-
-pub(crate) fn runtime_router(
-    host: Arc<crate::runtime_cli::RuntimeHost>,
-    listen: SocketAddr,
-) -> Result<axum::Router, String> {
-    let mut local = runtime_local(&host.config, &host.dirs)?;
-    local.host = Some(host);
-    // The management surface remains loopback-only even for network-facing deployments.
-    let address = SocketAddr::new(
-        if listen.is_ipv4() {
-            std::net::Ipv4Addr::LOCALHOST.into()
-        } else {
-            std::net::Ipv6Addr::LOCALHOST.into()
-        },
-        listen.port(),
-    );
-    let authority = address.to_string();
-    Ok(router(Web {
-        local: Arc::new(local),
-        origin: format!("http://{authority}"),
-        authority,
-    }))
 }
 
 /// CLI description uses the same manifest checks as the web UI. When the

@@ -242,10 +242,10 @@ After approval:
    Never ask for tokens in chat, read the credential database, or put token values
    in shell commands or configuration files. Login hints are instructions for the
    user, not commands to execute automatically. If browser opening fails, show
-   the URL printed by the command. The runtime serves this page even when missing
-   credentials block enforcement. If the process is stopped, start the configured
-   runtime using the existing deployment workflow before opening the UI. Saving
-   credentials also retries applying the configuration; no separate UI server is needed.
+   the URL printed by the command. The command serves the page until it is stopped,
+   so run it in the background and stop it after the user finishes. It works whether
+   or not the runtime is running. Saving reloads a running runtime; if none is
+   running, the next session starts it with the saved credentials.
    After the user finishes, rerun the combined status command with `--check` and
    use only its sanitized results. A `ready` result with reason `configured` means
    the battery's executables exist and its tokens are set, but no provider check

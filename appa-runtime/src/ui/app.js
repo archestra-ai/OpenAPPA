@@ -444,7 +444,8 @@ function save(list) {
     list.forEach(b => { if (state.batteries.find(item => item.name === b.name)?.check?.status === 'ready') expanded.delete(b.name); });
     render();
     const failed = state.batteries.filter(b => list.some(item => item.name === b.name) && (needsSetup(b) || b.check?.status === 'unavailable')).length;
-    notice(failed ? `Saved. ${failed} ${failed === 1 ? 'battery needs' : 'batteries need'} attention.` : 'Saved.');
+    const applied = state.applied === 'not_running' ? ' No runtime is running: start a new session to apply.' : '';
+    notice((failed ? `Saved. ${failed} ${failed === 1 ? 'battery needs' : 'batteries need'} attention.` : 'Saved.') + applied);
   });
 }
 function check(list) {
