@@ -170,9 +170,7 @@ function svg(tag, attrs) {
 }
 function overview() {
   heading('Overview', '', button('Refresh', refresh, 'secondary'));
-  const intro = el('p', 'What your current OpenAPPA configuration protects. ', 'description');
-  if (state.config) { intro.append('Read from '); intro.append(el('code', state.config)); intro.append('.'); }
-  content.append(intro);
+  content.append(el('p', 'What your current OpenAPPA configuration protects.', 'description'));
   errors();
   const list = servers();
   attention();

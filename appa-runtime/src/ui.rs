@@ -279,8 +279,7 @@ impl Local {
             }
         }
         Ok(
-            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins,
-                "config": self.config.display().to_string()}),
+            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}),
         )
     }
 
