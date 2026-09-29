@@ -420,6 +420,22 @@ impl Session {
         }
     }
 
+    pub(crate) fn released_call_has_no_effects(&self, call: &ProposedCall) -> bool {
+        let Ok(log) = self.inner.log(&self.root) else {
+            return false;
+        };
+        let Ok(policy) = self.policy(&log) else { return false };
+        let Some(bytes) = policy.engine().canonical_bytes(call) else {
+            return false;
+        };
+        let Ok(open) = self.carried_calls() else { return false };
+        let matching: Vec<_> = open
+            .iter()
+            .filter(|dispatch| dispatch.tool == call.tool && dispatch.bytes == bytes)
+            .collect();
+        !matching.is_empty() && matching.iter().all(|dispatch| dispatch.effect_free)
+    }
+
     #[cfg(test)]
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
         self.on_tool_call_identified(call, None, spawn).await
@@ -6842,6 +6858,7 @@ delta = {}
             id: id.clone(),
             tool: tool.to_string(),
             bytes: bytes.to_vec(),
+            effect_free: false,
         };
         let canonical = || Some(b"{}".to_vec());
 

@@ -85,16 +85,15 @@ fn run_client(url: &str, stdin: &str) -> (i32, String) {
 }
 
 #[test]
-fn codex_bash_is_denied_until_an_approved_wrapper_job_exists() {
+fn codex_bash_blocks_when_no_runtime_can_prepare_a_wrapper_job() {
     let event = r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"c1","tool_input":{"command":"printf secret"}}"#;
     let (status, output) = finish(
         child_process::spawn(client("http://127.0.0.1:1").arg("--adapter").arg("codex"))
             .expect("the Codex hook client starts"),
         event,
     );
-    assert_eq!(status, 0);
-    let answer: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(status, 2);
+    assert!(output.is_empty());
     assert!(!output.contains("printf secret"));
 }
 

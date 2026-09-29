@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use appa_runtime_api::AdapterName;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Json, Path as AxumPath, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -260,12 +260,182 @@ struct AppState {
     battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
+    codex_jobs: Arc<crate::codex::jobs::Jobs>,
+    codex_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexPrepare {
+    event: serde_json::Value,
+    shell: String,
+}
+
+async fn codex_prepare(
+    State(state): State<AppState>,
+    Json(request): Json<CodexPrepare>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.adapter.name != AdapterName::Codex {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Codex is not served here"})),
+        );
+    }
+    let body = match serde_json::to_vec(&request.event) {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid hook event"})),
+            );
+        }
+    };
+    let event = match appa_runtime_api::WireEvent::read(&body).and_then(|wire| wire.into_event(&state.adapter)) {
+        Ok(Some(accepted)) => accepted.event,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid Codex call"})),
+            );
+        }
+    };
+    if !matches!(&event, appa_runtime_api::HookEvent::ToolCall { call, .. } if call.tool == "host/codex/appa_exec") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "not a Codex command call"})),
+        );
+    }
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "runtime executable unavailable"})),
+            );
+        }
+    };
+    let (status, mut answer) = hooks::answer(&state.runtime, &state.adapter, &body).await;
+    if status == 200 && answer.get("decision").and_then(serde_json::Value::as_str) == Some("allow_call") {
+        match state
+            .codex_jobs
+            .create(&event, &executable, &state.codex_url, &request.shell)
+        {
+            Ok(wrapper) => {
+                answer["wrapper"] = serde_json::Value::String(wrapper);
+            }
+            Err(error) => {
+                // The dispatch already opened, but no child may run. Settle it conservatively.
+                if let appa_runtime_api::HookEvent::ToolCall {
+                    actor, call, call_id, ..
+                } = event
+                {
+                    let _ = hooks::handle(
+                        &state.runtime,
+                        appa_runtime_api::HookEvent::ToolResult {
+                            actor,
+                            call,
+                            call_id,
+                            outcome: appa_runtime_api::ToolOutcome::Indeterminate,
+                        },
+                    )
+                    .await;
+                }
+                return (StatusCode::CONFLICT, Json(serde_json::json!({"error": error})));
+            }
+        }
+    }
+    (
+        StatusCode::from_u16(status).expect("hook status is valid"),
+        Json(answer),
+    )
+}
+
+async fn codex_consume(
+    State(state): State<AppState>,
+    AxumPath(handle): AxumPath<String>,
+) -> Result<Json<crate::codex::jobs::Specification>, StatusCode> {
+    if state.adapter.name != AdapterName::Codex {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    state.codex_jobs.consume(&handle).map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn codex_running(State(state): State<AppState>, AxumPath(handle): AxumPath<String>) -> StatusCode {
+    if state.adapter.name != AdapterName::Codex || !state.codex_jobs.running(&handle) {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::NO_CONTENT
+    }
+}
+
+async fn codex_report(
+    State(state): State<AppState>,
+    AxumPath(handle): AxumPath<String>,
+    Json(report): Json<crate::codex::jobs::Report>,
+) -> Result<Json<crate::codex::jobs::Admission>, StatusCode> {
+    if state.adapter.name != AdapterName::Codex {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    state
+        .codex_jobs
+        .report(&state.runtime, &handle, report)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::CONFLICT)
+}
+
+async fn codex_outer(State(state): State<AppState>, body: axum::body::Bytes) -> (StatusCode, Json<serde_json::Value>) {
+    let owned = state.adapter.name == AdapterName::Codex
+        && appa_runtime_api::WireEvent::read(&body)
+            .and_then(|wire| wire.into_event(&state.adapter))
+            .ok()
+            .flatten()
+            .and_then(|accepted| match accepted.event {
+                appa_runtime_api::HookEvent::ToolResult {
+                    actor,
+                    call,
+                    call_id: Some(call_id),
+                    ..
+                } if call.tool == "host/codex/appa_exec" => {
+                    let command = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
+                    let command = command.get("command")?.as_str()?;
+                    Some(state.codex_jobs.settled(&actor, &call_id, command))
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+    let decision = if owned {
+        appa_runtime_api::HookDecision::Ack
+    } else {
+        appa_runtime_api::HookDecision::Block {
+            reason: "OpenAPPA could not verify the Codex command result".into(),
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(appa_runtime_api::WireDecision::of(&decision)).expect("decision serializes")),
+    )
 }
 
 async fn hook(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    if state.adapter.name == AdapterName::Codex
+        && let Ok(Some(accepted)) =
+            appa_runtime_api::WireEvent::read(&body).and_then(|wire| wire.into_event(&state.adapter))
+    {
+        let actor = match &accepted.event {
+            appa_runtime_api::HookEvent::TurnEnd { actor } | appa_runtime_api::HookEvent::Prompt { actor, .. } => {
+                Some(actor)
+            }
+            _ => None,
+        };
+        if let Some(actor) = actor {
+            for result in state.codex_jobs.cancel_actor(actor) {
+                let _ = hooks::handle(&state.runtime, result).await;
+            }
+        }
+    }
     let (status, body) = hooks::answer(&state.runtime, &state.adapter, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
@@ -571,6 +741,17 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         serving_tools: config.tool_names().into_iter().collect(),
     }));
     let db = args.db.unwrap_or_else(|| default_db_path(args.adapter));
+    let codex_jobs = if args.adapter == AdapterName::Codex {
+        match crate::codex::jobs::Jobs::persistent(&db) {
+            Ok(jobs) => Arc::new(jobs),
+            Err(error) => {
+                eprintln!("appa runtime: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        Arc::new(crate::codex::jobs::Jobs::default())
+    };
     let runtime = match Runtime::open_served(config, db, args.modules_dir, adapter) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -625,6 +806,21 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let listen = args.listen.unwrap_or_else(|| default_listen(args.adapter));
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("appa runtime: cannot bind {listen}: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let listen = match listener.local_addr() {
+        Ok(listen) => listen,
+        Err(error) => {
+            eprintln!("appa runtime: cannot read the bound address of {}: {error}", listen);
+            return ExitCode::FAILURE;
+        }
+    };
     let state = AppState {
         runtime: Arc::clone(&runtime),
         adapter,
@@ -633,6 +829,8 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         battery_dirs,
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
+        codex_jobs,
+        codex_url: format!("http://{listen}"),
     };
     let management = axum::Router::new()
         .route("/binary-fingerprint", get(binary_fingerprint))
@@ -647,6 +845,14 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .route("/adapter", get(adapter_identity))
         .route("/batteries", get(batteries))
         .route("/hook", post(hook))
+        .route("/codex/job/prepare", post(codex_prepare))
+        .route("/codex/job/{handle}/consume", get(codex_consume))
+        .route("/codex/job/{handle}/running", get(codex_running))
+        .route(
+            "/codex/job/{handle}/report",
+            post(codex_report).layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route("/codex/job/outer", post(codex_outer))
         .route(
             "/validate",
             post(validate_tools).layer(axum::extract::DefaultBodyLimit::max(
@@ -664,21 +870,6 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .merge(management)
         .with_state(state);
 
-    let listen = args.listen.unwrap_or_else(|| default_listen(args.adapter));
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("appa runtime: cannot bind {listen}: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let listen = match listener.local_addr() {
-        Ok(listen) => listen,
-        Err(error) => {
-            eprintln!("appa runtime: cannot read the bound address of {}: {error}", listen);
-            return ExitCode::FAILURE;
-        }
-    };
     // The one line the runtime writes to stdout: the address it serves, so a caller that
     // asked for port 0 learns the port it got.
     println!("http://{listen}");

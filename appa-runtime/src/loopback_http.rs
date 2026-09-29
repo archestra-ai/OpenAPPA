@@ -11,6 +11,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+const MAX_HTTP_BYTES: usize = 4 * 1024 * 1024;
+
 /// Where the runtime answers: an authority to connect to and the prefix its
 /// routes hang under.
 pub(crate) struct Endpoint {
@@ -164,6 +166,9 @@ fn request_with_route(
     deadline: &Deadline,
     proxy: Option<&Endpoint>,
 ) -> Result<Answer, String> {
+    if body.len() > MAX_HTTP_BYTES {
+        return Err("the runtime request exceeds the HTTP body limit".into());
+    }
     endpoint.addresses()?;
     let destination = proxy.unwrap_or(endpoint);
     let (mut socket, address) = connect(&destination.addresses()?, deadline)?;
@@ -192,6 +197,9 @@ fn request_with_route(
             Ok(0) => break,
             Ok(read) => {
                 answer.extend_from_slice(&chunk[..read]);
+                if answer.len() > MAX_HTTP_BYTES {
+                    return Err("the runtime answer exceeds the HTTP body limit".into());
+                }
                 if declared_answer_len(&answer)?.is_some_and(|length| answer.len() >= length) {
                     break;
                 }

@@ -155,8 +155,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 .ok_or_else(|| malformed("subagent stop has no agent_id"))?,
             value: input.last_assistant_message.clone(),
         },
-        "Stop" => HookEvent::TurnEnd { actor: input.actor() },
-        "SessionEnd" | "Interrupt" | "PreCompact" | "PostCompact" | "PermissionRequest" => return Ok(None),
+        "Stop" | "SessionEnd" | "Interrupt" | "PreCompact" => HookEvent::TurnEnd { actor: input.actor() },
+        "PostCompact" | "PermissionRequest" => return Ok(None),
         _ => return Err(malformed("unsupported Codex hook event")),
     };
     Ok(Some(event))
@@ -173,6 +173,17 @@ fn mcp_error(response: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interruption_and_session_end_close_outstanding_calls() {
+        for hook in ["Interrupt", "SessionEnd", "PreCompact"] {
+            let body = serde_json::json!({"hook_event_name": hook, "session_id": "s1"});
+            assert!(matches!(
+                parse(body.to_string().as_bytes()).unwrap(),
+                Some(HookEvent::TurnEnd { .. })
+            ));
+        }
+    }
 
     #[test]
     fn calls_keep_host_identity_and_arguments() {

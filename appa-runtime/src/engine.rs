@@ -703,6 +703,7 @@ pub struct OpenDispatch {
     pub id: EngineDispatchId,
     pub tool: String,
     pub bytes: Vec<u8>,
+    pub effect_free: bool,
 }
 
 /// The engine deciding one family's events: the engine of the
@@ -967,6 +968,7 @@ impl RuntimeEngine {
                 id: dispatch.clone(),
                 tool: call.tool().as_str().to_string(),
                 bytes: call.canonical_arguments().canonical_bytes().to_vec(),
+                effect_free: self.engine.registry().call_has_no_effects(call),
             })
             .collect()
     }

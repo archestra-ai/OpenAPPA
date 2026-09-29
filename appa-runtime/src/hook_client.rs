@@ -14,7 +14,9 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, WireDecision, WireEvent};
+use appa_runtime_api::{
+    AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, ToolOutcome, WireDecision, WireEvent,
+};
 
 use crate::loopback_http::{Answer, Deadline, Endpoint, get, request};
 use crate::runtime_start::{self, Deployment};
@@ -182,7 +184,6 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     if !session_is_gated() {
         return ExitCode::SUCCESS;
     }
-    let decides = Decides::of_a_turn_end(turn_end);
     let codec = match host {
         AdapterName::ClaudeCode => appa_adapter_claude_code::codec(),
         AdapterName::Codex => appa_adapter_codex::codec(),
@@ -194,6 +195,17 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
     }
+    let codex_turn_boundary = host == AdapterName::Codex
+        && serde_json::from_slice::<serde_json::Value>(&host_event)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("hook_event_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|name| matches!(name.as_str(), "Stop" | "Interrupt" | "SessionEnd" | "PreCompact"));
+    let decides = Decides::of_a_turn_end(turn_end || codex_turn_boundary);
     if host == AdapterName::Codex && ensure.is_some() {
         let reason = "Codex runtime auto-start requires its separate deployment and is not active yet";
         return if codex_unparsed_turn_gate(&host_event) {
@@ -232,23 +244,10 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
         // the output the tool produced does not stay in front of the model.
         Err(failure) => return unanswered(&codec, host, Unanswered::Unparsed(&host_event), &failure, decides),
     };
-    // A Codex Bash call is the transport for an APPA-owned child execution.
-    // Until the runtime has registered an opaque job and supplied the fixed
-    // wrapper command, returning an ordinary allow would run the raw command
-    // and expose its streaming output outside result admission.
-    if host == AdapterName::Codex
-        && let HookEvent::ToolCall { call, .. } = &event
-        && call.tool == "Bash"
-    {
-        return deliver(&(codec.render)(
-            &event,
-            &HookDecision::DenyCall {
-                feedback: "OpenAPPA's Codex command wrapper is not active for this deployment".into(),
-                offers: Vec::new(),
-                review: Vec::new(),
-            },
-        ));
-    }
+    let codex_exec_pre =
+        host == AdapterName::Codex && matches!(&event, HookEvent::ToolCall { call, .. } if call.tool == "Bash");
+    let codex_exec_post =
+        host == AdapterName::Codex && matches!(&event, HookEvent::ToolResult { call, .. } if call.tool == "Bash");
     // A prompt is refused while a subagent definition in reach declares `maxTurns`:
     // Claude Code ends such a subagent at its cap with no SubagentStop, so its
     // partial output would reach the parent unchecked.
@@ -262,7 +261,26 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     // A parsed event that cannot cross the wire is still an event to answer: it is handed
     // to the withholding path rather than dropped, so a result that already ran is taken
     // out of the model's attention instead of staying in front of it.
-    let body = match wire_body(host, &event) {
+    // The outer Bash result is transport metadata. Its host output is already
+    // admitted through the job report and must never be parsed or dispatched
+    // again; Codex can report it as a plain string, which the normal wire
+    // outcome format cannot represent as a complete JSON result body.
+    let outer_event = if codex_exec_post {
+        match &event {
+            HookEvent::ToolResult {
+                actor, call, call_id, ..
+            } => Some(HookEvent::ToolResult {
+                actor: actor.clone(),
+                call: call.clone(),
+                call_id: call_id.clone(),
+                outcome: ToolOutcome::Indeterminate,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let body = match wire_body(host, outer_event.as_ref().unwrap_or(&event)) {
         Ok(body) => body,
         Err(failure) => return unanswered(&codec, host, Unanswered::Event(&event), &failure, decides),
     };
@@ -273,7 +291,18 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
                 return Err(format!("{} does not serve the Codex adapter", target.url));
             }
         }
-        post(&endpoint, &body, &Deadline::spanning(decides.budget()))
+        let deadline = Deadline::spanning(decides.budget());
+        if codex_exec_pre {
+            let event: serde_json::Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            let prepare = serde_json::to_vec(&serde_json::json!({"event": event, "shell": shell}))
+                .map_err(|error| error.to_string())?;
+            request(&endpoint, "POST", "/codex/job/prepare", &prepare, &deadline)
+        } else if codex_exec_post {
+            request(&endpoint, "POST", "/codex/job/outer", &body, &deadline)
+        } else {
+            post(&endpoint, &body, &deadline)
+        }
     });
     let answer = match answered {
         Ok(answer) => answer,
@@ -283,6 +312,30 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
         return ExitCode::SUCCESS;
     }
     match (decision_of(&answer.body), answer.is_success()) {
+        (Ok(decision), true) if codex_exec_pre && matches!(decision, HookDecision::AllowCall { .. }) => {
+            let wrapper = serde_json::from_slice::<serde_json::Value>(&answer.body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("wrapper")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            match wrapper.filter(|wrapper| !wrapper.is_empty()) {
+                Some(wrapper) => deliver(&serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                    "updatedInput": {"command": wrapper}
+                }})),
+                None => unanswered(
+                    &codec,
+                    host,
+                    Unanswered::Event(&event),
+                    "runtime did not supply a Codex wrapper",
+                    decides,
+                ),
+            }
+        }
+        (Ok(HookDecision::Ack), true) if codex_exec_post => deliver(&serde_json::json!({})),
         (Ok(decision), true) => deliver(&(codec.render)(&event, &decision)),
         // A refusal is rendered too, and for a result that already ran the rendering
         // is the whole answer: the harness reads it only from a hook that exits zero,

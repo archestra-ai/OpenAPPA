@@ -1,0 +1,9 @@
+# Codex proxy compatibility probe
+
+`proxy_probe.py` exercises a runtime-owned Bash job through the installed Codex CLI's command sandbox. Build `appa` first with `cargo build -p appa`, then run `python3 integrations/codex/proxy_probe.py`. The probe creates a temporary project and Codex profile, makes no model call, and reports whether a rewritten wrapper reaches the runtime and releases only the admitted result after completion.
+
+The current command proxy is a **Unix, finite, noninteractive** implementation. It launches the selected `sh`, `bash`, or `zsh` login shell without a controlling terminal, buffers at most 1 MiB of combined output, and checks that the job remains active while it runs. Native Windows command execution, forwarded stdin, terminal jobs, and shell modes that cannot be reproduced are unsupported and refused. The proxy must be used with a protected launcher and a Codex sandbox profile that permits the disclosed `127.0.0.1` HTTP exception; the hook alone cannot guarantee coverage if Codex skips or disables it.
+
+A runtime restart invalidates live job handles. Settled ownership is retained to prevent replay, but a post-hook arriving after restart is withheld because the old turn's liveness cannot be proved. Stop, Interrupt, and a new prompt also close live jobs and prevent late post-hook acknowledgement.
+
+On cancellation, the wrapper kills the shell's process group and its ordinary descendants. A command that deliberately daemonizes by creating another session can escape that group and continue after the wrapper settles indeterminately. The installed Codex 0.159 sandbox also leaves such a descendant running when its parent exits. Do not treat this proxy as containment for daemonizing commands; policy should deny them until a process-tree containment mechanism is available. Output from an escaped descendant that retains the wrapper's pipes is withheld, but its side effects cannot be rolled back.

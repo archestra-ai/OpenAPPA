@@ -9,6 +9,8 @@ pub mod batteries;
 #[cfg(feature = "daemon")]
 pub mod claude_files;
 #[cfg(feature = "daemon")]
+pub mod codex;
+#[cfg(feature = "daemon")]
 pub mod codex_probe;
 pub mod config;
 #[cfg(feature = "daemon")]

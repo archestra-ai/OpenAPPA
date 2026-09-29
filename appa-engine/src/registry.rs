@@ -1539,6 +1539,13 @@ impl Registry {
         }
     }
 
+    /// The effects pinned to this released call, after an Annotator answer if
+    /// one was required. Unknown declarations conservatively return false.
+    pub fn call_has_no_effects(&self, call: &crate::value::ResolvedCall) -> bool {
+        self.annotation_of(call)
+            .is_some_and(|annotation| annotation.emits.is_empty())
+    }
+
     pub(crate) fn select_tool(
         &self,
         name: &ToolName,
