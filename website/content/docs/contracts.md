@@ -525,9 +525,11 @@ If you omit `trust_chain`, the ranks are `suspicious` followed by `trusted`, fro
 
 To define your own ranks, set `trust_chain` in `[policy]`. For example, `trust_chain = ["untrusted", "reviewed", "trusted"]` defines three ranks in increasing order. This replaces the default ranks. A trust rank used elsewhere in the policy must appear in this list, or the policy does not load.
 
-#### Choose a result's trust by who can write it
+#### Choose a result's trust by who wrote it
 
-Set a result's trust by who can write its text, not by which service returns it. Text that only members of the organization can write keeps the trajectory's trust: its `delta` omits `trust`. Text that someone outside the organization can write lowers it to `suspicious`: a web page, an issue on a public repository, a shared channel with another company, a meeting transcript with outside participants. A member account an attacker controls is outside this model.
+Set a result's trust by who wrote its text, not by which service returns it or who can read it. Text that only members of the organization and its collaborators wrote keeps the trajectory's trust: its `delta` omits `trust`. Text that someone outside the organization wrote lowers it to `suspicious`: a web page, a comment by an outside contributor, a message in a shared channel with another company, a meeting transcript with outside participants. Trust and audience are independent: an issue on a public repository that only the team wrote keeps the trajectory's trust, and an outsider's comment on a private repository is `suspicious`.
+
+A static contract does not see who wrote a particular result, so it assumes that anyone who can write there did: an issue on a public repository enters `suspicious`. An annotator can decide per call from the authors a [context provider](#context-providers) reports. A member account an attacker controls is outside this model.
 
 Guests and integrations a member installed write as the organization. An integration can relay text that an outsider wrote, such as a public issue title posted to a chat channel, and that text keeps the trajectory's trust.
 
@@ -675,34 +677,43 @@ Selecting fewer inputs does not change the response requirements: the annotator 
 | `$tool_call.description` | The tool's description. The tool contract must declare `description`. |
 | `$tool_call.arguments` | Complete argument object. |
 | `$tool_call.arguments.<name>` | One top-level argument. The tool's `parameters` schema must declare it as required. |
-| `$input.<name>` | The answer of the program configured under `[externals.inputs.<name>]`, asked about the call before the annotator. |
 
 A selected argument can contain any JSON value permitted by its schema.
 
-### Inputs a program answers
+### Context providers
 
-An `$input.<name>` input carries a fact about the call that the command line does not state, established by a program the deployment runs. For example, which readers a `git push` reaches is the visibility of the repository, which the program reads from the checkout. The annotator classifies from the finding instead of guessing.
+A context provider is a program the deployment runs to find facts about a call that the call does not state. Configure each one under `[externals.context.<name>]`. For example, which readers a `git push` reaches is the visibility of the repository, and who wrote a pull request's comments is in the repository's history. The provider finds these facts, and the annotator classifies from them instead of guessing.
 
 ```toml
 [[policy.annotator]]
 name = "classify-push"
 builtin = "claude-code"
-inputs = { call = "$tool_call", repository = "$input.repository" }
-hint = "`repository` is the deployment's own finding. A push into a public repository requires audience public; into a private one, internal."
+hint = "`context.github` is the deployment's own finding. A push into a public repository requires audience public; into a private one, internal."
 
 [[policy.tool]]
 name = "Bash(command:*git push*)"
 annotator = "classify-push"
 
-[externals.inputs.repository]
-command = ["python3", "repository.py"]
+[externals.context.github]
+command = ["python3", "context.py"]
 ```
 
-Before OpenAPPA asks the annotator, it sends each named program one consult request with `kind = "input"`. `declaration` is empty. `artifact` carries the call: `tool`, `arguments`, and `cwd`, the directory the harness would run the call in, when the harness reports one. The program returns `{"version": 1, "answer": <any JSON value>}`. OpenAPPA places the answer under the input's name in the annotator's `artifact.args`, exactly as returned, and lists the name in `declaration.established`.
+Before OpenAPPA asks an annotator for a new annotation, it sends every configured context provider one consult request with `kind = "context"`. The requests run concurrently. `declaration` is empty. `artifact` carries the call: `tool`, `arguments`, and `cwd`, the directory the harness would run the call in, when the harness reports one. The provider returns `{"version": 1, "answer": <any JSON value>}`. A provider that has nothing to say about the call answers `null`.
 
-If a program fails or does not answer in time, the call does not run, exactly as when the annotator fails. A program that cannot establish the fact should answer a value that says so, such as `null` with a reason, so the annotator classifies from a known gap. The annotator never sees `cwd`.
+OpenAPPA gives every annotator the answers in `artifact.context`, one entry per provider name:
 
-Every `$input.<name>` an annotator reads must be configured under `[externals.inputs.<name>]`. A configured program no annotator reads is allowed and never runs.
+```json
+{
+  "github": { "answer": { "repository": { "name": "acme/widget", "visibility": "public" } } },
+  "tickets": { "error": "timeout" }
+}
+```
+
+A provider that answers `null` has no entry. A provider that fails, does not answer in time, or answers an invalid response gets an `error` entry with the reason. A context provider never stops a call: the annotator is asked in every case, and it classifies a missing fact as unknown. The annotator never sees `cwd`.
+
+The answer is free-form JSON, and OpenAPPA does not validate it. An answer SHOULD state facts, not labels: a repository's visibility, not an audience. Text an answer quotes, such as a table description, SHOULD carry its author, because the annotator judges trust by who wrote the text.
+
+OpenAPPA records the context with the annotation it produced. A later decision that reuses the annotation reuses its context and does not ask the providers again. A battery can configure a context provider, as the `github` battery does.
 
 ### Permits and hint
 
@@ -721,7 +732,7 @@ An annotator can use a selector placeholder only when its own `audiences` lists 
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
-The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what an established input means. It can give examples. Every annotator builtin (`claude-code`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code` and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
+The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what a context provider's answer means. It can give examples. Every annotator builtin (`claude-code`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code` and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 
@@ -751,17 +762,16 @@ For the customer example, the request is:
   "declaration": {
     "hint": "Classify customer records as internal and suspicious.",
     "inputs": ["subject"],
-    "established": [],
     "trust_ranks": ["suspicious"],
     "audiences": ["internal"],
     "attention_marks": [],
     "effects": []
   },
-  "artifact": { "args": { "subject": "cust-7" } }
+  "artifact": { "args": { "subject": "cust-7" }, "context": {} }
 }
 ```
 
-`declaration.established` lists the inputs a program answered (see [Inputs a program answers](#inputs-a-program-answers)); the other inputs come from the tool call. Without an `inputs` mapping, `declaration.inputs` is empty and `artifact.args` contains the complete call. For example, the `artifact` field contains:
+`artifact.context` carries the [context providers'](#context-providers) answers. Without an `inputs` mapping, `declaration.inputs` is empty and `artifact.args` contains the complete call. For example, the `artifact` field contains:
 
 ```json
 {
@@ -769,7 +779,8 @@ For the customer example, the request is:
     "name": "Bash",
     "description": "Runs one shell command and returns its output.",
     "arguments": { "command": "cargo test" }
-  }
+  },
+  "context": {}
 }
 ```
 
@@ -1239,7 +1250,7 @@ The available settings depend on the component's role:
 | `authorities` | Exactly one of `url`, `command`, or `builtin`. | Optional. Without a binding, the authority returns no answer. |
 | `sanitizers` | Exactly one of `url`, `command`, or `builtin`. | Required, except for `attest-schema`. |
 | `annotators` | Exactly one of `url` or `command`. | Required unless the declaration specifies a builtin. |
-| `inputs` | Exactly one of `url` or `command`. | Required for each `$input.<name>` an annotator reads. |
+| `context` | Exactly one of `url` or `command`. | Optional. Each configured provider is asked about every call that needs a new annotation. |
 | `audience` | Exactly one of `url`, `command`, or `readers`; `selectors` on a `url` or `command` entry; optional `lookup`. | Required for each referenced provider and each `lookup` target. `readers` is allowed only on a `lookup` target. |
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
@@ -1286,7 +1297,7 @@ A consult request is a JSON request that OpenAPPA sends to an external component
 | Key | Meaning |
 |---|---|
 | `version` | Protocol version. Must be `1`. |
-| `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `input`. |
+| `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `context`. |
 | `name` | The component name declared in the policy. |
 | `declaration` | Policy instructions and limits for the component. The agent does not supply them. |
 | `artifact` | Request data: the tool call to review, data to clean, or the selector or member to look up. |
@@ -1297,15 +1308,15 @@ Each component uses these fields differently:
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling`, optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`; `parameters` for input rewrites | `tool` when known, `body` | `body` |
-| `annotation` | `hint`, `inputs`, `established`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
+| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args`, `context` | `delta`, `requires`, `emits` |
 | `audience` | `templates` | `selector` or `member` | `members` or `principal` |
-| `input` | empty | `tool`, `arguments`, optional `cwd` | any JSON value |
+| `context` | empty | `tool`, `arguments`, optional `cwd` | any JSON value, or `null` |
 
 For an audience request, `declaration.templates` lists the selector templates the policy declares for the provider under `selectors`, such as `viewer` and `user-group/<handle>`. The service MUST refuse a request whose templates differ from the ones it serves. It reads the requested selector or member ID from `artifact` and returns its result under `answer`.
 
 OpenAPPA records membership responses with the decision that requested them. If that decision requires an approval or remedy, OpenAPPA reuses those responses when it continues the decision. A new decision can request updated membership. Replaying a recorded decision uses its saved responses without calling the membership service. Responses from unrelated decisions cannot be substituted.
 
-A consult request does not include the agent's current audience, trust rank, previous actions, or user message. The component processes the request data in `artifact` using the instructions and limits in `declaration`. An `input` request alone carries `cwd`, and an `input` answer is the one answer OpenAPPA does not validate: it is data for the annotator, not a decision.
+A consult request does not include the agent's current audience, trust rank, previous actions, or user message. The component processes the request data in `artifact` using the instructions and limits in `declaration`. A `context` request alone carries `cwd`, and a `context` answer is the one answer OpenAPPA does not validate: it is data for the annotator, not a decision.
 
 The service or program returns `{"version":1,"answer":{...}}`. The fields inside `answer` must match the component's response format. Extra fields in the surrounding response object are not allowed.
 
