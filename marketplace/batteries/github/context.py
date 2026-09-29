@@ -78,7 +78,6 @@ GH_OPTIONS_WITH_VALUE = {
 }
 # MCP arguments naming a pull request or an issue.
 NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
-TRUNCATING_CONNECTIONS = 100
 
 
 class Unfollowable(Exception):

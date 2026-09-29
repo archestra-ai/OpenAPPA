@@ -178,7 +178,10 @@ def repository_facts(call, owner, repo):
     visibility = payload.get("visibility") if isinstance(payload, dict) else None
     if visibility not in VISIBILITIES:
         raise RuntimeError(f"GitHub reports the unknown repository visibility {visibility!r}")
-    return Repository(visibility, payload.get("fork") is True)
+    fork = payload.get("fork")
+    if not isinstance(fork, bool):
+        raise RuntimeError(f"GitHub reports no fork flag for the repository: {fork!r}")
+    return Repository(visibility, fork)
 
 
 def read_by(visibility, owner, repo):

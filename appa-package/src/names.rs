@@ -127,7 +127,7 @@ impl fmt::Display for Namespace {
 }
 
 /// The bare name of a command-line program, as a shell finds it on `PATH`:
-/// never a path, never blank, and never `.` or `..`.
+/// never a path or a drive prefix, never blank, and never `.` or `..`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExecutableName(String);
 
@@ -137,7 +137,7 @@ impl ExecutableName {
             && text != "."
             && text != ".."
             && !text.chars().any(|character| {
-                matches!(character, '/' | '\\') || character.is_whitespace() || character.is_control()
+                matches!(character, '/' | '\\' | ':') || character.is_whitespace() || character.is_control()
             });
         bare.then(|| Self(text.to_owned()))
     }

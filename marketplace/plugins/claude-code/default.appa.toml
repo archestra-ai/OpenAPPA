@@ -384,7 +384,7 @@ tags = ["credentials"]
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
 builtin = "claude-code"
-hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository."
+hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository, or a bot."
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*git push*)"

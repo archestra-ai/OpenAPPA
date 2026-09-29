@@ -177,8 +177,15 @@ class AnswerTests(unittest.TestCase):
         for tool in ["list_issues", "list_pull_requests"]:
             self.assertEqual(read_trust(ANNOTATOR.Call(tool, None, None), PRIVATE), "suspicious")
 
-    def test_only_a_reported_visibility_is_answered(self):
-        for payload in [{"private": False}, {"visibility": "secret"}, {"visibility": None}, []]:
+    def test_only_a_reported_visibility_and_fork_flag_are_answered(self):
+        for payload in [
+            {"private": False},
+            {"visibility": "secret", "fork": False},
+            {"visibility": None, "fork": False},
+            {"visibility": "private"},
+            {"visibility": "private", "fork": None},
+            [],
+        ]:
             with self.assertRaises(RuntimeError):
                 ANNOTATOR.repository_facts(lambda _path: payload, "acme", "api")
         self.assertEqual(
@@ -244,7 +251,7 @@ class EnvelopeTests(unittest.TestCase):
         )
 
     def test_the_api_root_is_github_api_url(self):
-        with Loopback({"/repos/acme/api": {"visibility": "private"}}) as github:
+        with Loopback({"/repos/acme/api": {"visibility": "private", "fork": False}}) as github:
             result = self.run_script(consult(), github.env())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(github.seen, [("/repos/acme/api", "Bearer ghp-fixture")])
@@ -263,7 +270,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_a_write_carrying_a_large_file_is_answered(self):
         arguments = {"owner": "acme", "repo": "api", "path": "data.txt", "content": "x" * 100_000}
         request = consult(name=ANNOTATOR.READERS, artifact={"args": {"name": "create_or_update_file", "arguments": arguments}})
-        with Loopback({"/repos/acme/api": {"visibility": "private"}}) as github:
+        with Loopback({"/repos/acme/api": {"visibility": "private", "fork": False}}) as github:
             result = self.run_script(request, github.env())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["answer"]["requires"]["audience"], {"contains": [COLLABORATORS]})

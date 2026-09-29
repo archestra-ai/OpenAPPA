@@ -20,7 +20,7 @@ digest = "sha256:264b2cf3539e18dbb24112376b75afe7adaa2c5ca57a722405f9101ddf51b2b
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:c94b1f2a82c5f507af569082353edccd5e836aace836ce24faee0e2d45dec9d4"
+digest = "sha256:5b6641c16332907c2701e7cdeaf81ba7db2a2bfc78d2a069761ae6c0a738c1e8"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -80,7 +80,7 @@ digest = "sha256:44cc5d588171b0f17cf8abcdc7bf63495c24c52701044a3f7907b4b5694c99f
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:fd1caf066fc0d933be5e07d01e59870c88348c686321f594c83c442885761abd"
+digest = "sha256:360ffd4763133da1691350bb46da1f8d220fe0ac1d65f402256372b90830106e"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

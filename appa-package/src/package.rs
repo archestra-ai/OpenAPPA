@@ -469,6 +469,7 @@ mod tests {
             r#"["/usr/bin/gh"]"#,
             r#"["bin\\gh"]"#,
             r#"["g h"]"#,
+            r#"["c:gh"]"#,
             r#"[".."]"#,
         ] {
             assert!(
