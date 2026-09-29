@@ -663,7 +663,7 @@ pub fn install(args: Install) -> ExitCode {
         let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         // A bundle restores its own selection and a reinstall keeps the
         // person's battery choices; only the plugin's first install brings the
-        // batteries its manifest requires.
+        // batteries its manifest requires and those whose program is on PATH.
         let mut included = Vec::new();
         let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -691,6 +691,13 @@ pub fn install(args: Install) -> ExitCode {
                 .is_some_and(|selection| selection.plugins.contains(&name));
             if first_install {
                 included = plugin.batteries().to_vec();
+                let available = discover::batteries(acquired.marketplace(), &catalog, plugin.host())?;
+                let search = std::env::var_os("PATH").unwrap_or_default();
+                for battery in discover::detected(plugin.host(), &available, &search) {
+                    if !included.contains(&battery) {
+                        included.push(battery);
+                    }
+                }
             }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
@@ -1539,6 +1546,7 @@ mod tests {
             credentials: credentials.iter().map(|variable| variable.to_string()).collect(),
             setup: setup.map(str::to_owned),
             readiness: None,
+            detect: vec![],
         };
         let github = PackageName::parse("github").unwrap();
         let linear = PackageName::parse("linear").unwrap();

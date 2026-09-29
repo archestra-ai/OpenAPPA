@@ -4,13 +4,10 @@ Two annotators share this script, told apart by the consult's name. Both
 read the repository the call names (`owner`, `repo`) and ask GitHub for
 its visibility:
 
-  github.repository-visibility   what a read returns: for a public
-                                 repository, content anyone may write
-                                 (`suspicious`) that everyone reads; for a
-                                 private or internal one, content only the
-                                 organization's people write, at the
-                                 session's trust, read by the repository's
-                                 collaborators
+  github.repository-visibility   what a read returns: content everyone
+                                 reads for a public repository, the
+                                 repository's collaborators otherwise; its
+                                 trust follows who wrote it (below)
   github.repository-readers      what a write needs: trusted data that
                                  everyone may see for a public repository,
                                  that the repository's collaborators may
@@ -23,6 +20,25 @@ answered as its collaborators (the narrower bound), and a write into it
 needs data everyone may see, since anything narrower could reach an
 enterprise member outside the collaborators. A visibility GitHub does
 not report is refused.
+Trust follows the author, never the visibility alone. A pull request or
+an issue (`pull_request_read`, `issue_read`) keeps the session's trust
+only when the `github` context provider's answer for that very item shows
+every author, commenter, reviewer, editor, and commit author is the
+repository's OWNER, MEMBER, or COLLABORATOR, or a bot — a GitHub App
+installed on the repository writes as its people — and no list was
+truncated; an outsider, a truncated list, an error
+entry, or no context at all makes it `suspicious`. A listing of issues or
+pull requests (`list_issues`, `list_pull_requests`) keeps the session's
+trust only when the provider's answer for that repository holds the
+listing, not truncated, and every listed item's author, and its last
+editor when it was edited, is the repository's OWNER, MEMBER, or
+COLLABORATOR, or a bot; otherwise it is `suspicious`. Other repository
+content (files, commits, branches, tags, releases) is pushed by the
+repository's writers and merged from pull requests its readers open: a
+public repository's readers are anyone, and a fork's content came from
+its parent, so both are `suspicious`; a private or internal repository
+that is not a fork keeps the session's trust.
+
 A non-public repository's readers are the collection
 `@github:repo/<owner>/<repo>/collaborators`, which the `github` audience
 source resolves. The policy's mandate for each call names exactly that
@@ -37,6 +53,7 @@ treats that as no answer and refuses the operation, so nothing is
 guessed public.
 """
 
+from dataclasses import dataclass
 import json
 import os
 import sys
@@ -78,7 +95,7 @@ def rest_api(token):
 
 
 def repository_of(consult):
-    """The annotator asked and the repository the call names."""
+    """The annotator asked, the repository the call names, and the call itself."""
     if not isinstance(consult, dict):
         raise ValueError("the consult must be an object")
     if consult.get("version") != 1:
@@ -100,7 +117,27 @@ def repository_of(consult):
         # policy's placeholder admits and what GitHub names a repository by.
         if not isinstance(value, str) or not value or "/" in value or value.startswith("$"):
             raise ValueError(f"{label} must be a non-empty string naming one repository segment")
-    return name, owner, repo
+    return name, owner, repo, Call.of(args, artifact.get("context"))
+
+
+@dataclass(frozen=True)
+class Call:
+    """The part of the consult that decides a read's trust: the tool, the
+    pull request or issue number it names, and the `github` context entry."""
+
+    tool: str
+    number: int | None
+    context: dict | None
+
+    @staticmethod
+    def of(args, context):
+        name = args.get("name")
+        tool = name.rsplit("/", 1)[-1] if isinstance(name, str) else ""
+        arguments = args["arguments"]
+        numbers = (arguments.get(key) for key in NUMBER_ARGUMENTS)
+        number = next((value for value in numbers if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
+        entry = context.get("github") if isinstance(context, dict) else None
+        return Call(tool, number, entry if isinstance(entry, dict) else None)
 
 
 def collaborators(owner, repo):
@@ -124,14 +161,31 @@ def check_declaration(consult, owner, repo):
 
 
 VISIBILITIES = ("public", "private", "internal")
+# Authors whose text keeps the session's trust: the repository's own people.
+# A bot is a GitHub App installed on the repository, so it writes as them.
+TEAM = ("OWNER", "MEMBER", "COLLABORATOR")
+NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
+# Reads that return what people wrote on one pull request or issue.
+DISCUSSIONS = {"pull_request_read": "pull_request", "issue_read": "issue"}
+# Reads that return what the authors of many of them wrote.
+LISTINGS = {"list_issues": "issues", "list_pull_requests": "pull_requests"}
 
 
-def repository_visibility(call, owner, repo):
+@dataclass(frozen=True)
+class Repository:
+    visibility: str
+    fork: bool
+
+
+def repository_facts(call, owner, repo):
     payload = call(f"/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}")
     visibility = payload.get("visibility") if isinstance(payload, dict) else None
     if visibility not in VISIBILITIES:
         raise RuntimeError(f"GitHub reports the unknown repository visibility {visibility!r}")
-    return visibility
+    fork = payload.get("fork")
+    if not isinstance(fork, bool):
+        raise RuntimeError(f"GitHub reports no fork flag for the repository: {fork!r}")
+    return Repository(visibility, fork)
 
 
 def read_by(visibility, owner, repo):
@@ -160,23 +214,76 @@ def must_reach(visibility, owner, repo):
             raise ValueError(f"unexpected repository visibility {visibility!r}")
 
 
-def read_delta(visibility, owner, repo):
-    """Trust follows who can write the text: anyone can open an issue or a
-    pull request on a public repository, only the organization's people on
-    a private or internal one."""
-    audience = read_by(visibility, owner, repo)
-    match visibility:
-        case "public":
-            return {"trust": "suspicious", "audience": audience}
+def context_answer(call, owner, repo):
+    """The `github` context answer when it is about this very repository."""
+    answer = (call.context or {}).get("answer")
+    if not isinstance(answer, dict):
+        return None
+    named = (answer.get("repository") or {}).get("name")
+    return answer if isinstance(named, str) and named.lower() == f"{owner}/{repo}".lower() else None
+
+
+def written_by_the_team(call, owner, repo):
+    """Whether the context shows that only the repository's own people wrote
+    the pull request or issue the call reads."""
+    answer = context_answer(call, owner, repo)
+    item = answer.get(DISCUSSIONS[call.tool]) if answer and call.number is not None else None
+    if not isinstance(item, dict):
+        return False
+    participants = item.get("participants")
+    if item.get("number") != call.number or item.get("truncated") is not False or not participants:
+        return False
+    team = {
+        participant.get("login")
+        for participant in participants
+        if isinstance(participant, dict) and (participant.get("association") in TEAM or participant.get("bot") is True)
+    }
+    team.discard(None)
+    everyone = [participant.get("login") if isinstance(participant, dict) else None for participant in participants]
+    author = (item.get("author") or {}).get("login")
+    wrote = [author, *everyone, *item.get("commit_authors", []), *item.get("last_editors", [])]
+    return all(login in team for login in wrote)
+
+
+def listed_by_the_team(call, owner, repo):
+    """Whether the context shows that only the repository's own people wrote
+    and edited every issue or pull request the listing returns."""
+    answer = context_answer(call, owner, repo)
+    listed = answer.get(LISTINGS[call.tool]) if answer else None
+    items = listed.get("items") if isinstance(listed, dict) else None
+    if not isinstance(items, list) or listed.get("truncated") is not False or not all(isinstance(item, dict) for item in items):
+        return False
+    authors = [(item.get("author") if isinstance(item.get("author"), dict) else {}, item.get("bot") is True) for item in items]
+    team = {author.get("login") for author, bot in authors if author.get("association") in TEAM or bot}
+    team.discard(None)
+    wrote = [author.get("login") for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
+    return all(login in team for login in wrote)
+
+
+def keeps_trust(call, repository, owner, repo):
+    """Trust follows the author: see the module docstring."""
+    match call.tool:
+        case tool if tool in DISCUSSIONS:
+            return written_by_the_team(call, owner, repo)
+        case tool if tool in LISTINGS:
+            return listed_by_the_team(call, owner, repo)
         case _:
-            return {"audience": audience}
+            return repository.visibility != "public" and not repository.fork
 
 
-def annotation(name, visibility, owner, repo):
+def read_delta(call, repository, owner, repo):
+    audience = read_by(repository.visibility, owner, repo)
+    if keeps_trust(call, repository, owner, repo):
+        return {"audience": audience}
+    return {"trust": "suspicious", "audience": audience}
+
+
+def annotation(name, call, repository, owner, repo):
+    visibility = repository.visibility
     match name:
         case "github.repository-visibility":
             return {
-                "delta": read_delta(visibility, owner, repo),
+                "delta": read_delta(call, repository, owner, repo),
                 "requires": {"history": [], "attention": []},
                 "emits": [],
             }
@@ -200,11 +307,11 @@ def main():
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("the consult is too large")
     consult = json.loads(raw)
-    name, owner, repo = repository_of(consult)
+    name, owner, repo, call = repository_of(consult)
     check_declaration(consult, owner, repo)
 
-    visibility = repository_visibility(rest_api(resolve_token()), owner, repo)
-    json.dump({"version": 1, "answer": annotation(name, visibility, owner, repo)}, sys.stdout)
+    repository = repository_facts(rest_api(resolve_token()), owner, repo)
+    json.dump({"version": 1, "answer": annotation(name, call, repository, owner, repo)}, sys.stdout)
     sys.stdout.write("\n")
 
 

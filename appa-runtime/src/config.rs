@@ -220,8 +220,9 @@ pub struct Externals {
     /// One entry per audience source provider the policy's `[audience]` table references,
     /// under the provider's name, plus one per entry a provider's `lookup` names.
     pub audience: BTreeMap<String, AudienceBinding>,
-    /// One program per `$input.<name>` an annotator reads, under the input's name.
-    pub inputs: BTreeMap<String, AnnotatorImplementation>,
+    /// One context provider per `[externals.context.<name>]`, under its name: asked about
+    /// every call an Annotator judges, before the Annotator.
+    pub context: BTreeMap<String, AnnotatorImplementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -839,8 +840,8 @@ pub(crate) enum Section {
     Annotators,
     /// One audience source per provider, plus lookup targets: `[externals.audience.<name>]`.
     Audience,
-    /// One program per `$input.<name>` an annotator reads: `[externals.inputs.<name>]`.
-    Inputs,
+    /// One context provider per `[externals.context.<name>]`.
+    Context,
 }
 
 impl Section {
@@ -849,7 +850,7 @@ impl Section {
         Section::Sanitizers,
         Section::Annotators,
         Section::Audience,
-        Section::Inputs,
+        Section::Context,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -858,7 +859,7 @@ impl Section {
             Section::Sanitizers => "sanitizers",
             Section::Annotators => "annotators",
             Section::Audience => "audience",
-            Section::Inputs => "inputs",
+            Section::Context => "context",
         }
     }
 
@@ -877,7 +878,7 @@ impl Section {
     /// on its policy declaration instead, and an audience entry is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Audience | Section::Inputs => {
+            Section::Annotators | Section::Audience | Section::Context => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -988,7 +989,7 @@ struct RawExternals {
     #[serde(default)]
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
-    inputs: BTreeMap<String, RawBinding>,
+    context: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1001,7 +1002,7 @@ impl RawExternals {
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
             (Section::Annotators, &self.annotators),
-            (Section::Inputs, &self.inputs),
+            (Section::Context, &self.context),
         ];
         bindings
             .into_iter()
@@ -1493,7 +1494,7 @@ impl Config {
             sanitizers,
             annotators,
             audience,
-            inputs,
+            context,
             claude_code,
             llm,
             jev,
@@ -1542,7 +1543,7 @@ impl Config {
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
                 audience: resolve_audience_bindings(audience, &origins, keys)?,
-                inputs: resolve(Section::Inputs, inputs)?
+                context: resolve(Section::Context, context)?
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
@@ -2020,12 +2021,12 @@ fn compose_included_confinement(
     Ok(())
 }
 
-/// An annotator or input binding after its section refused every `builtin` at parse.
+/// An annotator or context-provider binding after its section refused every `builtin` at parse.
 fn annotator_implementation(implementation: Implementation) -> AnnotatorImplementation {
     match implementation {
         Implementation::Resolver(endpoint) => AnnotatorImplementation::Resolver(endpoint),
         Implementation::Command(command) => AnnotatorImplementation::Command(command),
-        Implementation::Builtin(_) => unreachable!("the annotators and inputs sections refuse every builtin"),
+        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
     }
 }
 
@@ -2570,9 +2571,9 @@ mod tests {
                         AudienceImplementation::Readers(_) => Bound::Readers,
                     });
             }
-            Section::Annotators | Section::Inputs => {
+            Section::Annotators | Section::Context => {
                 let table = match section {
-                    Section::Inputs => &config.externals.inputs,
+                    Section::Context => &config.externals.context,
                     _ => &config.externals.annotators,
                 };
                 return table.get(name).map(|implementation| match implementation {

@@ -378,13 +378,13 @@ tags = ["credentials"]
 # this policy names, exactly as a static rule above would.
 # APPA-UNIX-FALLBACK-BEGIN
 # The Bash Annotators run a Claude subprocess, which is available only on Unix.
-# The root supplies the Bash rules absent from the portable battery. The
-# repository input resolves a publishing destination before its Annotator runs.
+# The root supplies the Bash rules absent from the portable battery. The GitHub
+# battery's context provider, when installed, tells the repository Annotator
+# which repository a command reaches and who wrote what it reads.
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
 builtin = "claude-code"
-inputs = { call = "$tool_call", repository = "$input.claude-code.repository" }
-hint = "`repository` is the deployment's own finding: the GitHub repository the command reaches, with its `visibility`, or `null` with a `reason`. A push, pull request, issue, release, or comment into a public repository, or into one not established, requires audience public; into a private or internal one requires audience internal. A read keeps the session's audience."
+hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository, or a bot."
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*git push*)"
@@ -421,9 +421,6 @@ annotator = "claude-code.bash-repository-requirements"
 name = "host/claude-code/Bash(command:*gh repo *)"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-repository-requirements"
-
-[externals.inputs."claude-code.repository"]
-command = ["python3", "batteries/claude-code/repository.py"]
 
 # How a model Annotator classifies — trust by who wrote the returned text,
 # audience by the visible destination — is the runtime's. Add a `hint` with

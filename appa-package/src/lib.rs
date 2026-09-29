@@ -21,8 +21,8 @@ pub use digest::{TreeDigest, TreeDigestParseError};
 pub use manifest::{ManifestError, SCHEMA};
 pub use marketplace::{Marketplace, OwnershipError, PackageEntry, check_ownership};
 pub use names::{
-    CredentialPrefix, Host, NameError, Namespace, NamespaceError, PackageKind, PackageName, RelativePath,
-    RelativePathError,
+    CredentialPrefix, ExecutableName, Host, NameError, Namespace, NamespaceError, PackageKind, PackageName,
+    RelativePath, RelativePathError,
 };
 pub use package::{
     Battery, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,

@@ -50,6 +50,7 @@ required-features = ["daemon"]
 [dependencies]
 tower = { version = "0.5", features = ["util"], optional = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,
@@ -89,7 +90,7 @@ tempfile = "3"
 tokio = { workspace = true }
 toml = { workspace = true }
 toml_edit = "0.25"
-zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
@@ -129,7 +130,7 @@ appa-eventlog = { workspace = true, features = ["fault-injection"] }
 # `start_paused`: a test that must exhaust a retry table should not spend the
 # table's backoff in real seconds.
 tokio = { workspace = true, features = ["test-util"] }
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.57.0", default-features = false }
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.

@@ -30,6 +30,10 @@ pub enum ManifestError {
     RepeatedNamespace { path: PathBuf, namespace: String },
     #[error("{path} requires the battery `{battery}` twice")]
     RepeatedBattery { path: PathBuf, battery: String },
+    #[error("{path}: `battery.detect`: `{name}` is not a program name: no path separator, whitespace, or blank")]
+    Detect { path: PathBuf, name: String },
+    #[error("{path}: `battery.detect` names `{name}` twice")]
+    RepeatedDetect { path: PathBuf, name: String },
     #[error("{path}: `battery.setup` must be one non-empty line")]
     Setup { path: PathBuf },
     #[error("{path} is not valid TOML: {source}")]
@@ -63,7 +67,7 @@ pub enum ManifestError {
     },
     #[error("{path}: `{kind}` is not a package kind: a package is an plugin or a battery")]
     Kind { path: PathBuf, kind: String },
-    #[error("{path}: `{host}` is not a host: this build serves claude-code and kagent")]
+    #[error("{path}: `{host}` is not a supported host for this package")]
     Host { path: PathBuf, host: String },
     #[error("{path}: packages `{first}` and `{second}` share the path `{shared}`")]
     DuplicatePath {

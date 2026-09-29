@@ -8,7 +8,7 @@ use appa_engine::names::SurfaceName;
 use appa_engine::params::ParamsError;
 use appa_engine::profile::{BindingMode, OpenVector, SurfaceMode};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS, TrustChain};
-use appa_policy::{Config, ConfigError, InputSource, ToolCallSource, parse_delta};
+use appa_policy::{Config, ConfigError, ToolCallSource, parse_delta};
 
 fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
@@ -343,24 +343,15 @@ fn parse_delta_refuses_an_unknown_rank_and_a_malformed_audience() {
 #[test]
 fn every_input_source_spelling_round_trips_through_parse() {
     for (spelling, expected) in [
-        ("$tool_call", InputSource::Call(ToolCallSource::Call)),
-        ("$tool_call.name", InputSource::Call(ToolCallSource::Name)),
-        ("$tool_call.description", InputSource::Call(ToolCallSource::Description)),
-        ("$tool_call.arguments", InputSource::Call(ToolCallSource::Arguments)),
-        (
-            "$tool_call.arguments.id",
-            InputSource::Call(ToolCallSource::Argument("id".to_string())),
-        ),
-        ("$input.repo", InputSource::External("repo".to_string())),
-        ("$input.github.repo", InputSource::External("github.repo".to_string())),
+        ("$tool_call", ToolCallSource::Call),
+        ("$tool_call.name", ToolCallSource::Name),
+        ("$tool_call.description", ToolCallSource::Description),
+        ("$tool_call.arguments", ToolCallSource::Arguments),
+        ("$tool_call.arguments.id", ToolCallSource::Argument("id".to_string())),
     ] {
-        let parsed = InputSource::parse(spelling).unwrap_or_else(|| panic!("{spelling} parses"));
+        let parsed = ToolCallSource::parse(spelling).unwrap_or_else(|| panic!("{spelling} parses"));
         assert_eq!(parsed, expected, "{spelling}");
         assert_eq!(parsed.spelling(), spelling);
-        if let InputSource::Call(call) = &parsed {
-            assert_eq!(ToolCallSource::parse(spelling).as_ref(), Some(call));
-            assert_eq!(call.spelling(), spelling);
-        }
     }
     assert_eq!(ToolCallSource::parse("$input.repo"), None);
 }

@@ -12,7 +12,9 @@ API. They are implementation components of the host plugins, not package kinds.
 Each directory under `plugins/` or `batteries/` has an `appa-package.toml`. A
 battery's `hosts` names the hosts it is written for; a plugin's `batteries`
 names the batteries its first install includes, the ones its host cannot be
-gated without. The directory name must match the manifest's package name. The package manifest
+gated without. A battery's optional `detect` names programs, such as
+`gh`; a Claude Code plugin's first install also includes every battery written
+for the host whose program is on `PATH`. The directory name must match the manifest's package name. The package manifest
 is the authored source; `marketplace.toml` is generated from these manifests and
 the package contents.
 

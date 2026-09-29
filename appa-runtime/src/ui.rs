@@ -512,7 +512,11 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
         .map(|entry| entry.name.clone())
         .collect();
     {
-        let mut checks = web.local.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut checks = web
+            .local
+            .checks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         checks.retain(|name, _| !affected.contains(name));
     }
     web.local
@@ -938,7 +942,10 @@ mod tests {
         assert_eq!(result.status, readiness::Status::Ready);
         assert!(matches!(result.reason, readiness::Reason::Configured));
         battery.credentials.clear();
-        local.store.update(&BTreeMap::from([("APPA_PROVIDER_DEMO_TOKEN".into(), None)])).unwrap();
+        local
+            .store
+            .update(&BTreeMap::from([("APPA_PROVIDER_DEMO_TOKEN".into(), None)]))
+            .unwrap();
         let result = readiness::check(&entry.dir, &battery, &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
     }

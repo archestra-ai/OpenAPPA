@@ -175,6 +175,7 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
 /// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
 fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
     match adapter {
+        AdapterName::Amp => appa_adapter_amp::adapter(),
         AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
         AdapterName::Kagent => appa_adapter_kagent::adapter(),
         AdapterName::Embedded => unreachable!("--adapter names a served adapter"),

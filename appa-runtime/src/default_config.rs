@@ -136,7 +136,7 @@ mod tests {
         )
         .expect("the portable default is written");
         let loaded = crate::config::Config::load(&path).expect("the portable default and battery load");
-        assert!(loaded.externals.inputs.is_empty());
+        assert!(loaded.externals.context.is_empty());
         let policy = loaded.policy_file().value();
         assert!(
             !policy["tool"]

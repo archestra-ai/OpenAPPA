@@ -149,8 +149,9 @@ Use [`appa replay` validation](/validation) to test the battery end to end. Repl
 
 In this example, the marketplace GitHub battery uses a `github.repository-visibility` annotator for reads. The annotator reads the repository owner and name from the call, asks the GitHub API whether the repository is private, and returns a complete contract for the call:
 
-- A public repository gives the result `suspicious` trust and a `public` audience.
-- A private repository gives the result `suspicious` trust and limits the audience to the repository's collaborators, the collection `@github:repo/<owner>/<repo>/collaborators` that the battery's audience source resolves.
+- A public repository gives the result a `public` audience.
+- A private repository limits the audience to the repository's collaborators, the collection `@github:repo/<owner>/<repo>/collaborators` that the battery's audience source resolves.
+- Trust follows who wrote the result. The battery's `github` [context provider](/contracts#context-providers) reports the authors of a pull request or issue; the result keeps the session's trust only when all of them are the repository's own people, and is `suspicious` otherwise.
 
 The battery declares the annotator with a selector placeholder in its mandate, so each call's consult admits exactly the repository that call names; `owner` and `repo` become required string arguments of every tool that uses it:
 

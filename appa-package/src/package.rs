@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::manifest::{ManifestError, SCHEMA};
-use crate::names::{Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
+use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
 
 /// The manifest file every package carries.
 pub const MANIFEST_FILE: &str = "appa-package.toml";
@@ -91,6 +91,9 @@ pub struct Battery {
     /// What the manifest tells the person after an install and the variable
     /// names cannot: the token's scopes, or a login the helpers fall back to.
     pub setup: Option<String>,
+    /// The programs whose presence on `PATH` means the battery is relevant
+    /// on this machine: a Claude Code install includes it when one is found.
+    pub detect: Vec<ExecutableName>,
     pub readiness: Option<Readiness>,
 }
 
@@ -258,6 +261,8 @@ struct RawBattery {
     helpers: Vec<String>,
     setup: Option<String>,
     readiness: Option<Readiness>,
+    #[serde(default)]
+    detect: Vec<String>,
 }
 
 impl RawBattery {
@@ -307,6 +312,20 @@ impl RawBattery {
                 });
             }
         };
+        let mut detect = Vec::new();
+        for program in self.detect {
+            let parsed = ExecutableName::parse(&program).ok_or_else(|| ManifestError::Detect {
+                path: path.to_path_buf(),
+                name: program.clone(),
+            })?;
+            if detect.contains(&parsed) {
+                return Err(ManifestError::RepeatedDetect {
+                    path: path.to_path_buf(),
+                    name: program,
+                });
+            }
+            detect.push(parsed);
+        }
         Ok(Battery {
             policy,
             hosts,
@@ -316,6 +335,7 @@ impl RawBattery {
             credentials: Vec::new(),
             setup,
             readiness: self.readiness,
+            detect,
         })
     }
 }
@@ -377,6 +397,11 @@ impl RawPlugin {
 
         match host {
             Host::Embedded => unreachable!("Host::parse names only served hosts"),
+            // amppa is distributed as an Amp plugin, not a marketplace installer.
+            Host::Amp => Err(ManifestError::Host {
+                path: path.to_path_buf(),
+                host: self.host,
+            }),
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
                 Ok(Plugin::ClaudeCode {
@@ -450,9 +475,41 @@ mod tests {
                 credentials: vec![],
                 setup: None,
                 readiness: None,
+                detect: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
+    }
+
+    /// `detect` names programs a shell finds on `PATH`: bare names, each once.
+    #[test]
+    fn a_battery_detects_bare_program_names_each_once() {
+        let with = |list: &str| manifest(&BATTERY.replace("helpers", &format!("detect = {list}\nhelpers")));
+        let detected = with(r#"["gh", "git-lfs"]"#).unwrap();
+        assert_eq!(
+            detected.battery().unwrap().detect,
+            vec![
+                ExecutableName::parse("gh").unwrap(),
+                ExecutableName::parse("git-lfs").unwrap()
+            ]
+        );
+        for refused in [
+            r#"[""]"#,
+            r#"["/usr/bin/gh"]"#,
+            r#"["bin\\gh"]"#,
+            r#"["g h"]"#,
+            r#"["c:gh"]"#,
+            r#"[".."]"#,
+        ] {
+            assert!(
+                matches!(with(refused), Err(ManifestError::Detect { .. })),
+                "{refused} is refused"
+            );
+        }
+        assert!(matches!(
+            with(r#"["gh", "gh"]"#),
+            Err(ManifestError::RepeatedDetect { .. })
+        ));
     }
 
     /// `setup` is one line the install prints verbatim, so a blank or
@@ -599,6 +656,15 @@ mod tests {
         ));
         assert!(matches!(
             manifest(&BATTERY.replace("[\"claude-code\"]", "[\"codex\"]")),
+            Err(ManifestError::Host { .. })
+        ));
+    }
+
+    #[test]
+    fn amp_is_a_battery_host_but_has_no_marketplace_installer() {
+        assert!(manifest(&BATTERY.replace("[\"claude-code\"]", "[\"amp\"]")).is_ok());
+        assert!(matches!(
+            manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"amp\"")),
             Err(ManifestError::Host { .. })
         ));
     }

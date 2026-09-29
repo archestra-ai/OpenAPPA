@@ -1,6 +1,7 @@
 //! What a host has connected, read from the host's own configuration, and
 //! the batteries of a version that cover it. An install suggests those; it
-//! never includes a battery on a person's behalf.
+//! includes on a person's behalf only a battery whose `detect` program is on
+//! this machine's `PATH`.
 //!
 //! Discovery is the one host-specific step: each host keeps its MCP servers
 //! in its own files. Matching a server to a battery is not: a battery declares
@@ -8,9 +9,10 @@
 //! harness reports for that server's tools.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use appa_package::{Battery, Host, Marketplace, Namespace, PackageKind, PackageName};
+use appa_package::{Battery, ExecutableName, Host, Marketplace, Namespace, PackageKind, PackageName};
 
 use super::{InstallError, battery_at};
 
@@ -26,9 +28,9 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
             });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
-        // Neither keeps MCP servers in files on this machine: kagent's live in the cluster,
-        // an embedding host's in its own store.
-        Host::Kagent | Host::Embedded => BTreeSet::new(),
+        // kagent and embedding hosts keep their own inventories. amppa does not
+        // participate in marketplace installation or automatic battery discovery.
+        Host::Kagent | Host::Amp | Host::Embedded => BTreeSet::new(),
     }
 }
 
@@ -124,6 +126,45 @@ pub(crate) fn batteries(
         }
     }
     Ok(batteries)
+}
+
+/// The batteries of `available` whose `detect` names a program found in a
+/// directory of `search`, a `PATH` value. Only Claude Code uses local program
+/// discovery. kagent and embedding hosts keep their own inventories; amppa
+/// does not participate in automatic battery discovery.
+pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search: &OsStr) -> Vec<PackageName> {
+    match host {
+        Host::ClaudeCode => {
+            // An empty or relative entry resolves against the working
+            // directory, which is not what the machine has installed.
+            let directories: Vec<PathBuf> = std::env::split_paths(search)
+                .filter(|directory| directory.is_absolute())
+                .collect();
+            available
+                .iter()
+                .filter(|(_, battery)| {
+                    battery
+                        .detect
+                        .iter()
+                        .any(|program| directories.iter().any(|directory| is_program(directory, program)))
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        }
+        Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
+    }
+}
+
+#[cfg(unix)]
+fn is_program(directory: &Path, program: &ExecutableName) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(directory.join(program.as_str()))
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_program(directory: &Path, program: &ExecutableName) -> bool {
+    directory.join(program.as_str()).is_file() || directory.join(format!("{}.exe", program.as_str())).is_file()
 }
 
 /// One battery an install would suggest for the servers it covers.
@@ -300,6 +341,7 @@ mod tests {
                 credentials: vec![],
                 setup: None,
                 readiness: None,
+                detect: vec![],
             },
         )
     }
@@ -575,5 +617,78 @@ mod tests {
             coverage(&with_own_key, &batteries, &included(&["databricks"]), &listed),
             Coverage::default()
         );
+    }
+
+    #[cfg(unix)]
+    fn program(directory: &Path, name: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn detecting(name: &str, programs: &[&str]) -> (PackageName, Battery) {
+        let (name, mut battery) = battery(name, &[name]);
+        battery.detect = programs
+            .iter()
+            .map(|program| ExecutableName::parse(program).unwrap())
+            .collect();
+        (name, battery)
+    }
+
+    /// A battery is detected by an executable file its `detect` names in an
+    /// absolute `PATH` directory, and only for Claude Code: a file that is not
+    /// executable, a directory, or a program found only through a relative
+    /// entry detects nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_is_detected_by_an_executable_program_on_path() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(other.join("folder")).unwrap();
+        program(&bin, "gh", 0o755);
+        program(&bin, "notes", 0o644);
+        let available = [
+            detecting("github", &["gh"]),
+            detecting("notes", &["notes"]),
+            detecting("folder", &["folder"]),
+            detecting("linear", &[]),
+        ];
+        let search = std::env::join_paths([other.clone(), bin.clone()]).unwrap();
+
+        assert_eq!(
+            detected(Host::ClaudeCode, &available, &search),
+            vec![PackageName::parse("github").unwrap()]
+        );
+        assert!(detected(Host::Kagent, &available, &search).is_empty());
+        assert!(detected(Host::ClaudeCode, &available, &std::env::join_paths([&other]).unwrap()).is_empty());
+        let relative = bin.strip_prefix(root.path()).unwrap().to_path_buf();
+        assert!(
+            detected(Host::ClaudeCode, &available, relative.as_os_str()).is_empty(),
+            "a relative entry names the working directory, not the machine"
+        );
+    }
+
+    /// The shipped github battery is detected by the `gh` CLI: a Claude Code
+    /// install on a machine with `gh` and no GitHub MCP server includes it.
+    #[cfg(unix)]
+    #[test]
+    fn the_shipped_github_battery_is_detected_by_gh() {
+        let marketplace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
+        let catalog = Marketplace::read(&marketplace.join("marketplace.toml")).unwrap();
+        let available = batteries(&marketplace, &catalog, Host::ClaudeCode).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let with_gh = root.path().join("with-gh");
+        let without = root.path().join("without");
+        std::fs::create_dir_all(&with_gh).unwrap();
+        std::fs::create_dir_all(&without).unwrap();
+        program(&with_gh, "gh", 0o755);
+
+        let github = PackageName::parse("github").unwrap();
+        assert!(detected(Host::ClaudeCode, &available, with_gh.as_os_str()).contains(&github));
+        assert!(!detected(Host::ClaudeCode, &available, without.as_os_str()).contains(&github));
     }
 }

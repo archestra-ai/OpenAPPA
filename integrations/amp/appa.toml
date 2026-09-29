@@ -1,0 +1,53 @@
+# A small, explicit starting policy for amppa. Adapt the paths and tool names to
+# your deployment. Undeclared tools are refused; there is no permissive wildcard.
+[policy]
+version = 2
+
+# Amp modes use different builtin names. These are independent host identities.
+[[policy.tool]]
+name = "host/amp/Read(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/amp/Read"
+
+[[policy.tool]]
+name = "host/amp/read_file(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/amp/read_file"
+
+# A web request exposes its arguments to the public destination. Its result
+# also lowers trust, so subsequent trusted-only calls stop.
+[[policy.tool]]
+name = "host/amp/read_web_page"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/amp/web_search"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/amp/apply_patch"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/amp/edit_file"
+requires = { trust = "trusted" }
+
+# Arbitrary shell can both read files and transmit them without an intervening
+# hook. This example permits only this exact diagnostic command, not general shell.
+[[policy.tool]]
+name = "host/amp/shell_command(command:pwd)"
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "host/amp/Bash(cmd:pwd)"
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

@@ -187,7 +187,7 @@ async def repository(request: Request) -> JSONResponse:
     if not request.headers.get("authorization", "").startswith("Bearer "):
         return JSONResponse({"message": "Requires authentication"}, status_code=401)
     owner, repo = request.path_params["owner"], request.path_params["repo"]
-    return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public"})
+    return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public", "fork": False})
 
 
 RUNBOOKS = {

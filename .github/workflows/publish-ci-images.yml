@@ -48,6 +48,7 @@ jobs:
               - 'appa-eventlog/**'
               - 'appa-policy/**'
               - 'appa-builtin/**'
+              - 'appa-adapter-amp/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
               - 'appa-example-agent/**'

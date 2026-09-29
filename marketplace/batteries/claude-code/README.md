@@ -40,25 +40,14 @@ and `host/claude-code/Edit`:
   `kubectl` example below does.
 - **Bash, `git push` and `gh`** — What a push, a pull request, an issue, a
   release, or a `gh api` call puts on GitHub is read by the repository's
-  readers, which the command line does not say. Before the Annotator is
-  asked, `repository.py` establishes every repository the command reaches —
-  each one a `gh` call names by `--repo`, `GH_REPO`, a `repos/OWNER/NAME`
-  path, a URL, or an `OWNER/NAME` word of `gh repo`, and each one a push names by URL or remote (in its `-C` or `cd`
-  directory), else the checkout's own in the directory Claude Code runs
-  the command in — and their visibility, through the GitHub CLI's own login
-  (`gh repo view`). Several repositories answer the most widely readable.
-  The Annotator reads the finding as an established input and requires
-  audience `public` for a public repository, `internal` for a private or
-  internal one. A repository it cannot establish (no `gh`, no checkout, a
-  shell, `eval`, `source` or subshell, `git -c`, an environment setting
-  such as `GIT_DIR` or `HOME`, a program or target computed at run time) is
-  answered as unknown, and the Annotator treats the destination as public.
-  The finding covers the `git` and `gh` calls the command line shows; a
-  script or another program that pushes on its own is the Annotator's to
-  judge from the command. The finding informs the Annotator; the
-  repository's collaborators are not resolved as readers. On Windows, the
-  Unix-only publishing selectors are absent, so these otherwise undeclared
-  calls are refused.
+  readers, which the command line does not say. When the `github` battery
+  is installed, its `github` context provider answers before the Annotator
+  is asked: the repositories, pull requests and issues the command reaches,
+  their visibility, and who wrote them. The Annotator requires audience
+  `public` for a public repository and `internal` for a private or internal
+  one. Without that answer, or when the provider fails, the Annotator treats
+  the destination as public. On Windows, the Unix-only publishing selectors
+  are absent, so these otherwise undeclared calls are refused.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules
@@ -81,7 +70,6 @@ and `host/claude-code/Edit`:
 On Unix, the default config `appa plugin install claude-code` writes declares
 the Bash Annotators, the GitHub publishing selectors, the Monitor rule, and the
 wildcard fallback.
-It resolves `repository.py` from the included battery's installed directory.
 On Windows, the installer omits these Unix-only declarations. Bash calls that
 have no static rule remain fail-closed. The battery still labels credential
 paths and confines Bash results on both platforms.

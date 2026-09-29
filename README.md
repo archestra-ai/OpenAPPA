@@ -98,6 +98,9 @@ integration](https://openappa.com/claude-code) ·
 Plugin and battery installation, explicit version updates, offline bundles,
 and kagent deployment preparation: [marketplace guide](marketplace/README.md).
 
+**Amp:** [amppa](integrations/amp/README.md) is the source-distributed Amp plugin.
+It checks tool calls and results through the same APPA runtime, locally or in an orb.
+
 ## Testing
 
 Install [mise](https://mise.jdx.dev/) and prepare the repository:

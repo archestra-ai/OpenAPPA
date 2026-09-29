@@ -397,7 +397,7 @@ fn check_jev_profile(policy: &Path, profile: &Value, name: &PackageName) -> Resu
 
 /// The external kinds an included file may bind. A battery is an included
 /// fragment, so this is exactly the set the config loader accepts from one.
-pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "inputs"];
+pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "context"];
 
 /// The stock sanitizers a battery may bind by `builtin` name: pure rewrites the
 /// runtime ships, which reach nothing outside the process. The loader's stock
@@ -706,10 +706,17 @@ mod tests {
         fs::write(&path, &valid).unwrap();
         assert!(validate_package(directory.path()).is_ok());
         // Executables alone run nothing under python3, so they need not name it.
-        fs::write(&path, format!("{BATTERY_MANIFEST}\n[battery.readiness]\nrequired_executables = [\"gh\"]\n")).unwrap();
+        fs::write(
+            &path,
+            format!("{BATTERY_MANIFEST}\n[battery.readiness]\nrequired_executables = [\"gh\"]\n"),
+        )
+        .unwrap();
         assert!(validate_package(directory.path()).is_ok());
         for invalid in [
-            valid.replace("required_executables = [\"python3\"]", "required_executables = [\"gh\"]"),
+            valid.replace(
+                "required_executables = [\"python3\"]",
+                "required_executables = [\"gh\"]",
+            ),
             valid.replace(
                 "command = [\"python3\", \"audience-source.py\"]",
                 "command = [\"python3\", \"../escape.py\"]",

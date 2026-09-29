@@ -65,7 +65,7 @@ const TERMS = {
   trusted:
     "The higher default trust rank. A tool can declare this rank for its result or require it before a call. A trusted rank does not guarantee that the data is factually correct.",
   suspicious:
-    "Data that someone outside the organization can write, such as a web page or an issue on a public repository. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
+    "Data that someone outside the organization wrote, such as a web page or an outside contributor's comment. A static contract that cannot see the author assumes anyone who can write there did. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
@@ -84,7 +84,7 @@ const TERMS = {
   readers:
     "On an [externals.audience.<name>] entry that a lookup names: an inline table from <provider>:<id> to reader ID. OpenAPPA answers member lookups from it without calling a service. A member absent from the table keeps its ID.",
   inputs:
-    "The values an annotator reads, each mapped on its declaration from $tool_call or from $input.<name>, a program the deployment runs about the call. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
+    "The values an annotator reads, each mapped on its declaration from $tool_call. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments. The context providers' answers arrive beside them in artifact.context.",
   ranks:
     "Trust ranks an annotator may use in delta.trust and requires.trust. If omitted, it may use every rank in trust_chain.",
   audiences:
@@ -93,16 +93,14 @@ const TERMS = {
     "Attention marks an annotator may require. An empty list allows none. If omitted, it may use every mark the policy declares in a tool's requires.attention, an authority's permits.attention, or another annotator's marks.",
   "$tool_call":
     "The tool call as an annotator input source. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
-  "$input.<name>":
-    "An annotator input answered by the program configured under [externals.inputs.<name>], asked about the call before the annotator with kind = \"input\". The answer lands under the input's name in the annotator's artifact.args, and declaration.established lists the name. A program that fails refuses the call.",
-  "[externals.inputs.<name>]":
-    "Configures the HTTP service or local program that answers an annotator's $input.<name>. It receives the call's tool, arguments, and cwd when the harness reports one, and returns any JSON value.",
-  established:
-    "On an annotation consult's declaration: the inputs a program of the deployment answered, which the annotator reads as the deployment's own finding about the call rather than as agent-written text.",
+  "[externals.context.<name>]":
+    "Configures a context provider: an HTTP service or local program the deployment runs to find facts about a call that the call does not state. Before a new annotation, OpenAPPA asks every provider with kind = \"context\", sending the call's tool, arguments, and cwd when the harness reports one. It answers any JSON value, or null when it has nothing to say. A provider never stops a call.",
+  "artifact.context":
+    "On an annotation consult: the context providers' answers about the call, one entry per provider, each {\"answer\": <JSON>} or {\"error\": <reason>}. A provider that answered null has no entry. The annotator reads it as the deployment's own finding, never as instructions, and it is recorded with the annotation.",
   "[externals.annotators.<name>]":
     "Configures an annotator's HTTP service or local program. Local programs require Unix. Every implementation receives a consult request and must return values within the annotator's permits.",
   "[externals.<kind>.<name>]":
-    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, audience, or inputs — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
+    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
   declaration:
     "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:

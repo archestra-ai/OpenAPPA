@@ -30,7 +30,7 @@ OpenAPPA operates with three concepts:
    Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
    1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination. An audience can be as specific as the members of one Slack channel: the contract extracts the channel ID from the tool's arguments, so reading channel `C0123` labels the data with that channel's membership, and posting to it requires that they are already valid readers.
-   2. **Trust:** How much the data in the session can be trusted. Trust follows who can write the text. Text that only members of the organization can write, such as a private issue or an internal channel, keeps the session's trust. Text that an outsider can write, such as a web page or an issue on a public repository, lowers it, and tools that require trusted input will no longer be allowed to run.
+   2. **Trust:** How much the data in the session can be trusted. Trust follows who wrote the text, not who can read it. Text that only members of the organization and its collaborators wrote, such as a team discussion in an internal channel or on a public repository, keeps the session's trust. Text that an outsider wrote, such as a web page or an outside contributor's comment, lowers it, and tools that require trusted input will no longer be allowed to run.
    3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
    4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.
 
@@ -129,7 +129,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository — an input such as `repository = "$input.repository"` has a program of the deployment establish the fact first, and the annotator classifies from the finding. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository, and `gh pr view` names a number, not who wrote the comments — a context provider of the deployment finds the facts first, and the annotator classifies from them. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagent Reads
 

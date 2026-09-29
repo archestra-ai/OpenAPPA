@@ -44,34 +44,6 @@ impl AnnotatorBuiltin {
     }
 }
 
-/// What one `[[annotator]]` input reads: a value of the tool call, or the answer of a program
-/// the deployment binds under `[externals.inputs.<name>]` and runs before the annotator. The
-/// mapping is policy syntax the runtime executes when it builds a consult artifact; the engine
-/// never sees it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InputSource {
-    Call(ToolCallSource),
-    /// `$input.<name>`
-    External(String),
-}
-
-impl InputSource {
-    pub fn parse(spelling: &str) -> Option<InputSource> {
-        match spelling.strip_prefix("$input.") {
-            Some(name) if !name.is_empty() => Some(InputSource::External(name.to_string())),
-            Some(_) => None,
-            None => ToolCallSource::parse(spelling).map(InputSource::Call),
-        }
-    }
-
-    pub fn spelling(&self) -> String {
-        match self {
-            InputSource::Call(source) => source.spelling(),
-            InputSource::External(name) => format!("$input.{name}"),
-        }
-    }
-}
-
 /// The five values of the tool call an input can read.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ToolCallSource {
@@ -122,7 +94,7 @@ impl ToolCallSource {
 pub struct AnnotatorBinding {
     pub hint: Option<Hint>,
     pub builtin: Option<AnnotatorBuiltin>,
-    pub inputs: BTreeMap<String, InputSource>,
+    pub inputs: BTreeMap<String, ToolCallSource>,
 }
 
 /// Each `[[annotator]]` as its runtime-owned binding and as the declaration the registry
@@ -154,7 +126,7 @@ pub(crate) fn compile_annotators(
         let hint = parse_hint(annotator.hint, &format!("annotator {}", name.as_str()))?;
         let mut inputs = BTreeMap::new();
         for (input, spelling) in annotator.inputs.unwrap_or_default() {
-            let Some(source) = InputSource::parse(&spelling) else {
+            let Some(source) = ToolCallSource::parse(&spelling) else {
                 return Err(ConfigError::UnknownCallSource {
                     annotator: name.as_str().to_string(),
                     input,
@@ -211,14 +183,14 @@ pub(crate) fn validate_annotator_inputs(
         {
             for (input, source) in &binding.inputs {
                 let refused = match source {
-                    InputSource::Call(ToolCallSource::Argument(argument)) => parameters
+                    ToolCallSource::Argument(argument) => parameters
                         .required_property(argument)
                         .err()
                         .map(|fault| format!("which {fault}")),
-                    InputSource::Call(ToolCallSource::Description) if description.is_none() => {
+                    ToolCallSource::Description if description.is_none() => {
                         Some("but the tool declares no description".to_string())
                     }
-                    InputSource::Call(_) | InputSource::External(_) => None,
+                    _ => None,
                 };
                 if let Some(reason) = refused {
                     return Err(ConfigError::AnnotatorInput {
