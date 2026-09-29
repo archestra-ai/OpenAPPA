@@ -475,10 +475,8 @@ function batteries() {
       const detail = statusInfo(b).detail; if (detail) checkCell.append(rich(detail, 'span', 'check-message'));
       row.append(checkCell);
       const action = el('td', undefined, 'battery-action');
-      const broken = brokenBattery(b);
       if (configurable(b)) {
-        const label = open ? 'Close' : !broken ? 'Configure' : b.alternatives.length ? 'Connect' : b.credentials.length ? 'Add token' : 'Set up';
-        const toggle = button(label, () => { expanded.set(b.name, !open); render(); }, open ? 'small secondary' : 'small');
+        const toggle = button('Configure', () => { expanded.set(b.name, !open); render(); }, open ? 'small secondary' : 'small');
         toggle.setAttribute('aria-expanded', String(open));
         toggle.setAttribute('aria-controls', `configure-${b.name}`);
         action.append(toggle);
