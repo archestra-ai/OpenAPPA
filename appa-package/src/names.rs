@@ -126,6 +126,33 @@ impl fmt::Display for Namespace {
     }
 }
 
+/// The bare name of a command-line program, as a shell finds it on `PATH`:
+/// never a path, never blank, and never `.` or `..`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExecutableName(String);
+
+impl ExecutableName {
+    pub fn parse(text: &str) -> Option<Self> {
+        let bare = !text.is_empty()
+            && text != "."
+            && text != ".."
+            && !text.chars().any(|character| {
+                matches!(character, '/' | '\\') || character.is_whitespace() || character.is_control()
+            });
+        bare.then(|| Self(text.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ExecutableName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RelativePathError {
     #[error("a path is empty")]

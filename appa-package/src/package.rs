@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::manifest::{ManifestError, SCHEMA};
-use crate::names::{Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
+use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
 
 /// The manifest file every package carries.
 pub const MANIFEST_FILE: &str = "appa-package.toml";
@@ -91,6 +91,9 @@ pub struct Battery {
     /// What the manifest tells the person after an install and the variable
     /// names cannot: the token's scopes, or a login the helpers fall back to.
     pub setup: Option<String>,
+    /// The programs whose presence on `PATH` means the battery is relevant
+    /// on this machine: a Claude Code install includes it when one is found.
+    pub detect: Vec<ExecutableName>,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -236,6 +239,8 @@ struct RawBattery {
     #[serde(default)]
     helpers: Vec<String>,
     setup: Option<String>,
+    #[serde(default)]
+    detect: Vec<String>,
 }
 
 impl RawBattery {
@@ -285,6 +290,20 @@ impl RawBattery {
                 });
             }
         };
+        let mut detect = Vec::new();
+        for program in self.detect {
+            let parsed = ExecutableName::parse(&program).ok_or_else(|| ManifestError::Detect {
+                path: path.to_path_buf(),
+                name: program.clone(),
+            })?;
+            if detect.contains(&parsed) {
+                return Err(ManifestError::RepeatedDetect {
+                    path: path.to_path_buf(),
+                    name: program,
+                });
+            }
+            detect.push(parsed);
+        }
         Ok(Battery {
             policy,
             hosts,
@@ -293,6 +312,7 @@ impl RawBattery {
             audiences: Vec::new(),
             credentials: Vec::new(),
             setup,
+            detect,
         })
     }
 }
@@ -426,9 +446,40 @@ mod tests {
                 audiences: vec![],
                 credentials: vec![],
                 setup: None,
+                detect: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
+    }
+
+    /// `detect` names programs a shell finds on `PATH`: bare names, each once.
+    #[test]
+    fn a_battery_detects_bare_program_names_each_once() {
+        let with = |list: &str| manifest(&BATTERY.replace("helpers", &format!("detect = {list}\nhelpers")));
+        let detected = with(r#"["gh", "git-lfs"]"#).unwrap();
+        assert_eq!(
+            detected.battery().unwrap().detect,
+            vec![
+                ExecutableName::parse("gh").unwrap(),
+                ExecutableName::parse("git-lfs").unwrap()
+            ]
+        );
+        for refused in [
+            r#"[""]"#,
+            r#"["/usr/bin/gh"]"#,
+            r#"["bin\\gh"]"#,
+            r#"["g h"]"#,
+            r#"[".."]"#,
+        ] {
+            assert!(
+                matches!(with(refused), Err(ManifestError::Detect { .. })),
+                "{refused} is refused"
+            );
+        }
+        assert!(matches!(
+            with(r#"["gh", "gh"]"#),
+            Err(ManifestError::RepeatedDetect { .. })
+        ));
     }
 
     /// `setup` is one line the install prints verbatim, so a blank or
