@@ -53,9 +53,10 @@ configuration.
 The UI checks battery readiness on opening and uses the battery result as its
 status; absence of a token alone is not a failure when CLI login is supported.
 `appa describe` runs the same readiness checks for configured batteries.
-A `[battery.readiness]` declaration without a command or credentials is ready
-once its declared executables exist (or immediately if none are required).
-An absent readiness declaration remains unverified. This applies to every battery.
+A battery is ready when nothing it needs is missing: its declared executables,
+the variables its policy binds as `token_env`, and the result of its provider
+check when it declares one. A battery that declares nothing is ready. Without
+a provider check, a set token is ready but untested.
 The runtime serves the UI on the same port as its APIs. Missing credentials or an
 invalid policy leave enforcement unavailable while the UI stays accessible.
 `appa ui` opens the running server; it never starts a separate UI process.

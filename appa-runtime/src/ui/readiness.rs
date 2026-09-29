@@ -15,7 +15,6 @@ pub(super) enum Status {
     Ready,
     NeedsConfiguration,
     Unavailable,
-    Unverified,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +27,8 @@ pub(super) enum Authentication {
 #[serde(rename_all = "snake_case")]
 pub(super) enum Reason {
     Verified,
+    /// Every declared requirement is present; the battery declares no check to verify them.
+    Configured,
     MissingConfiguration,
     MissingCredential,
     CliNotAuthenticated,
@@ -37,7 +38,6 @@ pub(super) enum Reason {
     ProviderUnavailable,
     CheckFailed,
     CheckTimedOut,
-    NoCheck,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -89,34 +89,35 @@ pub(super) fn executable_available(executable: &str) -> bool {
     })
 }
 
+/// Ready means nothing the battery declares is missing: its executables, the values of the
+/// variables its policy binds as `token_env`, and, when it declares a check, the check's verdict.
 pub(super) async fn check(dir: &Path, battery: &appa_package::Battery, store: &CredentialStore) -> CheckResult {
-    let Some(readiness) = &battery.readiness else {
-        return CheckResult::new(Status::Unverified, Reason::NoCheck);
-    };
+    let readiness = battery.readiness.as_ref();
     if readiness
-        .required_executables
-        .iter()
+        .into_iter()
+        .flat_map(|r| &r.required_executables)
         .any(|name| !executable_available(name))
     {
         return CheckResult::new(Status::NeedsConfiguration, Reason::MissingExecutable);
     }
-    if readiness.command.is_empty() {
-        return if battery.credentials.is_empty() {
-            CheckResult::new(Status::Ready, Reason::Verified)
-        } else {
-            CheckResult::new(Status::Unverified, Reason::NoCheck)
-        };
-    }
     let mut environment = BTreeMap::new();
     for variable in &battery.credentials {
         match resolve(Some(store), variable) {
-            Ok(Some(value)) => {
+            Ok(Some(value)) if !value.is_empty() => {
                 environment.insert(variable.clone(), value);
             }
-            Ok(None) => (),
+            Ok(_) => (),
             Err(_) => return CheckResult::new(Status::Unavailable, Reason::CheckFailed),
         }
     }
+    let Some(readiness) = readiness.filter(|r| !r.command.is_empty()) else {
+        // Without a check, only presence is knowable: a set variable is not a verified one.
+        return if environment.len() == battery.credentials.len() {
+            CheckResult::new(Status::Ready, Reason::Configured)
+        } else {
+            CheckResult::new(Status::NeedsConfiguration, Reason::MissingCredential)
+        };
+    };
     let mut command = tokio::process::Command::new(&readiness.command[0]);
     command
         .args(&readiness.command[1..])

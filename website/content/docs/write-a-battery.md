@@ -91,8 +91,8 @@ login_hint = "gh auth login"
 ```
 
 List `check.py` in `battery.helpers`. The command must name `python3` and one
-packaged helper. Omit `command` to declare executable prerequisites without a
-provider check. A CLI alternative is optional when its credential is supplied;
+packaged helper, and `required_executables` must then include `python3`. Omit
+`command` to declare executable prerequisites without a provider check. A CLI alternative is optional when its credential is supplied;
 a CLI needed even with a token belongs in `required_executables` too.
 
 The readiness helper receives only this battery's declared APPA credential
@@ -103,11 +103,11 @@ logic, and write one JSON object to stdout:
 {"status":"ready","authentication":"token","reason":"verified"}
 ```
 
-`status` is `ready`, `needs_configuration`, `unavailable`, or `unverified`.
+`status` is `ready`, `needs_configuration`, or `unavailable`.
 `authentication` is `token`, `cli`, or `none`. Reasons are `verified`,
 `missing_configuration`, `missing_credential`, `cli_not_authenticated`,
 `missing_executable`, `invalid_credential`, `insufficient_access`,
-`provider_unavailable`, `check_failed`, `check_timed_out`, or `no_check`.
+`provider_unavailable`, `check_failed`, or `check_timed_out`.
 Only `ready` may use `verified`, and `ready` must use it.
 
 Do not print credentials, identity information, freeform messages, or provider
@@ -117,10 +117,11 @@ Checks must not install software or start an interactive login. `login_hint` is
 shown to the user and never executed automatically.
 
 A successful check establishes only the access it actually tested. For example,
-a viewer check cannot prove access to every repository. A readiness declaration
-without a command or credentials is ready once its required executables exist.
-An absent readiness declaration, or credentials without a provider check, remains
-unverified.
+a viewer check cannot prove access to every repository. Without a provider
+check, APPA decides readiness itself: the battery is ready when its required
+executables exist and every `token_env` variable has a value. APPA reports this
+as `ready` with reason `configured`; the token is set but not tested. A battery
+that declares nothing is ready.
 
 ## Test the battery
 

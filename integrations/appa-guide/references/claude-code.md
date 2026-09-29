@@ -247,9 +247,9 @@ After approval:
    runtime using the existing deployment workflow before opening the UI. Saving
    credentials also retries applying the configuration; no separate UI server is needed.
    After the user finishes, rerun the combined status command with `--check` and
-   use only its sanitized results. A battery without a readiness declaration remains
-   unverified. A prerequisites-only battery can report ready without a provider
-   check; do not claim its provider access was tested.
+   use only its sanitized results. A `ready` result with reason `configured` means
+   the battery's executables exist and its tokens are set, but no provider check
+   ran; do not claim its provider access was tested.
 3. Include each approved battery with the command `appa describe` printed:
    `appa battery install <name> --config <live-path>`, with
    `--server <connection-id>` when it names one. The command adds the

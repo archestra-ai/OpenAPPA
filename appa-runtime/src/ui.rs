@@ -746,8 +746,8 @@ pub fn describe_readiness(config: &Path, dirs: &[PathBuf]) -> Result<String, Str
             let value = serde_json::to_value(check).map_err(|e| e.to_string())?;
             text.push_str(&format!(
                 "  {name}: {} ({})\n",
-                value["status"].as_str().unwrap_or("unverified"),
-                value["reason"].as_str().unwrap_or("no_check")
+                value["status"].as_str().unwrap_or("unknown"),
+                value["reason"].as_str().unwrap_or("unknown")
             ));
         }
         Ok(text)
@@ -784,7 +784,7 @@ pub fn status(args: StatusArgs) -> ExitCode {
                     println!(
                         "{}: {}",
                         battery["name"].as_str().unwrap_or("battery"),
-                        battery["check"]["status"].as_str().unwrap_or("unverified")
+                        battery["check"]["status"].as_str().unwrap_or("not_checked")
                     );
                 }
             }
@@ -931,6 +931,34 @@ mod tests {
             .push("appa-missing-fixture-cli".into());
         let result = readiness::check(&entry.dir, &battery, &local.store).await;
         assert_eq!(result.status, readiness::Status::NeedsConfiguration);
+    }
+
+    #[tokio::test]
+    async fn a_battery_without_a_check_is_ready_when_its_bound_variables_are_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = fixture(dir.path());
+        let local = Local::new(&args).unwrap();
+        let (entries, _) = local.catalog();
+        let entry = &entries[0];
+        let mut battery = entry.battery().unwrap().clone();
+        battery.readiness = None;
+        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        assert_eq!(result.status, readiness::Status::NeedsConfiguration);
+        assert!(matches!(result.reason, readiness::Reason::MissingCredential));
+        local
+            .store
+            .update(&BTreeMap::from([(
+                "APPA_PROVIDER_DEMO_TOKEN".into(),
+                Some("fixture-only-secret".into()),
+            )]))
+            .unwrap();
+        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        assert_eq!(result.status, readiness::Status::Ready);
+        assert!(matches!(result.reason, readiness::Reason::Configured));
+        battery.credentials.clear();
+        local.store.update(&BTreeMap::from([("APPA_PROVIDER_DEMO_TOKEN".into(), None)])).unwrap();
+        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        assert_eq!(result.status, readiness::Status::Ready);
     }
 
     #[tokio::test]

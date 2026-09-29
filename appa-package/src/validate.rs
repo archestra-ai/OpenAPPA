@@ -126,7 +126,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     || (check.command.len() == 2
                         && check.command[0] == "python3"
                         && battery.helpers.iter().any(|helper| helper.as_str() == check.command[1])))
-                    && check.required_executables.iter().any(|name| name == "python3")
+                    && (check.command.is_empty() || check.required_executables.iter().any(|name| name == "python3"))
                     && check.required_executables.iter().all(|name| executable(name))
                     && check.cli_alternatives.iter().all(|alt| {
                         executable(&alt.executable)
@@ -135,7 +135,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                             && !alt.login_hint.contains(['\n', '\r'])
                     });
                 if !valid {
-                    return Err(PackageError::Readiness { policy, reason: "use python3 and a declared helper, declare required python3, and reference owned credentials".into() });
+                    return Err(PackageError::Readiness { policy, reason: "a check runs python3 on a declared helper and requires python3; executables are bare names; alternatives reference owned credentials".into() });
                 }
             }
         }
@@ -705,7 +705,11 @@ mod tests {
         );
         fs::write(&path, &valid).unwrap();
         assert!(validate_package(directory.path()).is_ok());
+        // Executables alone run nothing under python3, so they need not name it.
+        fs::write(&path, format!("{BATTERY_MANIFEST}\n[battery.readiness]\nrequired_executables = [\"gh\"]\n")).unwrap();
+        assert!(validate_package(directory.path()).is_ok());
         for invalid in [
+            valid.replace("required_executables = [\"python3\"]", "required_executables = [\"gh\"]"),
             valid.replace(
                 "command = [\"python3\", \"audience-source.py\"]",
                 "command = [\"python3\", \"../escape.py\"]",

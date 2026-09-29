@@ -14,16 +14,14 @@ history.replaceState(null, '', location.pathname + location.search);
 
 const reasons = {
   missing_configuration: 'Additional configuration required. See setup instructions.',
-  verified: 'Connection verified',
   missing_credential: 'Enter a token.',
   cli_not_authenticated: 'CLI is not logged in. Log in or enter a token.',
-  missing_executable: 'Install the missing executable, then check again.',
-  invalid_credential: 'Credential rejected by provider.',
-  insufficient_access: 'Credential lacks the required access.',
-  provider_unavailable: 'Provider unavailable. Try again.',
+  missing_executable: 'Install the missing program, then check again.',
+  invalid_credential: 'Token rejected by the provider.',
+  insufficient_access: 'Token lacks the required access.',
+  provider_unavailable: 'Provider unreachable. Check again later.',
   check_failed: 'Check failed or returned an invalid response.',
-  check_timed_out: 'Check timed out. Try again.',
-  no_check: 'No provider check declared.',
+  check_timed_out: 'Check timed out. Check again later.',
 };
 const names = { github: 'GitHub', slack: 'Slack', huggingface: 'Hugging Face', databricks: 'Databricks', 'claude-code': 'Claude Code' };
 
@@ -350,11 +348,10 @@ function serverDetail(server, wildcard, redraw) {
 function needsSetup(b) { return b.check?.status === 'needs_configuration'; }
 function relevant(b) { return b.selected || b.included || b.configured || selected.has(b.name); }
 function checkStatus(b) {
-  if (!b.check) return status('Not checked');
+  if (!b.check) return status('Checking…');
   if (b.check.status === 'ready') return status('Ready', 'good');
   if (b.check.status === 'unavailable') return status('Check failed', 'bad');
-  if (b.check.status === 'needs_configuration') return status('Needs setup', 'warn');
-  return status('Unverified');
+  return status('Needs setup', 'warn');
 }
 function readinessDetail(b) {
   if (!b.check || b.check.status === 'ready') return '';
@@ -366,12 +363,13 @@ function readinessDetail(b) {
   }
   if (b.check.reason === 'cli_not_authenticated' || b.check.reason === 'missing_credential') {
     const hints = b.alternatives.map(a => a.installed ? a.login_hint : `install ${a.executable}, then ${a.login_hint}`);
-    if (hints.length) return `Enter a credential or ${hints.join('; ')}.`;
+    if (hints.length) return `Enter a token or run ${hints.join('; ')}.`;
   }
   return reasons[b.check.reason] ?? '';
 }
+function configurable(b) { return b.credentials.length > 0 || (needsSetup(b) && b.alternatives.length > 0); }
 function batteries() {
-  heading('Batteries', 'Readiness reported by each battery.');
+  heading('Batteries', 'Ready means nothing a battery needs is missing. A battery without a connection check cannot tell whether the provider accepts its token.');
   const list = state.batteries.filter(relevant);
   if (!list.length) content.append(el('p', 'No batteries in use. Include one with appa battery install <name>.', 'empty'));
   else {
@@ -384,21 +382,26 @@ function batteries() {
       const checkCell = el('td'); checkCell.append(checkStatus(b));
       const detail = readinessDetail(b); if (detail) checkCell.append(el('span', detail, 'check-message'));
       row.append(checkCell);
-      const open = expanded.get(b.name) ?? (configureRequested && needsSetup(b));
       const action = el('td');
-      const toggle = button(open ? 'Close' : 'Configure', () => { expanded.set(b.name, !open); render(); }, 'link');
-      toggle.setAttribute('aria-expanded', String(open));
-      toggle.setAttribute('aria-controls', `configure-${b.name}`);
-      action.append(toggle); row.append(action); body.append(row);
-      const detailRow = el('tr', undefined, 'configuration-row');
-      detailRow.id = `configure-${b.name}`; detailRow.hidden = !open;
-      const cell = el('td'); cell.colSpan = 3;
-      if (open) cell.append(configuration(b));
-      detailRow.append(cell); body.append(detailRow);
+      const open = configurable(b) && (expanded.get(b.name) ?? (configureRequested && needsSetup(b)));
+      if (configurable(b)) {
+        const toggle = button(open ? 'Close' : 'Configure', () => { expanded.set(b.name, !open); render(); }, 'link');
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.setAttribute('aria-controls', `configure-${b.name}`);
+        action.append(toggle);
+      }
+      row.append(action); body.append(row);
+      if (open) {
+        const detailRow = el('tr', undefined, 'configuration-row');
+        detailRow.id = `configure-${b.name}`;
+        const cell = el('td'); cell.colSpan = 3;
+        cell.append(configuration(b));
+        detailRow.append(cell); body.append(detailRow);
+      }
     });
     result.node.append(body); content.append(result.wrap);
     const actions = el('div', undefined, 'actions');
-    actions.append(button('Check connections', () => check(list), 'secondary')); content.append(actions);
+    actions.append(button('Check again', () => check(list), 'secondary')); content.append(actions);
   }
   errors();
 }
@@ -428,23 +431,18 @@ function configuration(b) {
   form.setAttribute('aria-label', `Configure ${names[b.name] ?? b.name}`);
   form.addEventListener('submit', event => { event.preventDefault(); save([b]); });
   b.credentials.forEach(c => form.append(credentialField(b, c)));
-  b.dependencies.filter(d => !d.installed).forEach(d => form.append(el('div', `Install ${d.executable}.`, 'requirement warn')));
   if (needsSetup(b)) b.alternatives.forEach(a => {
-    form.append(el('p', `${b.credentials.length ? 'Or sign in' : 'Sign in'} using ${a.executable}${a.installed ? '' : ' (install it first)'}. Run this in your terminal, then click Check connection:`, 'requirement'), el('code', a.login_hint, 'login-hint'));
+    form.append(el('p', `${b.credentials.length ? 'Or sign in' : 'Sign in'} using ${a.executable}${a.installed ? '' : ' (install it first)'}. Run this in your terminal, then check again:`, 'requirement'), el('code', a.login_hint, 'login-hint'));
   });
   if (needsSetup(b) && b.setup) {
     const instructions = el('details', undefined, 'instructions');
     instructions.append(el('summary', 'Setup instructions'), el('p', b.setup)); form.append(instructions);
   }
-  if (!b.credentials.length && !b.dependencies.some(d => !d.installed) && !b.alternatives.length && !b.setup) {
-    form.append(el('p', 'No configuration required.', 'muted'));
-  }
-  const actions = el('div', undefined, 'actions');
   if (b.credentials.length) {
+    const actions = el('div', undefined, 'actions');
     const submit = button('Save and check', () => {}); submit.type = 'submit'; actions.append(submit);
+    form.append(actions);
   }
-  actions.append(button('Check connection', () => check([b]), 'secondary'));
-  form.append(actions);
   return form;
 }
 function save(list) {
