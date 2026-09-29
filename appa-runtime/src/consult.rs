@@ -1441,6 +1441,26 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_schema_preserves_real_annotation_examples_without_one_of() {
+        let original = annotation_schema(&annotation_declaration());
+        let adapted = crate::model::codex::codex_schema(original.clone()).unwrap();
+        assert!(!adapted.to_string().contains("\"oneOf\""));
+        for answer in [
+            serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {"trust": "trusted", "audience": ["internal"]}, "requires": {"audience": {"within": ["internal"]}, "history": [{"contains": "network"}], "attention": ["review"]}, "emits": ["network"]}),
+            serde_json::json!({"delta": {"trust": "unknown"}, "requires": {"history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {"audience": []}, "requires": {"history": [], "attention": []}, "emits": []}),
+        ] {
+            assert_eq!(
+                jsonschema::is_valid(&original, &answer),
+                jsonschema::is_valid(&adapted, &answer),
+                "Codex changed the acceptance of {answer}"
+            );
+        }
+    }
+
     #[test]
     fn a_model_prompt_ends_its_system_prompt_with_the_declaration_and_schemas_the_vocabulary() {
         let declaration = annotation_declaration();

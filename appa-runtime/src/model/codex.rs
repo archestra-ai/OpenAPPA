@@ -55,7 +55,7 @@ async fn run(
     let result = work.path().join("answer.json");
     std::fs::write(
         &schema,
-        serde_json::to_vec(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?,
+        serde_json::to_vec(&codex_schema(prompt.schema.clone())?).map_err(|_| NoAnswerReason::Malformed)?,
     )
     .map_err(|_| NoAnswerReason::Transport)?;
     std::fs::write(&instructions, &prompt.system).map_err(|_| NoAnswerReason::Transport)?;
@@ -89,6 +89,34 @@ async fn run(
             "browser_use",
             "--disable",
             "skill_search",
+        ])
+        .args([
+            "--disable",
+            "computer_use",
+            "--disable",
+            "browser_use_external",
+            "--disable",
+            "browser_use_full_cdp_access",
+            "--disable",
+            "plugins",
+            "--disable",
+            "unified_exec",
+            "--disable",
+            "unified_exec_tty",
+            "--disable",
+            "image_generation",
+            "--disable",
+            "view_image",
+        ])
+        .args([
+            "--disable",
+            "code_mode_host",
+            "--disable",
+            "in_app_browser",
+            "--disable",
+            "in_app_local_automation",
+            "--disable",
+            "remote_plugin",
         ])
         .args(["-c", "web_search=\"disabled\"", "-c", "tools.web_search=false"])
         .arg("-c")
@@ -153,6 +181,37 @@ async fn run(
         return Err(NoAnswerReason::Oversized);
     }
     serde_json::from_slice(&bytes).map_err(|_| NoAnswerReason::Malformed)
+}
+
+/// Codex's structured-output endpoint supports nested `anyOf` but not `oneOf`.
+/// APPA validates the returned answer against its original mandate after the CLI
+/// completes, so this transport rewrite cannot widen an accepted policy answer.
+#[cfg(unix)]
+pub(crate) fn codex_schema(mut schema: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
+    fn rewrite(value: &mut serde_json::Value) -> Result<(), NoAnswerReason> {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(variants) = fields.remove("oneOf") {
+                    if fields.contains_key("anyOf") {
+                        return Err(NoAnswerReason::Malformed);
+                    }
+                    fields.insert("anyOf".to_string(), variants);
+                }
+                for child in fields.values_mut() {
+                    rewrite(child)?;
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    rewrite(child)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    rewrite(&mut schema)?;
+    Ok(schema)
 }
 
 /// A completed answer is usable only if no tool could have run during the consult.
@@ -378,6 +437,9 @@ mod tests {
         let arguments = std::fs::read_to_string(args).unwrap();
         assert!(arguments.contains("--ignore-user-config\n"));
         assert!(arguments.contains("--disable\nhooks\n"));
+        assert!(arguments.contains("--disable\ncomputer_use\n"));
+        assert!(arguments.contains("--disable\nplugins\n"));
+        assert!(arguments.contains("--disable\nunified_exec\n"));
         assert!(arguments.contains("--sandbox\nread-only\n"));
         assert!(arguments.contains("model_instructions_file="));
         assert!(
