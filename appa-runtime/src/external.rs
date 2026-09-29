@@ -2095,7 +2095,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let command = fake_claude(
             dir.path(),
-            "cat >/dev/null\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output-last-message' ]; then\n    shift\n    printf '%s' '{\"ruling\":\"approve\",\"reason\":\"fine\"}' > \"$1\"\n    break\n  fi\n  shift\ndone\nprintf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.started\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}' '{\"type\":\"turn.completed\"}'",
+            "if [ \"$1\" = debug ]; then printf '%s\\n' '{\"models\":[{\"slug\":\"test-model\",\"apply_patch_tool_type\":\"freeform\"}]}'; exit 0; fi\ncat >/dev/null\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output-last-message' ]; then\n    shift\n    printf '%s' '{\"ruling\":\"approve\",\"reason\":\"fine\"}' > \"$1\"\n    break\n  fi\n  shift\ndone\nprintf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.started\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}' '{\"type\":\"turn.completed\"}'",
         );
         let mut config = externals(None, 2000, 65_536);
         config.codex.command = command;

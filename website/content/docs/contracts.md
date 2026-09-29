@@ -1350,11 +1350,11 @@ Each request starts a new `claude -p` process. It cannot use tools, load project
 | Field | Purpose |
 |---|---|
 | `command` | Selects the executable. Default: `codex`. |
-| `model` | Selects the model. Omit it to use the installed CLI's default. |
+| `model` | Selects a model in the installed CLI's bundled catalog. If omitted, Codex selects the first picker-visible model in that catalog; set this field to pin a particular model. |
 | `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: 60,000. |
 | `max_concurrent` | Sets how many requests the runtime runs at once. Default: 4. |
 
-Each consult starts a fresh `codex exec --ephemeral` process using the existing Codex login. It ignores user configuration and rules, disables the supported tool features, uses a read-only sandbox and temporary working directory, and rejects any event stream that contains a tool call. The runtime supplies the component instructions through a private file and the request data on stdin. An invalid result cannot approve a call. This backend is separate from the Codex session hooks and command proxy.
+Each consult reads the installed CLI's bundled model catalog and makes a private temporary copy with model-declared tools removed. It then starts a fresh `codex exec --ephemeral` process using the existing Codex login and that private catalog. It ignores user configuration and rules, disables tool features, uses a read-only sandbox and temporary working directory, and rejects any event stream that contains a tool call. The runtime supplies the component instructions through a private file and the request data on stdin. An invalid result cannot approve a call. This backend is separate from the Codex session hooks and command proxy.
 
 `[externals.llm]` selects the model used by all `builtin = "llm"` components. This example uses an Anthropic model, a token from `APPA_LLM_TOKEN`, a 30-second timeout, and up to four concurrent requests:
 

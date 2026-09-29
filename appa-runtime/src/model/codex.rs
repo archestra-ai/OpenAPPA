@@ -53,12 +53,20 @@ async fn run(
     let schema = work.path().join("answer.schema.json");
     let instructions = work.path().join("instructions.md");
     let result = work.path().join("answer.json");
+    let catalog = work.path().join("models.json");
     std::fs::write(
         &schema,
         serde_json::to_vec(&codex_schema(prompt.schema.clone())?).map_err(|_| NoAnswerReason::Malformed)?,
     )
     .map_err(|_| NoAnswerReason::Transport)?;
     std::fs::write(&instructions, &prompt.system).map_err(|_| NoAnswerReason::Transport)?;
+    let mut models = bundled_models(&backend.config.command, work.path(), deadline).await?;
+    disable_catalog_tools(&mut models, backend.config.model.as_deref())?;
+    std::fs::write(
+        &catalog,
+        serde_json::to_vec(&models).map_err(|_| NoAnswerReason::Malformed)?,
+    )
+    .map_err(|_| NoAnswerReason::Transport)?;
 
     let mut command = tokio::process::Command::new(&backend.config.command);
     command
@@ -117,12 +125,26 @@ async fn run(
             "in_app_local_automation",
             "--disable",
             "remote_plugin",
+            "--disable",
+            "sleep_tool",
         ])
-        .args(["-c", "web_search=\"disabled\"", "-c", "tools.web_search=false"])
+        .args([
+            "-c",
+            "web_search=\"disabled\"",
+            "-c",
+            "tools.web_search=false",
+            "-c",
+            "tools.experimental_request_user_input.enabled=false",
+        ])
         .arg("-c")
         .arg(format!(
             "model_instructions_file={}",
             toml::Value::String(instructions.to_string_lossy().into_owned())
+        ))
+        .arg("-c")
+        .arg(format!(
+            "model_catalog_json={}",
+            toml::Value::String(catalog.to_string_lossy().into_owned())
         ))
         .current_dir(work.path())
         .stdin(Stdio::piped())
@@ -181,6 +203,88 @@ async fn run(
         return Err(NoAnswerReason::Oversized);
     }
     serde_json::from_slice(&bytes).map_err(|_| NoAnswerReason::Malformed)
+}
+
+#[cfg(unix)]
+async fn bundled_models(
+    executable: &std::path::Path,
+    work: &std::path::Path,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, NoAnswerReason> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    use crate::external::{CommandProcess, exchange_with_child};
+
+    let catalog_home = work.join("catalog-home");
+    std::fs::create_dir(&catalog_home).map_err(|_| NoAnswerReason::Transport)?;
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .args(["debug", "models", "--bundled"])
+        .current_dir(work)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    isolate_environment(&mut command, std::env::vars_os().collect());
+    command.env("CODEX_HOME", catalog_home);
+    let child = crate::child_process::spawn_async(&mut command).map_err(|_| NoAnswerReason::Unreachable)?;
+    let mut process = CommandProcess::spawned(child)?;
+    let group = process.process_group();
+    let exchanged = tokio::time::timeout_at(
+        deadline,
+        exchange_with_child(process.child_mut(), group, b"", 2_097_152),
+    )
+    .await;
+    let output = match exchanged {
+        Ok(Ok(output)) => output,
+        Ok(Err(reason)) => {
+            process.terminate_and_reap_later();
+            return Err(reason);
+        }
+        Err(_) => {
+            process.terminate_and_reap_later();
+            return Err(NoAnswerReason::Timeout);
+        }
+    };
+    let status = process.terminate_and_reap().await?;
+    if !status.success() {
+        return Err(NoAnswerReason::NonSuccess {
+            status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
+            detail: None,
+        });
+    }
+    serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)
+}
+
+/// A per-consult copy of this CLI release's own catalog prevents built-in model
+/// metadata from registering tools independently of the disabled feature flags.
+#[cfg(unix)]
+fn disable_catalog_tools(catalog: &mut serde_json::Value, selected: Option<&str>) -> Result<(), NoAnswerReason> {
+    let models = catalog
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+        .filter(|models| !models.is_empty())
+        .ok_or(NoAnswerReason::Malformed)?;
+    let mut selected_found = selected.is_none();
+    for model in models {
+        let fields = model.as_object_mut().ok_or(NoAnswerReason::Malformed)?;
+        let slug = fields
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(NoAnswerReason::Malformed)?;
+        selected_found |= selected == Some(slug);
+        fields.insert("apply_patch_tool_type".into(), serde_json::Value::Null);
+        fields.insert("shell_type".into(), serde_json::Value::String("disabled".into()));
+        fields.insert("tool_mode".into(), serde_json::Value::Null);
+        fields.insert("experimental_supported_tools".into(), serde_json::json!([]));
+        fields.insert("supports_search_tool".into(), serde_json::Value::Bool(false));
+    }
+    if !selected_found {
+        return Err(NoAnswerReason::Unregistered);
+    }
+    Ok(())
 }
 
 /// Codex's structured-output endpoint supports nested `anyOf` but not `oneOf`.
@@ -307,6 +411,8 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    const CATALOG_RESPONSE: &str = "if [ \"$1\" = debug ]; then printf '%s\\n' '{\"models\":[{\"slug\":\"test-model\",\"apply_patch_tool_type\":\"freeform\",\"shell_type\":\"unified_exec\"}]}'; exit 0; fi\n";
+    #[cfg(unix)]
     const RESULT_ARG: &str = "while [ \"$#\" -gt 0 ]; do if [ \"$1\" = '--output-last-message' ]; then shift; result=$1; break; fi; shift; done";
     #[cfg(unix)]
     const COMPLETE_EVENTS: &str = "printf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.started\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}' '{\"type\":\"turn.completed\"}'";
@@ -320,7 +426,7 @@ mod tests {
     ) -> CodexBackend {
         CodexBackend::new(
             &Codex {
-                command: crate::test_support::fake_claude(fixture.path(), script),
+                command: crate::test_support::fake_claude(fixture.path(), &format!("{CATALOG_RESPONSE}{script}")),
                 model: None,
                 limits,
             },
@@ -399,6 +505,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn private_catalog_removes_model_declared_tools() {
+        let mut catalog = serde_json::json!({"models": [
+            {"slug": "one", "apply_patch_tool_type": "freeform", "shell_type": "unified_exec", "tool_mode": "code_mode_only", "experimental_supported_tools": ["clock"], "supports_search_tool": true},
+            {"slug": "two", "apply_patch_tool_type": "freeform", "shell_type": "unified_exec"}
+        ]});
+        assert_eq!(disable_catalog_tools(&mut catalog, Some("one")), Ok(()));
+        for model in catalog["models"].as_array().unwrap() {
+            assert!(model["apply_patch_tool_type"].is_null());
+            assert_eq!(model["shell_type"], "disabled");
+            assert!(model["tool_mode"].is_null());
+            assert_eq!(model["experimental_supported_tools"], serde_json::json!([]));
+            assert_eq!(model["supports_search_tool"], false);
+        }
+        assert_eq!(
+            disable_catalog_tools(&mut catalog, Some("unknown")),
+            Err(NoAnswerReason::Unregistered)
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn fake_cli_receives_isolated_prompt_and_returns_structured_answer() {
         let fixture = tempfile::tempdir().unwrap();
@@ -414,11 +541,11 @@ mod tests {
             input.display(),
             environment.display()
         );
-        let executable = crate::test_support::fake_claude(fixture.path(), &script);
+        let executable = crate::test_support::fake_claude(fixture.path(), &format!("{CATALOG_RESPONSE}{script}"));
         let backend = CodexBackend::new(
             &Codex {
                 command: executable,
-                model: None,
+                model: Some("test-model".into()),
                 limits: crate::config::ModelLimits::MODEL_CALL,
             },
             65_536,
@@ -442,6 +569,9 @@ mod tests {
         assert!(arguments.contains("--disable\nunified_exec\n"));
         assert!(arguments.contains("--sandbox\nread-only\n"));
         assert!(arguments.contains("model_instructions_file="));
+        assert!(arguments.contains("model_catalog_json="));
+        assert!(arguments.contains("--model\ntest-model\n"));
+        assert!(arguments.contains("tools.experimental_request_user_input.enabled=false\n"));
         assert!(
             !std::fs::read_to_string(environment)
                 .unwrap()

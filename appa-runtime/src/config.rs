@@ -442,7 +442,7 @@ impl Default for ClaudeCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Codex {
     pub command: PathBuf,
-    /// An absent model uses the installed Codex CLI's default.
+    /// An absent model uses the first picker-visible model in the CLI's bundled catalog.
     pub model: Option<String>,
     pub limits: ModelLimits,
 }
