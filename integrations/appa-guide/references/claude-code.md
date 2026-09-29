@@ -406,7 +406,9 @@ rules.
 
 For an exact Bash command pattern, add a narrow, ordered
 `host/claude-code/Bash(command:...)` root contract: root rules precede the
-battery's Bash rules. For semantic command interpretation, declare
+battery's Bash rules, including its credential rules. A command the root rule
+matches is not narrowed for the credential paths it names, so keep the pattern
+exact. For semantic command interpretation, declare
 `claude-code.bash-requirements` in the root with a `hint`; a root Annotator
 replaces the battery's of the same name. Preserve its implementation, inputs,
 and mandate unless the approved behavior requires a change.

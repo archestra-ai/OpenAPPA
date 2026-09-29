@@ -84,7 +84,9 @@ This small root includes every rule the battery declares. A tool no rule
 names is refused; the installed default root adds a wildcard fallback for it.
 
 Root rules take precedence over the battery. Add a root rule when a particular
-Bash command or Read path needs stricter, looser, or fully blocked behavior.
+Bash command or Read path needs stricter, looser, or fully blocked behavior. A
+root Bash rule also precedes the battery's credential rules, so a command it
+matches is not narrowed for a credential path it names.
 
 The battery lists `host/claude-code/Bash` in `confined_results` itself, so the
 masker can run on the command's output; a root needs no deployment setting for
