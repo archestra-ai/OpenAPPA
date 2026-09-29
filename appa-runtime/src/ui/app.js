@@ -478,7 +478,7 @@ function batteries() {
       const broken = brokenBattery(b);
       if (configurable(b)) {
         const label = open ? 'Close' : !broken ? 'Configure' : b.alternatives.length ? 'Connect' : b.credentials.length ? 'Add token' : 'Set up';
-        const toggle = button(label, () => { expanded.set(b.name, !open); render(); }, open || !broken ? 'link' : 'small');
+        const toggle = button(label, () => { expanded.set(b.name, !open); render(); }, open ? 'small secondary' : 'small');
         toggle.setAttribute('aria-expanded', String(open));
         toggle.setAttribute('aria-controls', `configure-${b.name}`);
         action.append(toggle);
