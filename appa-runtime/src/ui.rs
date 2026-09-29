@@ -514,13 +514,27 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
         .store
         .update(&changes.credentials)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Credentials could not be saved"))?;
+    // A saved credential can change the readiness of every battery that declares it; other
+    // batteries keep their last result.
+    let affected: Vec<String> = entries
+        .iter()
+        .filter(|entry| {
+            changes.batteries.contains(&entry.name)
+                || entry
+                    .battery()
+                    .expect("battery")
+                    .credentials
+                    .iter()
+                    .any(|variable| changes.credentials.contains_key(variable))
+        })
+        .map(|entry| entry.name.clone())
+        .collect();
+    {
+        let mut checks = web.local.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        checks.retain(|name, _| !affected.contains(name));
+    }
     web.local
-        .checks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-    web.local
-        .check(&changes.batteries)
+        .check(&affected)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Cannot check batteries"))?;
     let activation_failed = if let Some(host) = &web.local.host {
