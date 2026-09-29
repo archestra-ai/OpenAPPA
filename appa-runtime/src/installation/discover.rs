@@ -1,7 +1,7 @@
 //! What a host has connected, read from the host's own configuration, and
 //! the batteries of a version that cover it. An install suggests those; it
-//! includes on a person's behalf only a battery whose `detect` program is on
-//! this machine's `PATH`.
+//! includes on a person's behalf only a battery whose `detect` command is on
+//! this machine's `PATH` or whose path is present in the project repository.
 //!
 //! Discovery is the one host-specific step: each host keeps its MCP servers
 //! in its own files. Matching a server to a battery is not: a battery declares
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use appa_package::{Battery, ExecutableName, Host, Marketplace, Namespace, PackageKind, PackageName};
+use appa_package::{Battery, Detect, ExecutableName, Host, Marketplace, Namespace, PackageKind, PackageName};
 
 use super::{InstallError, battery_at};
 
@@ -128,11 +128,16 @@ pub(crate) fn batteries(
     Ok(batteries)
 }
 
-/// The batteries of `available` whose `detect` names a program found in a
-/// directory of `search`, a `PATH` value. Only Claude Code uses local program
-/// discovery. kagent and embedding hosts keep their own inventories; amppa
-/// does not participate in automatic battery discovery.
-pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search: &OsStr) -> Vec<PackageName> {
+/// The batteries of `available` with a `detect` command found in `search`, a
+/// `PATH` value, or a `detect` path present relative to the repository containing
+/// `cwd`. Only Claude Code uses local discovery. kagent and embedding hosts keep
+/// their own inventories; amppa does not participate in automatic discovery.
+pub(crate) fn detected(
+    host: Host,
+    available: &[(PackageName, Battery)],
+    search: &OsStr,
+    cwd: Option<&Path>,
+) -> Vec<PackageName> {
     match host {
         Host::ClaudeCode => {
             // An empty or relative entry resolves against the working
@@ -140,13 +145,16 @@ pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search:
             let directories: Vec<PathBuf> = std::env::split_paths(search)
                 .filter(|directory| directory.is_absolute())
                 .collect();
+            let repository = cwd.map(project_root);
             available
                 .iter()
                 .filter(|(_, battery)| {
-                    battery
-                        .detect
-                        .iter()
-                        .any(|program| directories.iter().any(|directory| is_program(directory, program)))
+                    battery.detect.iter().any(|detect| match detect {
+                        Detect::Command(program) => directories.iter().any(|directory| is_program(directory, program)),
+                        Detect::Path(path) => repository
+                            .as_ref()
+                            .is_some_and(|repository| repository.join(path.as_path()).exists()),
+                    })
                 })
                 .map(|(name, _)| name.clone())
                 .collect()
@@ -627,12 +635,16 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    #[cfg(unix)]
-    fn detecting(name: &str, programs: &[&str]) -> (PackageName, Battery) {
+    fn detecting(name: &str, commands: &[&str], paths: &[&str]) -> (PackageName, Battery) {
         let (name, mut battery) = battery(name, &[name]);
-        battery.detect = programs
+        battery.detect = commands
             .iter()
-            .map(|program| ExecutableName::parse(program).unwrap())
+            .map(|program| Detect::Command(ExecutableName::parse(program).unwrap()))
+            .chain(
+                paths
+                    .iter()
+                    .map(|path| Detect::Path(appa_package::RelativePath::parse(path).unwrap())),
+            )
             .collect();
         (name, battery)
     }
@@ -652,24 +664,63 @@ mod tests {
         program(&bin, "gh", 0o755);
         program(&bin, "notes", 0o644);
         let available = [
-            detecting("github", &["gh"]),
-            detecting("notes", &["notes"]),
-            detecting("folder", &["folder"]),
-            detecting("linear", &[]),
+            detecting("github", &["gh"], &[]),
+            detecting("notes", &["notes"], &[]),
+            detecting("folder", &["folder"], &[]),
+            detecting("linear", &[], &[]),
         ];
         let search = std::env::join_paths([other.clone(), bin.clone()]).unwrap();
 
         assert_eq!(
-            detected(Host::ClaudeCode, &available, &search),
+            detected(Host::ClaudeCode, &available, &search, Some(root.path())),
             vec![PackageName::parse("github").unwrap()]
         );
-        assert!(detected(Host::Kagent, &available, &search).is_empty());
-        assert!(detected(Host::ClaudeCode, &available, &std::env::join_paths([&other]).unwrap()).is_empty());
+        assert!(detected(Host::Kagent, &available, &search, Some(root.path())).is_empty());
+        assert!(
+            detected(
+                Host::ClaudeCode,
+                &available,
+                &std::env::join_paths([&other]).unwrap(),
+                Some(root.path()),
+            )
+            .is_empty()
+        );
         let relative = bin.strip_prefix(root.path()).unwrap().to_path_buf();
         assert!(
-            detected(Host::ClaudeCode, &available, relative.as_os_str()).is_empty(),
+            detected(Host::ClaudeCode, &available, relative.as_os_str(), Some(root.path())).is_empty(),
             "a relative entry names the working directory, not the machine"
         );
+    }
+
+    /// Path detection starts at the repository root, not the installer's
+    /// current subdirectory. Presence includes directories and ordinary files,
+    /// including the `.git` file used by linked worktrees.
+    #[test]
+    fn a_battery_is_detected_by_a_repository_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let empty_path = OsStr::new("");
+        let git = [detecting("github", &[], &[".git"])];
+        let deploy = [detecting("deploy", &[], &["deploy.sh"])];
+
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        assert_eq!(
+            detected(Host::ClaudeCode, &git, empty_path, Some(&nested)),
+            vec![PackageName::parse("github").unwrap()]
+        );
+        std::fs::remove_dir(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git"), "gitdir: elsewhere").unwrap();
+        std::fs::write(root.path().join("deploy.sh"), "not executable").unwrap();
+        assert_eq!(
+            detected(Host::ClaudeCode, &git, empty_path, Some(&nested)),
+            vec![PackageName::parse("github").unwrap()]
+        );
+        assert_eq!(
+            detected(Host::ClaudeCode, &deploy, empty_path, Some(&nested)),
+            vec![PackageName::parse("deploy").unwrap()]
+        );
+        assert!(detected(Host::ClaudeCode, &git, empty_path, None).is_empty());
     }
 
     /// The shipped github battery is detected by the `gh` CLI: a Claude Code
@@ -688,7 +739,7 @@ mod tests {
         program(&with_gh, "gh", 0o755);
 
         let github = PackageName::parse("github").unwrap();
-        assert!(detected(Host::ClaudeCode, &available, with_gh.as_os_str()).contains(&github));
-        assert!(!detected(Host::ClaudeCode, &available, without.as_os_str()).contains(&github));
+        assert!(detected(Host::ClaudeCode, &available, with_gh.as_os_str(), Some(&without)).contains(&github));
+        assert!(!detected(Host::ClaudeCode, &available, without.as_os_str(), None).contains(&github));
     }
 }

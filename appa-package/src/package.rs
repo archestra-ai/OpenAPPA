@@ -16,6 +16,15 @@ use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, Rela
 /// The manifest file every package carries.
 pub const MANIFEST_FILE: &str = "appa-package.toml";
 
+/// One condition that makes a battery relevant to a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detect {
+    /// A command-line program present on `PATH`.
+    Command(ExecutableName),
+    /// A file or directory present relative to the repository root.
+    Path(RelativePath),
+}
+
 /// One of a kagent plugin's named images.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImageName(String);
@@ -91,9 +100,9 @@ pub struct Battery {
     /// What the manifest tells the person after an install and the variable
     /// names cannot: the token's scopes, or a login the helpers fall back to.
     pub setup: Option<String>,
-    /// The programs whose presence on `PATH` means the battery is relevant
-    /// on this machine: a Claude Code install includes it when one is found.
-    pub detect: Vec<ExecutableName>,
+    /// The commands or repository-relative paths whose presence means the
+    /// battery is relevant: a Claude Code install includes it when one is found.
+    pub detect: Vec<Detect>,
     pub readiness: Option<Readiness>,
 }
 
@@ -313,15 +322,21 @@ impl RawBattery {
             }
         };
         let mut detect = Vec::new();
-        for program in self.detect {
-            let parsed = ExecutableName::parse(&program).ok_or_else(|| ManifestError::Detect {
+        for entry in self.detect {
+            let parsed = if entry.starts_with('.') {
+                let path = entry.strip_prefix("./").unwrap_or(&entry);
+                RelativePath::parse(path).ok().map(Detect::Path)
+            } else {
+                ExecutableName::parse(&entry).map(Detect::Command)
+            }
+            .ok_or_else(|| ManifestError::Detect {
                 path: path.to_path_buf(),
-                name: program.clone(),
+                name: entry.clone(),
             })?;
             if detect.contains(&parsed) {
                 return Err(ManifestError::RepeatedDetect {
                     path: path.to_path_buf(),
-                    name: program,
+                    name: entry,
                 });
             }
             detect.push(parsed);
@@ -481,33 +496,51 @@ mod tests {
         );
     }
 
-    /// `detect` names programs a shell finds on `PATH`: bare names, each once.
+    /// The first character selects the grammar. Commands stay command names;
+    /// dot-prefixed entries become repository-relative paths.
     #[test]
-    fn a_battery_detects_bare_program_names_each_once() {
+    fn detect_entries_are_commands_or_repository_paths() {
         let with = |list: &str| manifest(&BATTERY.replace("helpers", &format!("detect = {list}\nhelpers")));
-        let detected = with(r#"["gh", "git-lfs"]"#).unwrap();
+        let detected = with(r#"["terraform", ".terraform", "./main.tf"]"#).unwrap();
         assert_eq!(
             detected.battery().unwrap().detect,
             vec![
-                ExecutableName::parse("gh").unwrap(),
-                ExecutableName::parse("git-lfs").unwrap()
+                Detect::Command(ExecutableName::parse("terraform").unwrap()),
+                Detect::Path(RelativePath::parse(".terraform").unwrap()),
+                Detect::Path(RelativePath::parse("main.tf").unwrap()),
             ]
         );
+    }
+
+    #[test]
+    fn detect_entries_refuse_malformed_commands_and_escaping_paths() {
+        let with = |entry: &str| manifest(&BATTERY.replace("helpers", &format!("detect = [{entry:?}]\nhelpers")));
         for refused in [
-            r#"[""]"#,
-            r#"["/usr/bin/gh"]"#,
-            r#"["bin\\gh"]"#,
-            r#"["g h"]"#,
-            r#"["c:gh"]"#,
-            r#"[".."]"#,
+            "",
+            "/usr/bin/tool",
+            "bin\\tool",
+            "tool name",
+            "c:tool",
+            "..",
+            "../project.toml",
+            "./",
         ] {
             assert!(
                 matches!(with(refused), Err(ManifestError::Detect { .. })),
                 "{refused} is refused"
             );
         }
+    }
+
+    #[test]
+    fn detect_entries_are_unique_after_path_normalization() {
+        let with = |list: &str| manifest(&BATTERY.replace("helpers", &format!("detect = {list}\nhelpers")));
         assert!(matches!(
-            with(r#"["gh", "gh"]"#),
+            with(r#"["terraform", "terraform"]"#),
+            Err(ManifestError::RepeatedDetect { .. })
+        ));
+        assert!(matches!(
+            with(r#"[".terraform", "./.terraform"]"#),
             Err(ManifestError::RepeatedDetect { .. })
         ));
     }

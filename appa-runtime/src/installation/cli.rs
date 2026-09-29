@@ -663,7 +663,8 @@ pub fn install(args: Install) -> ExitCode {
         let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         // A bundle restores its own selection and a reinstall keeps the
         // person's battery choices; only the plugin's first install brings the
-        // batteries its manifest requires and those whose program is on PATH.
+        // batteries its manifest requires and those detected on this machine
+        // or in the current project repository.
         let mut included = Vec::new();
         let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -693,7 +694,8 @@ pub fn install(args: Install) -> ExitCode {
                 included = plugin.batteries().to_vec();
                 let available = discover::batteries(acquired.marketplace(), &catalog, plugin.host())?;
                 let search = std::env::var_os("PATH").unwrap_or_default();
-                for battery in discover::detected(plugin.host(), &available, &search) {
+                let cwd = std::env::current_dir().ok();
+                for battery in discover::detected(plugin.host(), &available, &search, cwd.as_deref()) {
                     if !included.contains(&battery) {
                         included.push(battery);
                     }
