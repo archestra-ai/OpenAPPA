@@ -1692,7 +1692,11 @@ mod tests {
             .await;
             let example = &crate::label_guide::EXAMPLES[round % crate::label_guide::EXAMPLES.len()];
             let shown: serde_json::Value = serde_json::from_str(example.call).expect("an example call is JSON");
-            let consult = consult_of(json!({"name": shown["tool"], "arguments": shown["arguments"]}));
+            let mut consult = consult_of(json!({"name": shown["tool"], "arguments": shown["arguments"]}));
+            if let ConsultBody::Annotation { artifact, .. } = &mut consult.body {
+                artifact.context = serde_json::from_value(shown.get("context").cloned().unwrap_or(json!({})))
+                    .expect("an example's context is an annotation context");
+            }
             let started = std::time::Instant::now();
             let (answered, record) = jev.consult(&consult).await;
             elapsed.push(started.elapsed());
