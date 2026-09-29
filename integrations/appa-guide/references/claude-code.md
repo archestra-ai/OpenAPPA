@@ -273,21 +273,21 @@ After approval:
    revise the proposal, and ask for approval again.
 2. Resolve all approved batteries' missing prerequisites together before including
    them. Run `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
-   If credentials, CLI login, or required executables need configuration, serve one
-   consolidated browser page and give the user its link:
+   If credentials, CLI login, or required executables need configuration, open one
+   consolidated browser page:
 
    ```sh
-   appa ui --config <live-path> --setup --battery <name>,<name> --no-open
+   appa ui --config <live-path> --setup --battery <name>,<name>
    ```
 
-   Pass every proposed battery in that one command; never serve one page per token.
-   The link opens Batteries with `?configure=true`, checking battery readiness and expanding only batteries that need configuration.
+   Pass every proposed battery in that one command; never open one page per token.
+   This opens Batteries with `?configure=true`, checking battery readiness and expanding only batteries that need configuration.
    Ready batteries stay collapsed; do not ask the user to configure them again.
    The user enters tokens directly into the browser and chooses **Save and check**.
    Never ask for tokens in chat, read the credential database, or put token values
    in shell commands or configuration files. Login hints are instructions for the
-   user, not commands to execute automatically. Never open a browser: show the
-   URL the command printed as a link. The command serves the page until it is stopped,
+   user, not commands to execute automatically. If browser opening fails, show
+   the URL printed by the command. The command serves the page until it is stopped,
    so run it in the background and stop it after the user finishes. It works whether
    or not the runtime is running. Saving reloads a running runtime; if none is
    running, the next session starts it with the saved credentials.
@@ -462,6 +462,6 @@ appa ui --config <live-path> --no-open
 The page shows each MCP server the policy covers, where each rule comes from
 (the root config or a battery), and each server's contracts. Tell the user in
 one sentence to review the policies there, and give the URL the command
-printed as a link. Never open a browser. If the port is busy, an earlier `appa ui` still serves this page:
-give its URL and do not start another. Stop the command when the user says
+printed as a link. Never open a browser. If the port is busy, an earlier
+`appa ui` still serves this page: give its URL and do not start another. Stop the command when the user says
 they are done, or leave it running if they move on to other work.
