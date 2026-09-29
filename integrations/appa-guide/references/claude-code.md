@@ -219,7 +219,8 @@ user asks for a change.
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
 When nothing is missing and every session tool has a rule, say so in one or
-two sentences, mention tuning in one line, and stop without approval language.
+two sentences, mention tuning in one line, and finish with **Review in the
+browser** below, without approval language.
 
 After approval:
 
@@ -399,3 +400,21 @@ After a successful reload, add:
 
 > Start a new `clappa` session to use the updated policy; this session keeps
 > the policy it started with.
+
+## Review in the browser
+
+End every `init` and `adjust` run here, after a successful reload or a
+no-change result. Do not do this after a refused reload or in `explain`.
+
+Open the policy overview in the background:
+
+```sh
+appa ui --config <live-path>
+```
+
+The page shows each MCP server the policy covers, where each rule comes from
+(the root config or a battery), and each server's contracts. Tell the user in
+one sentence to review the policies there, and show the URL the command
+printed. If the port is busy, an earlier `appa ui` still serves this page:
+give its URL and do not start another. Stop the command when the user says
+they are done, or leave it running if they move on to other work.
