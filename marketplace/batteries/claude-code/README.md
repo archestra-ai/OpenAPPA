@@ -5,9 +5,9 @@ labels on the requester's own secrets. `appa plugin install claude-code`
 includes it on a first install; `appa battery remove claude-code` takes it out,
 and a later plugin install does not bring it back.
 
-It covers five built-in tools, which the policy names `host/claude-code/Bash`,
-`host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write`
-and `host/claude-code/Edit`:
+It covers six built-in tools, which the policy names `host/claude-code/Bash`,
+`host/claude-code/Monitor`, `host/claude-code/Read`, `host/claude-code/Grep`,
+`host/claude-code/Write` and `host/claude-code/Edit`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows the session
@@ -20,7 +20,7 @@ and `host/claude-code/Edit`:
   the session keeps its label.
   The sanitizer carries no tags: it is offered for any withheld Bash result
   the session cannot read as it is, including one the Annotator narrowed to
-  `self`, and for a subagent's return. On Unix, before any other command runs, the
+  `self`, and for a subagent's return. Before any other command runs, the
   Claude Code model decides what trust and fresh attention it requires and
   labels its output for trust and audience, inside the vocabulary static rules
   write: a command that visibly reads the requester's or the organization's
@@ -35,7 +35,7 @@ and `host/claude-code/Edit`:
   Bash annotator like any other command; the rules narrow what they match
   and promise no full recall. Every other `databricks` command, the SQL of
   `databricks experimental aitools tools query` included, is classified by
-  the Bash annotator under the root's hint; a deployment that wants a
+  the Bash annotator under its hint; a deployment that wants a
   fixed contract for one command writes a root rule for it, as the
   `kubectl` example below does.
 - **Bash, `git push` and `gh`** — What a push, a pull request, an issue, a
@@ -46,8 +46,7 @@ and `host/claude-code/Edit`:
   their visibility, and who wrote them. The Annotator requires audience
   `public` for a public repository and `internal` for a private or internal
   one. Without that answer, or when the provider fails, the Annotator treats
-  the destination as public. On Windows, the Unix-only publishing selectors
-  are absent, so these otherwise undeclared calls are refused.
+  the destination as public.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules
@@ -67,12 +66,10 @@ and `host/claude-code/Edit`:
   (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
   `appa/batteries/`). Every other path takes the session's label as it is.
 
-On Unix, the default config `appa plugin install claude-code` writes declares
-the Bash Annotators, the GitHub publishing selectors, the Monitor rule, and the
-wildcard fallback.
-On Windows, the installer omits these Unix-only declarations. Bash calls that
-have no static rule remain fail-closed. The battery still labels credential
-paths and confines Bash results on both platforms.
+The battery also routes `host/claude-code/Monitor` through the Bash
+Annotator. Both Annotators run the local `claude` command; on Windows it must
+resolve to `claude.exe`. The default config `appa plugin install claude-code`
+writes adds the wildcard fallback for tools no rule names.
 
 ## Add it to a deployment
 
@@ -83,9 +80,8 @@ include = ["batteries/claude-code/appa.toml"]
 version = 2
 ```
 
-This small root only includes the battery's static rules. Use the installed
-default root for Unix Bash Annotators and publishing selectors, or declare
-those contracts in your own root policy.
+This small root includes every rule the battery declares. A tool no rule
+names is refused; the installed default root adds a wildcard fallback for it.
 
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
@@ -110,7 +106,7 @@ builtin = "claude-code"
 hint = "Hosts under corp.example are the organization's own: what they return is internal. Require hitl attention before commands that publish releases or change production infrastructure."
 ```
 
-On Unix, replace the default root declaration with this one. Preserve `builtin`
+A root Annotator replaces the battery's of the same name. Preserve `builtin`
 unless you intend to alter the implementation; write `audiences` only to narrow
 the mandate below the policy's vocabulary. The battery continues to provide
 ordered credential-path narrowing rules.

@@ -622,9 +622,6 @@ jobs:
       - name: Lint runtime library for Windows
         run: cargo clippy --locked --package appa --lib -- -D warnings
 
-      - name: Verify portable Claude policy and battery
-        run: cargo test --locked --package appa --lib default_config::tests
-
       - name: Verify committed marketplace bytes under Windows Git
         run: cargo test --locked --package appa --lib export_commit_preserves_committed_bytes_with_windows_autocrlf
 

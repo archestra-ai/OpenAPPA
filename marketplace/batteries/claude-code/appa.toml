@@ -1,4 +1,4 @@
-# Optional Claude Code rules for Bash, Read, Grep, Write and Edit.
+# Optional Claude Code rules for Bash, Monitor, Read, Grep, Write and Edit.
 #
 # Order matters: the first matching rule wins, so the argument-selected
 # credential rules come before each tool's bare rule. A name written
@@ -127,8 +127,7 @@ tags = ["credentials"]
 # global flags anywhere (`databricks --profile dev auth token`), so the
 # verb is matched after `databricks` with anything between. A selector is a
 # substring of the command line, so a spelling these miss (the command
-# inside `$(...)`, a heredoc, an alias) reaches the Unix root's Bash
-# Annotator; without it, the call remains fail-closed.
+# inside `$(...)`, a heredoc, an alias) reaches the Bash Annotator below.
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.databrickscfg*)"
 delta = { audience = ["self"] }
@@ -154,9 +153,73 @@ name = "host/claude-code/Bash(command:*databricks*configure*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
-# The Unix root policy declares the Bash publishing selectors, their
-# repository input, and the general Bash Annotator. Off Unix, those calls
-# have no matching declaration and remain fail-closed.
+# --- Bash: publishing selectors, then every other command ---
+
+# A command no credential selector above names is labeled per call. The GitHub
+# battery's context provider, when installed, tells the repository Annotator
+# which repository a command reaches and who wrote what it reads.
+[[policy.annotator]]
+name = "claude-code.bash-repository-requirements"
+builtin = "claude-code"
+hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository, or a bot."
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*git push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+# Options between `git` and `push`, such as `git -C sub push`.
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*git -* push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh pr *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh issue *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh release *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh api *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh repo *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+# How a model Annotator classifies — trust by who wrote the returned text,
+# audience by the visible destination — is the runtime's. Add a `hint` with
+# what only this deployment knows: which hosts are its own and which paths hold
+# whose data. The mandate leaves `audiences` omitted, so it may name readers.
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+
+[[policy.tool]]
+name = "host/claude-code/Bash"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-requirements"
+
+# Monitor runs a shell command, or opens a WebSocket, and its output reaches
+# the model as later notifications that no tool result carries. Its Annotator
+# labels the call before it runs.
+[[policy.tool]]
+name = "host/claude-code/Monitor"
+description = "Runs a shell command or opens a WebSocket and streams each output line to the agent."
+annotator = "claude-code.bash-requirements"
+
 
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the AWS secret access key, the value of any assignment

@@ -107,21 +107,14 @@ fn re_fired(mut stop: serde_json::Value) -> serde_json::Value {
     stop
 }
 
-/// The shipped example with `policy_extra` spliced in after the deployment
+/// The shipped root with `policy_extra` spliced in after the deployment
 /// table, plus deterministic `Bash` and `Read` tools under the canonical
-/// names the served adapter maps. These tests exercise trajectory
-/// binding, not the default's model-backed compatibility fallback;
-/// `bash_delta` is what the recorded Bash output carries.
+/// names the served adapter maps, in place of the battery's model-backed
+/// rules. These tests exercise trajectory binding; `bash_delta` is what the
+/// recorded Bash output carries.
 fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Runtime {
     let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
-    let bare_bash = "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndescription = \"Runs one shell command and returns its output.\"\nannotator = \"claude-code.bash-requirements\"";
-    assert!(example.contains(bare_bash), "the default root declares Bash");
-    let example = example.replacen(
-        bare_bash,
-        &format!("[[policy.tool]]\nname = \"host/claude-code/Bash\"\n{bash_delta}"),
-        1,
-    );
     let (policy, externals) = example
         .split_once("[externals]")
         .expect("the example carries an [externals] table");
@@ -129,7 +122,10 @@ fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Ru
     let (before_deployment, after_deployment) = policy
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
-    let tools = "[[policy.tool]]\nname = \"host/claude-code/Read\"\ndelta = {}\n";
+    let tools = format!(
+        "[[policy.tool]]\nname = \"host/claude-code/Read\"\ndelta = {{}}\n\
+         [[policy.tool]]\nname = \"host/claude-code/Bash\"\n{bash_delta}\n"
+    );
     let text = format!(
         "{before_deployment}{deployment}{policy_extra}\n{tools}{after_deployment}[externals]{externals}\n{externals_extra}"
     );

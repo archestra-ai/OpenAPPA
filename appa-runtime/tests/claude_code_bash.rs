@@ -19,7 +19,7 @@ fn bash(command: &str) -> ProposedCall {
 }
 
 /// The shipped default and battery under a failing `claude`: a static credential
-/// rule narrows without consulting the root's Bash Annotator.
+/// rule narrows without consulting the Bash Annotator.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     let target = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&target).unwrap();

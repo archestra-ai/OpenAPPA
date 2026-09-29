@@ -115,7 +115,7 @@ audience or the proposal configures an audience source for it.
 
 ### Develop the Bash classifier hint
 
-During `init`, develop a concise `hint` for the root
+During `init`, develop a concise `hint` for the
 `claude-code.bash-requirements` Annotator from the contracts of every battery
 that the approved configuration will include. This lets Claude apply the same
 policy intent when a CLI command reaches a service covered by an MCP battery.
@@ -405,11 +405,11 @@ argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
 
 For an exact Bash command pattern, add a narrow, ordered
-`host/claude-code/Bash(command:...)` root contract before the root's bare
-`host/claude-code/Bash` rule. For semantic command interpretation, add a
-`hint` to the root's `claude-code.bash-requirements` Annotator. Preserve its
-implementation, inputs, and mandate unless the approved behavior requires a
-change. Keep the root's Bash selectors above the bare Bash rule.
+`host/claude-code/Bash(command:...)` root contract: root rules precede the
+battery's Bash rules. For semantic command interpretation, declare
+`claude-code.bash-requirements` in the root with a `hint`; a root Annotator
+replaces the battery's of the same name. Preserve its implementation, inputs,
+and mandate unless the approved behavior requires a change.
 
 To make an audience mismatch reviewable, permit the intended Authority to
 review that audience expansion. Do not add attention only to route the review.

@@ -10,8 +10,6 @@ pub mod batteries;
 pub mod claude_files;
 pub mod config;
 mod credentials;
-#[cfg(feature = "daemon")]
-mod default_config;
 pub mod describe;
 #[cfg(feature = "daemon")]
 pub mod hook_client;

@@ -722,13 +722,6 @@ pub fn install(args: Install) -> ExitCode {
                 None => {
                     let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let text = if name == "claude-code" {
-                        crate::default_config::for_installed_policy(&text)
-                            .map_err(|reason| InstallError::Invalid(reason.into()))?
-                            .into_owned()
-                    } else {
-                        text
-                    };
                     match (agent_yell, with_agent_yell_on(&text)) {
                         (Some(AgentYell::On), Some(on)) => on,
                         (Some(AgentYell::On), None) if args.agent_yell => {
@@ -1643,17 +1636,23 @@ mod tests {
     /// policy has to carry exactly one of it. Two, or none, and a yes cannot be honored.
     #[test]
     fn the_shipped_policy_states_the_reporting_posture_exactly_once() {
-        let text = crate::default_config::text();
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../marketplace/plugins/claude-code/default.appa.toml"
+        ));
         assert_eq!(text.matches(AGENT_YELL_OFF).count(), 1);
         assert_eq!(text.matches(AGENT_YELL_ON).count(), 0);
     }
 
     #[test]
     fn a_yes_turns_reporting_on_and_changes_only_that_line() {
-        let before = crate::default_config::text();
-        let after = with_agent_yell_on(&before).expect("the shipped policy carries the line once");
-        assert_ne!(after, before.as_ref());
-        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before.as_ref());
+        let before = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../marketplace/plugins/claude-code/default.appa.toml"
+        ));
+        let after = with_agent_yell_on(before).expect("the shipped policy carries the line once");
+        assert_ne!(after, before);
+        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before);
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
         std::fs::write(&config, &after).expect("the answered policy is written");

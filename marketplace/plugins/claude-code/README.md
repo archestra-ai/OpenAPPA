@@ -241,8 +241,8 @@ explicit about the checked boundary and its unobserved inputs.
 - `default.appa.toml` — a complete starting policy: the harness's other
   built-in tools released with the neutral annotation, web tool results
   marked suspicious, subagents run as children of the session, and a bounded
-  per-call fallback for every tool the policy does not name. Bash, Read,
-  Grep, Write and Edit are left to the battery, whose argument selectors a
+  per-call fallback for every tool the policy does not name. Bash, Monitor,
+  Read, Grep, Write and Edit are left to the battery, whose argument selectors a
   bare rule here would shadow.
 - `live-gate-check.py` — the harness conformance check described below.
 
