@@ -9,6 +9,14 @@ fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
     if raw == CONTROL {
         return Ok(CanonicalTool::control());
     }
+    // Bash is Codex's command transport. Policy names its eventual APPA-owned
+    // wrapper, while the wire and reverse spelling retain the actual host tool.
+    if raw == "Bash" {
+        return CanonicalTool::of("host", "codex", "appa_exec").map_err(|error| invalid(error.to_string()));
+    }
+    if raw == "appa_exec" {
+        return Err(invalid("appa_exec is a policy identity, not a Codex tool".into()));
+    }
     if let Some(rest) = raw.strip_prefix("mcp__") {
         let (server, tool) = rest
             .split_once("__")
@@ -33,6 +41,7 @@ pub(crate) fn spell(tool: &CanonicalTool) -> Option<String> {
     let mut parts = tool.as_str().split('/');
     let raw = match (parts.next()?, parts.next()?, parts.next()?, parts.next()) {
         ("mcp", server, name, None) => format!("mcp__{server}__{name}"),
+        ("host", "codex", "appa_exec", None) => "Bash".to_owned(),
         ("host", "codex", name, None) => name.to_owned(),
         _ => return None,
     };
@@ -55,5 +64,9 @@ mod tests {
             None
         );
         assert!(identify_tool("spawn_agent").unwrap().spawn);
+        let bash = CanonicalTool::parse("host/codex/appa_exec").unwrap();
+        assert_eq!(identify_tool("Bash").unwrap().canonical, bash);
+        assert_eq!(spell(&bash).as_deref(), Some("Bash"));
+        assert!(identify_tool("appa_exec").is_err());
     }
 }

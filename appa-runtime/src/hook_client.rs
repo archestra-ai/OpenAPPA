@@ -124,6 +124,28 @@ fn deliver(answer: &serde_json::Value) -> ExitCode {
     }
 }
 
+/// Codex treats a failed SessionStart command as a hook error and continues.
+/// Its supported exit-zero response stops the current turn instead.
+fn stop_codex_turn(failure: &str) -> ExitCode {
+    eprintln!("OpenAPPA hook stopped the Codex turn: {failure}");
+    deliver(&serde_json::json!({"continue": false, "stopReason": failure}))
+}
+
+fn codex_can_stop_turn(event: &HookEvent) -> bool {
+    matches!(event, HookEvent::SessionStart { .. } | HookEvent::Prompt { .. })
+}
+
+fn codex_unparsed_turn_gate(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|event| {
+            matches!(
+                event.get("hook_event_name").and_then(serde_json::Value::as_str),
+                Some("SessionStart" | "UserPromptSubmit")
+            )
+        })
+}
+
 /// The host event read as the typed event it reports: `None` for a hook the adapter does
 /// not gate, whose answer is the empty opinion without a round trip.
 fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent>, String> {
@@ -160,9 +182,6 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     if !session_is_gated() {
         return ExitCode::SUCCESS;
     }
-    if host == AdapterName::Codex && ensure.is_some() {
-        return block("Codex runtime auto-start requires its separate deployment and is not active yet");
-    }
     let decides = Decides::of_a_turn_end(turn_end);
     let codec = match host {
         AdapterName::ClaudeCode => appa_adapter_claude_code::codec(),
@@ -172,6 +191,14 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
+    }
+    if host == AdapterName::Codex && ensure.is_some() {
+        let reason = "Codex runtime auto-start requires its separate deployment and is not active yet";
+        return if codex_unparsed_turn_gate(&host_event) {
+            stop_codex_turn(reason)
+        } else {
+            block(reason)
+        };
     }
     if let Some(deployment) = ensure {
         let executable = match std::env::current_exe() {
@@ -201,7 +228,7 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
         // Bytes this codec cannot read at all are still a hook: where they report a result
         // the harness has already produced, the codec renders the withholding for it, so
         // the output the tool produced does not stay in front of the model.
-        Err(failure) => return unanswered(&codec, Unanswered::Unparsed(&host_event), &failure, decides),
+        Err(failure) => return unanswered(&codec, host, Unanswered::Unparsed(&host_event), &failure, decides),
     };
     // A Codex Bash call is the transport for an APPA-owned child execution.
     // Until the runtime has registered an opaque job and supplied the fixed
@@ -209,7 +236,7 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     // and expose its streaming output outside result admission.
     if host == AdapterName::Codex
         && let HookEvent::ToolCall { call, .. } = &event
-        && call.tool == "appa_exec"
+        && call.tool == "Bash"
     {
         return deliver(&(codec.render)(
             &event,
@@ -235,7 +262,7 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     // out of the model's attention instead of staying in front of it.
     let body = match wire_body(host, &event) {
         Ok(body) => body,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, host, Unanswered::Event(&event), &failure, decides),
     };
     let answered = Endpoint::parse(&target.url).and_then(|endpoint| {
         if host == AdapterName::Codex {
@@ -248,7 +275,7 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
     });
     let answer = match answered {
         Ok(answer) => answer,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, host, Unanswered::Event(&event), &failure, decides),
     };
     if decides == Decides::Nothing {
         return ExitCode::SUCCESS;
@@ -260,13 +287,13 @@ pub fn run(target: &RuntimeTarget, host: AdapterName, turn_end: bool, ensure: Op
         // so a replacement carried out on a blocking exit would be discarded and the
         // withheld output would stay in front of the model. That holds whatever the
         // refusal carries — a decision, a refusal that decides nothing, or a body that
-        // is no wire decision at all. Every other refusal is what the exit code stops,
-        // and the rendering only reports it.
+        // is no wire decision at all. Codex turn gates stop with an exit-zero JSON
+        // response; other refusals are stopped by the exit code.
         (answered, false) => {
             let failure = refusal(&answer);
-            carry_out(&codec, &event, refused(&event, answered.ok(), &failure), &failure)
+            carry_out(&codec, host, &event, refused(&event, answered.ok(), &failure), &failure)
         }
-        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        (Err(failure), true) => unanswered(&codec, host, Unanswered::Event(&event), &failure, decides),
     }
 }
 
@@ -299,7 +326,10 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
     }
 }
 
-fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
+fn carry_out(codec: &Codec, host: AdapterName, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
+    if host == AdapterName::Codex && codex_can_stop_turn(event) {
+        return stop_codex_turn(failure);
+    }
     match refused {
         Refused::Withheld(withholding) => withhold(&(codec.render)(event, &withholding), failure),
         // The exit code stops the call either way; where the answer's own rendering could
@@ -342,11 +372,20 @@ enum Unanswered<'a> {
 /// but a result the tool already produced stays in front of the model unless the
 /// withholding is rendered for it — and the harness reads a rendered answer only
 /// from a hook that exits zero, so a hook reporting a result is withheld by the
-/// rendering and exits zero, while everything else blocks by the exit code alone.
-fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decides) -> ExitCode {
+/// rendering and exits zero. Codex turn gates also use a successful response;
+/// other unrun actions are blocked by the exit code.
+fn unanswered(codec: &Codec, host: AdapterName, hook: Unanswered<'_>, failure: &str, decides: Decides) -> ExitCode {
     if decides == Decides::Nothing {
         eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         return ExitCode::SUCCESS;
+    }
+    if host == AdapterName::Codex
+        && match &hook {
+            Unanswered::Event(event) => codex_can_stop_turn(event),
+            Unanswered::Unparsed(body) => codex_unparsed_turn_gate(body),
+        }
+    {
+        return stop_codex_turn(failure);
     }
     match withholding(codec, hook, failure) {
         Some(withholding) => withhold(&withholding, failure),

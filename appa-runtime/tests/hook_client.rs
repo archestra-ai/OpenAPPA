@@ -98,6 +98,74 @@ fn codex_bash_is_denied_until_an_approved_wrapper_job_exists() {
     assert!(!output.contains("printf secret"));
 }
 
+fn codex_client(url: &str) -> Command {
+    let mut command = client(url);
+    command.arg("--adapter").arg("codex");
+    command
+}
+
+fn assert_codex_turn_stopped(output: std::process::Output, reason: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Codex reads stop responses only from successful hooks"
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).expect("Codex receives JSON");
+    assert_eq!(answer["continue"], false, "{answer}");
+    assert!(
+        answer["stopReason"]
+            .as_str()
+            .is_some_and(|message| message.contains(reason)),
+        "{answer}"
+    );
+    assert!(
+        answer.get("decision").is_none(),
+        "legacy block does not stop SessionStart: {answer}"
+    );
+}
+
+#[test]
+fn codex_session_start_stops_when_runtime_is_unavailable_or_event_is_malformed() {
+    let url = "http://127.0.0.1:1";
+    for (event, reason) in [
+        (r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#, "127.0.0.1"),
+        (r#"{"hook_event_name":"SessionStart","session_id":""}"#, "session_id"),
+    ] {
+        let output = finish_output(child_process::spawn(&mut codex_client(url)).unwrap(), event);
+        assert_codex_turn_stopped(output, reason);
+    }
+    // A later prompt in the same session still cannot proceed while the runtime is down.
+    let prompt = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"continue"}"#;
+    let output = finish_output(child_process::spawn(&mut codex_client(url)).unwrap(), prompt);
+    assert_codex_turn_stopped(output, "127.0.0.1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_session_start_stops_on_runtime_refusal_or_invalid_answer() {
+    for (status, body, reason) in [
+        (
+            axum::http::StatusCode::CONFLICT,
+            r#"{"protocol":1,"decision":"refuse","detail":"storage failure"}"#,
+            "storage failure",
+        ),
+        (axum::http::StatusCode::OK, "not a wire decision", "wire decision"),
+    ] {
+        let url = serve(
+            Router::new()
+                .route("/adapter", axum::routing::get(|| async { "codex" }))
+                .route("/hook", post(move || async move { (status, body) })),
+        )
+        .await;
+        let start = r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#;
+        let output = tokio::task::spawn_blocking(move || {
+            finish_output(child_process::spawn(&mut codex_client(&url)).unwrap(), start)
+        })
+        .await
+        .expect("hook joins");
+        assert_codex_turn_stopped(output, reason);
+    }
+}
+
 #[test]
 fn codex_hook_refuses_claude_runtime_auto_start() {
     let event = r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#;
@@ -112,8 +180,24 @@ fn codex_hook_refuses_claude_runtime_auto_start() {
         .expect("the Codex hook client starts"),
         event,
     );
-    assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("separate deployment"));
+    assert_codex_turn_stopped(output, "separate deployment");
+
+    // A misconfigured tool hook cannot use the turn-stop shape: Codex rejects
+    // `continue` on PreToolUse, but accepts exit 2 as a tool denial.
+    let tool = r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"apply_patch","tool_use_id":"c1","tool_input":{"patch":"x"}}"#;
+    let output = finish_output(
+        child_process::spawn(
+            client("http://127.0.0.1:8787")
+                .arg("--adapter")
+                .arg("codex")
+                .arg("--ensure-runtime"),
+        )
+        .expect("the Codex hook client starts"),
+        tool,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

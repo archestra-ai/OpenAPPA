@@ -55,7 +55,7 @@ impl Input {
             .filter(|name| !name.is_empty())
             .ok_or_else(|| malformed("tool hook has no tool_name"))?;
         Ok(ProposedCall {
-            tool: if raw == "Bash" { "appa_exec" } else { raw }.to_owned(),
+            tool: raw.to_owned(),
             arguments: self
                 .tool_input
                 .clone()
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(actor.root.0, "codex:s1");
         assert_eq!(call_id.as_deref(), Some("c1"));
         assert_eq!(call.cwd.as_deref(), Some("/tmp"));
-        assert_eq!(call.tool, "appa_exec");
+        assert_eq!(call.tool, "Bash");
         assert_eq!(call.arguments.get(), r#"{"command":"echo hi"}"#);
     }
 
