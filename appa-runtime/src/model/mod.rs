@@ -4,10 +4,12 @@
 //! [`ModelPrompt`]: crate::consult::ModelPrompt
 
 pub(crate) mod claude_code;
+pub(crate) mod codex;
 pub(crate) mod jev;
 pub(crate) mod llm;
 
 use claude_code::ClaudeCodeBackend;
+use codex::CodexBackend;
 use llm::LlmBackend;
 
 /// No retry or hedge starts with less of the consult's budget left than this.
@@ -19,5 +21,6 @@ pub(crate) const MAX_ATTEMPTS: usize = 3;
 #[derive(Clone)]
 pub(crate) enum PromptModel {
     ClaudeCode(ClaudeCodeBackend),
+    Codex(CodexBackend),
     Llm(LlmBackend),
 }

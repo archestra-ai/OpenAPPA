@@ -462,6 +462,8 @@ pub enum OpenError {
         "annotator {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
     )]
     UnsupportedClaudeCodePlatform(String),
+    #[error("annotator {0} names the builtin \"codex\", which runs a local process this platform does not support yet")]
+    UnsupportedCodexPlatform(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
     #[error("storage failure: {0}")]
@@ -3097,6 +3099,9 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::ClaudeCode if !cfg!(unix) => {
                 return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
             }
+            appa_policy::AnnotatorBuiltin::Codex if !cfg!(unix) => {
+                return Err(OpenError::UnsupportedCodexPlatform(name.to_string()));
+            }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
@@ -3115,6 +3120,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             }
             appa_policy::AnnotatorBuiltin::Jev
             | appa_policy::AnnotatorBuiltin::Llm
+            | appa_policy::AnnotatorBuiltin::Codex
             | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
         }
     }

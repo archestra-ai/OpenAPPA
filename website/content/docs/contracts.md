@@ -732,7 +732,7 @@ An annotator can use a selector placeholder only when its own `audiences` lists 
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
-The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what a context provider's answer means. It can give examples. Every annotator builtin (`claude-code`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code` and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
+The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what a context provider's answer means. It can give examples. Every annotator builtin (`claude-code`, `codex`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code`, `codex`, and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 
@@ -741,12 +741,13 @@ An annotator can be an HTTP service or a local program on a Unix system. Configu
 Alternatively, use a built-in annotator. The available options are:
 
 - `builtin = "claude-code"`: uses Claude Code to classify tool calls.
+- `builtin = "codex"`: uses a separate noninteractive Codex CLI process with the existing Codex login.
 - `builtin = "llm"`: uses the model configured under `[externals.llm]` to classify tool calls.
 - `builtin = "jev"`: asks TypeSafe's Jev classifier, with the key named under [`[externals.jev]`](#jev), to label each call's audience and trust.
 
 Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, an implementation unavailable on that system, or a model implementation whose key is not set.
+`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `codex` runs the local `codex` command and currently requires a Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, an implementation unavailable on that system, or a model implementation whose key is not set.
 
 ### Annotator protocol
 
@@ -909,6 +910,7 @@ You can also select a built-in implementation with `builtin` under `[externals.s
 | `builtin = "redact-email"` | Replaces email addresses with a fixed placeholder. It does not remove other private information. |
 | `builtin = "redact-secrets"` | Replaces credentials with a fixed placeholder: private-key blocks, tokens of well-known shapes (AWS, GitHub, Anthropic, OpenAI, Slack, Google, GitLab, npm, JWT), the AWS secret access key, which has no prefix and is recognized by its 40 base64 characters, the password in a URL's `user:password@host`, the value of an assignment whose key names a password, passphrase, secret, token, credential, authorization, key or auth (quoted JSON keys, `Bearer` values and netrc `password` lines included), and any run of 20 or more characters with high entropy. It is a detector, not a proof that no secret remains. |
 | `builtin = "claude-code"` | Uses Claude Code to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
+| `builtin = "codex"` | Uses the local Codex CLI to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 | `builtin = "llm"` | Uses the model configured under `[externals.llm]` to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 
 See [Externals](#externals) for implementation settings. The reserved `attest-schema` sanitizer has separate configuration for [structured child returns](#structured-child-returns).
@@ -982,7 +984,7 @@ An authority can use a built-in reviewer, an HTTP service, or a local program. C
 |---|---|
 | `builtin = "hitl"` | Asks a person to review the exact call and the requirements to be approved. |
 | `builtin = "approve"` | Automatically approves every matching request within `permits`. |
-| `builtin = "claude-code"` or `builtin = "llm"` | A model approves or denies using the declaration, call, and unmet requirements. |
+| `builtin = "claude-code"`, `builtin = "codex"`, or `builtin = "llm"` | A model approves or denies using the declaration, call, and unmet requirements. |
 | `builtin = "<module name>"` | Runs a module loaded from `--modules-dir` with the same system permissions as OpenAPPA. |
 | `url` or `command` | Asks an external service or local program to approve or deny the call. |
 
@@ -1255,7 +1257,7 @@ The available settings depend on the component's role:
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
-Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
+Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.codex]`, or `[externals.llm]`.
 
 ### HTTP services
 
@@ -1324,9 +1326,9 @@ OpenAPPA rejects a response if the HTTP service reports an error, the program ex
 
 ### Model implementations
 
-The `claude-code` and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. For an annotator, the fixed instructions include the label guide: the rule and the criteria for each trust and audience leaf, and worked example calls, each with the annotation it gets under the annotator's permits. An example whose labels the permits exclude is left out. OpenAPPA sends `artifact` as the user message, to be processed as data.
+The `claude-code`, `codex`, and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. For an annotator, the fixed instructions include the label guide: the rule and the criteria for each trust and audience leaf, and worked example calls, each with the annotation it gets under the annotator's permits. An example whose labels the permits exclude is left out. OpenAPPA sends `artifact` as the user message, to be processed as data.
 
-Before an annotator request leaves for a model provider, OpenAPPA redacts what it recognizes as a secret in `artifact.args`. This applies to `claude-code`, `llm`, and `jev`. Each string goes through the detector of `builtin = "redact-secrets"`. The whole value of a field whose name contains `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `private_key`, `access_key`, `authorization`, `cookie`, or `credential`, or is `auth`, is replaced. Each secret becomes `[redacted-secret]`. The tool name is not redacted. Redaction is best effort, not a proof that no secret remains. Authority and sanitizer requests are not redacted, because a sanitizer must see the value it cleans. The consult record keeps the request before redaction.
+Before an annotator request leaves for a model provider, OpenAPPA redacts what it recognizes as a secret in `artifact.args`. This applies to `claude-code`, `codex`, `llm`, and `jev`. Each string goes through the detector of `builtin = "redact-secrets"`. The whole value of a field whose name contains `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `private_key`, `access_key`, `authorization`, `cookie`, or `credential`, or is `auth`, is replaced. Each secret becomes `[redacted-secret]`. The tool name is not redacted. Redaction is best effort, not a proof that no secret remains. Authority and sanitizer requests are not redacted, because a sanitizer must see the value it cleans. The consult record keeps the request before redaction.
 
 OpenAPPA builds the expected response format from the declaration. The model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
@@ -1342,6 +1344,17 @@ OpenAPPA checks authority and annotator answers against their permits and assign
 | `max_concurrent` | Sets how many requests the runtime runs at once. Default: 4. |
 
 Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables.
+
+`[externals.codex]` configures the independent Codex model implementation:
+
+| Field | Purpose |
+|---|---|
+| `command` | Selects the executable. Default: `codex`. |
+| `model` | Selects the model. Omit it to use the installed CLI's default. |
+| `timeout_ms` | Sets the timeout for one request, including its wait for a free slot. Default: 60,000. |
+| `max_concurrent` | Sets how many requests the runtime runs at once. Default: 4. |
+
+Each consult starts a fresh `codex exec --ephemeral` process using the existing Codex login. It ignores user configuration and rules, disables the supported tool features, uses a read-only sandbox and temporary working directory, and rejects any event stream that contains a tool call. The runtime supplies the component instructions through a private file and the request data on stdin. An invalid result cannot approve a call. This backend is separate from the Codex session hooks and command proxy.
 
 `[externals.llm]` selects the model used by all `builtin = "llm"` components. This example uses an Anthropic model, a token from `APPA_LLM_TOKEN`, a 30-second timeout, and up to four concurrent requests:
 

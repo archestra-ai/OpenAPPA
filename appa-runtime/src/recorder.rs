@@ -28,6 +28,7 @@ pub enum ConsultBackend {
     Llm,
     Jev,
     ClaudeCode,
+    Codex,
     Hitl,
 }
 

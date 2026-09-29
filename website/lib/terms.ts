@@ -147,6 +147,8 @@ const TERMS = {
     "Automatically approves every request within the authority's permits.",
   'builtin = "claude-code"':
     "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the Unix machine running OpenAPPA.",
+  'builtin = "codex"':
+    "Runs Codex locally to answer a component's request with the existing Codex login. Each request starts an isolated codex exec process. Currently requires Codex on the Unix machine running OpenAPPA.",
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":

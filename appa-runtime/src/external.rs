@@ -15,13 +15,14 @@ use serde::Deserialize;
 
 use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
-    Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
+    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, CODEX_BUILTIN, Endpoint, EndpointHost,
+    EndpointToken, Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
 use crate::model::claude_code::ClaudeCodeBackend;
+use crate::model::codex::CodexBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
 use crate::recorder::ConsultBackend;
@@ -190,6 +191,7 @@ impl Backend {
             Backend::Module(_) => Some(ConsultBackend::Module),
             Backend::Hitl => Some(ConsultBackend::Hitl),
             Backend::Model(PromptModel::ClaudeCode(_)) => Some(ConsultBackend::ClaudeCode),
+            Backend::Model(PromptModel::Codex(_)) => Some(ConsultBackend::Codex),
             Backend::Model(PromptModel::Llm(_)) => Some(ConsultBackend::Llm),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
             Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
@@ -270,7 +272,7 @@ pub(crate) struct ConsultGates {
     /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
-    models: Arc<Mutex<[ModelGate; 3]>>,
+    models: Arc<Mutex<[ModelGate; 4]>>,
     pub(crate) jev: Arc<JevClients>,
 }
 
@@ -284,7 +286,7 @@ impl ConsultGates {
     fn of(command: usize) -> ConsultGates {
         let gate = |builtin| {
             let size = match builtin {
-                AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Llm => {
+                AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Codex | AnnotatorBuiltin::Llm => {
                     crate::config::ModelLimits::MODEL_CALL.max_concurrent
                 }
                 AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
@@ -298,7 +300,7 @@ impl ConsultGates {
         }
     }
 
-    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; 3]> {
+    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; 4]> {
         self.models
             .lock()
             .expect("the model gates mutex is never poisoned: no panic runs while it is held")
@@ -371,6 +373,7 @@ impl ExternalServices {
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
         let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
+        let codex = CodexBackend::new(&config.codex, config.max_body_bytes, &gates);
         // A profile without the key it needs serves nothing: a deployment that consults it
         // refuses to open, so an entry naming it never reaches here.
         let llm = config
@@ -384,6 +387,12 @@ impl ExternalServices {
             .jev
             .as_ref()
             .and_then(|profile| JevBackend::new(profile, config.max_body_bytes, &gates, JevTiming::STANDARD));
+        let models = BuiltinModels {
+            claude: &claude,
+            codex: &codex,
+            llm: llm.as_ref(),
+            jev: jev.as_ref(),
+        };
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -395,9 +404,7 @@ impl ExternalServices {
                 let backend = match implementation {
                     Implementation::Resolver(endpoint) => Backend::Url(endpoint),
                     Implementation::Command(command) => Backend::Command(command),
-                    Implementation::Builtin(builtin) => {
-                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref(), jev.as_ref())?
-                    }
+                    Implementation::Builtin(builtin) => builtin_backend(section, &name, builtin, registry, &models)?,
                 };
                 resolved.insert(name, backend);
             }
@@ -423,9 +430,7 @@ impl ExternalServices {
                 &name,
                 builtin.wire_name().to_string(),
                 registry,
-                &claude,
-                llm.as_ref(),
-                jev.as_ref(),
+                &models,
             )?;
             annotators.insert(name, backend);
         }
@@ -629,6 +634,7 @@ impl ExternalServices {
         match model {
             PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
             PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
+            PromptModel::Codex(codex) => codex.consult(&prompt, &consult.name, seen).await,
         }
     }
 
@@ -766,14 +772,19 @@ pub(crate) async fn read_body(
 /// Resolve one `builtin` name for one section: the stock implementations and the model
 /// transports by name, then the loaded modules of the section's kind. An Annotator
 /// reaches here from its policy declaration, the other kinds from their bindings.
+struct BuiltinModels<'a> {
+    claude: &'a ClaudeCodeBackend,
+    codex: &'a CodexBackend,
+    llm: Option<&'a LlmBackend>,
+    jev: Option<&'a JevBackend>,
+}
+
 fn builtin_backend(
     section: Section,
     name: &str,
     builtin: String,
     registry: &ModuleRegistry,
-    claude: &ClaudeCodeBackend,
-    llm: Option<&LlmBackend>,
-    jev: Option<&JevBackend>,
+    models: &BuiltinModels<'_>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
@@ -783,12 +794,15 @@ fn builtin_backend(
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
         (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
-            Some(Backend::Model(PromptModel::ClaudeCode(claude.clone())))
+            Some(Backend::Model(PromptModel::ClaudeCode(models.claude.clone())))
+        }
+        (Section::Authorities | Section::Sanitizers | Section::Annotators, CODEX_BUILTIN) => {
+            Some(Backend::Model(PromptModel::Codex(models.codex.clone())))
         }
         (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
-            llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
+            models.llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
         }
-        (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
+        (Section::Annotators, JEV_BUILTIN) => models.jev.cloned().map(Backend::Jev),
         _ => Stock::for_section(section, &builtin)
             .map(Backend::Stock)
             .or_else(|| module.map(|module| Backend::Module(Arc::clone(module)))),
@@ -1318,6 +1332,7 @@ mod tests {
             audience,
             context: BTreeMap::new(),
             claude_code: Default::default(),
+            codex: Default::default(),
             llm: None,
             jev: None,
         }
@@ -2062,6 +2077,40 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             Some(&br#"{"type":"result","structured_output":{"ruling":"approve","reason":"fine"}}"#[..])
         );
         assert_eq!(transcript.http_status, None);
+        assert!(matches!(
+            services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
+            ConsultOutcome::Answer(_)
+        ));
+        assert!(matches!(
+            services
+                .consult(&annotation_consult("judge", serde_json::json!({})), None, None)
+                .await,
+            ConsultOutcome::Answer(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_codex_builtin_serves_model_consults_through_existing_dispatch() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let command = fake_claude(
+            dir.path(),
+            "cat >/dev/null\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output-last-message' ]; then\n    shift\n    printf '%s' '{\"ruling\":\"approve\",\"reason\":\"fine\"}' > \"$1\"\n    break\n  fi\n  shift\ndone\nprintf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.started\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}' '{\"type\":\"turn.completed\"}'",
+        );
+        let mut config = externals(None, 2000, 65_536);
+        config.codex.command = command;
+        for section in [&mut config.authorities, &mut config.sanitizers] {
+            section.insert("judge".to_string(), Implementation::Builtin(CODEX_BUILTIN.to_string()));
+        }
+        let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Codex));
+        let (answered, transcript) = services
+            .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
+            .await;
+        assert_eq!(
+            answered,
+            ConsultOutcome::Answer(serde_json::json!({"ruling":"approve","reason":"fine"}))
+        );
+        assert_eq!(transcript.expect("consult recorded").backend, ConsultBackend::Codex);
         assert!(matches!(
             services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)

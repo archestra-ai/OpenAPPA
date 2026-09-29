@@ -17,13 +17,15 @@ use crate::raw::RawAnnotator;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnnotatorBuiltin {
     ClaudeCode,
+    Codex,
     Llm,
     Jev,
 }
 
 impl AnnotatorBuiltin {
-    pub const ALL: [AnnotatorBuiltin; 3] = [
+    pub const ALL: [AnnotatorBuiltin; 4] = [
         AnnotatorBuiltin::ClaudeCode,
+        AnnotatorBuiltin::Codex,
         AnnotatorBuiltin::Llm,
         AnnotatorBuiltin::Jev,
     ];
@@ -32,6 +34,7 @@ impl AnnotatorBuiltin {
     pub const fn wire_name(self) -> &'static str {
         match self {
             AnnotatorBuiltin::ClaudeCode => "claude-code",
+            AnnotatorBuiltin::Codex => "codex",
             AnnotatorBuiltin::Llm => "llm",
             AnnotatorBuiltin::Jev => "jev",
         }

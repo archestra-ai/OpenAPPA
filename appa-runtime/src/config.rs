@@ -224,6 +224,8 @@ pub struct Externals {
     pub context: BTreeMap<String, AnnotatorImplementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
+    /// The independent saved-login Codex model transport.
+    pub codex: Codex,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
     pub llm: Option<LlmProfile>,
     /// The profile the stock `jev` annotator consults, where the deployment declares one.
@@ -235,6 +237,7 @@ impl Externals {
     pub(crate) fn model_limits(&self, builtin: AnnotatorBuiltin) -> Option<ModelLimits> {
         match builtin {
             AnnotatorBuiltin::ClaudeCode => Some(self.claude_code.limits),
+            AnnotatorBuiltin::Codex => Some(self.codex.limits),
             AnnotatorBuiltin::Llm => self.llm.as_ref().map(|llm| llm.limits),
             AnnotatorBuiltin::Jev => self.jev.as_ref().map(|jev| jev.limits),
         }
@@ -436,6 +439,24 @@ impl Default for ClaudeCode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Codex {
+    pub command: PathBuf,
+    /// An absent model uses the installed Codex CLI's default.
+    pub model: Option<String>,
+    pub limits: ModelLimits,
+}
+
+impl Default for Codex {
+    fn default() -> Self {
+        Self {
+            command: "codex".into(),
+            model: None,
+            limits: ModelLimits::MODEL_CALL,
+        }
+    }
+}
+
 /// The `[externals.llm]` profile, validated: its endpoint rules are a `url` binding's
 /// (`https` anywhere, cleartext `http` only to loopback, no credentials in the URL, the
 /// token from an `APPA_*` variable). `url` is `None` where the provider's own API host
@@ -588,6 +609,7 @@ pub struct ResolverCommand {
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
+pub const CODEX_BUILTIN: &str = AnnotatorBuiltin::Codex.wire_name();
 pub const LLM_BUILTIN: &str = AnnotatorBuiltin::Llm.wire_name();
 pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
 
@@ -799,6 +821,10 @@ pub enum ConfigError {
         "the {section} entry {name:?} names the builtin \"claude-code\", which runs a local process this platform does not support"
     )]
     UnsupportedClaudeCodePlatform { section: &'static str, name: String },
+    #[error(
+        "the {section} entry {name:?} names the builtin \"codex\", which runs a local process this platform does not support yet"
+    )]
+    UnsupportedCodexPlatform { section: &'static str, name: String },
     #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
     HostedKey { key: String },
     #[error("the hosted {section} entry {name:?} runs a local command, which a hosted document cannot declare")]
@@ -888,6 +914,13 @@ impl Section {
         #[cfg(not(unix))]
         if builtin == CLAUDE_CODE_BUILTIN {
             return Err(ConfigError::UnsupportedClaudeCodePlatform {
+                section: self.name(),
+                name: name.to_string(),
+            });
+        }
+        #[cfg(not(unix))]
+        if builtin == CODEX_BUILTIN {
+            return Err(ConfigError::UnsupportedCodexPlatform {
                 section: self.name(),
                 name: name.to_string(),
             });
@@ -988,6 +1021,7 @@ struct RawExternals {
     #[serde(default)]
     context: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
+    codex: Option<RawCodex>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
 }
@@ -1028,6 +1062,15 @@ impl RawExternals {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawClaudeCode {
+    command: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
+    max_concurrent: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodex {
     command: Option<String>,
     model: Option<String>,
     timeout_ms: Option<u64>,
@@ -1473,6 +1516,7 @@ impl Config {
             audience,
             context,
             claude_code,
+            codex,
             llm,
             jev,
         } = raw.externals;
@@ -1524,6 +1568,7 @@ impl Config {
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
                 claude_code: resolve_claude_code(claude_code)?,
+                codex: resolve_codex(codex)?,
                 llm,
                 jev,
             },
@@ -1615,7 +1660,7 @@ pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
 }
 
 /// A hosted document's author runs nothing on the machine that holds it: no binding takes
-/// a `command`, and the `claude-code` builtin stays on the executable the host installed.
+/// a `command`, and local model builtins stay on the executable the host installed.
 fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
     if let Some((section, name)) = externals.commanded().next() {
         return Err(ConfigError::HostedCommand {
@@ -1623,13 +1668,29 @@ fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
             name: name.to_string(),
         });
     }
-    match externals.claude_code.as_ref().and_then(|table| table.command.as_ref()) {
-        Some(_) => Err(ConfigError::HostedCommand {
+    if externals
+        .claude_code
+        .as_ref()
+        .and_then(|table| table.command.as_ref())
+        .is_some()
+    {
+        return Err(ConfigError::HostedCommand {
             section: "claude_code",
             name: "claude_code".to_string(),
-        }),
-        None => Ok(()),
+        });
     }
+    if externals
+        .codex
+        .as_ref()
+        .and_then(|table| table.command.as_ref())
+        .is_some()
+    {
+        return Err(ConfigError::HostedCommand {
+            section: "codex",
+            name: "codex".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn policy_version(policy: &toml::Value) -> Option<i64> {
@@ -2257,6 +2318,18 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
     })
 }
 
+fn resolve_codex(raw: Option<RawCodex>) -> Result<Codex, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(Codex::default());
+    };
+    let defaults = Codex::default();
+    Ok(Codex {
+        command: raw.command.map(PathBuf::from).unwrap_or(defaults.command),
+        model: raw.model.filter(|model| !model.is_empty()),
+        limits: ModelLimits::declared("codex", raw.timeout_ms, raw.max_concurrent, defaults.limits)?,
+    })
+}
+
 /// The `[externals.jev]` table. A consult is one short HTTPS request, so its budget
 /// defaults to the shared `timeout`; below [`JEV_MIN_TIMEOUT`] no attempt fits in it.
 fn resolve_jev(
@@ -2741,6 +2814,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_codex_table_uses_the_cli_default_model_unless_pinned() {
+        let config = parse(MINIMAL).expect("no Codex table uses the CLI defaults");
+        assert_eq!(config.externals.codex.command, PathBuf::from("codex"));
+        assert_eq!(config.externals.codex.model, None);
+        assert_eq!(config.externals.codex.limits, ModelLimits::MODEL_CALL);
+
+        let text = format!("{MINIMAL}\n[externals.codex]\ncommand = \"/opt/codex/bin/codex\"\nmodel = \"pinned\"\n");
+        let config = parse(&text).expect("the Codex table validates");
+        assert_eq!(config.externals.codex.command, PathBuf::from("/opt/codex/bin/codex"));
+        assert_eq!(config.externals.codex.model.as_deref(), Some("pinned"));
+        let text = format!("{MINIMAL}\n[externals.codex]\nurl = \"https://x.example\"\n");
+        assert!(toml::from_str::<RawConfig>(&text).is_err());
+    }
+
     /// Every kind × transport cell: which of `url`, `command`, and each builtin name a
     /// section accepts.
     #[test]
@@ -2933,11 +3021,13 @@ mod tests {
         const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
         const CLAUDE: &str = "[externals.claude_code]\n";
+        const CODEX: &str = "[externals.codex]\n";
         let limits = |config: &Config| AnnotatorBuiltin::ALL.map(|builtin| config.externals.model_limits(builtin));
-        let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{LLM}{JEV}")).expect("the model tables validate");
+        let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{CODEX}{LLM}{JEV}")).expect("the model tables validate");
         assert_eq!(
             limits(&defaults),
             [
+                Some(ModelLimits::MODEL_CALL),
                 Some(ModelLimits::MODEL_CALL),
                 Some(ModelLimits::MODEL_CALL),
                 Some(ModelLimits {
@@ -2949,17 +3039,19 @@ mod tests {
         );
 
         let pinned = "timeout_ms = 90000\nmax_concurrent = 2\n";
-        let declared = parse(&format!("{MINIMAL}\n{CLAUDE}{pinned}{LLM}{pinned}{JEV}{pinned}"))
-            .expect("the model tables validate");
+        let declared = parse(&format!(
+            "{MINIMAL}\n{CLAUDE}{pinned}{CODEX}{pinned}{LLM}{pinned}{JEV}{pinned}"
+        ))
+        .expect("the model tables validate");
         let expected = ModelLimits {
             timeout: Duration::from_secs(90),
             max_concurrent: 2,
         };
-        assert_eq!(limits(&declared), [Some(expected); 3]);
+        assert_eq!(limits(&declared), [Some(expected); 4]);
 
         let floor = JEV_MIN_TIMEOUT.as_millis();
         let jev_timeout = |ms: u128| format!("{JEV}timeout_ms = {ms}\n");
-        let too_small = [(CLAUDE, "claude_code"), (LLM, "llm"), (JEV, "jev")]
+        let too_small = [(CLAUDE, "claude_code"), (CODEX, "codex"), (LLM, "llm"), (JEV, "jev")]
             .into_iter()
             .flat_map(|(table, section)| {
                 ["timeout_ms", "max_concurrent"].map(|field| (format!("{table}{field} = 0\n"), section, field, 1))
@@ -4017,6 +4109,10 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            hosted("[policy]\nversion = 2\n[externals.codex]\ncommand = \"/opt/codex/bin/codex\"\n"),
+            Err(ConfigError::HostedCommand { section: "codex", .. })
+        ));
     }
 
     #[test]
@@ -4183,6 +4279,7 @@ mod tests {
             "review_timeout_ms = 1",
             "max_body_bytes = 1",
             "claude_code = { model = \"other\" }",
+            "codex = { model = \"other\" }",
             "llm = { provider = \"openai\", model = \"m\" }",
         ] {
             std::fs::write(&battery, format!("[policy]\nversion = 2\n[externals]\n{field}\n"))

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
+use crate::config::{CLAUDE_CODE_BUILTIN, CODEX_BUILTIN, LLM_BUILTIN, Section};
 use crate::consult::{Consult, ConsultBody};
 use crate::secrets::redact_secrets;
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
@@ -14,13 +14,14 @@ use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-const REFUSED_MODULE_NAMES: [&str; 7] = [
+const REFUSED_MODULE_NAMES: [&str; 8] = [
     "hitl",
     "attest-schema",
     "approve",
     "redact-email",
     "redact-secrets",
     CLAUDE_CODE_BUILTIN,
+    CODEX_BUILTIN,
     LLM_BUILTIN,
 ];
 
