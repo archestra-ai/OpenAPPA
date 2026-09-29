@@ -39,8 +39,9 @@ Use one mode:
 
 - **`init`** — check what the host has connected and how the policy
   covers it, then propose a starting config: batteries to include, what
-  they need set up, and rules for tools nothing covers. It is also the
-  checkup to run after MCP servers change.
+  they need set up, rules for tools nothing covers, and any host classifier
+  guidance derived from those batteries. It is also the checkup to run after
+  MCP servers change.
 - **`adjust`** — change how OpenAPPA treats a tool, data source,
   destination, battery, or approval, including making the defaults
   stricter or looser.
@@ -84,6 +85,11 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   complete declaration into the root config under the same name. Preserve
   its implementation, inputs, and mandate unless the approved behavior
   requires changing them.
+- A battery contract is also source material when a host classifier must
+  recognize equivalent use through another tool. Translate the contract's
+  policy intent, not its MCP enforcement mechanism. Use only facts the host
+  call or an actual context provider supplies. Never invent resource
+  visibility, readers, account identity, or provider context.
 - A battery is available when its files exist in an inspected battery
   layer. It is included only when serving root policy includes its
   `appa.toml`. Say "include" rather than "install" when proposing that

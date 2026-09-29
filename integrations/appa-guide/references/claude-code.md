@@ -107,6 +107,44 @@ Check what each battery's README expects the root config to provide, and record
 anything missing. Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
 
+### Develop the Bash classifier hint
+
+During `init`, develop a concise `hint` for the root
+`claude-code.bash-requirements` Annotator from the contracts of every battery
+that the approved configuration will include. This lets Claude apply the same
+policy intent when a CLI command reaches a service covered by an MCP battery.
+
+Read the batteries' `appa.toml` and README as source material. Translate their
+source and sink intent for recognizable CLI usage. Give the classifier a short
+instruction and authority to reason from the complete command; do not build an
+exhaustive command list or restate OpenAPPA's label guide. Keep the complete
+hint within the documented 512-character limit.
+
+This translation is not equivalent MCP enforcement. A Bash call does not gain
+an MCP tool's typed arguments, Annotator, audience source, or knowledge of its
+readers. Use a battery's dynamic facts only when an installed context provider
+actually supplies them for that Bash call. Otherwise, do not invent visibility,
+reader membership, account identity, or other runtime facts. State uncertainty
+conservatively in the hint when the command and supplied context cannot
+establish the boundary.
+
+Keep specialized Annotators separate. In particular, the GitHub battery
+supplies `context.github` to the existing
+`claude-code.bash-repository-requirements` Annotator; do not replace it, merge
+it into the generic Bash Annotator, or claim that a generated hint reproduces
+it. Preserve every Annotator's implementation, inputs, and mandate.
+
+Treat an existing root hint as an operator customization. Preserve it and add
+compatible battery-derived guidance only when the combined hint remains
+concise and within the limit. If the guidance conflicts or does not fit,
+propose the smallest explicit revision instead of silently replacing it.
+
+Include the exact proposed hint text and its practical effect in the proposal.
+Do not write it before approval. If the resulting hint is unchanged, propose no
+hint edit. After approval, copy the complete existing
+`claude-code.bash-requirements` declaration into the root only when needed,
+change only its `hint`, and leave the included battery files unchanged.
+
 ### Cover the remaining tools
 
 Create root rules only for the tools `appa describe` reports as annotated call
@@ -194,6 +232,8 @@ are included. Then group the proposal by server. Show:
 
 - batteries to include, each with its one-sentence explanation and the
   credential it needs;
+- the exact Bash classifier hint derived from the batteries, when it changes,
+  and what CLI behavior it adds;
 - rules for the remaining tools, and how those tools will behave;
 - existing behavior that stays unchanged, but only when it affects the result;
 - tools the proposal leaves to the Annotator (judged call by call, which may
@@ -221,6 +261,10 @@ After approval:
 1. Run `appa describe --config <live-path> --session-tools ...` again. If the
    config, batteries, Authorities, audience sources, or named audiences
    changed since the proposal, revise the proposal and ask for approval again.
+   Re-read the root config and compare the complete
+   `claude-code.bash-requirements` declaration, including its `hint`, with the
+   version used for the proposal. If it changed, preserve the new declaration,
+   revise the proposal, and ask for approval again.
 2. Include each approved battery with the command `appa describe` printed:
    `appa battery install <name> --config <live-path>`, with
    `--server <connection-id>` when it names one. The command adds the
@@ -241,7 +285,10 @@ After approval:
 5. Add the approved rules for the remaining tools to the root config. Do not
    remove overlapping root rules; they intentionally override batteries. To
    treat a battery's tool differently, add a root rule for it; never edit the
-   battery.
+   battery. Immediately before changing the Bash hint, re-read the root and
+   replace only the exact complete `claude-code.bash-requirements` declaration
+   used in the approved proposal. If it no longer matches, stop, preserve the
+   current declaration, and revise the proposal instead of overwriting it.
 6. Reload and report the result as described below. When the battery's
    README names a replay trace, offer
    `appa replay --config <live-path> <trace>` as the check that the
