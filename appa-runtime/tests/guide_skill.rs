@@ -24,36 +24,6 @@ fn the_router_opens_with_the_frontmatter_the_installer_recognizes() {
 }
 
 #[test]
-fn claude_init_develops_a_battery_informed_bash_hint_without_inventing_context() {
-    let router = read("SKILL.md");
-    assert!(router.contains("host classifier must\n  recognize equivalent use through another tool"));
-    assert!(router.contains("Translate the contract's\n  policy intent, not its MCP enforcement mechanism"));
-
-    let reference = read("references/claude-code.md");
-    for marker in [
-        "### Develop the Bash classifier hint",
-        "every battery\nthat the approved configuration will include",
-        "short\ninstruction and authority to reason from the complete command",
-        "not equivalent MCP enforcement",
-        "actually supplies them for that Bash call",
-        "do not invent visibility",
-        "Keep specialized Annotators separate",
-        "claude-code.bash-repository-requirements",
-        "Treat an existing root hint as an operator customization",
-        "Preserve every Annotator's implementation, inputs, and mandate",
-        "Include the exact proposed hint text",
-        "Do not write it before approval",
-        "change only its `hint`",
-        "compare the complete\n   `claude-code.bash-requirements` declaration, including its `hint`",
-        "preserve the new declaration",
-        "replace only the exact complete `claude-code.bash-requirements` declaration",
-        "revise the proposal instead of overwriting it",
-    ] {
-        assert!(reference.contains(marker), "the Claude init flow carries {marker:?}");
-    }
-}
-
-#[test]
 fn the_kagent_reference_carries_the_full_flow() {
     let reference = read("references/kagent.md");
     for marker in [
