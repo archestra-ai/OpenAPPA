@@ -129,9 +129,9 @@ pub(crate) fn batteries(
 }
 
 /// The batteries of `available` whose `detect` names a program found in a
-/// directory of `search`, a `PATH` value. Only Claude Code runs on this
-/// machine; kagent's and an embedding host's agents run elsewhere, so what
-/// this machine has installed says nothing about them.
+/// directory of `search`, a `PATH` value. Only Claude Code uses local program
+/// discovery. kagent and embedding hosts keep their own inventories; amppa
+/// does not participate in automatic battery discovery.
 pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search: &OsStr) -> Vec<PackageName> {
     match host {
         Host::ClaudeCode => {
@@ -151,7 +151,7 @@ pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search:
                 .map(|(name, _)| name.clone())
                 .collect()
         }
-        Host::Kagent | Host::Embedded => Vec::new(),
+        Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
     }
 }
 
