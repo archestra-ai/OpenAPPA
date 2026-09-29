@@ -30,9 +30,10 @@ use tokio::time::Instant;
 
 use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
-use crate::consult::{Consult, ConsultBody};
+use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
+use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_policy::AnnotatorBuiltin;
 use questions::Questions;
 
@@ -153,16 +154,6 @@ impl JevBackend {
         started: Instant,
         exchange: &mut Exchange,
     ) -> Result<serde_json::Value, (JevFailure, NoAnswerReason)> {
-        let consult_bytes =
-            serde_json::to_vec(consult).map_err(|_| (JevFailure::UnsupportedConsult, NoAnswerReason::Malformed))?;
-        if consult_bytes.len() > MAX_CONSULT_BYTES {
-            tracing::debug!(
-                bytes = consult_bytes.len(),
-                limit = MAX_CONSULT_BYTES,
-                "the jev consult is too large to send"
-            );
-            return Err((JevFailure::ConsultTooLarge, NoAnswerReason::Oversized));
-        }
         let unsupported = (JevFailure::UnsupportedConsult, NoAnswerReason::Unregistered);
         let ConsultBody::Annotation { declaration, artifact } = &consult.body else {
             return Err(unsupported);
@@ -170,8 +161,37 @@ impl JevBackend {
         if !declaration.inputs.is_empty() {
             return Err(unsupported);
         }
+        // Context that would carry the consult over the cap is dropped, each provider
+        // recorded as having told Jev nothing, before the call itself is given up on.
+        let trimmed;
+        let artifact = if consult_size(consult)? <= MAX_CONSULT_BYTES {
+            artifact
+        } else {
+            trimmed = without_context_answers(artifact);
+            let size = consult_size(&Consult {
+                name: consult.name.clone(),
+                body: ConsultBody::Annotation {
+                    declaration: declaration.clone(),
+                    artifact: trimmed.clone(),
+                },
+            })?;
+            if size > MAX_CONSULT_BYTES {
+                tracing::debug!(
+                    bytes = size,
+                    limit = MAX_CONSULT_BYTES,
+                    "the jev consult is too large to send"
+                );
+                return Err((JevFailure::ConsultTooLarge, NoAnswerReason::Oversized));
+            }
+            &trimmed
+        };
         let args = crate::secrets::redact_args(&artifact.args);
-        let state = State::of(&args).ok_or(unsupported)?;
+        let context = (!artifact.context.is_empty()).then(|| {
+            crate::secrets::redact_args(
+                &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
+            )
+        });
+        let state = State::of(&args, context.as_ref()).ok_or(unsupported)?;
         let key = self
             .key
             .as_ref()
@@ -457,24 +477,54 @@ struct JevRequest<'a> {
     questions: Questions,
 }
 
-/// The call as Jev reads it: its name, its redacted arguments, and its description when
-/// the policy declares one.
+/// The call as Jev reads it: its name, its redacted arguments, its description when the
+/// policy declares one, and what the deployment's context providers answered about it.
 #[derive(Serialize)]
 struct State<'a> {
     tool: &'a str,
     arguments: &'a serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'a serde_json::Value>,
 }
 
 impl<'a> State<'a> {
     /// The complete call an annotation consult carries, or nothing for any other artifact.
-    fn of(args: &'a serde_json::Value) -> Option<State<'a>> {
+    fn of(args: &'a serde_json::Value, context: Option<&'a serde_json::Value>) -> Option<State<'a>> {
         Some(State {
             tool: args.get("name")?.as_str()?,
             arguments: args.get("arguments").filter(|arguments| arguments.is_object())?,
             description: args.get("description").and_then(serde_json::Value::as_str),
+            context,
         })
+    }
+}
+
+fn consult_size(consult: &Consult) -> Result<usize, (JevFailure, NoAnswerReason)> {
+    serde_json::to_vec(consult)
+        .map(|bytes| bytes.len())
+        .map_err(|_| (JevFailure::UnsupportedConsult, NoAnswerReason::Malformed))
+}
+
+/// The artifact with every provider's answer replaced by the reason Jev does not see it.
+fn without_context_answers(artifact: &AnnotationArtifact) -> AnnotationArtifact {
+    let entries = artifact
+        .context
+        .entries()
+        .keys()
+        .map(|provider| {
+            (
+                provider.clone(),
+                ContextEntry::Error(format!(
+                    "the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap"
+                )),
+            )
+        })
+        .collect();
+    AnnotationArtifact {
+        args: artifact.args.clone(),
+        context: AnnotationContext::new(entries),
     }
 }
 
@@ -756,7 +806,6 @@ mod tests {
         AnnotationDeclaration {
             hint: None,
             inputs: vec![],
-            established: vec![],
             trust_ranks: ranks.iter().map(ToString::to_string).collect(),
             audiences: AudienceVocabulary::parse_entries(
                 &audiences.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -772,7 +821,10 @@ mod tests {
             name: "jev.tool-call".to_string(),
             body: ConsultBody::Annotation {
                 declaration: declaration(&["suspicious", "trusted"], &["self", "internal"]),
-                artifact: AnnotationArtifact { args },
+                artifact: AnnotationArtifact {
+                    args,
+                    context: Default::default(),
+                },
             },
         }
     }
@@ -1285,6 +1337,62 @@ mod tests {
         assert_eq!(stub.requests().len(), 1);
     }
 
+    fn with_context(consult: Consult, answer: serde_json::Value) -> Consult {
+        let ConsultBody::Annotation { declaration, artifact } = consult.body else {
+            unreachable!("the fixture is an annotation consult")
+        };
+        let context = AnnotationContext::new(
+            [
+                (
+                    appa_engine::names::ContextProviderName::new("github"),
+                    ContextEntry::Answer(answer),
+                ),
+                (
+                    appa_engine::names::ContextProviderName::new("databricks"),
+                    ContextEntry::Error("timeout".to_string()),
+                ),
+            ]
+            .into(),
+        );
+        Consult {
+            name: consult.name,
+            body: ConsultBody::Annotation {
+                declaration,
+                artifact: AnnotationArtifact { context, ..artifact },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn the_context_reaches_jev_redacted_beside_the_call() {
+        let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
+        let consult = with_context(call(), json!({"viewer": "octocat", "note": SECRET}));
+        let (answered, _) = backend(&url, Duration::from_secs(2), FAST).consult(&consult).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        let [(_, request)] = stub.requests().try_into().expect("one request");
+        assert_eq!(
+            request["state"]["context"],
+            json!({
+                "databricks": {"error": "timeout"},
+                "github": {"answer": {"viewer": "octocat", "note": "[redacted-secret]"}},
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn context_past_the_input_bound_is_dropped_before_the_call_is() {
+        let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
+        let consult = with_context(call(), json!({"blob": "x".repeat(MAX_CONSULT_BYTES)}));
+        let (answered, _) = backend(&url, Duration::from_secs(2), FAST).consult(&consult).await;
+        assert_eq!(answered, Ok(jev_annotation()), "the call is still judged");
+        let [(_, request)] = stub.requests().try_into().expect("one request");
+        let dropped = format!("the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap");
+        assert_eq!(
+            request["state"]["context"],
+            json!({"databricks": {"error": dropped}, "github": {"error": dropped}})
+        );
+    }
+
     #[tokio::test]
     async fn an_invalid_body_is_not_retried() {
         for body in ["not json", r#"{"answers": {}}"#, r#"{"labels": {}}"#] {
@@ -1595,7 +1703,11 @@ mod tests {
             .await;
             let example = &crate::label_guide::EXAMPLES[round % crate::label_guide::EXAMPLES.len()];
             let shown: serde_json::Value = serde_json::from_str(example.call).expect("an example call is JSON");
-            let consult = consult_of(json!({"name": shown["tool"], "arguments": shown["arguments"]}));
+            let mut consult = consult_of(json!({"name": shown["tool"], "arguments": shown["arguments"]}));
+            if let ConsultBody::Annotation { artifact, .. } = &mut consult.body {
+                artifact.context = serde_json::from_value(shown.get("context").cloned().unwrap_or(json!({})))
+                    .expect("an example's context is an annotation context");
+            }
             let started = std::time::Instant::now();
             let (answered, record) = jev.consult(&consult).await;
             elapsed.push(started.elapsed());

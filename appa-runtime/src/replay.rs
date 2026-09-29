@@ -7,7 +7,7 @@
 //! empty output, which is the moment the contract's `delta` lands on the trajectory label, so
 //! the next step sees the narrowed trajectory.
 //!
-//! A step expects one of four things. `allow`: the call runs, or the only thing in the way is
+//! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
 //! the plain narrowing acceptance, which the runner takes as the model would. `authority`: the
 //! call is blocked and the offer names an authority; the runner takes it, and the runtime's
 //! stand-in approves. `sanitizer`: the call is blocked and the offer names a sanitizer; the
@@ -40,6 +40,7 @@ use crate::hooks;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expect {
     Allow,
+    Withhold,
     Deny,
     Authority(Option<String>),
     Sanitizer(Option<String>),
@@ -49,6 +50,7 @@ impl fmt::Display for Expect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expect::Allow => f.write_str("allow"),
+            Expect::Withhold => f.write_str("withhold"),
             Expect::Deny => f.write_str("deny"),
             Expect::Authority(None) => f.write_str("authority"),
             Expect::Authority(Some(name)) => write!(f, "authority {name}"),
@@ -63,6 +65,7 @@ impl Expect {
     fn takes(&self, kind: &OfferKind) -> bool {
         match (self, kind) {
             (Expect::Allow, OfferKind::Accept) => true,
+            (Expect::Withhold, OfferKind::Withhold) => true,
             (Expect::Authority(None), OfferKind::Authority { .. }) => true,
             (Expect::Authority(Some(name)), OfferKind::Authority { names }) => names.contains(name),
             (Expect::Sanitizer(None), OfferKind::Sanitizer { .. }) => true,
@@ -105,7 +108,7 @@ pub struct SyntaxError {
 }
 
 /// Parse one trace file. The grammar is strict and line-oriented: a step is a canonical tool id
-/// and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`, `expect deny`,
+/// and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`, `expect withhold`, `expect deny`,
 /// `expect authority [name]`, or `expect sanitizer [name]`. Blank lines and lines whose first
 /// character is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
@@ -140,7 +143,8 @@ enum State {
     },
 }
 
-const EXPECT_WORDS: &str = "`expect allow`, `expect deny`, `expect authority [name]`, or `expect sanitizer [name]`";
+const EXPECT_WORDS: &str =
+    "`expect allow`, `expect withhold`, `expect deny`, `expect authority [name]`, or `expect sanitizer [name]`";
 
 impl Parser<'_> {
     fn error(&self, line: usize, detail: impl Into<String>) -> SyntaxError {
@@ -248,6 +252,7 @@ impl Parser<'_> {
     ) -> Result<(), SyntaxError> {
         let expect = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["expect", "allow"] => Expect::Allow,
+            ["expect", "withhold"] => Expect::Withhold,
             ["expect", "deny"] => Expect::Deny,
             ["expect", "authority"] => Expect::Authority(None),
             ["expect", "authority", name] if is_identifier(name) => Expect::Authority(Some(name.to_string())),
@@ -322,6 +327,7 @@ impl fmt::Display for Got {
                     .iter()
                     .map(|kind| match kind {
                         OfferKind::Accept => "allow".to_string(),
+                        OfferKind::Withhold => "withhold".to_string(),
                         OfferKind::Authority { names } => format!("authority {}", names.join("+")),
                         OfferKind::Sanitizer { name } => format!("sanitizer {name}"),
                     })
@@ -589,6 +595,7 @@ fn taken_note(taken: Option<&OfferKind>) -> String {
     match taken {
         None => String::new(),
         Some(OfferKind::Accept) => " (after accepting the narrowing)".to_string(),
+        Some(OfferKind::Withhold) => " (after withholding the result)".to_string(),
         Some(OfferKind::Authority { names }) => format!(" (after {} approved)", names.join(" and ")),
         Some(OfferKind::Sanitizer { name }) => format!(" (after {name} rewrote it)"),
     }
@@ -796,6 +803,14 @@ mod tests {
         );
         assert_eq!(trace.steps[3].expect, Expect::Deny);
         assert_eq!(trace.steps[4].expect, Expect::Authority(Some("hitl".into())));
+    }
+
+    #[test]
+    fn a_trace_can_select_the_withhold_remedy() {
+        let trace = parsed("mcp/mail/send {}\nexpect withhold\n").expect("the trace parses");
+        assert_eq!(trace.steps[0].expect, Expect::Withhold);
+        assert!(Expect::Withhold.takes(&OfferKind::Withhold));
+        assert!(!Expect::Allow.takes(&OfferKind::Withhold));
     }
 
     #[test]

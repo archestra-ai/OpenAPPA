@@ -323,7 +323,8 @@ file that gives its sessions APPA's statusline, and starts the runtime through t
 start, the one every protected session performs at SessionStart. A first
 install writes the starting policy; a later one keeps the file it finds. A
 successful command therefore proves that one runtime from the installed
-version is active.
+version is active. When an earlier APPA Claude plugin is still enabled, the
+install disables it before adding the native hooks so each event is checked once.
 
 An install owns only what names its deployed binary. Other hook entries, an
 MCP server or a skill of your own are left alone; an `appa` MCP server or an
@@ -380,7 +381,11 @@ Only sessions started with `APPA_GATE=1` are protected. The binary reads
 the variable from the Claude Code process environment, fixed at launch,
 so a session cannot turn the protection off mid-session. A plain
 `claude` session stays unprotected, and the binary prints nothing
-into it. The entries live in the user's settings: a project whose settings
+into it. Protection belongs to the process, not the saved conversation:
+resume a protected conversation with `clappa --resume`, not `claude --resume`.
+Exit and restart a conversation already resumed through plain `claude`; it
+cannot become protected in place.
+The entries live in the user's settings: a project whose settings
 set `disableAllHooks` turns them off for its sessions, and `clappa` cannot
 protect a session there.
 

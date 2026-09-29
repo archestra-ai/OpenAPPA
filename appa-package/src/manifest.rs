@@ -30,6 +30,10 @@ pub enum ManifestError {
     RepeatedNamespace { path: PathBuf, namespace: String },
     #[error("{path} requires the battery `{battery}` twice")]
     RepeatedBattery { path: PathBuf, battery: String },
+    #[error("{path}: `battery.detect`: `{name}` is not a program name: no path separator, whitespace, or blank")]
+    Detect { path: PathBuf, name: String },
+    #[error("{path}: `battery.detect` names `{name}` twice")]
+    RepeatedDetect { path: PathBuf, name: String },
     #[error("{path}: `battery.setup` must be one non-empty line")]
     Setup { path: PathBuf },
     #[error("{path} is not valid TOML: {source}")]

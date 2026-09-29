@@ -39,8 +39,8 @@
 
 use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims, Unroutable};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
-    ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
+    AnnotationContext, AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements,
+    PinnedAnnotation, ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, Consult,
-    HistoryEntry, InputArtifact, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
+    HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
@@ -148,11 +148,11 @@ pub enum ExternalRequest {
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
         /// The consult artifact: the complete call, or one value per declared input that
-        /// reads the call. An input a program answers is added by its consult below.
+        /// reads the call.
         args: serde_json::Value,
-        /// The consults owed before the annotator is asked, one per `$input.<name>` input;
-        /// each answer joins `args` under its input's name.
-        inputs: Vec<InputRequest>,
+        /// What every bound context provider is asked before the Annotator; their answers
+        /// join the Annotator's artifact as its `context`.
+        context: ContextArtifact,
     },
     /// One audience source read: the members of one selector's collection at the
     /// registered source of `provider`.
@@ -172,13 +172,6 @@ pub enum ExternalRequest {
         answering: String,
         templates: Vec<String>,
     },
-}
-
-/// One annotator input a program of the deployment answers about the proposed call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InputRequest {
-    pub input: String,
-    pub consult: Consult,
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -206,6 +199,8 @@ pub enum ExternalEvidence {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         answer: AnnotationAnswer,
+        /// What the context providers answered before the Annotator judged the call.
+        context: AnnotationContext,
     },
     AudienceSource {
         provider: String,
@@ -660,6 +655,7 @@ pub enum AuditEvent {
     SanitizerBound {
         sanitizer: String,
     },
+    OutputWithheld,
     Sanitized {
         sanitizer: String,
     },
@@ -921,6 +917,7 @@ impl RuntimeEngine {
         let engine_offer = parse_offer(offer)?;
         match self.engine.offer_consults(view, trajectory, &engine_offer).ok()? {
             OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Withhold => Some(crate::api::OfferKind::Withhold),
             OfferConsult::Accept {
                 sanitizer: Some(sanitizer),
             } => Some(crate::api::OfferKind::Sanitizer {
@@ -1186,6 +1183,7 @@ impl RuntimeEngine {
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
+            Fact::OutputWithheld { .. } => AuditEvent::OutputWithheld,
             Fact::CandidateDerived { sanitizer, .. } => AuditEvent::Sanitized {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
@@ -1589,8 +1587,8 @@ impl RuntimeEngine {
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
-            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }) => {
-                Next::PresentToModel(outcome_presentation(outcome, admitted))
+            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }) => {
+                Next::PresentToModel(outcome_presentation(outcome, admitted, withheld))
             }
             FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
@@ -1651,7 +1649,7 @@ impl RuntimeEngine {
                 ));
             }
             OfferConsult::Replay(outcome) => outcome,
-            OfferConsult::Accept { .. } => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Accept { .. } | OfferConsult::Withhold => OfferOutcome::Approved(Vec::new()),
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
@@ -2189,10 +2187,11 @@ impl RuntimeEngine {
                 annotator: answered_by,
                 call,
                 answer,
-            } if answered_by == annotator.as_str() && *call == digest => Some(answer),
+                context,
+            } if answered_by == annotator.as_str() && *call == digest => Some((answer, context)),
             _ => None,
         });
-        let Some(answer) = answer else {
+        let Some((answer, context)) = answer else {
             return Err(Resolution(vec![self.annotation_request(
                 annotator,
                 declaration,
@@ -2200,15 +2199,14 @@ impl RuntimeEngine {
                 cwd,
             )]));
         };
-        Ok(PinnedAnnotation::new(
-            annotator.clone(),
-            digest,
-            self.produced_annotation(answer),
-        ))
+        Ok(
+            PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
+                .with_context(context.clone()),
+        )
     }
 
     /// `cwd` is the directory the harness proposed the call from, when it reports one; only
-    /// the input programs see it, never the annotator.
+    /// the context providers see it, never the annotator.
     fn annotation_request(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
@@ -2220,30 +2218,16 @@ impl RuntimeEngine {
             .annotators
             .get(annotator.as_str())
             .expect("the deployment registers every annotator the policy declares");
-        let inputs = binding
-            .inputs
-            .iter()
-            .filter_map(|(input, source)| match source {
-                appa_policy::InputSource::External(program) => Some(InputRequest {
-                    input: input.clone(),
-                    consult: Consult::input(
-                        program,
-                        InputArtifact {
-                            tool: resolved.tool().as_str().to_string(),
-                            arguments: resolved.arguments().clone(),
-                            cwd: cwd.map(str::to_string),
-                        },
-                    ),
-                }),
-                appa_policy::InputSource::Call(_) => None,
-            })
-            .collect();
         ExternalRequest::Annotation {
             annotator: annotator.as_str().to_string(),
             call: resolved.digest(),
             declaration: self.annotation_declaration(annotator, binding, resolved),
             args: annotation_args(&binding.inputs, declaration, resolved),
-            inputs,
+            context: ContextArtifact {
+                tool: resolved.tool().as_str().to_string(),
+                arguments: resolved.arguments().clone(),
+                cwd: cwd.map(str::to_string),
+            },
         }
     }
 
@@ -2286,12 +2270,6 @@ impl RuntimeEngine {
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
             inputs: binding.inputs.keys().cloned().collect(),
-            established: binding
-                .inputs
-                .iter()
-                .filter(|(_, source)| matches!(source, appa_policy::InputSource::External(_)))
-                .map(|(input, _)| input.clone())
-                .collect(),
             trust_ranks: mandate
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
@@ -2738,10 +2716,9 @@ struct CallAnswers {
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
 /// name, the declaration's description when the policy wrote one, and the canonical
-/// arguments — or one value per declared input that reads the call. An input a program
-/// answers is left out here and joins once its consult has answered.
+/// arguments — or one value per declared input that reads the call.
 fn annotation_args(
-    inputs: &BTreeMap<String, appa_policy::InputSource>,
+    inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
     declaration: &ToolDeclaration,
     resolved: &ResolvedCall,
 ) -> serde_json::Value {
@@ -2759,9 +2736,6 @@ fn annotation_args(
     }
     let mut args = serde_json::Map::new();
     for (input, source) in inputs {
-        let appa_policy::InputSource::Call(source) = source else {
-            continue;
-        };
         let value = match source {
             appa_policy::ToolCallSource::Call => complete(),
             appa_policy::ToolCallSource::Name => serde_json::json!(resolved.tool().as_str()),
@@ -3049,7 +3023,12 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
 /// What the model reads in place of the raw result. An admitted value and the runtime's
 /// own words are separate presentations here, because a harness delivers the first as it
 /// crossed and spells its own tool names into the second.
-fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> Presentation {
+fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>, withheld: bool) -> Presentation {
+    if withheld {
+        return Presentation::ReplaceOutput {
+            placeholder: "[appa] the result is withheld".to_string(),
+        };
+    }
     match (outcome, admitted) {
         (
             ToolOutcome::Success {
@@ -3565,6 +3544,13 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
         }
         action
     } else {
+        if plan.withholds_output() {
+            return if needs_approval {
+                "Submit for approval, run the tool, and withhold its result".to_string()
+            } else {
+                "Run the tool and withhold its result".to_string()
+            };
+        }
         match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
             (true, _, Some(sanitizer)) => {
                 format!(
@@ -3889,12 +3875,13 @@ mod tests {
     use super::TrustChain;
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
-        ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire,
-        block_feedback, remedy_instruction, remedy_lines, terminal_safe,
+        Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
+        audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::api::{EmbeddedPresentationOptions, ToolNaming};
+    use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
+    use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
@@ -4066,6 +4053,7 @@ mod tests {
                 annotator: "classifier".to_string(),
                 call: asked,
                 answer,
+                context: AnnotationContext::default(),
             }],
         );
         let recorded = decided.append.expect("the answered proposal is decided and recorded");
@@ -4108,6 +4096,7 @@ mod tests {
                 attention: Vec::new(),
                 emits: Vec::new(),
             },
+            context: AnnotationContext::default(),
         };
         let pinned = engine
             .annotation_for(&views, declaration, &resolved, None, &[contradicting])
@@ -4197,6 +4186,7 @@ mod tests {
                     annotator: "classifier".to_string(),
                     call: asked,
                     answer: answer(),
+                    context: AnnotationContext::default(),
                 }],
             )
             .expect("a complete answer pins");
@@ -4249,6 +4239,7 @@ mod tests {
                     annotator: "classifier".to_string(),
                     call: asked,
                     answer: answer(),
+                    context: AnnotationContext::default(),
                 }],
             ),
             Err(Resolution(_))
@@ -4665,6 +4656,22 @@ mod tests {
             terminal_safe("tru\u{206A}sted"),
             "tru\u{FFFD}sted",
             "the full Cf range replaces"
+        );
+    }
+
+    #[test]
+    fn withholding_replaces_failure_output_too() {
+        assert_eq!(
+            outcome_presentation(
+                &ToolOutcome::Failure {
+                    message: "sensitive failure detail".to_string(),
+                },
+                None,
+                true,
+            ),
+            Presentation::ReplaceOutput {
+                placeholder: "[appa] the result is withheld".to_string(),
+            },
         );
     }
 }

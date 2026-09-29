@@ -209,7 +209,8 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
                 "name": "fetch",
                 "description": "Fetches one URL and returns its body.",
                 "arguments": { "url": "https://a.example" },
-            }
+            },
+            "context": {},
         })
     );
     // The declaration restates the resolved mandate: the closed vocabulary a produced
@@ -219,7 +220,6 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
         serde_json::json!({
             "hint": "Use insider for data restricted to company readers.",
             "inputs": [],
-            "established": [],
             "trust_ranks": ["suspicious", "trusted"],
             "audiences": ["insider"],
             "attention_marks": [],
@@ -424,120 +424,118 @@ audiences = ["insider"]"#,
     );
 }
 
-/// The http policy with one input a program answers, bound to the same fake service under
-/// the name `repo`.
-fn input_policy(url: &str) -> String {
-    http_policy(url).replace(
-        r#"name = "classifier"
-audiences = ["insider"]"#,
-        r#"name = "classifier"
-inputs = { call = "$tool_call", repository = "$input.repo" }
-audiences = ["insider"]"#,
-    ) + &format!(
-        r#"
-[externals.inputs.repo]
+/// The http policy with three context providers bound to the same fake service: `repo`,
+/// `quiet`, and `down`.
+fn context_policy(url: &str) -> String {
+    http_policy(url)
+        + &format!(
+            r#"
+[externals.context.repo]
+url = "{url}"
+
+[externals.context.quiet]
+url = "{url}"
+
+[externals.context.down]
 url = "{url}"
 "#
-    )
+        )
 }
 
-#[tokio::test]
-async fn a_program_answered_input_reaches_the_annotator_as_established() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, service) = serve_annotator().await;
+fn context_service(service: &Annotator) {
     service.set("classifier", Answer::Wire(produced("trusted")));
     service.set(
         "repo",
         Answer::Wire(serde_json::json!({ "version": 1, "answer": { "visibility": "private" } })),
     );
-    let runtime = open_runtime(&dir, &input_policy(&url)).await;
+    service.set(
+        "quiet",
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": null })),
+    );
+    service.set("down", Answer::Down);
+}
+
+#[tokio::test]
+async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_error() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, service) = serve_annotator().await;
+    context_service(&service);
+    let store =
+        Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, context_policy(&url)).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open_with_store(config, store.clone(), None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
 
     let mut call = fetch("https://a.example");
     call.cwd = Some("/work/checkout".to_string());
-    assert_eq!(propose(&runtime, call).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, call).await,
+        HookDecision::AllowCall { spawn: None },
+        "a provider that gives no answer does not refuse the call"
+    );
 
     let requests = service.requests();
+    let (asked, annotations): (Vec<_>, Vec<_>) = requests.iter().partition(|request| request["kind"] == "context");
+    let mut providers: Vec<&str> = asked.iter().map(|request| request["name"].as_str().unwrap()).collect();
+    providers.sort_unstable();
+    assert_eq!(providers, ["down", "quiet", "repo"], "every bound provider is asked");
+    for request in &asked {
+        assert_eq!(request["declaration"], serde_json::json!({}));
+        assert_eq!(
+            request["artifact"],
+            serde_json::json!({
+                "tool": "fetch",
+                "arguments": { "url": "https://a.example" },
+                "cwd": "/work/checkout",
+            })
+        );
+    }
+    assert_eq!(annotations.len(), 1, "the annotator is asked once, after the providers");
+    let context = serde_json::json!({
+        "down": { "error": "non_success status=500" },
+        "repo": { "answer": { "visibility": "private" } },
+    });
     assert_eq!(
-        requests.len(),
-        2,
-        "the program answers first, then the annotator is asked"
-    );
-    // The program sees the proposed call and where the harness would run it; the policy
-    // gives it no instruction.
-    assert_eq!(requests[0]["kind"], "input");
-    assert_eq!(requests[0]["name"], "repo");
-    assert_eq!(requests[0]["declaration"], serde_json::json!({}));
-    assert_eq!(
-        requests[0]["artifact"],
+        annotations[0]["artifact"],
         serde_json::json!({
-            "tool": "fetch",
-            "arguments": { "url": "https://a.example" },
-            "cwd": "/work/checkout",
-        })
-    );
-    // The annotator sees the answer under the input's name, marked as established, and
-    // never sees the directory.
-    assert_eq!(requests[1]["kind"], "annotation");
-    assert_eq!(
-        requests[1]["declaration"]["inputs"],
-        serde_json::json!(["call", "repository"])
-    );
-    assert_eq!(
-        requests[1]["declaration"]["established"],
-        serde_json::json!(["repository"])
-    );
-    assert_eq!(
-        requests[1]["artifact"]["args"],
-        serde_json::json!({
-            "call": {
+            "args": {
                 "name": "fetch",
                 "description": "Fetches one URL and returns its body.",
                 "arguments": { "url": "https://a.example" },
             },
-            "repository": { "visibility": "private" },
-        })
+            "context": context,
+        }),
+        "a provider that answers null is left out, and the annotator never sees the directory"
     );
-}
 
-#[tokio::test]
-async fn an_input_program_that_does_not_answer_refuses_the_call_before_the_annotator() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, service) = serve_annotator().await;
-    service.set("classifier", Answer::Wire(produced("trusted")));
-    service.set("repo", Answer::Down);
-    let runtime = open_runtime(&dir, &input_policy(&url)).await;
-    let baseline = audit_len(&runtime);
-
-    let decision = propose(&runtime, fetch("https://a.example")).await;
-    let HookDecision::Refuse { detail } = decision else {
-        panic!("an unanswered input is an operational refusal, got {decision:?}");
-    };
-    assert!(
-        detail.contains("classifier"),
-        "the refusal names the annotator: {detail}"
-    );
-    assert_eq!(audit_len(&runtime), baseline, "nothing is appended");
-    assert!(
-        service.requests().iter().all(|request| request["kind"] == "input"),
-        "the annotator is never asked without its input"
-    );
-}
-
-#[tokio::test]
-async fn an_input_no_program_binds_refuses_the_deployment() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, _service) = serve_annotator().await;
-    let config = input_policy(&url).replace("[externals.inputs.repo]", "[externals.inputs.other]");
-    let path = dir.path().join("appa.toml");
-    std::fs::write(&path, config).expect("the fixture writes");
-    let config = Config::load(&path).expect("the file itself is well formed");
-    let refused = match Runtime::open(config, dir.path().join("appa.db"), None) {
-        Ok(_) => panic!("a deployment whose annotator reads an unbound input opened"),
-        Err(refused) => refused.to_string(),
-    };
-    assert!(
-        refused.contains("repo"),
-        "the refusal names the unbound program: {refused}"
+    let log = store
+        .log(&appa_eventlog::TrajectoryId::new(root().0))
+        .expect("the trajectory's log reads");
+    let recorded = serde_json::to_value(log.facts()).expect("facts serialize");
+    let pins: Vec<&serde_json::Value> = recorded
+        .as_array()
+        .expect("facts are an array")
+        .iter()
+        .filter_map(|fact| fact.get("ProposalBatchDecided"))
+        .flat_map(|decided| decided["proposals"].as_array().expect("proposals are an array"))
+        .map(|proposal| &proposal["annotation"])
+        .collect();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(
+        pins[0]["context"], context,
+        "the decision records the context it was made with"
     );
 }
 
@@ -1077,6 +1075,55 @@ async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never
         annotator.requests().len(),
         1,
         "the exact declaration decides without a consult"
+    );
+}
+
+/// Shell aliases with only argument-specific contracts still consult the wildcard for
+/// ordinary reads. The selected annotation survives result recording and later replay.
+#[tokio::test]
+async fn an_unmatched_shell_selector_uses_the_wildcard_and_replays_its_annotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("gatekeeper", Answer::Wire(produced("trusted")));
+    let config = wildcard_policy(&url).replace(
+        "[[policy.tool]]\nname = \"read\"\ndelta = {}",
+        r#"[[policy.tool]]
+name = "builtin:shell(command:git push*)"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "read"
+delta = {}"#,
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    let shell = call("builtin:shell", serde_json::json!({"command":"ls"}));
+    assert_eq!(
+        propose(&runtime, shell.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator.requests().len(), 1);
+    assert_eq!(annotator.requests()[0]["artifact"]["args"]["name"], "builtin:shell");
+    ran(&runtime, shell).await;
+
+    // Recording and replay must use the pinned wildcard annotation, without a fresh consult.
+    annotator.set("gatekeeper", Answer::Down);
+    let read = call("read", serde_json::json!({"path":"a.txt"}));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read).await;
+    let protected = propose(
+        &runtime,
+        call("builtin:shell", serde_json::json!({"command":"git push"})),
+    )
+    .await;
+    assert!(matches!(protected, HookDecision::DenyCall { .. }));
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the matched rule and replay require no consult"
     );
 }
 

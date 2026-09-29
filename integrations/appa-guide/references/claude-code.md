@@ -201,8 +201,6 @@ are included. Then group the proposal by server. Show:
 - every configured MCP server whose tools could not be inspected: "<server>
   is configured, but I could not inspect its tools in this session."
 
-Add one short `OpenAPPA pieces: <primitives>` line.
-
 At the end of the proposal, add **Needed for this to work** when any required
 support is missing. Group every missing requirement there and propose the
 concrete fix. For example: "Slack needs your approval before publishing, but
@@ -267,9 +265,8 @@ not guess.
    If it is unavailable or does not answer the question, stop and report an
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
-4. Explain what happens now, what you propose, and the practical effect. Add
-   one short `OpenAPPA pieces: <primitives>` line. Ask only for a decision that
-   changes the result.
+4. Explain what happens now, what you propose, and the practical effect.
+   Ask only for a decision that changes the result.
 5. If a battery would help, propose it with the same one-sentence rule used in
    the checkup. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
@@ -362,6 +359,10 @@ The runtime checks the whole config
 before installing it. If reload is refused, the previous config keeps serving.
 Explain the error plainly and fix it. Ask for approval again if the fix changes
 the behavior the user approved.
+
+Briefly say what succeeded, what failed, and whether the file was restored.
+If the fix changes who may receive information, say how before asking for
+approval. Describe only behavior supported by the README or observed results.
 
 After a successful reload, add:
 

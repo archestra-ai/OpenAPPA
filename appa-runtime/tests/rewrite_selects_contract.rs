@@ -238,12 +238,9 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
     );
 }
 
-/// The policy with one input the `/resolve` stub answers as a program, beside the call.
-fn policy_with_input(base: &str) -> String {
-    policy(base).replace(
-        "name = \"classify\"\n",
-        "name = \"classify\"\ninputs = { call = \"$tool_call\", origin = \"$input.origin\" }\n",
-    ) + &format!("\n[externals.inputs.origin]\nurl = \"{base}/resolve\"\n")
+/// The policy with one context provider the `/resolve` stub answers.
+fn policy_with_context(base: &str) -> String {
+    policy(base) + &format!("\n[externals.context.origin]\nurl = \"{base}/resolve\"\n")
 }
 
 /// The harness reports the directory on the proposal; the remedy's rewritten call is
@@ -251,7 +248,8 @@ fn policy_with_input(base: &str) -> String {
 #[tokio::test]
 async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, stubs) = narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_input).await;
+    let (runtime, stubs) =
+        narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_context).await;
 
     let mut proposal = read_file("private/q3.md");
     proposal.cwd = Some("/work/checkout".to_string());
@@ -264,9 +262,9 @@ async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
     assert_eq!(
         consults.len(),
         2,
-        "the input program answers, then the annotator is asked"
+        "the context provider answers, then the annotator is asked"
     );
-    assert_eq!(consults[0]["kind"], "input");
+    assert_eq!(consults[0]["kind"], "context");
     assert_eq!(
         consults[0]["artifact"],
         serde_json::json!({
@@ -276,9 +274,8 @@ async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
         })
     );
     assert_eq!(consults[1]["kind"], "annotation");
-    assert_eq!(consults[1]["declaration"]["established"], serde_json::json!(["origin"]));
     assert_eq!(
-        consults[1]["artifact"]["args"]["origin"]["delta"],
+        consults[1]["artifact"]["context"]["origin"]["answer"]["delta"],
         serde_json::json!({})
     );
 }

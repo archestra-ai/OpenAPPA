@@ -10,10 +10,12 @@ use crate::consult::{
 };
 use crate::engine::{
     Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
-    ForkStatus, InputRequest, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
+    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
 };
 use crate::external::ConsultOutcome;
+use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_engine::label::ReaderId;
+use appa_engine::names::ContextProviderName;
 
 use super::{
     ChildReturnDecision, ConsultContext, ConsultRecord, Deployment, EmbeddedPresentationOptions, EventError, ExactCall,
@@ -1576,39 +1578,29 @@ impl Session {
                 call,
                 declaration,
                 args,
-                inputs,
+                context,
             } => {
-                // Every input program answers first, together; one that does not refuses
-                // the annotation exactly as the annotator's own silence would.
-                let joined = join_input_answers(args.clone(), inputs, |consult| {
+                // Every context provider answers first, together; one that does not leaves
+                // an error in the context and the Annotator is still asked.
+                let consults = self.deployment.externals.context_consults(context);
+                let context = gather_context(&consults, |consult| {
                     self.timed_consult(consult, None, None, occasion, Some(call))
                 })
                 .await;
-                let answer = match joined {
-                    Err((input, reason)) => {
-                        tracing::warn!(
-                            annotator,
-                            input = input.input,
-                            program = input.consult.name,
-                            ?reason,
-                            "an annotator input produced no answer"
-                        );
-                        Err(reason)
-                    }
-                    Ok(args) => {
-                        let consult = Consult {
-                            name: annotator.clone(),
-                            body: ConsultBody::Annotation {
-                                declaration: declaration.clone(),
-                                artifact: AnnotationArtifact { args },
-                            },
-                        };
-                        match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
-                            ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
-                                .map_err(crate::external::NoAnswerReason::MalformedAnswer),
-                            ConsultOutcome::NoAnswer(reason) => Err(reason),
-                        }
-                    }
+                let consult = Consult {
+                    name: annotator.clone(),
+                    body: ConsultBody::Annotation {
+                        declaration: declaration.clone(),
+                        artifact: AnnotationArtifact {
+                            args: args.clone(),
+                            context: context.clone(),
+                        },
+                    },
+                };
+                let answer = match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
+                    ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
+                        .map_err(crate::external::NoAnswerReason::MalformedAnswer),
+                    ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
                 // Annotation failure is an operational refusal, never model feedback: the
                 // call is not judged, nothing is appended, and the harness fails closed.
@@ -1630,6 +1622,7 @@ impl Session {
                     // never consumes a stale annotation.
                     call: *call,
                     answer,
+                    context,
                 }
             }
             ExternalRequest::AudienceSource {
@@ -1761,33 +1754,41 @@ impl Decided<'_> {
     }
 }
 
-/// An annotation's artifact with each input program's answer joined under its input's name,
-/// the programs asked together; or the first input, in declaration order, that produced no
-/// answer.
-pub(super) async fn join_input_answers<'a, Asked>(
-    mut args: serde_json::Value,
-    inputs: &'a [InputRequest],
+/// What the context providers answered about one call, the providers asked together. A
+/// provider that answers `null` — the call is not its concern — is left out; one that gives
+/// no answer is recorded with why, so the Annotator judges without that fact.
+pub(super) async fn gather_context<'a, Asked>(
+    consults: &'a [Consult],
     ask: impl Fn(&'a Consult) -> Asked,
-) -> Result<serde_json::Value, (&'a InputRequest, crate::external::NoAnswerReason)>
+) -> AnnotationContext
 where
     Asked: std::future::Future<Output = ConsultOutcome>,
 {
-    let mut asked = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        asked.push(ask(&input.consult));
+    let mut asked = Vec::with_capacity(consults.len());
+    for consult in consults {
+        asked.push(ask(consult));
     }
     let outcomes = crate::external::settle_batch(asked).await;
-    for (input, outcome) in inputs.iter().zip(outcomes) {
-        match outcome {
-            ConsultOutcome::Answer(answer) => {
-                args.as_object_mut()
-                    .expect("an annotation with declared inputs carries an object artifact")
-                    .insert(input.input.clone(), answer);
-            }
-            ConsultOutcome::NoAnswer(reason) => return Err((input, reason)),
-        }
-    }
-    Ok(args)
+    let entries = consults
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(consult, outcome)| {
+            let entry = match outcome {
+                ConsultOutcome::Answer(serde_json::Value::Null) => return None,
+                ConsultOutcome::Answer(answer) => ContextEntry::Answer(answer),
+                ConsultOutcome::NoAnswer(reason) => {
+                    tracing::debug!(
+                        provider = consult.name,
+                        ?reason,
+                        "a context provider produced no answer"
+                    );
+                    ContextEntry::Error(reason.diagnostic())
+                }
+            };
+            Some((ContextProviderName::new(consult.name.clone()), entry))
+        })
+        .collect();
+    AnnotationContext::new(entries)
 }
 
 fn remedy_presentation(
@@ -4576,6 +4577,82 @@ confined_results = ["leak"]
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
 
+    #[tokio::test]
+    async fn a_withhold_remedy_commits_effects_without_admitting_the_result() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "unused"})).await;
+        let runtime =
+            Runtime::open(emitting_leak_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+        let ToolCallDecision::Deny { offers, .. } = session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the narrowing block is delivered")
+        else {
+            panic!("the narrowing call must block before execution");
+        };
+        let quoted = offers
+            .iter()
+            .map(|offer| OfferId(offer.id.clone()))
+            .find(|offer| {
+                matches!(
+                    runtime.offer_kind(&root(), offer),
+                    Some(crate::api::OfferKind::Withhold)
+                )
+            })
+            .expect("the confined result offers withholding");
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session
+                .on_remedy(offer, RemedyArguments::default(), None, None)
+                .await
+                .expect("the withhold offer executes"),
+            RemedyDecision::Authorized { .. }
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the approved call releases"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let decision = session
+            .on_tool_result(
+                leak(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("raw with pii".to_string()),
+                },
+            )
+            .await
+            .expect("the successful result closes");
+        let ToolResultDecision::Replace { placeholder, .. } = decision else {
+            panic!("the raw result must be replaced");
+        };
+        assert_eq!(placeholder, "[appa] the result is withheld");
+
+        let facts = runtime.log_facts(&root());
+        assert!(
+            facts
+                .iter()
+                .any(|fact| matches!(fact, appa_engine::fact::Fact::OutputWithheld { .. }))
+        );
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            appa_engine::fact::Fact::DispatchClosed {
+                outcome: appa_engine::fact::CloseOutcome::Success { effects },
+                ..
+            } if effects.contains(&appa_engine::fact::EffectKind::new("leak"))
+        )));
+        assert!(
+            facts
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::ValueAdmitted { .. })),
+            "withholding admits no value",
+        );
+    }
+
     /// A tool whose result narrows on two dimensions with a sanitizer
     /// that clears only one: the derivation is admitted and staged, and
     /// the residual narrowing is what the model is told about.
@@ -4846,6 +4923,11 @@ context_control = true
         assert_eq!(status.trajectory, "cc:root");
         assert_eq!(status.trust, "trusted");
         assert_eq!(status.audience, "public");
+        assert_eq!(runtime.try_status(&root()).expect("the read succeeds"), status);
+        assert!(matches!(
+            runtime.try_status(&TrajectoryId("cc:ghost".to_string())),
+            Err(crate::api::StatusReadError::UnknownRoot { root }) if root == "cc:ghost"
+        ));
     }
 
     #[tokio::test]
@@ -4898,6 +4980,7 @@ context_control = true
         runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().corrupt_batch(&root(), 0, b"not engine records");
         assert!(runtime.status(&root()).is_none());
+        assert!(runtime.try_status(&root()).is_err());
     }
 
     #[tokio::test]

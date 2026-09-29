@@ -363,6 +363,11 @@ pub enum Fact {
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
     },
+    OutputWithheld {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        plan: PlanId,
+    },
     /// One sanitizer's derivation of a subject's value; the transition it applied is the
     /// registry's, recomputed at replay.
     CandidateDerived {
@@ -456,7 +461,7 @@ pub enum Fact {
         plan: PlanId,
         acceptance: Option<Narrowing>,
         rulings: Vec<crate::execute::AuthorityEvidence>,
-        sanitizer: Option<SanitizerName>,
+        output: Option<crate::plan::OutputRemedy>,
         /// The child's return policy a marked spawn's plan declared, carried to the fork the
         /// release prepares. `None` for every ordinary call.
         return_policy: Option<ReturnPolicy>,
@@ -543,6 +548,7 @@ impl Fact {
             | Fact::Denial { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
+            | Fact::OutputWithheld { trajectory, .. }
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }

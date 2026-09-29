@@ -212,6 +212,9 @@ static PINNED_ANNOTATION: Table = Table {
         ("annotator", Rule::Token(Class::Annotator)),
         ("call", DIGEST),
         ("produced", Rule::Table(&PRODUCED_ANNOTATION)),
+        // What the deployment's context providers answered about the call: repository
+        // names, logins, grants — the deployment's own findings, which never leave.
+        ("context", Rule::Never),
     ],
 };
 
@@ -261,10 +264,16 @@ static REMEDY_STEP: Table = Table {
     entries: &[
         ("Authorize", Rule::Token(Class::Authority)),
         ("Accept", Rule::Table(&NARROWING)),
+        ("Withhold", Rule::Keep),
         ("Sanitize", Rule::Token(Class::Sanitizer)),
         ("Derive", Rule::Token(Class::Sanitizer)),
         ("Return", Rule::Token(Class::Sanitizer)),
     ],
+};
+
+static OUTPUT_REMEDY: Table = Table {
+    name: "OutputRemedy",
+    entries: &[("Withhold", Rule::Keep), ("Sanitize", Rule::Token(Class::Sanitizer))],
 };
 
 static REQUIRED_RULING: Table = Table {
@@ -632,6 +641,15 @@ static OUTPUT_SANITIZER_BOUND: Table = Table {
     ],
 };
 
+static OUTPUT_WITHHELD: Table = Table {
+    name: "OutputWithheld",
+    entries: &[
+        ("trajectory", TRAJECTORY),
+        ("dispatch", Rule::Table(&DISPATCH_ID)),
+        ("plan", NUMBER),
+    ],
+};
+
 static CANDIDATE_DERIVED: Table = Table {
     name: "CandidateDerived",
     entries: &[
@@ -720,7 +738,7 @@ static CALL_APPROVED: Table = Table {
         ("plan", NUMBER),
         ("acceptance", Rule::Table(&NARROWING)),
         ("rulings", Rule::Each(&Rule::Table(&AUTHORITY_EVIDENCE))),
-        ("sanitizer", Rule::Token(Class::Sanitizer)),
+        ("output", Rule::Table(&OUTPUT_REMEDY)),
         ("return_policy", Rule::Table(&RETURN_POLICY)),
         ("basis", Rule::Table(&POLICY_BASIS)),
         ("evidence", Rule::Table(&EVIDENCE)),
@@ -790,6 +808,7 @@ pub(crate) static FACT: Table = Table {
         ("Denial", Rule::Table(&DENIAL)),
         ("Acceptance", Rule::Table(&ACCEPTANCE)),
         ("OutputSanitizerBound", Rule::Table(&OUTPUT_SANITIZER_BOUND)),
+        ("OutputWithheld", Rule::Table(&OUTPUT_WITHHELD)),
         ("CandidateDerived", Rule::Table(&CANDIDATE_DERIVED)),
         ("CandidateAccepted", Rule::Table(&CANDIDATE_ACCEPTED)),
         ("ChildReturn", Rule::Table(&CHILD_RETURN)),

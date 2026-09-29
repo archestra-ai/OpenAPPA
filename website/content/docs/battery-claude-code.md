@@ -28,9 +28,7 @@ The default config `appa plugin install claude-code` writes handles tools that t
 claude-code/
 |-- README.md
 |-- appa-package.toml
-|-- appa.toml
-|-- repository.py
-`-- test_repository.py
+`-- appa.toml
 ```
 
 The `host/claude-code/Read` rules match a path as written, absolute or relative, so a hidden name and its relative spelling are both covered.

@@ -24,6 +24,19 @@ pub use appa_runtime_api::{
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
+/// Why a host could not read a root's current status.
+#[derive(Debug, thiserror::Error)]
+pub enum StatusReadError {
+    #[error("no log for root {root} exists")]
+    UnknownRoot { root: String },
+    #[error("the trajectory log could not be read: {0}")]
+    Read(appa_eventlog::ReadError),
+    #[error("the trajectory's opening policy could not be resolved: {0}")]
+    Policy(String),
+    #[error("the trajectory log could not be replayed: {0}")]
+    Replay(String),
+}
+
 use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
@@ -353,6 +366,7 @@ impl From<EventError> for RemedyOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OfferKind {
     Accept,
+    Withhold,
     Authority { names: Vec<String> },
     Sanitizer { name: String },
 }
@@ -1555,31 +1569,20 @@ impl Runtime {
             annotator,
             declaration,
             args,
-            inputs,
+            context,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
             return Ok(None);
         };
-        let args = match session::join_input_answers(args, &inputs, |consult| {
-            deployment.externals.consult(consult, None, None)
-        })
-        .await
-        {
-            Ok(args) => args,
-            Err((_, reason)) => {
-                return Ok(Some(AnnotationConsult {
-                    annotator,
-                    outcome: crate::external::ConsultOutcome::NoAnswer(reason),
-                    admitted: false,
-                }));
-            }
-        };
+        let consults = deployment.externals.context_consults(&context);
+        let context =
+            session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
                 declaration: declaration.clone(),
-                artifact: crate::consult::AnnotationArtifact { args },
+                artifact: crate::consult::AnnotationArtifact { args, context },
             },
         };
         let outcome = deployment.externals.consult(&consult, None, None).await;
@@ -2064,16 +2067,42 @@ impl Runtime {
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let deployment = self.inner.deployment();
-        let (policy, log) = self.root_log(&deployment, id, "status")?;
-        let view = match policy.engine().rebuild_view(&log) {
-            Ok(view) => view,
-            Err(refusal) => {
-                tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
-                return None;
+        match self.try_status(id) {
+            Ok(status) => Some(status),
+            Err(StatusReadError::UnknownRoot { .. }) => None,
+            Err(error) => {
+                tracing::warn!(trajectory = %id.0, %error, "status read refused the persisted log");
+                None
+            }
+        }
+    }
+
+    /// Read a root's current label for an embedded host. Unlike [`Runtime::status`],
+    /// this reports an unopened root separately from a failed store, policy, or replay read.
+    /// It appends nothing to the trajectory log.
+    pub fn try_status(&self, id: &TrajectoryId) -> Result<TrajectoryStatus, StatusReadError> {
+        let log = match self.inner.store.log(id) {
+            Ok(log) => log,
+            Err(appa_eventlog::ReadError::UnknownRoot { root }) => return Err(StatusReadError::UnknownRoot { root }),
+            Err(error) => {
+                self.inner
+                    .note_store_error(Some(id), crate::events::StoreOperation::Read, &error);
+                return Err(StatusReadError::Read(error));
             }
         };
-        policy.engine().trajectory_status(&view, id)
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .map_err(|error| StatusReadError::Policy(error.to_string()))?;
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
+            .map_err(|error| StatusReadError::Replay(error.to_string()))?;
+        policy
+            .engine()
+            .trajectory_status(&view, id)
+            .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -3126,21 +3155,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
-    // Every program an annotator input reads is bound. A bound program no annotator reads
-    // stays idle rather than refused, as an audience source does: a battery binds the
-    // program beside the annotator that reads it, and a root that replaces that annotator
-    // may read nothing of the kind.
-    no_unbound(
-        "annotator input",
-        policy
-            .annotators()
-            .flat_map(|(_, binding)| binding.inputs.values())
-            .filter_map(|source| match source {
-                appa_policy::InputSource::External(program) => Some(program.as_str()),
-                appa_policy::InputSource::Call(_) => None,
-            }),
-        &externals.inputs,
-    )?;
     // Every provider the policy references is bound, and so is every entry a provider's
     // `lookup` names. A bound provider the policy never references stays idle rather than
     // refused: a battery binds its own source, and a deployment may include the battery
@@ -4070,6 +4084,18 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookDecision::Ack
         );
         assert!(store.has_root(&root).expect("the store reads"));
+        let status = runtime
+            .on(Arc::clone(&lease))
+            .try_status(&root)
+            .expect("the leased store reads status");
+        assert_eq!((status.trust.as_str(), status.audience.as_str()), ("trusted", "public"));
+        assert_eq!(
+            runtime
+                .on(Arc::new(store.lease().expect("another connection leases")))
+                .try_status(&root)
+                .expect("another leased store reads status"),
+            status,
+        );
 
         let key = root.0.clone();
         lease

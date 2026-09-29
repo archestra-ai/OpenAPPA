@@ -94,7 +94,7 @@ impl RecoveryRoute {
                 RouteStep::Derive(sanitizer) | RouteStep::Sanitize(sanitizer) => Some(Contingency::SanitizerResult {
                     sanitizer: sanitizer.clone(),
                 }),
-                RouteStep::Accept(_) | RouteStep::Return(_) => None,
+                RouteStep::Accept(_) | RouteStep::Withhold | RouteStep::Return(_) => None,
             })
             .collect();
         if contingencies.is_empty() {
@@ -119,6 +119,7 @@ pub enum RouteStep {
     },
     Derive(SanitizerName),
     Accept(Narrowing),
+    Withhold,
     /// A ruling over `covers` for exactly this rendered call (`RUL-3`): the digest binds it.
     Authorize {
         authority: AuthorityName,
@@ -673,6 +674,7 @@ impl<'a> Search<'a> {
                     call: self.context.call.digest(),
                 },
                 RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
+                RemedyStep::Withhold => RouteStep::Withhold,
                 RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
                 RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
             })
@@ -772,7 +774,11 @@ impl<'a> Search<'a> {
                         }
                     }
                 }
-                RouteStep::Precede { .. } | RouteStep::Accept(_) | RouteStep::Sanitize(_) | RouteStep::Return(_) => {}
+                RouteStep::Precede { .. }
+                | RouteStep::Accept(_)
+                | RouteStep::Withhold
+                | RouteStep::Sanitize(_)
+                | RouteStep::Return(_) => {}
             }
         }
         powers
@@ -1219,6 +1225,7 @@ mod tests {
                 RouteStep::Derive(sanitizer) => format!("derive:{}", sanitizer.as_str()),
                 RouteStep::Authorize { authority, .. } => format!("authorize:{}", authority.as_str()),
                 RouteStep::Accept(_) => "accept".to_string(),
+                RouteStep::Withhold => "withhold".to_string(),
                 RouteStep::Sanitize(sanitizer) => format!("sanitize:{}", sanitizer.as_str()),
                 RouteStep::Return(None) => "return".to_string(),
                 RouteStep::Return(Some(sanitizer)) => format!("return:{}", sanitizer.as_str()),
@@ -1779,6 +1786,7 @@ mod tests {
                                         call: proposal.digest(),
                                     },
                                     RemedyStep::Accept(narrowing) => RouteStep::Accept(narrowing.clone()),
+                                    RemedyStep::Withhold => RouteStep::Withhold,
                                     RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                                     RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
                                     RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),

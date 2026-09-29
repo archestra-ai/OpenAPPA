@@ -30,7 +30,7 @@ OpenAPPA operates with three concepts:
    Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
    1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination. An audience can be as specific as the members of one Slack channel: the contract extracts the channel ID from the tool's arguments, so reading channel `C0123` labels the data with that channel's membership, and posting to it requires that they are already valid readers.
-   2. **Trust:** How much the data in the session can be trusted. Trust follows who can write the text. Text that only members of the organization can write, such as a private issue or an internal channel, keeps the session's trust. Text that an outsider can write, such as a web page or an issue on a public repository, lowers it, and tools that require trusted input will no longer be allowed to run.
+   2. **Trust:** How much the data in the session can be trusted. Trust follows who wrote the text, not who can read it. Text that only members of the organization and its collaborators wrote, such as a team discussion in an internal channel or on a public repository, keeps the session's trust. Text that an outsider wrote, such as a web page or an outside contributor's comment, lowers it, and tools that require trusted input will no longer be allowed to run.
    3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
    4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.
 
@@ -42,11 +42,13 @@ OpenAPPA operates with three concepts:
    - **`requires`:** Which requirements the session must satisfy for OpenAPPA to allow the action.
    - **`effects`:** Which effects are recorded after a tool runs successfully.
 
+   OpenAPPA uses the first explicit contract whose argument selectors match. If none match, the policy can route the call through a wildcard (`name = "*"`) annotator. Once a contract matches, a schema error refuses the call without falling through.
+
    For example, a CRM tool can label its result as internal, while an email tool can require the recipient to be included in the session's audience.
 
 3. **Remedy Plans**
 
-   When an action does not meet its tool contract, OpenAPPA blocks it and returns the remedy plans allowed by the policy. A plan can involve cleaning data with a [sanitizer](#sanitizers), receiving approval from an [authority](#authorities), accepting a narrower audience, or isolating a sensitive read in a [subagent](#subagent-reads).
+   When an action does not meet its tool contract, OpenAPPA blocks it and returns the remedy plans allowed by the policy. A plan can involve cleaning data with a [sanitizer](#sanitizers), receiving approval from an [authority](#authorities), accepting a narrower audience, withholding a tool result, or isolating a sensitive read in a [subagent](#subagent-reads).
 
    An offered plan can still be denied by an approval service or fail during data cleaning. If no permitted remedy succeeds, the action remains blocked.
 
@@ -83,6 +85,8 @@ See [Authorities in Policy configuration](/contracts#authorities) for configurat
 ### Sanitizers
 
 A sanitizer cleans data before the agent receives it or sends it to a tool. Cleaning data before the agent sends it can allow an action that would otherwise be blocked.
+
+For a side-effecting tool result the integration can withhold, the agent can instead run the tool without receiving any result output. A successful call still records its effects, but its result adds no Value or Label restriction to the trajectory.
 
 For example, a sanitizer removes customer names and email addresses from a support ticket. The policy permits the agent to share that cleaned version in a public bug report.
 
@@ -125,7 +129,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository — an input such as `repository = "$input.repository"` has a program of the deployment establish the fact first, and the annotator classifies from the finding. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository, and `gh pr view` names a number, not who wrote the comments — a context provider of the deployment finds the facts first, and the annotator classifies from them. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagent Reads
 

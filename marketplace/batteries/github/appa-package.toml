@@ -6,5 +6,6 @@ description = "Rules for the GitHub MCP server with its default tool sets: profi
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
-helpers = ["audience-source.py", "repository-visibility.py", "github_token.py"]
+detect = ["gh"]
+helpers = ["audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
 setup = "Falls back to your gh login (gh auth login) when the variable is unset; a token needs the repo and read:org scopes, and user:email to name the viewer by address."

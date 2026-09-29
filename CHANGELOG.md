@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.28.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.27.0...v0.28.0) (2026-09-28)
+
+
+### Features
+
+* **google-workspace:** static rules for the claude.ai Google Drive connector ([#503](https://github.com/archestra-ai/OpenAPPA/issues/503)) ([29a71b8](https://github.com/archestra-ai/OpenAPPA/commit/29a71b801429f70de7ee1bc76cdaed316c5f7785))
+
+
+### Bug Fixes
+
+* **appa-guide:** clarify checkup closing guidance ([#510](https://github.com/archestra-ai/OpenAPPA/issues/510)) ([19e47f2](https://github.com/archestra-ai/OpenAPPA/commit/19e47f2d6976d6d1d47a9f268d4fdadbe0f609ed))
+* **appa-guide:** explain proposals and failures plainly ([#513](https://github.com/archestra-ai/OpenAPPA/issues/513)) ([646aed6](https://github.com/archestra-ai/OpenAPPA/commit/646aed64865def502de88ea4b92d2cebfbef37b2))
+* **appa-guide:** keep tuning options out of checkup proposals ([19e47f2](https://github.com/archestra-ai/OpenAPPA/commit/19e47f2d6976d6d1d47a9f268d4fdadbe0f609ed))
+* **website:** drop stale DIRECTIVE_DESCRIPTIONS block that broke the build ([#512](https://github.com/archestra-ai/OpenAPPA/issues/512)) ([6349c68](https://github.com/archestra-ai/OpenAPPA/commit/6349c68afd284b451a5d1240772548e3c76d76fc))
+
+
+### Documentation
+
+* remove file call checking section ([#511](https://github.com/archestra-ai/OpenAPPA/issues/511)) ([4a63eb5](https://github.com/archestra-ai/OpenAPPA/commit/4a63eb5fca8b00f237d16a4693967edaffeeb2e5))
+
 ## [0.27.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.26.1...v0.27.0) (2026-09-28)
 
 

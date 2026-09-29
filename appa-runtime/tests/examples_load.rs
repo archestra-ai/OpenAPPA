@@ -12,7 +12,6 @@ use std::sync::Arc;
 #[cfg(unix)]
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
 #[cfg(unix)]
-use appa_runtime::config::AnnotatorImplementation;
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
@@ -87,11 +86,6 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
-    std::fs::copy(
-        repository.join("marketplace/batteries/claude-code/repository.py"),
-        battery_dir.join("repository.py"),
-    )
-    .expect("the repository input is copied");
 
     let root = dir.path().join("appa.toml");
     std::fs::write(
@@ -108,11 +102,6 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
 fn the_initialized_default_composes_with_the_claude_code_battery() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
-    let Some(AnnotatorImplementation::Command(repository)) = config.externals.inputs.get("claude-code.repository")
-    else {
-        panic!("the root registers the battery's repository input");
-    };
-    assert!(repository.cwd.join(&repository.argv[1]).is_file());
     let annotators = config.policy_file().value()["annotator"]
         .as_array()
         .expect("the composed Annotators are an array");

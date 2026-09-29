@@ -16,6 +16,11 @@ use std::time::Duration;
 use super::paths::DeploymentPaths;
 use super::{Compensation, InitError, Undo, file_before, write_state};
 
+/// The Claude plugin this installer used before the deployed binary took
+/// ownership of the profile. Leaving it enabled registers a second copy of
+/// every hook beside the native settings entries.
+const LEGACY_PLUGIN: &str = "appa-runtime@appa";
+
 /// What every hook entry needs to know about its deployment.
 pub(super) struct HookTarget<'a> {
     pub(super) binary: &'a Path,
@@ -117,6 +122,7 @@ pub(super) fn install_hooks(
     let path = path(paths);
     let binary = portable(target.binary)?;
     edit(&path, Some(compensation), |settings| {
+        disable_legacy_plugin(settings, &path)?;
         let hooks = object_entry(settings, "hooks", &path)?;
         for (event, group) in groups(target, binary)? {
             let groups = array_entry(hooks, event, &path)?;
@@ -125,6 +131,22 @@ pub(super) fn install_hooks(
         }
         Ok(())
     })
+}
+
+/// Retire the exact APPA-owned plugin registration superseded by these native
+/// entries. Keep the installation itself so a failed activation can restore
+/// this settings file byte-for-byte through its compensation.
+fn disable_legacy_plugin(settings: &mut Map<String, Value>, path: &Path) -> Result<(), InitError> {
+    let Some(enabled) = settings.get_mut("enabledPlugins") else {
+        return Ok(());
+    };
+    let enabled = enabled
+        .as_object_mut()
+        .ok_or_else(|| conflict(path, "enabledPlugins must be an object"))?;
+    if enabled.contains_key(LEGACY_PLUGIN) {
+        enabled.insert(LEGACY_PLUGIN.to_owned(), Value::Bool(false));
+    }
+    Ok(())
 }
 
 /// Drop this deployment's entries from every event, whatever events an earlier
@@ -499,6 +521,38 @@ mod tests {
         install_hooks(&paths, &target, &mut Compensation::default()).unwrap();
         remove_hooks(&paths, &binary).unwrap();
         assert_eq!(settings(&paths), Map::new());
+    }
+
+    #[test]
+    fn native_hooks_disable_the_superseded_appa_plugin_without_touching_others() {
+        let root = tempfile::tempdir().unwrap();
+        let (paths, binary) = fixture(root.path());
+        let original = write(
+            &paths,
+            json!({
+                "enabledPlugins": {
+                    "appa-runtime@appa": true,
+                    "formatter@example": true
+                }
+            }),
+        );
+        let target = HookTarget {
+            binary: &binary,
+            url: "http://127.0.0.1:1",
+            config: &paths.config_dir.join("appa.toml"),
+            data_dir: &paths.data_dir,
+        };
+
+        let mut compensation = Compensation::default();
+        install_hooks(&paths, &target, &mut compensation).unwrap();
+
+        let installed = settings(&paths);
+        assert_eq!(installed["enabledPlugins"]["appa-runtime@appa"], false);
+        assert_eq!(installed["enabledPlugins"]["formatter@example"], true);
+        assert!(installed["hooks"]["PreToolUse"].is_array());
+
+        compensation.unwind().unwrap();
+        assert_eq!(fs::read(path(&paths)).unwrap(), original);
     }
 
     /// The status line reaches `clappa` sessions only: the user's own

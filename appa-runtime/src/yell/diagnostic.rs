@@ -953,6 +953,7 @@ mod tests {
             Fact::Denial { .. } => "Denial",
             Fact::Acceptance { .. } => "Acceptance",
             Fact::OutputSanitizerBound { .. } => "OutputSanitizerBound",
+            Fact::OutputWithheld { .. } => "OutputWithheld",
             Fact::CandidateDerived { .. } => "CandidateDerived",
             Fact::CandidateAccepted { .. } => "CandidateAccepted",
             Fact::ChildReturn { .. } => "ChildReturn",
@@ -976,7 +977,7 @@ mod tests {
     /// the second catches a table left behind after one is removed or renamed.
     #[tokio::test]
     async fn the_inventory_names_every_fact_variant_and_no_others() {
-        const NAMES: [&str; 24] = [
+        const NAMES: [&str; 25] = [
             "TrajectoryOpened",
             "ValueAdmitted",
             "DispatchOpened",
@@ -986,6 +987,7 @@ mod tests {
             "Denial",
             "Acceptance",
             "OutputSanitizerBound",
+            "OutputWithheld",
             "CandidateDerived",
             "CandidateAccepted",
             "ChildReturn",

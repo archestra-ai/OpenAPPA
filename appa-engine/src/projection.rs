@@ -111,7 +111,7 @@ pub(crate) struct PreparedApproval {
     pub(crate) plan: crate::plan::PlanId,
     pub(crate) acceptance: Option<crate::check::Narrowing>,
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
-    pub(crate) sanitizer: Option<crate::names::SanitizerName>,
+    pub(crate) output: Option<crate::plan::OutputRemedy>,
     pub(crate) return_policy: Option<ReturnPolicy>,
     pub(crate) basis: crate::basis::PolicyBasis,
     /// The pinned audience evidence the approval was prepared under: its consumption
@@ -160,6 +160,7 @@ pub struct Projection {
     resumed: BTreeMap<TrajectoryId, Label>,
     ended: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
+    withheld_outputs: BTreeSet<DispatchId>,
     /// The live derived candidate of each subject that has one. A successful hop
     /// replaces its subject's entry, so this holds the candidate the next stage plans from — never
     /// a chain, which the engine deliberately does not precompute.
@@ -230,6 +231,7 @@ impl Projection {
             resumed: BTreeMap::new(),
             ended: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
+            withheld_outputs: BTreeSet::new(),
             candidates: BTreeMap::new(),
             denials: BTreeMap::new(),
             opening: None,
@@ -284,6 +286,7 @@ impl Projection {
             resumed,
             ended,
             bound_sanitizers,
+            withheld_outputs,
             candidates,
             denials,
             opening,
@@ -376,7 +379,7 @@ impl Projection {
                     plan,
                     acceptance,
                     rulings,
-                    sanitizer,
+                    output,
                     return_policy,
                     basis,
                     evidence,
@@ -389,7 +392,7 @@ impl Projection {
                             plan: *plan,
                             acceptance: acceptance.clone(),
                             rulings: rulings.clone(),
-                            sanitizer: sanitizer.clone(),
+                            output: output.clone(),
                             return_policy: return_policy.clone(),
                             basis: *basis,
                             evidence: evidence.clone(),
@@ -529,6 +532,9 @@ impl Projection {
                     dispatch, sanitizer, ..
                 } => {
                     bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
+                }
+                Fact::OutputWithheld { dispatch, .. } => {
+                    withheld_outputs.insert(dispatch.clone());
                 }
                 Fact::CandidateDerived {
                     trajectory,
@@ -1215,6 +1221,10 @@ impl Views<'_> {
     /// result; the runtime also reads it to know which backend to call.
     pub(crate) fn bound_sanitizer(&self, dispatch: &DispatchId) -> Option<&SanitizerName> {
         self.projection.bound_sanitizers.get(dispatch)
+    }
+
+    pub(crate) fn withholds_output(&self, dispatch: &DispatchId) -> bool {
+        self.projection.withheld_outputs.contains(dispatch)
     }
 
     /// The live derived candidate of this subject, if a hop has produced one. The next

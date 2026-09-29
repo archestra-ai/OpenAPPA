@@ -393,6 +393,9 @@ fn replay(entries: &[AuditEntry]) {
             AuditEvent::SanitizerBound { sanitizer } => {
                 eprintln!("appa: [{at}] the raw result is withheld for {sanitizer}");
             }
+            AuditEvent::OutputWithheld => {
+                eprintln!("appa: remedy authorized [{at}]: the tool result was withheld");
+            }
             AuditEvent::Sanitized { sanitizer } => {
                 eprintln!("appa: remedy authorized [{at}]: the {sanitizer} derivation was admitted");
             }
