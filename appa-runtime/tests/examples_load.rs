@@ -72,7 +72,7 @@ fn the_live_replay_roots_open() {
 }
 
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
-/// them: the battery's rules run before the default's.
+/// them: the default's rules run before the battery's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let battery_dir = dir.path().join("batteries/claude-code");
@@ -109,7 +109,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .iter()
         .filter(|annotator| annotator["name"].as_str() == Some("claude-code.bash-requirements"))
         .collect::<Vec<_>>();
-    assert_eq!(bash_annotators.len(), 1, "the root supplies the Bash Annotator");
+    assert_eq!(bash_annotators.len(), 1, "the battery supplies the Bash Annotator");
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
