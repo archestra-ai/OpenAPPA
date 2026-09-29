@@ -264,7 +264,8 @@ impl Local {
             }
         }
         Ok(
-            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}),
+            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins,
+                "config": self.config.display().to_string()}),
         )
     }
 
@@ -650,6 +651,15 @@ fn router(web: Web) -> axum::Router {
                 (
                     [(header::CONTENT_TYPE, "image/svg+xml")],
                     include_str!("../../website/public/brand/openappa-lockup-light.svg"),
+                )
+            }),
+        )
+        .route(
+            "/logo-dark.svg",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "image/svg+xml")],
+                    include_str!("../../website/public/brand/openappa-lockup-dark.svg"),
                 )
             }),
         )

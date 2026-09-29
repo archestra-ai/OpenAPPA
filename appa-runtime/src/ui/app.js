@@ -12,18 +12,40 @@ const content = document.querySelector('#content');
 const notices = document.querySelector('#notice');
 history.replaceState(null, '', location.pathname + location.search);
 
+// Each check reason as a badge and one sentence that says what to do next.
+// `{name}` is the battery's display name.
 const reasons = {
-  missing_configuration: 'Additional configuration required. See setup instructions.',
-  missing_credential: 'Enter a token.',
-  cli_not_authenticated: 'CLI is not logged in. Log in or enter a token.',
-  missing_executable: 'Install the missing program, then check again.',
-  invalid_credential: 'Token rejected by the provider.',
-  insufficient_access: 'Token lacks the required access.',
-  provider_unavailable: 'Provider unreachable. Check again later.',
-  check_failed: 'Check failed or returned an invalid response.',
-  check_timed_out: 'Check timed out. Check again later.',
+  missing_configuration: ['Needs setup', 'Setup is not complete. Follow the setup steps.'],
+  missing_credential: ['Needs a token', 'Add a token to connect {name}.'],
+  cli_not_authenticated: ['Not signed in', 'Sign in with the CLI, or add a token.'],
+  missing_executable: ['Program missing', 'Install the missing program, then check again.'],
+  invalid_credential: ['Token rejected', '{name} did not accept the token. The token can be expired, revoked, or copied incompletely. Add a new token.'],
+  insufficient_access: ['Missing permissions', 'The token works, but it cannot read all that the battery needs. Compare its scopes with the setup steps.'],
+  provider_unavailable: ['Cannot reach {name}', 'APPA cannot connect to {name}. Check your network or VPN, then check again.'],
+  check_failed: ['Check error', 'The battery check stopped with an error, or gave an answer that APPA cannot read. Check again.'],
+  check_timed_out: ['Check timed out', '{name} did not answer in 15 seconds. Check again later.'],
 };
-const names = { github: 'GitHub', slack: 'Slack', huggingface: 'Hugging Face', databricks: 'Databricks', 'claude-code': 'Claude Code' };
+const names = {
+  github: 'GitHub', slack: 'Slack', huggingface: 'Hugging Face', databricks: 'Databricks', 'claude-code': 'Claude Code',
+  grain: 'Grain', linear: 'Linear', notion: 'Notion', sentry: 'Sentry', posthog: 'PostHog', pagerduty: 'PagerDuty',
+  launchdarkly: 'LaunchDarkly', cloudflare: 'Cloudflare', monday: 'monday.com', archestra: 'Archestra', jev: 'Jev',
+  xmemory: 'xmemory', 'google-workspace': 'Google Workspace', 'microsoft-learn': 'Microsoft Learn',
+};
+function displayName(name) { return names[name] ?? name; }
+// Manifest text: `code` spans and bare https links, nothing else.
+function rich(text, tag = 'span', cls) {
+  const node = el(tag, undefined, cls);
+  text.split(/(`[^`]+`)/).forEach(part => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 1) { node.append(el('code', part.slice(1, -1))); return; }
+    part.split(/(https:\/\/[^\s)]+[^\s).,;:])/).forEach(piece => {
+      if (!piece.startsWith('https://')) { if (piece) node.append(piece); return; }
+      const link = el('a', piece.replace(/^https:\/\//, ''));
+      link.href = piece; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      node.append(link);
+    });
+  });
+  return node;
+}
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -98,7 +120,7 @@ let serverFilter = 'all';
 const CUSTOM = 'root configuration';
 const kinds = [
   { key: 'battery', label: 'Battery rules' },
-  { key: 'custom', label: 'Custom rules only' },
+  { key: 'custom', label: 'Your rules only' },
   { key: 'unknown', label: 'Source unknown' },
 ];
 function namespaceOf(rule) {
@@ -147,89 +169,99 @@ function svg(tag, attrs) {
   return node;
 }
 function overview() {
-  heading('Policy coverage', '', button('Refresh', refresh, 'secondary'));
-  const list = servers(), mcp = list.filter(s => isMcp(s.key));
-  const cards = el('div', undefined, 'cards');
-  cards.append(coverageCard(mcp), batteriesCard());
-  content.append(cards);
+  heading('Overview', '', button('Refresh', refresh, 'secondary'));
+  const intro = el('p', 'What your current OpenAPPA configuration protects. ', 'description');
+  if (state.config) { intro.append('Read from '); intro.append(el('code', state.config)); intro.append('.'); }
+  content.append(intro);
+  const list = servers();
+  attention();
+  content.append(summary(list));
   serverTable(list);
   errors();
 }
-function coverageCard(mcp) {
-  const card = el('section', undefined, 'card');
-  const head = el('div');
-  head.append(el('h2', 'MCP servers'), el('p', 'Where the rules for each MCP server in the policy come from.', 'muted'));
-  card.append(head);
-  if (!mcp.length) { card.append(el('p', 'No rule names an MCP server.', 'empty')); return card; }
-  const count = key => mcp.filter(s => s.kind === key).length;
-  const pct = n => Math.round(n * 100 / mcp.length);
-  const body = el('div', undefined, 'coverage');
-  const donut = el('div', undefined, 'donut');
-  const chart = svg('svg', { viewBox: '0 0 120 120', 'aria-hidden': 'true' });
-  const radius = 48, circumference = 2 * Math.PI * radius;
-  chart.append(svg('circle', { cx: 60, cy: 60, r: radius, class: 'track' }));
-  let offset = 0;
-  for (const kind of kinds) {
-    const length = count(kind.key) / mcp.length * circumference;
-    if (!length) continue;
-    chart.append(svg('circle', { cx: 60, cy: 60, r: radius, class: `arc ${kind.key}`,
-      'stroke-dasharray': `${length} ${circumference}`, 'stroke-dashoffset': -offset }));
-    offset += length;
+// One call to action per included battery that cannot work yet, with the reason to fix it.
+function attention() {
+  const broken = state.batteries.filter(b => b.configured && brokenBattery(b));
+  if (!broken.length) return;
+  const section = el('section', undefined, 'attention');
+  section.setAttribute('aria-label', 'Batteries to set up');
+  for (const b of broken) {
+    const info = statusInfo(b);
+    const card = el('div', undefined, 'attention-card');
+    const text = el('div');
+    const title = el('p', undefined, 'attention-title');
+    title.append(el('strong', displayName(b.name)), ` · ${info.label.toLowerCase()}`);
+    text.append(title);
+    if (b.benefit) text.append(rich(b.benefit, 'p', 'attention-benefit'));
+    card.append(text, button(`Set up ${displayName(b.name)}`, () => { expanded.set(b.name, true); navigate('batteries'); }));
+    section.append(card);
   }
-  const center = el('div', undefined, 'donut-center');
-  center.append(el('strong', mcp.length), el('span', mcp.length === 1 ? 'MCP server' : 'MCP servers'));
-  donut.append(chart, center);
-  donut.setAttribute('role', 'img');
-  donut.setAttribute('aria-label', `${plural(mcp.length, 'MCP server')} in the policy`);
-  const legend = el('ul', undefined, 'legend');
-  for (const kind of kinds) {
-    const n = count(kind.key);
-    if (!n && kind.key === 'unknown') continue;
-    const item = el('li');
-    item.append(el('span', undefined, `swatch ${kind.key}`), el('span', kind.label), el('span', n, 'value'), el('span', `${pct(n)}%`, 'share'));
-    legend.append(item);
+  content.append(section);
+}
+function summary(list) {
+  const mcp = list.filter(s => isMcp(s.key)), hosts = list.filter(s => s.key.startsWith('host:'));
+  const card = el('section', undefined, 'summary');
+  card.setAttribute('aria-label', 'Summary');
+
+  const covered = el('div', undefined, 'fact');
+  covered.append(el('span', 'Protected', 'fact-label'));
+  const big = el('p', undefined, 'fact-value');
+  big.append(el('strong', mcp.length), ` ${mcp.length === 1 ? 'MCP server' : 'MCP servers'}`);
+  covered.append(big);
+  if (hosts.length) covered.append(el('span', `and ${hosts.map(h => h.title.replace(/ built-in tools$/, '')).join(', ')} built-in tools`, 'fact-note'));
+
+  const sources = el('div', undefined, 'fact');
+  sources.append(el('span', 'Rules for MCP servers come from', 'fact-label'));
+  if (mcp.length) {
+    const bar = el('div', undefined, 'bar');
+    bar.setAttribute('role', 'img');
+    const legend = el('ul', undefined, 'bar-legend');
+    const parts = kinds.map(kind => ({ ...kind, n: mcp.filter(s => s.kind === kind.key).length })).filter(k => k.n);
+    bar.setAttribute('aria-label', parts.map(p => `${p.label}: ${p.n}`).join(', '));
+    for (const part of parts) {
+      const segment = el('span', undefined, `segment ${part.key}`);
+      segment.style.flexGrow = part.n;
+      segment.title = `${part.label}: ${plural(part.n, 'server')}`;
+      bar.append(segment);
+      const item = el('li');
+      item.append(el('span', undefined, `swatch ${part.key}`), `${part.label} `, el('strong', part.n));
+      legend.append(item);
+    }
+    sources.append(bar, legend);
+  } else sources.append(el('p', 'No rule names an MCP server.', 'fact-note'));
+
+  const inUse = state.batteries.filter(b => b.configured);
+  const batteriesFact = el('div', undefined, 'fact');
+  batteriesFact.append(el('span', 'Batteries in use', 'fact-label'));
+  const chips = el('div', undefined, 'battery-chips');
+  for (const b of inUse) {
+    const info = statusInfo(b);
+    const chip = button(displayName(b.name), () => { if (brokenBattery(b)) expanded.set(b.name, true); navigate('batteries'); }, `battery-chip ${info.kind}`);
+    chip.title = info.label;
+    chips.append(chip);
   }
-  body.append(donut, legend);
-  card.append(body, el('p', fallbackText(), 'muted'));
-  return card;
+  if (!inUse.length) chips.append(el('span', 'None yet.', 'fact-note'));
+  batteriesFact.append(chips);
+
+  card.append(covered, sources, batteriesFact);
+  const wrap = el('div');
+  wrap.append(card, el('p', fallbackText(), 'fallback'));
+  return wrap;
 }
 // What happens to a call no rule names, read from the policy's `*` rule.
 function fallbackText() {
   const policy = state.policy ?? {};
   const wildcard = (policy.tool ?? []).find(rule => rule.name === '*');
-  if (!wildcard || (wildcard.requires?.attention ?? []).includes('blocked')) return 'Calls to tools without a rule are refused.';
-  if (!wildcard.annotator) return 'Calls to tools without a rule get the wildcard rule: one fixed rule for all of them.';
+  if (!wildcard || (wildcard.requires?.attention ?? []).includes('blocked')) return 'Tools with no rule: APPA blocks the call.';
+  if (!wildcard.annotator) return 'Tools with no rule: one shared default rule applies.';
   const annotator = (policy.annotator ?? []).find(a => a.name === wildcard.annotator);
   const asks = (annotator?.marks ?? []).length > 0;
-  return `Calls to tools without a rule go to the wildcard rule. Before each call runs, the ${wildcard.annotator} annotator reads the call and writes a rule for that call only${asks ? '. That rule can ask you to approve the call' : ''}.`;
-}
-function batteriesCard() {
-  const card = el('section', undefined, 'card');
-  const head = el('div');
-  head.append(el('h2', 'Batteries'), el('p', "Reusable policy for a set of tools, such as an MCP server or Claude Code's built-in tools.", 'muted'));
-  const inUse = state.batteries.filter(b => b.configured);
-  const broken = inUse.filter(brokenBattery);
-  const tiles = el('div', undefined, 'tiles');
-  const tile = (label, value, names, kind = '') => {
-    const node = el('div', undefined, `tile ${kind}`);
-    node.append(el('span', label, 'tile-label'), el('strong', value));
-    if (names.length) node.append(el('span', names.join(', '), 'tile-names'));
-    return node;
-  };
-  tiles.append(
-    tile('Included', inUse.length, inUse.map(b => names[b.name] ?? b.name)),
-    tile('Needs setup', broken.length, broken.map(b => names[b.name] ?? b.name), broken.length ? 'alert' : ''),
-    tile('In catalog', state.batteries.length, []),
-  );
-  const actions = el('div', undefined, 'actions');
-  actions.append(button('Open batteries', () => navigate('batteries'), 'secondary'));
-  card.append(head, tiles, actions);
-  return card;
+  return `Tools with no rule: before each call, the ${wildcard.annotator} annotator writes a rule for that call only.${asks ? ' That rule can ask you to approve the call.' : ''}`;
 }
 function sourceChip(source) {
-  if (source === CUSTOM) return el('span', 'custom', 'chip');
+  if (source === CUSTOM) return el('span', 'your rules', 'chip');
   const battery = batteryByName(source);
-  return brokenBattery(battery) ? el('span', `${source} · needs setup`, 'chip alert') : el('span', source, 'chip battery');
+  return brokenBattery(battery) ? el('span', `${displayName(source)} · ${statusInfo(battery).label.toLowerCase()}`, 'chip alert') : el('span', displayName(source), 'chip battery');
 }
 function shortName(name) {
   const parts = name.split('/');
@@ -259,20 +291,21 @@ function serverMatches(server) {
   return !query || server.title.toLowerCase().includes(query) || server.rules.some(rule => rule.name.toLowerCase().includes(query));
 }
 function serverTable(list) {
-  content.append(el('h2', 'Servers and built-in tools'));
+  content.append(el('h2', 'Tools in your configuration'));
+  content.append(el('p', 'Each MCP server and set of built-in tools that your policy names, and where its rules come from. Open a row to see the rules.', 'description'));
   const toolbar = el('div', undefined, 'toolbar');
   const search = el('input', undefined, 'search');
   search.type = 'search'; search.placeholder = 'Search servers and rules'; search.value = query;
   search.setAttribute('aria-label', 'Search servers and rules');
   const filter = el('select');
   filter.setAttribute('aria-label', 'Filter servers');
-  [['all', 'All servers'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Custom rules']]
+  [['all', 'All'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Your rules']]
     .forEach(([value, label]) => { const option = el('option', label); option.value = value; filter.append(option); });
   filter.value = serverFilter;
   const total = el('span', undefined, 'muted');
   toolbar.append(search, filter, total);
   content.append(toolbar);
-  const result = table(['Server', 'Rules from', 'Rules', ''], 'servers');
+  const result = table(['Server or tool set', 'Rules come from', 'Rules', ''], 'servers');
   const body = el('tbody');
   result.node.append(body);
   content.append(result.wrap);
@@ -316,7 +349,7 @@ function serverDetail(server, redraw) {
   }
   for (const [source, rules] of groups) {
     const group = el('div', undefined, 'rule-group');
-    const label = source === CUSTOM ? 'Custom rules' : source === 'unknown' ? 'Source unknown' : `${names[source] ?? source} battery`;
+    const label = source === CUSTOM ? 'Your rules' : source === 'unknown' ? 'Source unknown' : `${displayName(source)} battery`;
     group.append(el('h3', `${label} · ${rules.length}`));
     const list = el('ul', undefined, 'rules');
     for (const rule of rules) {
@@ -336,45 +369,126 @@ function serverDetail(server, redraw) {
 }
 function needsSetup(b) { return b.check?.status === 'needs_configuration'; }
 function relevant(b) { return b.selected || b.included || b.configured || selected.has(b.name); }
-function checkStatus(b) {
-  if (!b.check) return status('Checking…');
-  if (b.check.status === 'ready') return status('Ready', 'good');
-  if (b.check.status === 'unavailable') return status('Check failed', 'bad');
-  return status('Needs setup', 'warn');
+// The mascot on openappa.com's pixel grid. 1 body · 3 muzzle and paws · 2 nose · 4 eyes.
+const BEAST = [
+  '.....11..........11.....', '.....11..........11.....', '....1111111111111111....',
+  '...111111111111111111...', '...111111111111111111...', '...111111111111111111...',
+  '...111444111111444111...', '...111444111111444111...', '...111444111111444111...',
+  '...111111111111111111...', '...111111133331111111...', '...111111132231111111...',
+  '...111111111111111111...', '....1111111111111111....', '.1111111111111111111111.',
+  '111111111111111111111111', '111111111111111111111111', '111111111111111111111111',
+  '111111111111111111111111', '111111111111111111111111', '11111..1111..1111..11111',
+  '33333..3333..3333..33333',
+];
+function mascot() {
+  const body = svg('g', {}), eyes = svg('g', { class: 'eyes' });
+  const cls = { 1: 'px-body', 2: 'px-eye', 3: 'px-dim', 4: 'px-body' };
+  BEAST.forEach((row, y) => {
+    for (let x = 0; x < row.length;) {
+      const c = row[x];
+      let end = x; while (row[end] === c) end++;
+      if (c !== '.') body.append(svg('rect', { x, y, width: end - x, height: 1, class: cls[c] }));
+      if (c === '4') eyes.append(svg('rect', { x, y, width: end - x, height: 1, class: 'px-eye' }));
+      x = end;
+    }
+  });
+  const look = svg('g', { class: 'look' });
+  look.append(eyes);
+  const group = svg('g', { class: 'hop' });
+  group.append(body, look);
+  return group;
 }
-function readinessDetail(b) {
-  if (!b.check || b.check.status === 'ready') return '';
+function bubble(x, y, w, text, cls, tailX) {
+  const g = svg('g', { class: `bubble ${cls}` });
+  g.append(svg('rect', { x, y, width: w, height: 9, class: 'bubble-box' }),
+    svg('rect', { x: tailX, y: y + 9, width: 2, height: 2, class: 'bubble-tail' }),
+    svg('rect', { x: tailX + 1, y: y + 11, width: 1, height: 1, class: 'bubble-tail' }));
+  const label = svg('text', { x: x + w / 2, y: y + 6.2, 'text-anchor': 'middle', class: 'bubble-text' });
+  label.textContent = text;
+  g.append(label);
+  return g;
+}
+// APPA hops from GitHub to Slack to Claude Code and asks each a question in its own language.
+function journey() {
+  const stops = [
+    { name: 'GitHub', key: 'github', ask: 'mrrp? blep?', answer: 'brrzt! ok' },
+    { name: 'Slack', key: 'slack', ask: 'psst… wub?', answer: 'shh… tsk!' },
+    { name: 'Claude Code', key: 'claude', ask: 'hnn? zorp?', answer: 'hmm… k!' },
+  ];
+  const figure = el('figure', undefined, 'journey');
+  const scene = svg('svg', { viewBox: '0 17 240 41', role: 'img', 'shape-rendering': 'crispEdges',
+    'aria-label': 'The APPA mascot visits GitHub, Slack and Claude Code and asks each one a question.' });
+  scene.append(svg('rect', { x: 0, y: 56, width: 240, height: 1, class: 'ground' }));
+  stops.forEach((stop, i) => {
+    const cx = 55 + 80 * i;
+    const kiosk = svg('g', { class: `kiosk ${stop.key}` });
+    kiosk.append(svg('rect', { x: cx - 14, y: 40, width: 34, height: 16, class: 'kiosk-box' }),
+      svg('rect', { x: cx - 14, y: 40, width: 34, height: 3, class: 'kiosk-roof' }),
+      svg('rect', { x: cx + 15, y: 45, width: 2, height: 2, class: `kiosk-lamp lamp-${i}` }));
+    const label = svg('text', { x: cx + 3, y: 52, 'text-anchor': 'middle', class: 'kiosk-text' });
+    label.textContent = stop.name;
+    kiosk.append(label);
+    scene.append(kiosk,
+      bubble(cx - 44, 20, 34, stop.ask, `ask ask-${i}`, cx - 30),
+      bubble(cx - 8, 25, 30, stop.answer, `answer answer-${i}`, cx + 4));
+  });
+  const walker = svg('g', { transform: 'translate(15 34)' });
+  walker.append(mascot());
+  scene.append(walker);
+  const caption = el('figcaption');
+  caption.append(el('strong', 'Batteries teach OpenAPPA about your tools and your data. '),
+    'Each battery brings rules for one set of tools. Many batteries also ask the provider questions, for example: ',
+    el('em', 'Who can read this Slack channel?'),
+    ' APPA uses the answers to let data go only to people who can already read it.');
+  figure.append(scene, caption);
+  return figure;
+}
+// The badge, its color, and the next step for one battery's latest check.
+function statusInfo(b) {
+  if (!b?.check) return { label: 'Checking…', kind: '', detail: '' };
+  const name = displayName(b.name);
+  if (b.check.status === 'ready') return { label: 'Ready', kind: 'good', detail: '' };
+  const [label, text] = reasons[b.check.reason] ?? ['Needs setup', 'Follow the setup steps, then check again.'];
+  const kind = b.check.status === 'unavailable' ? 'bad' : 'warn';
+  const fill = s => s.replaceAll('{name}', name);
   if (b.check.reason === 'missing_executable') {
-    const missing = b.dependencies.filter(d => !d.installed).map(d => d.executable);
-    if (missing.length) return `Install ${missing.join(', ')}.`;
-    const alternatives = b.alternatives.filter(a => !a.installed).map(a => a.executable);
-    if (alternatives.length) return `Enter a token or install ${alternatives.join(', ')} and sign in.`;
+    const missing = b.dependencies.filter(d => !d.installed).map(d => `\`${d.executable}\``);
+    if (missing.length) return { label, kind, detail: `Install ${missing.join(', ')}, then check again.` };
+    const alternatives = b.alternatives.filter(a => !a.installed).map(a => `\`${a.executable}\``);
+    if (alternatives.length) return { label, kind, detail: `Add a token, or install ${alternatives.join(', ')} and sign in.` };
   }
   if (b.check.reason === 'cli_not_authenticated' || b.check.reason === 'missing_credential') {
-    const hints = b.alternatives.map(a => a.installed ? a.login_hint : `install ${a.executable}, then ${a.login_hint}`);
-    if (hints.length) return `Enter a token or run ${hints.join('; ')}.`;
+    const hints = b.alternatives.map(a => a.installed ? `\`${a.login_hint}\`` : `install \`${a.executable}\`, then \`${a.login_hint}\``);
+    if (hints.length) return { label, kind, detail: `Add a token, or run ${hints.join('; ')} in a terminal.` };
   }
-  return reasons[b.check.reason] ?? '';
+  return { label: fill(label), kind, detail: fill(text) };
 }
-function configurable(b) { return b.credentials.length > 0 || (needsSetup(b) && b.alternatives.length > 0); }
+function checkStatus(b) { const info = statusInfo(b); return status(info.label, info.kind); }
+function configurable(b) { return b.credentials.length > 0 || b.setup?.length > 0 || (needsSetup(b) && b.alternatives.length > 0); }
 function batteries() {
-  heading('Batteries', "Reusable policy for a set of tools, such as an MCP server or Claude Code's built-in tools.");
+  heading('Batteries');
+  content.append(journey());
   const list = state.batteries.filter(relevant);
   if (!list.length) content.append(el('p', 'No batteries in use. Include one with appa battery install <name>.', 'empty'));
   else {
     const result = table(['Battery', 'Status', '']);
     const body = el('tbody');
     list.forEach(b => {
-      const row = el('tr'), name = el('td', names[b.name] ?? b.name, 'battery-name');
+      const row = el('tr'), name = el('td');
+      name.append(el('span', displayName(b.name), 'battery-name'));
       name.title = b.description;
+      const open = configurable(b) && (expanded.get(b.name) ?? (configureRequested && needsSetup(b)));
+      // The open panel repeats the benefit under "Why connect".
+      if (b.benefit && !open) name.append(rich(b.benefit, 'span', 'battery-benefit'));
       row.append(name);
       const checkCell = el('td'); checkCell.append(checkStatus(b));
-      const detail = readinessDetail(b); if (detail) checkCell.append(el('span', detail, 'check-message'));
+      const detail = statusInfo(b).detail; if (detail) checkCell.append(rich(detail, 'span', 'check-message'));
       row.append(checkCell);
-      const action = el('td');
-      const open = configurable(b) && (expanded.get(b.name) ?? (configureRequested && needsSetup(b)));
+      const action = el('td', undefined, 'battery-action');
+      const broken = brokenBattery(b);
       if (configurable(b)) {
-        const toggle = button(open ? 'Close' : 'Configure', () => { expanded.set(b.name, !open); render(); }, 'link');
+        const label = open ? 'Close' : broken ? (b.credentials.length ? 'Add token' : 'Set up') : 'Configure';
+        const toggle = button(label, () => { expanded.set(b.name, !open); render(); }, open || !broken ? 'link' : 'small');
         toggle.setAttribute('aria-expanded', String(open));
         toggle.setAttribute('aria-controls', `configure-${b.name}`);
         action.append(toggle);
@@ -397,8 +511,9 @@ function batteries() {
 function credentialField(b, c) {
   const field = el('div', undefined, 'credential'), head = el('div', undefined, 'field-heading');
   const id = `credential-${b.name}-${c.variable}`;
-  const label = el('label', b.credentials.length === 1 ? 'Token' : c.variable);
-  label.htmlFor = id; label.title = c.variable;
+  const label = el('label', undefined);
+  label.append(b.credentials.length === 1 ? 'Token ' : '', el('code', c.variable, 'variable'));
+  label.htmlFor = id;
   const source = el('span', undefined, 'field-source');
   if (c.saved) source.append(button('Delete', () => work(async () => {
     state = await api('credentials', { credentials: { [c.variable]: null }, batteries: [b.name] });
@@ -419,14 +534,23 @@ function configuration(b) {
   const form = el('form', undefined, 'battery-configuration');
   form.setAttribute('aria-label', `Configure ${names[b.name] ?? b.name}`);
   form.addEventListener('submit', event => { event.preventDefault(); save([b]); });
+  if (b.benefit) {
+    const why = el('div', undefined, 'why');
+    why.append(el('h3', `Why connect ${displayName(b.name)}`), rich(b.benefit, 'p'));
+    form.append(why);
+  }
+  if (b.setup?.length) {
+    const steps = el('div', undefined, 'steps');
+    steps.append(el('h3', b.credentials.length ? 'How to get the token' : 'Setup steps'));
+    const list = el('ol');
+    b.setup.forEach(step => list.append(rich(step, 'li')));
+    steps.append(list);
+    form.append(steps);
+  }
   b.credentials.forEach(c => form.append(credentialField(b, c)));
   if (needsSetup(b)) b.alternatives.forEach(a => {
-    form.append(el('p', `${b.credentials.length ? 'Or sign in' : 'Sign in'} using ${a.executable}${a.installed ? '' : ' (install it first)'}. Run this in your terminal, then check again:`, 'requirement'), el('code', a.login_hint, 'login-hint'));
+    form.append(el('p', `${b.credentials.length ? 'Or sign in' : 'Sign in'} with ${a.executable}${a.installed ? '' : ' (install it first)'}. Run this in a terminal, then check again:`, 'requirement'), el('code', a.login_hint, 'login-hint'));
   });
-  if (needsSetup(b) && b.setup) {
-    const instructions = el('details', undefined, 'instructions');
-    instructions.append(el('summary', 'Setup instructions'), el('p', b.setup)); form.append(instructions);
-  }
   if (b.credentials.length) {
     const actions = el('div', undefined, 'actions');
     const submit = button('Save and check', () => {}); submit.type = 'submit'; actions.append(submit);
