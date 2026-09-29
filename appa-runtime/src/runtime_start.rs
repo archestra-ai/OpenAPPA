@@ -187,6 +187,9 @@ pub fn ensure(
         Health::Ok => return Ok(()),
         Health::Stale(_) if target.user_owned => return Ok(()),
         Health::Stale(pid) => {
+            // A stale runtime still serves; without a policy to start its
+            // replacement over, it is left serving.
+            require_policy(&deployment.config)?;
             if stop_stale(&endpoint, &target.url, pid)? {
                 return Ok(());
             }
@@ -447,6 +450,36 @@ mod tests {
             data_dir: PathBuf::from("unused"),
         };
         ensure(&target, &deployment, Path::new("unused"), &[]).expect("the session's own runtime is left as it is");
+    }
+
+    /// A stale runtime of the deployment is not stopped when no policy is on
+    /// disk to start its replacement over: the hook fails, and the stale one
+    /// keeps serving.
+    #[test]
+    fn a_stale_runtime_keeps_serving_when_the_policy_is_missing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let url = format!("http://{}", listener.local_addr().expect("the bound address"));
+        let served = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut socket, _) = listener.accept().expect("the probe connects");
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request);
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nstale 99");
+            listener.set_nonblocking(true).expect("the listener turns non-blocking");
+            listener.accept().is_err()
+        });
+        let root = tempfile::tempdir().expect("temporary directory");
+        let deployment = Deployment {
+            config: root.path().join("appa.toml"),
+            data_dir: root.path().join("data"),
+        };
+        let target = RuntimeTarget { url, user_owned: false };
+        let error = ensure(&target, &deployment, Path::new("unused"), &[]).expect_err("no policy");
+        assert!(matches!(error, StartError::MissingPolicy(_)), "{error}");
+        assert!(
+            served.join().expect("the fake runtime joins"),
+            "nothing but the one probe reached the stale runtime"
+        );
     }
 
     /// Nothing answering at a URL the session named is the user's to start:
