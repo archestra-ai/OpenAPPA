@@ -287,7 +287,7 @@ def github_mcp(host, port, state):
             return JSONResponse({"message": "Requires authentication"}, status_code=401)
         owner, repo = request.path_params["owner"], request.path_params["repo"]
         state.record("lookups", {"owner": owner, "repo": repo})
-        return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public"})
+        return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public", "fork": False})
 
     return mcp
 

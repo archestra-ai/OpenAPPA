@@ -626,6 +626,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    #[cfg(unix)]
     fn detecting(name: &str, programs: &[&str]) -> (PackageName, Battery) {
         let (name, mut battery) = battery(name, &[name]);
         battery.detect = programs
