@@ -35,7 +35,7 @@ Trust follows who wrote the text, and visibility alone never grants it:
 | Read | Keeps the session's trust when | Otherwise |
 | --- | --- | --- |
 | one pull request or issue (`pull_request_read`, `issue_read`) | the `github` context answer for that item shows every author, commenter, reviewer, editor, and commit author is an `OWNER`, `MEMBER`, or `COLLABORATOR` or a bot (an installed GitHub App), and `truncated` is `false` | `suspicious`, also when the provider answered an error or nothing |
-| a listing of issues or pull requests | never | `suspicious` |
+| a listing of issues or pull requests (`list_issues`, `list_pull_requests`) | the `github` context answer for that repository holds the listing with `truncated` `false`, and every listed item's author, and its last editor when it was edited, is an `OWNER`, `MEMBER`, or `COLLABORATOR` or a bot | `suspicious`, also when the provider answered an error or nothing |
 | other content (files, commits, branches, tags, releases) | the repository is private or internal and is no fork | `suspicious`: anyone may open the pull requests merged into a public repository, and a fork's content came from its parent |
 
 *Reads across repositories* — code, commit, issue, pull-request and
@@ -89,7 +89,7 @@ call:
   a GitHub URL, a `repos/OWNER/NAME` API path, a `gh repo` argument,
   `--repo`/`-R`, `GH_REPO`, a pushed remote, or the checkout's git
   config; `gh pr <verb> N` and `gh issue <verb> N` (or their URLs) name
-  the item.
+  the item, and `gh issue list` and `gh pr list` a listing.
 
 Any other call answers `null` without touching the network. A recognized
 call costs one GraphQL query, and the answer carries facts only:
@@ -116,6 +116,30 @@ the provider cannot follow — a shell, a subshell, a computed target, a
 setting that moves git, several repositories or items at once — a
 repository the token cannot see, or any GitHub error exits nonzero, and
 the annotator receives an error entry instead of an answer.
+
+A listing call (`list_issues`, `list_pull_requests`, `gh issue list`,
+`gh pr list`) is repeated in the same query with the call's filters, and
+the answer carries `issues` or `pull_requests`:
+
+```json
+{"items": [{"number": 41, "author": {"login": "ana", "association": "MEMBER"},
+            "bot": false, "last_editor": "bo"},
+           {"number": 40, "author": {"login": "dependabot", "association": "NONE"},
+            "bot": true}],
+ "truncated": false}
+```
+
+`items` hold every item the call returns, possibly more;
+`last_editor` is present only for an edited item and is `null` for a
+deleted account. The query repeats the call's order and reads as many
+items as the call does (at most 100) when it can: `gh` without a search
+filter, `list_issues`, and `list_pull_requests` sorted by `created` or
+`updated`, `page` included. Otherwise it reads the whole set the call's
+filters admit and drops what it cannot repeat — labels, milestone, type,
+app, draft, `@me`, a `head` owner, `field_filters`, a sort by
+popularity — and `truncated` is `true` when that set has more than 100
+items. A `--search`, an unknown flag or argument, or a value the server
+would refuse reads nothing and answers `truncated: true`.
 
 **`audience-source.py`** — the `github` audience source. It answers
 these selectors over the GitHub REST API:

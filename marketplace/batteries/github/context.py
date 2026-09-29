@@ -6,7 +6,8 @@ the harness would run it in), one answer out:
 
   {"version": 1, "answer": null}      the call reaches nothing on GitHub
   {"version": 1, "answer": {"viewer": "ana", "repository": {...},
-                            "pull_request" | "issue": {...}}}
+                            "pull_request" | "issue": {...},
+                            "issues" | "pull_requests": {...}}}
 
 Two kinds of call are recognized. A `Bash` call is split into its simple
 commands; each `gh` call and `git push` names its repository by
@@ -15,6 +16,15 @@ remote, or the checkout (read from the checkout's git config, never the
 network), and a pull request or issue by its number or URL. A
 `mcp/github/<tool>` call names it by `owner`, `repo`, and `pullNumber` or
 `issue_number`. Every other call answers `null` before any network.
+
+A listing (`gh issue list`, `gh pr list`, `list_issues`,
+`list_pull_requests`) is repeated through GraphQL with the call's
+filters: `"issues"` or `"pull_requests"` carries `items`, which hold
+every item the call itself returns (possibly more), each with its author
+and last editor, and `truncated`, which is `true` whenever that cannot be
+established: a search, a flag or argument this provider does not know,
+a page it cannot reach, or a superset of the call's filters that has
+more items than one query reads.
 
 A recognized call costs one GraphQL query. The answer carries facts
 only: who wrote the pull request or issue, every comment and review on
@@ -75,7 +85,29 @@ GH_OPTIONS_WITH_VALUE = {
     "--remove-label", "--add-assignee", "--remove-assignee", "--add-reviewer", "--remove-reviewer",
     "--add-project", "--remove-project", "--subject", "--match-head-commit", "--reason",
     "-X", "--method", "-f", "--raw-field", "--field", "--input", "--header", "--cache", "--preview",
+    "--mention", "--app", "--type",
 }
+# `gh issue list` and `gh pr list`: short flags, and the flags each accepts.
+LIST_SHORT = {
+    "-s": "--state", "-l": "--label", "-L": "--limit", "-A": "--author", "-a": "--assignee", "-m": "--milestone",
+    "-S": "--search", "-B": "--base", "-H": "--head", "-q": "--jq", "-t": "--template", "-R": "--repo",
+    "-w": "--web", "-d": "--draft",
+}
+OUTPUT_FLAGS = {"--json", "--jq", "--template", "--repo"}
+LIST_VALUE_FLAGS = {
+    "issue": {"--state", "--label", "--limit", "--author", "--assignee", "--mention", "--milestone", "--type", "--app", "--search"} | OUTPUT_FLAGS,
+    "pr": {"--state", "--label", "--limit", "--author", "--assignee", "--app", "--base", "--head", "--search"} | OUTPUT_FLAGS,
+}
+LIST_SWITCHES = {"issue": {"--web"}, "pr": {"--web", "--draft"}}
+GH_LIST_STATES = {
+    "issue": {"open": ("OPEN",), "closed": ("CLOSED",), "all": ("OPEN", "CLOSED")},
+    "pr": {"open": ("OPEN",), "closed": ("CLOSED", "MERGED"), "merged": ("MERGED",), "all": ("OPEN", "CLOSED", "MERGED")},
+}
+REST_PULL_REQUEST_STATES = {"open": ("OPEN",), "closed": ("CLOSED", "MERGED"), "all": ("OPEN", "CLOSED", "MERGED")}
+REST_SORTS = {"created": "CREATED_AT", "updated": "UPDATED_AT", "popularity": None, "long-running": None}
+ISSUE_ORDERS = {"CREATED_AT", "UPDATED_AT", "COMMENTS"}
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 # MCP arguments naming a pull request or an issue.
 NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
 
@@ -84,16 +116,49 @@ class Unfollowable(Exception):
     """The command reaches GitHub in a way this provider cannot establish."""
 
 
+# How faithfully a listing's query repeats the call:
+PREFIX = "prefix"  # same filters and order: the first `first` items cover the call
+WHOLE = "whole"  # filters that admit every item the call returns, in another order: covered only when no page follows
+UNKNOWN = "unknown"  # the call cannot be repeated; nothing is fetched
+MAX_FIRST = 100
+
+
+@dataclass(frozen=True)
+class Listing:
+    """A listing call repeated as one GraphQL connection read."""
+
+    kind: str
+    scope: str
+    first: int = 0
+    states: tuple[str, ...] = ()
+    labels: tuple[str, ...] = ()
+    order: tuple[str, str] = ("CREATED_AT", "DESC")
+    filters: tuple[tuple[str, str], ...] = ()
+    after: str | None = None
+    base: str | None = None
+    head: str | None = None
+
+
+def listing(kind, prefix, first, **fields):
+    """A PREFIX listing when the query repeats the call's filters and order
+    and one page reaches every item the call returns, WHOLE otherwise."""
+    if prefix and first <= MAX_FIRST:
+        return Listing(kind, PREFIX, first, **fields)
+    return Listing(kind, WHOLE, MAX_FIRST, **fields)
+
+
 @dataclass(frozen=True)
 class Target:
     """One place a call reaches: a `slug`, a `remote` of a checkout, the
     `checkout`'s own repository as gh resolves it, or the remote a bare
-    `git push` goes to (`push`); with the pull request or issue it names."""
+    `git push` goes to (`push`); with the pull request or issue, or the
+    listing, it names."""
 
     kind: str
     value: str | None
     directory: str | None
     number: int | None = None
+    listing: Listing | None = None
 
 
 # ---------------------------------------------------------------- commands
@@ -199,6 +264,68 @@ def positionals(words):
             yield word
 
 
+def list_flags(command, words):
+    """The flags of a `gh issue|pr list` call as (name, value) pairs, `None`
+    for a word gh does not accept there or this provider cannot read."""
+    flags, listed = [], False
+    arguments = iter(words)
+    for word in arguments:
+        if word in ("list", "ls") and not listed:
+            listed = True
+            continue
+        if not word.startswith("-") or word in ("-", "--"):
+            return None
+        if word.startswith("--"):
+            name, sign, value = word.partition("=")
+        else:
+            name, sign, value = word[:2], word[2:3], word[2:].removeprefix("=")
+        name = LIST_SHORT.get(name, name)
+        if name in LIST_SWITCHES[command]:
+            if sign and value not in ("true", "false"):
+                return None
+            flags.append((name, value if sign else "true"))
+        elif name in LIST_VALUE_FLAGS[command]:
+            value = value if sign else next(arguments, None)
+            if value is None or "$" in value or "`" in value:
+                return None
+            flags.append((name, value))
+        else:
+            return None
+    return flags
+
+
+def gh_listing(command, words):
+    """The listing a `gh issue list` or `gh pr list` call reads, `None` for
+    one that opens a browser instead. gh lists by creation, newest first,
+    through GraphQL unless a filter sends it to the search API."""
+    kind = "issues" if command == "issue" else "pull_requests"
+    flags = list_flags(command, words)
+    if flags is None:
+        return Listing(kind, UNKNOWN)
+    values = dict(flags)
+    # A label flag repeats and splits at commas; gh wants every label, GraphQL any.
+    labels = tuple(label for name, value in flags if name == "--label" for label in value.split(",") if label)
+    if values.get("--web", "false") != "false":
+        return None
+    states = GH_LIST_STATES[command].get(values.get("--state", "open").lower())
+    limit = values.get("--limit", "30")
+    if "--search" in values or states is None or not limit.isdigit() or int(limit) < 1:
+        return Listing(kind, UNKNOWN)
+    match command:
+        case "issue":
+            people = {"createdBy": values.get("--author"), "assignee": values.get("--assignee"), "mentioned": values.get("--mention")}
+            # `@me` is the viewer, known to this query only in its answer: the filter is dropped.
+            kept = tuple((name, value) for name, value in people.items() if value and value != "@me")
+            dropped = len(kept) < sum(bool(value) for value in people.values())
+            searched = labels or {"--milestone", "--type", "--app"} & values.keys()
+            return listing(kind, not (searched or dropped), int(limit), states=states, labels=labels, filters=kept)
+        case "pr":
+            searched = labels or {"--author", "--assignee", "--app", "--draft"} & values.keys()
+            base, head = values.get("--base") or None, values.get("--head") or None
+            return listing(kind, not searched, int(limit), states=states, labels=labels, base=base, head=head)
+    raise ValueError(f"unexpected gh command {command!r}")
+
+
 def gh_targets(words, environment, directory):
     """What one `gh` call reaches: a URL, API path, or `gh repo` slug names
     the repository, else `--repo`/`-R` or `GH_REPO`, else the checkout; a
@@ -221,7 +348,7 @@ def gh_targets(words, environment, directory):
             chosen = word.removeprefix("--repo=").removeprefix("-R").removeprefix("=")
         elif word in GH_OPTIONS_WITH_VALUE:
             next(arguments, None)
-    slug, number = None, None
+    slug, number, listed = None, None, None
     rest = list(positionals(words[1:]))
     match words[0], rest:
         case "repo", ["create" | "fork", *_]:
@@ -237,6 +364,8 @@ def gh_targets(words, environment, directory):
                 raise Unfollowable(f"gh api {endpoint} names no repository this provider can establish")
         case "api", []:
             raise Unfollowable("gh api names no endpoint")
+        case "pr" | "issue", ["list" | "ls", *_]:
+            listed = gh_listing(words[0], words[1:])
         case "pr" | "issue", [_, named, *_]:
             if match := GITHUB_URL.match(computed(named)):
                 slug, number = f"{match.group(1)}/{match.group(2)}", match.group(3)
@@ -250,7 +379,7 @@ def gh_targets(words, environment, directory):
     if slug is not None and not SLUG.match(slug):
         raise Unfollowable(f"{slug} names no repository this provider can establish")
     number = int(number) if number else None
-    return [Target("slug", slug, directory, number) if slug else Target("checkout", None, directory, number)]
+    return [Target("slug" if slug else "checkout", slug, directory, number, listed)]
 
 
 def bash_targets(command, cwd):
@@ -305,14 +434,85 @@ def bash_targets(command, cwd):
     return list(dict.fromkeys(targets))
 
 
+def count(arguments, key, default):
+    """A positive integer argument, `None` for any other value."""
+    value = arguments.get(key, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def mcp_issue_listing(arguments):
+    """`list_issues`: the MCP server reads the same GraphQL connection, so
+    its filters, order, and cursor repeat as they are."""
+    unknown = Listing("issues", UNKNOWN)
+    text = {key: arguments.get(key) or "" for key in ("state", "orderBy", "direction", "since")}
+    labels, fields, after = arguments.get("labels") or [], arguments.get("field_filters"), arguments.get("after")
+    first = count(arguments, "perPage", 30)
+    if (
+        not all(isinstance(value, str) for value in text.values())
+        or not (isinstance(labels, list) and all(isinstance(label, str) for label in labels))
+        or not (after is None or isinstance(after, str))
+        or first is None
+        or first > MAX_FIRST
+        or "page" in arguments
+    ):
+        return unknown
+    state, order, direction, since = text["state"].upper(), text["orderBy"].upper(), text["direction"].upper(), text["since"]
+    if DATE.match(since):
+        since += "T00:00:00Z"
+    if since and not DATE_TIME.match(since):
+        return unknown
+    return listing(
+        "issues",
+        # Custom issue-field filters only narrow the listing; they are left out.
+        not fields,
+        first,
+        states=(state,) if state in ("OPEN", "CLOSED") else ("OPEN", "CLOSED"),
+        labels=tuple(labels),
+        order=(order if order in ISSUE_ORDERS else "CREATED_AT", direction if direction in ("ASC", "DESC") else "DESC"),
+        filters=(("since", since),) if since else (),
+        after=after or None,
+    )
+
+
+def mcp_pull_request_listing(arguments):
+    """`list_pull_requests`: the MCP server lists through REST, page by
+    page; the query reads every page up to the one asked for."""
+    unknown = Listing("pull_requests", UNKNOWN)
+    text = {key: arguments.get(key) or "" for key in ("state", "head", "base", "sort", "direction")}
+    per_page, page = count(arguments, "perPage", 30), count(arguments, "page", 1)
+    if not all(isinstance(value, str) for value in text.values()) or per_page is None or page is None:
+        return unknown
+    states = REST_PULL_REQUEST_STATES.get(text["state"] or "open")
+    sort = text["sort"] or "created"
+    direction = text["direction"] or ("desc" if sort == "created" else "asc")
+    if states is None or sort not in REST_SORTS or direction not in ("asc", "desc"):
+        return unknown
+    # REST's `head` is `owner:branch`; GraphQL filters on the branch alone, a wider set.
+    head = text["head"].rpartition(":")[2] if ":" in text["head"] else None
+    return listing(
+        "pull_requests",
+        REST_SORTS[sort] is not None and not text["head"],
+        min(per_page, MAX_FIRST) * page,
+        states=states,
+        order=(REST_SORTS[sort] or "CREATED_AT", direction.upper()),
+        base=text["base"] or None,
+        head=head or None,
+    )
+
+
+MCP_LISTINGS = {"list_issues": mcp_issue_listing, "list_pull_requests": mcp_pull_request_listing}
+
+
 def mcp_target(tool, arguments):
-    """The repository and pull request or issue a GitHub MCP call names."""
+    """The repository, and the pull request, issue, or listing a GitHub MCP
+    call names."""
     owner, repo = arguments.get("owner"), arguments.get("repo")
     if not all(isinstance(value, str) and value and "/" not in value and not value.startswith("$") for value in (owner, repo)):
         return None
     numbers = [arguments[key] for key in NUMBER_ARGUMENTS if key in arguments]
     number = next((value for value in numbers if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
-    return Target("slug", f"{owner}/{repo}", None, number)
+    listed = MCP_LISTINGS.get(tool.removeprefix("mcp/github/"))
+    return Target("slug", f"{owner}/{repo}", None, number, listed(arguments) if listed else None)
 
 
 def call_targets(artifact):
@@ -439,8 +639,9 @@ def repository_of(target):
 
 
 def reached(targets):
-    """The one repository and at most one pull request or issue the call
-    reaches, or `None` when it reaches nothing on GitHub."""
+    """The one repository, at most one pull request or issue, and at most
+    one listing the call reaches, or `None` when it reaches nothing on
+    GitHub."""
     places = {(repository_of(target), target.number) for target in targets}
     places = {(slug, number) for slug, number in places if slug}
     slugs = {slug.lower() for slug, _ in places}
@@ -451,18 +652,34 @@ def reached(targets):
         raise Unfollowable(f"the command reaches {len(slugs)} repositories")
     if len(numbers) > 1:
         raise Unfollowable(f"the command reaches {len(numbers)} pull requests or issues")
-    slug = sorted(places)[0][0]
-    return slug, next(iter(numbers), None)
+    listings = {target.listing for target in targets if target.listing}
+    if len(listings) > 1:
+        raise Unfollowable(f"the command reads {len(listings)} listings")
+    slug = min(slug for slug, _ in places)
+    return slug, next(iter(numbers), None), next(iter(listings), None)
 
 
 # ---------------------------------------------------------------- GitHub
 
 ACTOR = "author { login __typename } authorAssociation editor { login } lastEditedAt"
+LISTED = f"pageInfo {{ hasNextPage }} nodes {{ number {ACTOR} }}"
 QUERY = f"""
-query($owner: String!, $name: String!, $number: Int!, $withNumber: Boolean!) {{
+query(
+  $owner: String!, $name: String!, $number: Int!, $withNumber: Boolean!,
+  $withIssues: Boolean!, $withPullRequests: Boolean!, $first: Int!, $after: String,
+  $issueStates: [IssueState!], $pullRequestStates: [PullRequestState!], $labels: [String!],
+  $orderBy: IssueOrder, $filterBy: IssueFilters, $baseRefName: String, $headRefName: String
+) {{
   viewer {{ login }}
   repository(owner: $owner, name: $name) {{
     nameWithOwner visibility viewerPermission parent {{ nameWithOwner }}
+    issues(
+      first: $first, after: $after, states: $issueStates, labels: $labels, orderBy: $orderBy, filterBy: $filterBy
+    ) @include(if: $withIssues) {{ {LISTED} }}
+    pullRequests(
+      first: $first, after: $after, states: $pullRequestStates, labels: $labels, orderBy: $orderBy,
+      baseRefName: $baseRefName, headRefName: $headRefName
+    ) @include(if: $withPullRequests) {{ {LISTED} }}
     issueOrPullRequest(number: $number) @include(if: $withNumber) {{
       __typename
       ... on Issue {{
@@ -486,9 +703,26 @@ query($owner: String!, $name: String!, $number: Int!, $withNumber: Boolean!) {{
 """
 
 
-def variables_of(slug, number):
+def variables_of(slug, number, listed=None):
     owner, name = slug.split("/")
-    return {"owner": owner, "name": name, "number": number or 0, "withNumber": number is not None}
+    fetched = listed if listed is not None and listed.scope != UNKNOWN else Listing("", UNKNOWN)
+    return {
+        "owner": owner,
+        "name": name,
+        "number": number or 0,
+        "withNumber": number is not None,
+        "withIssues": fetched.kind == "issues",
+        "withPullRequests": fetched.kind == "pull_requests",
+        "first": fetched.first,
+        "after": fetched.after,
+        "issueStates": list(fetched.states) if fetched.kind == "issues" else None,
+        "pullRequestStates": list(fetched.states) if fetched.kind == "pull_requests" else None,
+        "labels": list(fetched.labels) or None,
+        "orderBy": {"field": fetched.order[0], "direction": fetched.order[1]},
+        "filterBy": dict(fetched.filters) or None,
+        "baseRefName": fetched.base,
+        "headRefName": fetched.head,
+    }
 
 
 def graphql_url(root):
@@ -570,7 +804,34 @@ def item_of(node):
     return item
 
 
-def answer_of(payload):
+def listed_item(node):
+    """The facts about one listed pull request or issue: its author, and its
+    last editor when it was edited (`null` for a deleted account)."""
+    author = node.get("author") or {}
+    item = {
+        "number": node.get("number"),
+        "author": {"login": author.get("login"), "association": node.get("authorAssociation")},
+        "bot": author.get("__typename") == "Bot",
+    }
+    if node.get("lastEditedAt"):
+        item["last_editor"] = (node.get("editor") or {}).get("login")
+    return item
+
+
+CONNECTIONS = {"issues": "issues", "pull_requests": "pullRequests"}
+
+
+def listing_of(repository, listed):
+    """The listed items, and whether they may miss one the call returns."""
+    if listed.scope == UNKNOWN:
+        return {"items": [], "truncated": True}
+    if not isinstance(repository.get(CONNECTIONS[listed.kind]), dict):
+        raise RuntimeError(f"GitHub GraphQL: no {listed.kind} in the response")
+    nodes, more = connection(repository, CONNECTIONS[listed.kind])
+    return {"items": [listed_item(node) for node in nodes], "truncated": listed.scope == WHOLE and more}
+
+
+def answer_of(payload, listed=None):
     """The provider's answer from one GraphQL response."""
     data = payload.get("data") if isinstance(payload, dict) else None
     repository = data.get("repository") if isinstance(data, dict) else None
@@ -598,6 +859,8 @@ def answer_of(payload):
             answer["pull_request"] = item_of(node)
         case "Issue":
             answer["issue"] = item_of(node)
+    if listed is not None:
+        answer[listed.kind] = listing_of(repository, listed)
     return answer
 
 
@@ -612,7 +875,7 @@ def context_of(consult):
     place = reached(call_targets(artifact))
     if place is None:
         return None
-    return answer_of(graphql(resolve_token(), variables_of(*place)))
+    return answer_of(graphql(resolve_token(), variables_of(*place)), place[2])
 
 
 def main():

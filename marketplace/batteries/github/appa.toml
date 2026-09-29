@@ -16,7 +16,10 @@
 # issue keeps the session's trust only when all of them are the
 # repository's owners, members, collaborators, or installed apps (bots)
 # and no list was cut short; otherwise, and whenever the provider has no answer, it enters
-# `suspicious`. Listings of issues and pull requests enter `suspicious`.
+# `suspicious`. A listing of issues or pull requests keeps the session's
+# trust only when the provider repeats it in full and every listed item's
+# author and last editor is one of those people or apps; otherwise it
+# enters `suspicious`.
 # Other content of a public repository enters `suspicious`, since anyone
 # may open the pull requests merged into it, and so does a fork's, which
 # came from its parent. A private or internal repository that is no fork

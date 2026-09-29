@@ -14,6 +14,8 @@ SPEC = importlib.util.spec_from_file_location("github_context", SCRIPT)
 CONTEXT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONTEXT)
 Target = CONTEXT.Target
+Listing = CONTEXT.Listing
+PREFIX, WHOLE, UNKNOWN = CONTEXT.PREFIX, CONTEXT.WHOLE, CONTEXT.UNKNOWN
 
 
 def bash(command, cwd=None, tool="host/claude-code/Bash"):
@@ -178,7 +180,6 @@ class McpTargets(unittest.TestCase):
     def test_a_github_tool_names_its_repository_and_item(self):
         for tool, arguments, expected in [
             ("get_file_contents", {"owner": "acme", "repo": "api", "path": "x"}, None),
-            ("list_issues", {"owner": "acme", "repo": "api"}, None),
             ("pull_request_read", {"method": "get_comments", "owner": "acme", "repo": "api", "pullNumber": 12}, 12),
             ("issue_read", {"method": "get", "owner": "acme", "repo": "api", "issue_number": 7}, 7),
             ("add_issue_comment", {"owner": "acme", "repo": "api", "issue_number": 7, "body": "x"}, 7),
@@ -197,9 +198,9 @@ class GhTargets(unittest.TestCase):
     def test_a_gh_call_chooses_its_repository_by_flag_or_environment(self):
         for command in (
             "gh pr create --repo acme/api --title x",
-            "gh issue list -R acme/api",
-            "gh issue list -Racme/api",
-            "gh issue list -R=acme/api",
+            "gh issue create -R acme/api",
+            "gh issue create -Racme/api",
+            "gh issue create -R=acme/api",
             "gh pr create --repo=acme/api",
             "GH_REPO=acme/api gh pr create",
             "export GH_REPO=acme/api; gh pr create",
@@ -240,8 +241,6 @@ class GhTargets(unittest.TestCase):
             "gh pr view",
             "gh pr view feature-branch",
             "gh pr view #12",
-            "gh pr list --state open",
-            "gh issue list --label bug",
             "gh release list",
             "gh pr create --draft",
             'gh pr create --body "see https://github.com/acme/public"',
@@ -398,8 +397,8 @@ class Checkouts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for arguments in (["init", "-q", "-b", "main"], ["remote", "add", "origin", "git@github.com:acme/widget.git"]):
                 subprocess.run(["git", "-C", directory, *arguments], check=True, capture_output=True)
-            self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 12 --comments", directory))), ("acme/widget", 12))
-            self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("git push && gh pr create --fill", directory))), ("acme/widget", None))
+            self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 12 --comments", directory))), ("acme/widget", 12, None))
+            self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("git push && gh pr create --fill", directory))), ("acme/widget", None, None))
             with self.assertRaises(CONTEXT.Unfollowable):
                 CONTEXT.reached(CONTEXT.call_targets(bash("git push && gh pr create --repo acme/other", directory)))
             with self.assertRaises(CONTEXT.Unfollowable):
@@ -410,7 +409,7 @@ class Checkouts(unittest.TestCase):
             for cwd in (empty, None, "relative/path"):
                 with self.assertRaises(CONTEXT.Unfollowable):
                     CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 12", cwd)))
-        self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 12 -R acme/api"))), ("acme/api", 12))
+        self.assertEqual(CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 12 -R acme/api"))), ("acme/api", 12, None))
 
 
 class Answers(unittest.TestCase):
@@ -482,12 +481,259 @@ class Answers(unittest.TestCase):
                 CONTEXT.answer_of(payload)
 
     def test_the_query_asks_for_the_item_only_when_the_call_names_one(self):
-        self.assertEqual(CONTEXT.variables_of("acme/api", 12), {"owner": "acme", "name": "api", "number": 12, "withNumber": True})
-        self.assertEqual(CONTEXT.variables_of("acme/api", None), {"owner": "acme", "name": "api", "number": 0, "withNumber": False})
+        named = CONTEXT.variables_of("acme/api", 12)
+        self.assertEqual({key: named[key] for key in ("owner", "name", "number", "withNumber")}, {"owner": "acme", "name": "api", "number": 12, "withNumber": True})
+        self.assertEqual((named["withIssues"], named["withPullRequests"]), (False, False))
+        self.assertEqual((CONTEXT.variables_of("acme/api", None)["number"], CONTEXT.variables_of("acme/api", None)["withNumber"]), (0, False))
 
     def test_the_graphql_endpoint_sits_beside_the_rest_root(self):
         self.assertEqual(CONTEXT.graphql_url("https://api.github.com"), "https://api.github.com/graphql")
         self.assertEqual(CONTEXT.graphql_url("https://ghe.example/api/v3"), "https://ghe.example/api/graphql")
+
+
+def issues(scope, first=30, **fields):
+    return Listing("issues", scope, first, **fields)
+
+
+def pulls(scope, first=30, **fields):
+    return Listing("pull_requests", scope, first, **fields)
+
+
+OPEN, ALL_ISSUES, ALL_PULLS = ("OPEN",), ("OPEN", "CLOSED"), ("OPEN", "CLOSED", "MERGED")
+
+
+class GhListings(unittest.TestCase):
+    def listed(self, command):
+        [target] = CONTEXT.bash_targets(command, "/w")
+        return target.listing
+
+    def test_a_list_gh_reads_through_graphql_is_repeated_in_its_order(self):
+        for command, expected in [
+            ("gh issue list", issues(PREFIX, states=OPEN)),
+            ("gh issue ls --json number,title --jq '.[].title'", issues(PREFIX, states=OPEN)),
+            ("gh issue list -s closed -L 5", issues(PREFIX, 5, states=("CLOSED",))),
+            ("gh issue list --state=all --limit=100", issues(PREFIX, 100, states=ALL_ISSUES)),
+            ("gh issue list -sall -L50", issues(PREFIX, 50, states=ALL_ISSUES)),
+            ("gh issue list -s=OPEN", issues(PREFIX, states=OPEN)),
+            ("gh issue list -A ana -a bo --mention cy", issues(PREFIX, states=OPEN, filters=(("createdBy", "ana"), ("assignee", "bo"), ("mentioned", "cy")))),
+            ("gh pr list", pulls(PREFIX, states=OPEN)),
+            ("gh pr list --state all --limit 5", pulls(PREFIX, 5, states=ALL_PULLS)),
+            ("gh pr list -s closed", pulls(PREFIX, states=("CLOSED", "MERGED"))),
+            ("gh pr list -s merged -B main -H feat", pulls(PREFIX, states=("MERGED",), base="main", head="feat")),
+            ("gh pr list -R acme/api --json number -t '{{.}}'", pulls(PREFIX, states=OPEN)),
+        ]:
+            self.assertEqual(self.listed(command), expected, command)
+
+    def test_a_list_gh_searches_or_filters_by_the_viewer_is_read_whole(self):
+        for command, expected in [
+            ("gh issue list --label bug", issues(WHOLE, 100, states=OPEN, labels=("bug",))),
+            ("gh issue list -l bug -l p1", issues(WHOLE, 100, states=OPEN, labels=("bug", "p1"))),
+            ("gh issue list -l bug,p1 -L 5", issues(WHOLE, 100, states=OPEN, labels=("bug", "p1"))),
+            ("gh issue list -m v1", issues(WHOLE, 100, states=OPEN)),
+            ("gh issue list --type Bug", issues(WHOLE, 100, states=OPEN)),
+            ("gh issue list --app dependabot", issues(WHOLE, 100, states=OPEN)),
+            ("gh issue list -A @me -a bo", issues(WHOLE, 100, states=OPEN, filters=(("assignee", "bo"),))),
+            ("gh issue list -L 500", issues(WHOLE, 100, states=OPEN)),
+            ("gh pr list -A ana", pulls(WHOLE, 100, states=OPEN)),
+            ("gh pr list --draft", pulls(WHOLE, 100, states=OPEN)),
+            ("gh pr list -d=false -B main", pulls(WHOLE, 100, states=OPEN, base="main")),
+            ("gh pr list --app renovate -l deps", pulls(WHOLE, 100, states=OPEN, labels=("deps",))),
+            ("gh pr list -a @me -s all", pulls(WHOLE, 100, states=ALL_PULLS)),
+        ]:
+            self.assertEqual(self.listed(command), expected, command)
+
+    def test_a_list_this_provider_cannot_repeat_is_unknown(self):
+        for command in (
+            "gh issue list -S 'is:open author:ana'",
+            "gh pr list --search review-requested:@me",
+            "gh issue list --state merged",
+            "gh issue list --limit many",
+            "gh issue list -L 0",
+            "gh issue list --limit",
+            "gh issue list --unknown-flag",
+            "gh issue list -m v1 -B main",
+            "gh pr list --mention ana",
+            "gh issue list extra",
+            "gh issue list -- -x",
+            "gh pr list -wd",
+        ):
+            self.assertEqual(self.listed(command).scope, UNKNOWN, command)
+
+    def test_a_list_opened_in_the_browser_reads_nothing(self):
+        for command in ("gh issue list --web", "gh pr list -w -s all", "gh pr list --web=true"):
+            self.assertIsNone(self.listed(command), command)
+        self.assertEqual(self.listed("gh pr list --web=false"), pulls(PREFIX, states=OPEN))
+
+    def test_a_list_names_its_repository_as_other_gh_calls_do(self):
+        self.assertEqual(CONTEXT.bash_targets("gh issue list -R acme/api -L 5", "/w"), [Target("slug", "acme/api", "/w", None, issues(PREFIX, 5, states=OPEN))])
+        self.assertEqual(CONTEXT.bash_targets("GH_REPO=acme/api gh pr list", "/w"), [Target("slug", "acme/api", "/w", None, pulls(PREFIX, states=OPEN))])
+
+    def test_a_command_reading_two_listings_is_unfollowable(self):
+        with self.assertRaises(CONTEXT.Unfollowable):
+            CONTEXT.reached(CONTEXT.call_targets(bash("gh issue list -R acme/api && gh pr list -R acme/api")))
+        listed = CONTEXT.reached(CONTEXT.call_targets(bash("gh pr view 3 -R acme/api; gh pr list -R acme/api")))
+        self.assertEqual(listed, ("acme/api", 3, pulls(PREFIX, states=OPEN)))
+
+
+class McpListings(unittest.TestCase):
+    def listed(self, tool, **arguments):
+        [target] = CONTEXT.call_targets({"tool": f"mcp/github/{tool}", "arguments": {"owner": "acme", "repo": "api", **arguments}})
+        return target.listing
+
+    def test_list_issues_repeats_the_servers_graphql_read(self):
+        both = ("OPEN", "CLOSED")
+        for arguments, expected in [
+            ({}, issues(PREFIX, states=both)),
+            ({"state": "OPEN"}, issues(PREFIX, states=OPEN)),
+            ({"state": "closed"}, issues(PREFIX, states=("CLOSED",))),
+            ({"state": "all"}, issues(PREFIX, states=both)),
+            ({"labels": ["bug", "p1"], "perPage": 100}, issues(PREFIX, 100, states=both, labels=("bug", "p1"))),
+            ({"orderBy": "updated_at", "direction": "asc"}, issues(PREFIX, states=both, order=("UPDATED_AT", "ASC"))),
+            ({"orderBy": "POPULARITY", "direction": "UP"}, issues(PREFIX, states=both)),
+            ({"since": "2026-09-01"}, issues(PREFIX, states=both, filters=(("since", "2026-09-01T00:00:00Z"),))),
+            ({"since": "2026-09-01T10:00:00+02:00"}, issues(PREFIX, states=both, filters=(("since", "2026-09-01T10:00:00+02:00"),))),
+            ({"after": "Y3Vyc29yOnYy", "perPage": 10}, issues(PREFIX, 10, states=both, after="Y3Vyc29yOnYy")),
+            ({"fields": ["number"], "state": None, "labels": None}, issues(PREFIX, states=both)),
+            ({"field_filters": [{"field_name": "Priority", "value": "P1"}]}, issues(WHOLE, 100, states=both)),
+        ]:
+            self.assertEqual(self.listed("list_issues", **arguments), expected, arguments)
+
+    def test_list_issues_the_server_would_refuse_is_unknown(self):
+        for arguments in (
+            {"page": 2},
+            {"perPage": 101},
+            {"perPage": 0},
+            {"perPage": "30"},
+            {"perPage": True},
+            {"labels": "bug"},
+            {"labels": ["bug", 3]},
+            {"state": 1},
+            {"since": "yesterday"},
+            {"after": 7},
+        ):
+            self.assertEqual(self.listed("list_issues", **arguments).scope, UNKNOWN, arguments)
+
+    def test_list_pull_requests_reads_every_rest_page_up_to_the_one_asked(self):
+        for arguments, expected in [
+            ({}, pulls(PREFIX, states=OPEN)),
+            ({"state": "closed", "base": "main"}, pulls(PREFIX, states=("CLOSED", "MERGED"), base="main")),
+            ({"state": "all", "perPage": 5}, pulls(PREFIX, 5, states=ALL_PULLS)),
+            ({"sort": "updated"}, pulls(PREFIX, states=OPEN, order=("UPDATED_AT", "ASC"))),
+            ({"sort": "created", "direction": "asc"}, pulls(PREFIX, states=OPEN, order=("CREATED_AT", "ASC"))),
+            ({"perPage": 20, "page": 3}, pulls(PREFIX, 60, states=OPEN)),
+            ({"perPage": 50, "page": 3}, pulls(WHOLE, 100, states=OPEN)),
+            ({"perPage": 500}, pulls(PREFIX, 100, states=OPEN)),
+            ({"sort": "popularity", "direction": "desc"}, pulls(WHOLE, 100, states=OPEN, order=("CREATED_AT", "DESC"))),
+            ({"sort": "long-running"}, pulls(WHOLE, 100, states=OPEN, order=("CREATED_AT", "ASC"))),
+            ({"head": "ana:feat"}, pulls(WHOLE, 100, states=OPEN, head="feat")),
+            ({"head": "feat"}, pulls(WHOLE, 100, states=OPEN)),
+        ]:
+            self.assertEqual(self.listed("list_pull_requests", **arguments), expected, arguments)
+
+    def test_list_pull_requests_rest_would_refuse_is_unknown(self):
+        for arguments in (
+            {"state": "merged"},
+            {"state": "OPEN"},
+            {"sort": "comments"},
+            {"direction": "DESC"},
+            {"page": 0},
+            {"perPage": 1.5},
+            {"base": ["main"]},
+        ):
+            self.assertEqual(self.listed("list_pull_requests", **arguments).scope, UNKNOWN, arguments)
+
+    def test_only_the_two_listings_carry_one(self):
+        self.assertIsNone(self.listed("get_file_contents", path="README.md"))
+        self.assertIsNone(self.listed("search_issues", query="bug"))
+
+
+def listed_node(number, login, association, typename="User", editor=None):
+    return {"number": number, **written(login, association, typename, editor)}
+
+
+# A recorded `issues` connection: a member's issue a collaborator edited, a
+# bot's issue, an issue by an account since deleted, and one edited by an
+# account since deleted.
+ISSUES_PAYLOAD = {
+    "data": {
+        "viewer": {"login": "ana"},
+        "repository": {
+            "nameWithOwner": "acme/widget",
+            "visibility": "PUBLIC",
+            "viewerPermission": "ADMIN",
+            "parent": None,
+            "issues": page(
+                [
+                    listed_node(41, "ana", "MEMBER", editor="bo"),
+                    listed_node(40, "dependabot", "NONE", "Bot"),
+                    listed_node(39, None, "NONE"),
+                    {**listed_node(38, "cy", "CONTRIBUTOR"), "lastEditedAt": "2026-09-02T10:00:00Z"},
+                ]
+            ),
+        },
+    }
+}
+
+
+class ListingAnswers(unittest.TestCase):
+    def test_a_listing_answer_names_each_items_author_and_editor(self):
+        self.assertEqual(
+            CONTEXT.answer_of(ISSUES_PAYLOAD, issues(PREFIX, states=OPEN))["issues"],
+            {
+                "items": [
+                    {"number": 41, "author": {"login": "ana", "association": "MEMBER"}, "bot": False, "last_editor": "bo"},
+                    {"number": 40, "author": {"login": "dependabot", "association": "NONE"}, "bot": True},
+                    {"number": 39, "author": {"login": None, "association": "NONE"}, "bot": False},
+                    {"number": 38, "author": {"login": "cy", "association": "CONTRIBUTOR"}, "bot": False, "last_editor": None},
+                ],
+                "truncated": False,
+            },
+        )
+
+    def test_a_further_page_truncates_only_a_listing_read_whole(self):
+        payload = json.loads(json.dumps(ISSUES_PAYLOAD))
+        payload["data"]["repository"]["issues"]["pageInfo"]["hasNextPage"] = True
+        self.assertFalse(CONTEXT.answer_of(payload, issues(PREFIX, states=OPEN))["issues"]["truncated"])
+        self.assertTrue(CONTEXT.answer_of(payload, issues(WHOLE, 100, states=OPEN))["issues"]["truncated"])
+
+    def test_a_listing_this_provider_cannot_repeat_is_truncated_and_not_fetched(self):
+        payload = json.loads(json.dumps(ISSUES_PAYLOAD))
+        del payload["data"]["repository"]["issues"]
+        self.assertEqual(CONTEXT.answer_of(payload, pulls(UNKNOWN, 0))["pull_requests"], {"items": [], "truncated": True})
+        variables = CONTEXT.variables_of("acme/widget", None, pulls(UNKNOWN, 0))
+        self.assertEqual((variables["withIssues"], variables["withPullRequests"]), (False, False))
+
+    def test_a_response_without_the_listing_is_a_failure(self):
+        with self.assertRaises(RuntimeError):
+            CONTEXT.answer_of(ISSUES_PAYLOAD, pulls(PREFIX, states=OPEN))
+
+    def test_the_query_repeats_the_listings_filters(self):
+        listed = issues(PREFIX, 5, states=OPEN, labels=("bug",), order=("UPDATED_AT", "ASC"), filters=(("createdBy", "ana"),), after="Y3Vy")
+        self.assertEqual(
+            CONTEXT.variables_of("acme/widget", None, listed),
+            {
+                "owner": "acme",
+                "name": "widget",
+                "number": 0,
+                "withNumber": False,
+                "withIssues": True,
+                "withPullRequests": False,
+                "first": 5,
+                "after": "Y3Vy",
+                "issueStates": ["OPEN"],
+                "pullRequestStates": None,
+                "labels": ["bug"],
+                "orderBy": {"field": "UPDATED_AT", "direction": "ASC"},
+                "filterBy": {"createdBy": "ana"},
+                "baseRefName": None,
+                "headRefName": None,
+            },
+        )
+        pulled = CONTEXT.variables_of("acme/widget", None, pulls(WHOLE, 100, states=ALL_PULLS, base="main", head="feat"))
+        self.assertEqual(
+            {key: pulled[key] for key in ("withPullRequests", "first", "pullRequestStates", "issueStates", "labels", "filterBy", "baseRefName", "headRefName")},
+            {"withPullRequests": True, "first": 100, "pullRequestStates": list(ALL_PULLS), "issueStates": None, "labels": None, "filterBy": None, "baseRefName": "main", "headRefName": "feat"},
+        )
 
 
 class Envelope(unittest.TestCase):
@@ -507,6 +753,15 @@ class Envelope(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(github.seen, [("/graphql", "Bearer ghp-fixture", CONTEXT.variables_of("acme/widget", 12))])
         self.assertEqual(json.loads(result.stdout), {"version": 1, "answer": CONTEXT.answer_of(PULL_REQUEST_PAYLOAD)})
+
+    def test_a_listing_costs_the_same_one_query(self):
+        artifact = {"tool": "mcp/github/list_issues", "arguments": {"owner": "acme", "repo": "widget", "state": "OPEN"}}
+        with Loopback(200, ISSUES_PAYLOAD) as github:
+            result = self.run_script(consult(artifact), github.env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed = issues(PREFIX, states=OPEN)
+        self.assertEqual(github.seen, [("/graphql", "Bearer ghp-fixture", CONTEXT.variables_of("acme/widget", None, listed))])
+        self.assertEqual(json.loads(result.stdout), {"version": 1, "answer": CONTEXT.answer_of(ISSUES_PAYLOAD, listed)})
 
     def test_a_github_failure_or_an_unfollowable_command_exits_nonzero(self):
         artifact = {"tool": "mcp/github/get_file_contents", "arguments": {"owner": "acme", "repo": "gone"}}

@@ -28,7 +28,11 @@ repository's OWNER, MEMBER, or COLLABORATOR, or a bot — a GitHub App
 installed on the repository writes as its people — and no list was
 truncated; an outsider, a truncated list, an error
 entry, or no context at all makes it `suspicious`. A listing of issues or
-pull requests names no single item and is `suspicious`. Other repository
+pull requests (`list_issues`, `list_pull_requests`) keeps the session's
+trust only when the provider's answer for that repository holds the
+listing, not truncated, and every listed item's author, and its last
+editor when it was edited, is the repository's OWNER, MEMBER, or
+COLLABORATOR, or a bot; otherwise it is `suspicious`. Other repository
 content (files, commits, branches, tags, releases) is pushed by the
 repository's writers and merged from pull requests its readers open: a
 public repository's readers are anyone, and a fork's content came from
@@ -163,8 +167,8 @@ TEAM = ("OWNER", "MEMBER", "COLLABORATOR")
 NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
 # Reads that return what people wrote on one pull request or issue.
 DISCUSSIONS = {"pull_request_read": "pull_request", "issue_read": "issue"}
-# Reads that return what many people wrote on many of them.
-LISTINGS = {"list_issues", "list_pull_requests"}
+# Reads that return what the authors of many of them wrote.
+LISTINGS = {"list_issues": "issues", "list_pull_requests": "pull_requests"}
 
 
 @dataclass(frozen=True)
@@ -210,15 +214,21 @@ def must_reach(visibility, owner, repo):
             raise ValueError(f"unexpected repository visibility {visibility!r}")
 
 
+def context_answer(call, owner, repo):
+    """The `github` context answer when it is about this very repository."""
+    answer = (call.context or {}).get("answer")
+    if not isinstance(answer, dict):
+        return None
+    named = (answer.get("repository") or {}).get("name")
+    return answer if isinstance(named, str) and named.lower() == f"{owner}/{repo}".lower() else None
+
+
 def written_by_the_team(call, owner, repo):
     """Whether the context shows that only the repository's own people wrote
     the pull request or issue the call reads."""
-    answer = (call.context or {}).get("answer")
-    if not isinstance(answer, dict) or call.number is None:
-        return False
-    named = (answer.get("repository") or {}).get("name")
-    item = answer.get(DISCUSSIONS[call.tool])
-    if not isinstance(named, str) or named.lower() != f"{owner}/{repo}".lower() or not isinstance(item, dict):
+    answer = context_answer(call, owner, repo)
+    item = answer.get(DISCUSSIONS[call.tool]) if answer and call.number is not None else None
+    if not isinstance(item, dict):
         return False
     participants = item.get("participants")
     if item.get("number") != call.number or item.get("truncated") is not False or not participants:
@@ -235,13 +245,28 @@ def written_by_the_team(call, owner, repo):
     return all(login in team for login in wrote)
 
 
+def listed_by_the_team(call, owner, repo):
+    """Whether the context shows that only the repository's own people wrote
+    and edited every issue or pull request the listing returns."""
+    answer = context_answer(call, owner, repo)
+    listed = answer.get(LISTINGS[call.tool]) if answer else None
+    items = listed.get("items") if isinstance(listed, dict) else None
+    if not isinstance(items, list) or listed.get("truncated") is not False or not all(isinstance(item, dict) for item in items):
+        return False
+    authors = [(item.get("author") if isinstance(item.get("author"), dict) else {}, item.get("bot") is True) for item in items]
+    team = {author.get("login") for author, bot in authors if author.get("association") in TEAM or bot}
+    team.discard(None)
+    wrote = [author.get("login") for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
+    return all(login in team for login in wrote)
+
+
 def keeps_trust(call, repository, owner, repo):
     """Trust follows the author: see the module docstring."""
     match call.tool:
         case tool if tool in DISCUSSIONS:
             return written_by_the_team(call, owner, repo)
         case tool if tool in LISTINGS:
-            return False
+            return listed_by_the_team(call, owner, repo)
         case _:
             return repository.visibility != "public" and not repository.fork
 

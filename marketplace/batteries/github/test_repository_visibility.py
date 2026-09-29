@@ -92,6 +92,20 @@ def pull_request_read(context, number=12):
     return ANNOTATOR.Call("pull_request_read", number, context)
 
 
+def listed(number, login, association="MEMBER", bot=False, **edited):
+    """One listed item, as context.py shapes it; `last_editor` only when edited."""
+    return {"number": number, "author": {"login": login, "association": association}, "bot": bot, **edited}
+
+
+def listing(kind, items, name="acme/api", truncated=False):
+    """A `github` context answer for one listing, as context.py shapes it."""
+    return {"answer": {"viewer": "ana", "repository": {"name": name, "visibility": "public"}, kind: {"items": items, "truncated": truncated}}}
+
+
+def list_issues(context):
+    return ANNOTATOR.Call("list_issues", None, context)
+
+
 def read_trust(call, repository=PUBLIC):
     return ANNOTATOR.annotation(ANNOTATOR.CONTENT, call, repository, "acme", "api")["delta"].get("trust")
 
@@ -173,9 +187,44 @@ class AnswerTests(unittest.TestCase):
             self.assertEqual(read_trust(call, PRIVATE), "suspicious", call)
         self.assertIsNone(read_trust(pull_request_read(discussion(team, name="Acme/API"))))
 
-    def test_a_listing_of_issues_or_pull_requests_is_suspicious(self):
-        for tool in ["list_issues", "list_pull_requests"]:
-            self.assertEqual(read_trust(ANNOTATOR.Call(tool, None, None), PRIVATE), "suspicious")
+    def test_a_team_only_listing_keeps_trust(self):
+        for tool, kind in [("list_issues", "issues"), ("list_pull_requests", "pull_requests")]:
+            items = [listed(1, "ana"), listed(2, "bo", "COLLABORATOR", last_editor="ana"), listed(3, "cy", "OWNER")]
+            self.assertIsNone(read_trust(ANNOTATOR.Call(tool, None, listing(kind, items))), tool)
+        self.assertIsNone(read_trust(list_issues(listing("issues", []))))
+
+    def test_an_installed_apps_listed_item_keeps_trust(self):
+        items = [listed(1, "ana"), listed(2, "dependabot", "NONE", bot=True, last_editor="dependabot")]
+        self.assertIsNone(read_trust(list_issues(listing("issues", items))))
+
+    def test_an_outsiders_listed_item_or_edit_makes_the_listing_suspicious(self):
+        team = [listed(1, "ana"), listed(2, "bo")]
+        for outsider in [
+            listed(3, "mallory", "CONTRIBUTOR"),
+            listed(3, "mallory", "NONE"),
+            listed(3, None, "NONE"),
+            listed(3, None, "MEMBER"),
+            listed(3, "ana", "MEMBER", last_editor="mallory"),
+            listed(3, "ana", "MEMBER", last_editor=None),
+            {"number": 3, "author": "ana", "bot": False},
+            "ana",
+        ]:
+            self.assertEqual(read_trust(list_issues(listing("issues", [*team, outsider])), PRIVATE), "suspicious", outsider)
+
+    def test_a_truncated_absent_or_mismatched_listing_is_suspicious(self):
+        team = [listed(1, "ana")]
+        for call in [
+            list_issues(listing("issues", team, truncated=True)),
+            list_issues(listing("issues", team, truncated=None)),
+            list_issues(None),
+            list_issues({"error": "non_success status=1"}),
+            list_issues({"answer": None}),
+            list_issues(listing("issues", team, name="acme/other")),
+            list_issues(listing("pull_requests", team)),
+            list_issues({"answer": {"repository": {"name": "acme/api"}, "issues": {"items": "ana", "truncated": False}}}),
+            list_issues(discussion([member("ana")], kind="issue")),
+        ]:
+            self.assertEqual(read_trust(call, PRIVATE), "suspicious", call)
 
     def test_only_a_reported_visibility_and_fork_flag_are_answered(self):
         for payload in [
