@@ -43,9 +43,13 @@ covers the complete flow.
 
 ## Local dashboard and battery setup
 
-Run `appa ui` to open the local dashboard. Status shows installed battery, policy rule, and covered MCP namespace counts.
-Policies groups contracts by MCP namespace; Batteries shows readiness and inline configuration.
-The MCP count excludes APPA’s internal namespace and wildcard namespaces.
+Run `appa ui` to open the local dashboard. Overview shows which MCP servers
+have rules and where each rule comes from (the root configuration or a
+battery), and opens each server into its contracts. Its server list joins the
+MCP servers Claude Code configures with the namespaces the policy names; it
+excludes APPA's internal namespace. Claude Code reports no tool inventory, so
+coverage is per server, not per tool. Batteries shows readiness and inline
+configuration.
 The UI checks battery readiness on opening and uses the battery result as its
 status; absence of a token alone is not a failure when CLI login is supported.
 `appa describe` runs the same readiness checks for configured batteries.

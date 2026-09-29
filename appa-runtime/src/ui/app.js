@@ -90,21 +90,262 @@ function render() {
   content.replaceChildren();
   document.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
   if (view === 'overview') overview();
-  else if (view === 'policies') policies();
   else batteries();
 }
 function refresh() { return work(async () => { state = await api('state'); render(); }); }
+const serversOpen = new Set();
+const rulesOpen = new Set();
+let query = '';
+let serverFilter = 'all';
+const CUSTOM = 'root configuration';
+const kinds = [
+  { key: 'battery', label: 'Battery rules' },
+  { key: 'custom', label: 'Custom rules only' },
+  { key: 'unknown', label: 'Rules, source unknown' },
+  { key: 'none', label: 'No rules' },
+];
+function namespaceOf(rule) {
+  const name = rule.name ?? '';
+  if (name === '*') return null;
+  if (typeof rule.server === 'string') return rule.server;
+  const [kind, space] = name.split('/');
+  if (kind === 'mcp' && space) return space;
+  if (kind === 'host' && space) return `host:${space}`;
+  return 'other';
+}
+function serverTitle(key) {
+  if (key === 'host:claude-code') return 'Claude Code built-in tools';
+  if (key.startsWith('host:')) return `${key.slice(5)} built-in tools`;
+  if (key === '*') return 'Any MCP server';
+  if (key === 'other') return 'Other tools';
+  return key;
+}
+function isMcp(key) { return !key.startsWith('host:') && key !== '*' && key !== 'other'; }
+function sourceOf(rule) { return state.origins[rule.name] ?? null; }
+function servers() {
+  const map = new Map();
+  const entry = key => {
+    if (!map.has(key)) map.set(key, { key, title: serverTitle(key), rules: [], configured: false });
+    return map.get(key);
+  };
+  for (const rule of state.policy?.tool ?? []) {
+    const key = namespaceOf(rule);
+    if (key && key !== 'appa') entry(key).rules.push(rule);
+  }
+  for (const name of state.configured_servers) if (name !== 'appa') entry(name).configured = true;
+  for (const server of map.values()) {
+    const sources = server.rules.map(sourceOf);
+    server.sources = [...new Set(sources.filter(Boolean))];
+    server.tools = new Set(server.rules.map(rule => rule.name.split('(')[0])).size;
+    server.kind = !server.rules.length ? 'none'
+      : server.sources.some(source => source !== CUSTOM) ? 'battery'
+      : sources.every(Boolean) ? 'custom' : 'unknown';
+  }
+  return [...map.values()].sort((a, b) => Number(isMcp(a.key)) - Number(isMcp(b.key)) || a.title.localeCompare(b.title));
+}
+function batteryByName(name) { return state.batteries.find(b => b.name === name); }
+function brokenBattery(b) { return b?.check?.status === 'needs_configuration' || b?.check?.status === 'unavailable'; }
+function plural(n, one, many = `${one}s`) { return `${n} ${n === 1 ? one : many}`; }
+function svg(tag, attrs) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+  return node;
+}
 function overview() {
-  heading('Status', '', button('Refresh', refresh, 'secondary'));
-  const rules = state.policy?.tool ?? [];
-  const servers = new Set(rules.map(rule => rule.name?.split('/'))
-    .filter(parts => parts?.[0] === 'mcp' && parts[1] && parts[1] !== 'appa' && !/[?*\[]/.test(parts[1]))
-    .map(parts => parts[1]));
-  const metrics = table(['Batteries installed', 'Policy rules', 'MCPs covered'], 'stats');
-  const body = el('tbody'), row = el('tr');
-  [state.batteries.length, rules.length, servers.size].forEach(value => row.append(el('td', value)));
-  body.append(row); metrics.node.append(body); content.append(metrics.wrap);
+  heading('Policy coverage', '', button('Refresh', refresh, 'secondary'));
+  const list = servers(), mcp = list.filter(s => isMcp(s.key));
+  const wildcard = (state.policy?.tool ?? []).some(rule => rule.name === '*');
+  const cards = el('div', undefined, 'cards');
+  cards.append(coverageCard(mcp, wildcard), batteriesCard());
+  content.append(cards);
+  if (!Object.keys(state.origins).length && (state.policy?.tool ?? []).length) {
+    content.append(el('p', 'Rule sources are unavailable: the running policy differs from the configuration on disk.', 'muted'));
+  }
+  serverTable(list, wildcard);
   errors();
+}
+function coverageCard(mcp, wildcard) {
+  const card = el('section', undefined, 'card');
+  const head = el('div');
+  head.append(el('h2', 'MCP servers'), el('p', `What decides calls to each of your ${plural(mcp.length, 'MCP server')}.`, 'muted'));
+  card.append(head);
+  if (!mcp.length) { card.append(el('p', 'No MCP servers are configured or named by a rule.', 'empty')); return card; }
+  const count = key => mcp.filter(s => s.kind === key).length;
+  const covered = mcp.length - count('none');
+  const pct = n => Math.round(n * 100 / mcp.length);
+  const body = el('div', undefined, 'coverage');
+  const donut = el('div', undefined, 'donut');
+  const chart = svg('svg', { viewBox: '0 0 120 120', 'aria-hidden': 'true' });
+  const radius = 48, circumference = 2 * Math.PI * radius;
+  chart.append(svg('circle', { cx: 60, cy: 60, r: radius, class: 'track' }));
+  let offset = 0;
+  for (const kind of kinds) {
+    const length = count(kind.key) / mcp.length * circumference;
+    if (!length || kind.key === 'none') { offset += length; continue; }
+    chart.append(svg('circle', { cx: 60, cy: 60, r: radius, class: `arc ${kind.key}`,
+      'stroke-dasharray': `${length} ${circumference}`, 'stroke-dashoffset': -offset }));
+    offset += length;
+  }
+  const center = el('div', undefined, 'donut-center');
+  center.append(el('strong', `${pct(covered)}%`), el('span', 'have a rule'));
+  donut.append(chart, center);
+  donut.setAttribute('role', 'img');
+  donut.setAttribute('aria-label', `${covered} of ${mcp.length} MCP servers have a rule`);
+  const legend = el('ul', undefined, 'legend');
+  for (const kind of kinds) {
+    const n = count(kind.key);
+    if (!n && kind.key === 'unknown') continue;
+    const item = el('li');
+    item.append(el('span', undefined, `swatch ${kind.key}`), el('span', kind.label), el('span', n, 'value'), el('span', `${pct(n)}%`, 'share'));
+    legend.append(item);
+  }
+  body.append(donut, legend);
+  card.append(body);
+  if (count('none')) {
+    card.append(el('p', wildcard
+      ? 'Calls to tools without a rule go to the wildcard annotator, one call at a time.'
+      : 'Calls to tools without a rule are refused.', 'muted'));
+  }
+  return card;
+}
+function batteriesCard() {
+  const card = el('section', undefined, 'card');
+  const head = el('div');
+  head.append(el('h2', 'Batteries'), el('p', 'Ready-made rules for common MCP servers.', 'muted'));
+  const inUse = state.batteries.filter(b => b.included || b.configured);
+  const broken = inUse.filter(brokenBattery);
+  const tiles = el('div', undefined, 'tiles');
+  const tile = (label, value, names, kind = '') => {
+    const node = el('div', undefined, `tile ${kind}`);
+    node.append(el('span', label, 'tile-label'), el('strong', value));
+    if (names.length) node.append(el('span', names.join(', '), 'tile-names'));
+    return node;
+  };
+  tiles.append(
+    tile('Included', inUse.length, inUse.map(b => names[b.name] ?? b.name)),
+    tile('Needs setup', broken.length, broken.map(b => names[b.name] ?? b.name), broken.length ? 'alert' : ''),
+    tile('In catalog', state.batteries.length, []),
+  );
+  const actions = el('div', undefined, 'actions');
+  actions.append(button('Open batteries', () => navigate('batteries'), 'secondary'));
+  card.append(head, tiles, actions);
+  return card;
+}
+function sourceChip(source) {
+  if (source === CUSTOM) return el('span', 'custom', 'chip');
+  const battery = batteryByName(source);
+  return brokenBattery(battery) ? el('span', `${source} · needs setup`, 'chip alert') : el('span', source, 'chip battery');
+}
+function shortName(name) {
+  const parts = name.split('/');
+  return (parts[0] === 'mcp' || parts[0] === 'host') && parts.length > 2 ? parts.slice(2).join('/') : name;
+}
+function contractText(rule) {
+  const key = k => /^[A-Za-z0-9_-]+$/.test(k) ? k : JSON.stringify(k);
+  const value = v => typeof v === 'string' ? JSON.stringify(v)
+    : Array.isArray(v) ? `[${v.map(value).join(', ')}]`
+    : v && typeof v === 'object' ? (Object.keys(v).length ? `{ ${Object.entries(v).map(([k, x]) => `${key(k)} = ${value(x)}`).join(', ')} }` : '{}')
+    : String(v);
+  const { name, ...rest } = rule;
+  return ['[[policy.tool]]', `name = ${value(name)}`, ...Object.entries(rest).map(([k, v]) => `${key(k)} = ${value(v)}`)].join('\n');
+}
+function clickable(row, open, toggle) {
+  row.tabIndex = 0;
+  row.setAttribute('aria-expanded', String(open));
+  row.addEventListener('click', toggle);
+  row.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+  });
+}
+function serverMatches(server) {
+  if (serverFilter === 'none' && server.rules.length) return false;
+  if (serverFilter === 'setup' && !server.sources.some(source => brokenBattery(batteryByName(source)))) return false;
+  if (serverFilter === 'battery' && !server.sources.some(source => source !== CUSTOM)) return false;
+  if (serverFilter === 'custom' && !server.sources.includes(CUSTOM)) return false;
+  return !query || server.title.toLowerCase().includes(query) || server.rules.some(rule => rule.name.toLowerCase().includes(query));
+}
+function serverTable(list, wildcard) {
+  content.append(el('h2', 'Servers and built-in tools'));
+  const toolbar = el('div', undefined, 'toolbar');
+  const search = el('input', undefined, 'search');
+  search.type = 'search'; search.placeholder = 'Search servers and rules'; search.value = query;
+  search.setAttribute('aria-label', 'Search servers and rules');
+  const filter = el('select');
+  filter.setAttribute('aria-label', 'Filter servers');
+  [['all', 'All servers'], ['none', 'No rules'], ['setup', 'Battery needs setup'], ['battery', 'Battery rules'], ['custom', 'Custom rules']]
+    .forEach(([value, label]) => { const option = el('option', label); option.value = value; filter.append(option); });
+  filter.value = serverFilter;
+  const total = el('span', undefined, 'muted');
+  toolbar.append(search, filter, total);
+  content.append(toolbar);
+  const result = table(['Server', 'Rules from', 'Rules', ''], 'servers');
+  const body = el('tbody');
+  result.node.append(body);
+  content.append(result.wrap);
+  function draw() {
+    body.replaceChildren();
+    const shown = list.filter(serverMatches);
+    total.textContent = `${shown.length} of ${plural(list.length, 'server')}`;
+    for (const server of shown) {
+      const open = serversOpen.has(server.key) || (query && server.rules.some(rule => rule.name.toLowerCase().includes(query)));
+      const row = el('tr', undefined, 'server-row');
+      const name = el('td');
+      name.append(el('span', server.title, 'server-name'));
+      if (isMcp(server.key)) name.append(el('span', server.configured ? 'Configured in Claude Code' : 'Named by rules', 'server-origin'));
+      const sources = el('td');
+      if (server.sources.length) sources.append(...server.sources.map(sourceChip));
+      else sources.append(el('span', server.rules.length ? 'Unknown' : 'None', 'muted'));
+      const rules = el('td', server.rules.length ? `${plural(server.rules.length, 'rule')} · ${plural(server.tools, 'tool')}` : 'No rules', server.rules.length ? '' : 'muted');
+      const chevron = el('td', open ? '▾' : '▸', 'chevron');
+      row.append(name, sources, rules, chevron);
+      clickable(row, open, () => { open ? serversOpen.delete(server.key) : serversOpen.add(server.key); draw(); });
+      body.append(row);
+      if (open) body.append(serverDetail(server, wildcard, draw));
+    }
+    if (!shown.length) {
+      const row = el('tr'), cell = el('td', 'No matching servers.', 'empty'); cell.colSpan = 4; row.append(cell); body.append(row);
+    }
+  }
+  search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); draw(); });
+  filter.addEventListener('change', () => { serverFilter = filter.value; draw(); });
+  draw();
+}
+function serverDetail(server, wildcard, redraw) {
+  const row = el('tr', undefined, 'server-detail'), cell = el('td');
+  cell.colSpan = 4;
+  row.append(cell);
+  if (!server.rules.length) {
+    cell.append(el('p', wildcard
+      ? 'No rule names this server. The wildcard annotator judges each call to its tools.'
+      : 'No rule names this server. Calls to its tools are refused.', 'muted'));
+    return row;
+  }
+  const groups = new Map();
+  for (const rule of server.rules) {
+    if (query && !rule.name.toLowerCase().includes(query) && !server.title.toLowerCase().includes(query)) continue;
+    const source = sourceOf(rule) ?? 'unknown';
+    if (!groups.has(source)) groups.set(source, []);
+    groups.get(source).push(rule);
+  }
+  for (const [source, rules] of groups) {
+    const group = el('div', undefined, 'rule-group');
+    const label = source === CUSTOM ? 'Custom rules' : source === 'unknown' ? 'Source unknown' : `${names[source] ?? source} battery`;
+    group.append(el('h3', `${label} · ${rules.length}`));
+    const list = el('ul', undefined, 'rules');
+    for (const rule of rules) {
+      const id = `${source}\u0000${rule.name}`, open = rulesOpen.has(id);
+      const item = el('li');
+      const line = el('div', shortName(rule.name), 'rule-line');
+      line.title = rule.name;
+      clickable(line, open, () => { open ? rulesOpen.delete(id) : rulesOpen.add(id); redraw(); });
+      item.append(line);
+      if (open) item.append(el('pre', contractText(rule)));
+      list.append(item);
+    }
+    group.append(list);
+    cell.append(group);
+  }
+  return row;
 }
 function needsSetup(b) { return b.check?.status === 'needs_configuration'; }
 function relevant(b) { return b.selected || b.included || b.configured || selected.has(b.name); }
@@ -225,57 +466,6 @@ function check(list) {
     state = await api('check', { batteries: list.map(b => b.name) }); render(); notices.replaceChildren();
   });
 }
-function policies() {
-  heading('Policies', state.runtime ? 'Active contracts, grouped by MCP namespace.' : 'Configured contracts. Enforcement is awaiting setup.', button('Refresh', refresh, 'secondary'));
-  const search = el('input', undefined, 'search');
-  search.type = 'search'; search.placeholder = 'Filter by server or tool'; search.setAttribute('aria-label', 'Filter policies');
-  content.append(search);
-  const groups = new Map();
-  for (const rule of state.policy?.tool ?? []) {
-    const name = rule.name ?? 'Unnamed rule', server = name.startsWith('mcp/') ? name.split('/')[1] : 'Built-in / other';
-    if (!groups.has(server)) groups.set(server, []);
-    groups.get(server).push(rule);
-  }
-  for (const server of state.configured_servers) if (server !== 'appa' && !groups.has(server)) groups.set(server, []);
-  const results = el('div'); content.append(results);
-  function draw() {
-    results.replaceChildren(); const query = search.value.trim().toLowerCase();
-    for (const [server, all] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-      const rules = all.filter(rule => `${server} ${rule.name}`.toLowerCase().includes(query));
-      if (query && !rules.length && !server.toLowerCase().includes(query)) continue;
-      const group = el('details', undefined, 'policy-group'); group.open = true;
-      const summary = el('summary', server); summary.append(el('small', ` ${rules.length} ${rules.length === 1 ? 'contract' : 'contracts'}`)); group.append(summary);
-      const aliases = state.runtime?.server_aliases?.[server];
-      if (aliases?.length) group.append(el('p', `Connections: ${aliases.join(', ')}`, 'muted'));
-      if (!all.length) group.append(el('p', 'No contracts under this namespace. Check aliases or annotation coverage.', 'muted'));
-      else {
-        const result = table(['Tool contract', 'Source'], 'policy-table'), body = el('tbody');
-        for (const rule of rules) {
-          const row = el('tr'), cell = el('td'), details = el('details');
-          details.append(el('summary', rule.name), el('pre', JSON.stringify(rule, null, 2))); cell.append(details);
-          row.append(cell, el('td', state.origins[rule.name] ?? (state.runtime ? 'Active configuration' : 'Configuration'))); body.append(row);
-        }
-        result.node.append(body); group.append(result.wrap);
-      }
-      results.append(group);
-    }
-    if (!results.children.length) results.append(el('p', 'No matching policy contracts.', 'empty'));
-  }
-  search.addEventListener('input', draw); draw();
-  const report = state.runtime?.validation;
-  if (report) {
-    const details = el('details', undefined, 'check-list'); details.append(el('summary', 'Coverage checks'));
-    const result = table(['Tool', 'Status', 'Details']), body = el('tbody');
-    for (const item of report.tools ?? []) {
-      const row = el('tr'), cell = el('td'); cell.append(status(item.status, item.status === 'valid' ? 'good' : 'warn'));
-      row.append(el('td', item.tool, 'mono'), cell, el('td', item.reason ?? '')); body.append(row);
-    }
-    result.node.append(body); details.append(result.wrap);
-    for (const error of [...(report.errors ?? []), ...(report.diagnostics ?? [])]) details.append(el('p', error, 'muted'));
-    content.append(details);
-  }
-  content.append(el('p', `${state.runtime?.inventory?.tools?.length ?? 0} observed tools. Missing observations leave coverage unverified.`, 'muted'));
-}
 function navigate(next) { if (busy || !state) return; view = next; notices.replaceChildren(); render(); }
 document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => navigate(b.dataset.view)));
 document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
@@ -287,6 +477,6 @@ document.querySelector('.brand').addEventListener('click', event => { event.prev
   } catch (error) { content.replaceChildren(el('h1', 'Connection needed'), el('p', error.message, 'description')); }
 })();
 setInterval(async () => {
-  if (!state || busy || view !== 'overview') return;
-  try { state = await api('state'); if (view === 'overview' && !busy) render(); } catch { /* Explicit actions surface errors. */ }
+  if (!state || busy || view !== 'overview' || content.contains(document.activeElement)) return;
+  try { state = await api('state'); if (view === 'overview' && !busy && !content.contains(document.activeElement)) render(); } catch { /* Explicit actions surface errors. */ }
 }, 10000);
