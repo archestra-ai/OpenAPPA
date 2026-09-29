@@ -103,7 +103,7 @@ function table(headers, cls = '') {
 function errors() {
   if (!state.errors.length) return;
   const section = el('div', undefined, 'errors');
-  state.errors.forEach(error => section.append(el('div', error, 'notice error')));
+  state.errors.forEach(error => section.append(rich(error, 'div', 'notice error')));
   content.append(section);
 }
 function render() {
@@ -173,11 +173,11 @@ function overview() {
   const intro = el('p', 'What your current OpenAPPA configuration protects. ', 'description');
   if (state.config) { intro.append('Read from '); intro.append(el('code', state.config)); intro.append('.'); }
   content.append(intro);
+  errors();
   const list = servers();
   attention();
   content.append(summary(list));
   serverTable(list);
-  errors();
 }
 // One call to action per included battery that cannot work yet, with the reason to fix it.
 function attention() {
@@ -243,10 +243,8 @@ function summary(list) {
   if (!inUse.length) chips.append(el('span', 'None yet.', 'fact-note'));
   batteriesFact.append(chips);
 
-  card.append(covered, sources, batteriesFact);
-  const wrap = el('div');
-  wrap.append(card, el('p', fallbackText(), 'fallback'));
-  return wrap;
+  card.append(covered, sources, batteriesFact, rich(fallbackText(), 'p', 'summary-foot'));
+  return card;
 }
 // What happens to a call no rule names, read from the policy's `*` rule.
 function fallbackText() {
@@ -256,7 +254,7 @@ function fallbackText() {
   if (!wildcard.annotator) return 'Tools with no rule: one shared default rule applies.';
   const annotator = (policy.annotator ?? []).find(a => a.name === wildcard.annotator);
   const asks = (annotator?.marks ?? []).length > 0;
-  return `Tools with no rule: before each call, the ${wildcard.annotator} annotator writes a rule for that call only.${asks ? ' That rule can ask you to approve the call.' : ''}`;
+  return `Tools with no rule: before each call, the \`${wildcard.annotator}\` annotator writes a rule for that call only.${asks ? ' That rule can ask you to approve the call.' : ''}`;
 }
 function sourceChip(source) {
   if (source === CUSTOM) return el('span', 'your rules', 'chip');
@@ -321,7 +319,8 @@ function serverTable(list) {
       const sources = el('td');
       if (server.sources.length) sources.append(...server.sources.map(sourceChip));
       else sources.append(el('span', 'Unknown', 'muted'));
-      const rules = el('td', `${plural(server.rules.length, 'rule')} · ${plural(server.tools, 'tool')}`);
+      // A rule per tool is the usual case; say both counts only when they differ.
+      const rules = el('td', server.rules.length === server.tools ? plural(server.tools, 'tool') : `${plural(server.tools, 'tool')} · ${plural(server.rules.length, 'rule')}`);
       const chevron = el('td', open ? '▾' : '▸', 'chevron');
       row.append(name, sources, rules, chevron);
       clickable(row, open, () => { open ? serversOpen.delete(server.key) : serversOpen.add(server.key); draw(); });
@@ -436,6 +435,7 @@ function journey() {
   walker.append(mascot());
   scene.append(walker);
   const caption = el('figcaption');
+  caption.id = 'journey-caption';
   caption.append(el('strong', 'Batteries teach OpenAPPA about your tools and your data. '),
     'Each battery brings rules for one set of tools. Many batteries also ask the provider questions, for example: ',
     el('em', 'Who can read this Slack channel?'),
@@ -467,11 +467,12 @@ function checkStatus(b) { const info = statusInfo(b); return status(info.label, 
 function configurable(b) { return b.credentials.length > 0 || b.setup?.length > 0 || (needsSetup(b) && b.alternatives.length > 0); }
 function batteries() {
   heading('Batteries');
+  errors();
   content.append(journey());
   const list = state.batteries.filter(relevant);
   if (!list.length) content.append(el('p', 'No batteries in use. Include one with appa battery install <name>.', 'empty'));
   else {
-    const result = table(['Battery', 'Status', '']);
+    const result = table(['Battery', 'Status', ''], 'battery-table');
     const body = el('tbody');
     list.forEach(b => {
       const row = el('tr'), name = el('td');
@@ -506,7 +507,6 @@ function batteries() {
     const actions = el('div', undefined, 'actions');
     actions.append(button('Check again', () => check(list), 'secondary')); content.append(actions);
   }
-  errors();
 }
 function credentialField(b, c) {
   const field = el('div', undefined, 'credential'), head = el('div', undefined, 'field-heading');

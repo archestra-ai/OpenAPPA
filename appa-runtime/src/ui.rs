@@ -118,6 +118,8 @@ impl Local {
             else {
                 continue;
             };
+            // Name the cause and the one command that restores the store.
+            let fix = "Run `appa plugin install claude-code` to restore the installed batteries.";
             match appa_package::validate_package(&dir) {
                 Ok(package)
                     if package.name.as_str() == battery.name
@@ -129,8 +131,12 @@ impl Local {
                         package,
                     });
                 }
-                _ => errors.push(format!(
-                    "{}: installed manifest or helper files are missing or invalid",
+                Ok(_) => errors.push(format!(
+                    "{}: the installed manifest does not describe this battery. {fix}",
+                    battery.name
+                )),
+                Err(error) => errors.push(format!(
+                    "{}: APPA cannot read the installed battery: {error}. {fix}",
                     battery.name
                 )),
             }
@@ -221,13 +227,22 @@ impl Local {
                 "check": checks.get(&entry.name), "has_check": battery.readiness.is_some()})
         }).collect()
         };
-        let config = Config::inspect_local(&self.config, &self.dirs).ok();
-        if config.is_none() {
-            errors.push("Configuration is absent or invalid. Credential setup is still available.".into());
-        }
+        let config = match Config::inspect_local(&self.config, &self.dirs) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                errors.push(format!(
+                    "APPA cannot read the configuration: {error}. The overview is empty until it is fixed; you can still add tokens."
+                ));
+                None
+            }
+        };
         for name in &configured {
-            if !entries.iter().any(|entry| &entry.name == name) {
-                errors.push(format!("{name}: configured battery is unavailable"));
+            // An unreadable installed battery already has its own message.
+            let reported = errors.iter().any(|error| error.starts_with(&format!("{name}: ")));
+            if !reported && !entries.iter().any(|entry| &entry.name == name) {
+                errors.push(format!(
+                    "{name}: the configuration includes this battery, but it is not installed. Run `appa battery install {name}`, or remove it from `include`."
+                ));
             }
         }
         // The overview reads the configuration on disk: the composed policy, and each
