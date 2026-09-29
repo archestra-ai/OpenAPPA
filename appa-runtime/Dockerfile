@@ -41,8 +41,9 @@ COPY marketplace/plugins/claude-code marketplace/plugins/claude-code
 COPY marketplace/batteries marketplace/batteries
 COPY integrations/appa-guide integrations/appa-guide
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
-# The appa ui header embeds the brand lockup.
+# appa ui embeds the brand lockups: the light one as the favicon, the dark one in the header.
 COPY website/public/brand/openappa-lockup-light.svg website/public/brand/openappa-lockup-light.svg
+COPY website/public/brand/openappa-lockup-dark.svg website/public/brand/openappa-lockup-dark.svg
 # The salt `appa yell` signs reports with. Compiled in by client.rs, so the
 # build needs the file even though nothing in the image reads it.
 COPY receiver/appa-yell/salt.txt receiver/appa-yell/salt.txt
