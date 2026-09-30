@@ -12,3 +12,6 @@ setup = [
   "In Linear, open Settings, then Security & access: https://linear.app/settings/account/security",
   "Create a personal API key. The key needs only read access. It starts with `lin_api_`.",
 ]
+
+[battery.readiness]
+required_executables = ["python3"]

@@ -14,3 +14,6 @@ setup = [
   "An app token needs the `users:read` scope.",
   "In your root config, map `internal` to the people who may see all the connection reaches, and `self` to the token owner.",
 ]
+
+[battery.readiness]
+required_executables = ["python3"]

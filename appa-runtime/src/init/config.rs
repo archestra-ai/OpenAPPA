@@ -39,7 +39,7 @@ pub(super) fn discard_file(path: &Path) {
 /// Answers with the policy key this file composes to, or [`ComposedPolicy::Unknowable`]
 /// when the file resolves only where the runtime runs.
 pub(super) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
-    let config = match Config::load(path) {
+    let config = match Config::load_local(path, &[]) {
         Ok(config) => config,
         // A `token_env` resolves where the runtime runs, not here. A hook starts
         // it with the session's environment, which carries variables this

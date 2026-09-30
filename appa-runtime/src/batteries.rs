@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(tools_in(&store.join("slack/appa.toml")), vec!["new"]);
         assert!(!store.join("slack/helper.py").exists());
         assert_eq!(tools_in(&store.join("github/appa.toml")), vec!["added"]);
-        assert!(!store.join("github/appa-package.toml").exists());
+        assert!(store.join("github/appa-package.toml").exists());
         assert!(!store.join("mine").exists());
         assert_eq!(
             snapshot(std::slice::from_ref(&store))

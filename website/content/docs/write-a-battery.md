@@ -75,12 +75,18 @@ setup = [
 - `setup` is a list of steps, one line each, in imperative mood. Say
   which kind of token to make, where to make it, which scopes it needs,
   the prefix it starts with, and any other variable to set. Name the
-  scopes the helpers' API calls need, not more. If the helpers support
-  a CLI login, include its command as another setup step.
+  scopes the helpers' API calls need, not more. Do not describe a CLI
+  sign-in here: declare it as a CLI alternative (see below), and `appa ui`
+  shows it as a separate choice beside the token field.
 
-`appa battery install` prints the benefit and numbered steps after the
-battery is included, beside every `token_env` variable the policy's bindings
-name. A blank or multi-line `benefit` or step makes the manifest invalid.
+A step may contain `code spans` in backticks and bare `https://` URLs.
+`appa ui` shows code spans as code and URLs as links. No other Markdown
+is rendered. `appa battery install` prints the benefit and the numbered
+steps after the battery is included, beside every `token_env` variable
+the policy's bindings name, and `appa ui` labels the token field with the
+variable. Thus a step does not tell the person to set the credential
+variable. A blank or multi-line `benefit` or step makes
+the manifest invalid.
 
 Run `bash scripts/appa-marketplace.sh` to generate the catalog entry and
 content digest, then commit `marketplace/marketplace.toml` with the
@@ -93,6 +99,57 @@ The battery `README.md` must name the server version and list the covered tools.
 Declare in the battery's `README.md` what a root config adds around it: the authority its rules require, the `[policy.audience]` mapping onto its source, and the credential variable. [`examples/README.md`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/README.md) shows the install steps a root follows.
 
 The test suite composes every battery into each host it declares to make sure the shipped batteries work together.
+
+## Declare local setup checks
+
+The existing `appa-package.toml` also describes prerequisites for `appa ui`.
+Credential names remain derived from the policy's `token_env` bindings.
+
+```toml
+[battery.readiness]
+command = ["python3", "check.py"]
+required_executables = ["python3"]
+
+[[battery.readiness.cli_alternatives]]
+executable = "gh"
+credential = "APPA_PROVIDER_GITHUB_TOKEN"
+login_hint = "gh auth login -s user:email"
+```
+
+List `check.py` in `battery.helpers`. The command must name `python3` and one
+packaged helper, and `required_executables` must then include `python3`. Omit
+`command` to declare executable prerequisites without a provider check. A CLI alternative is optional when its credential is supplied;
+a CLI needed even with a token belongs in `required_executables` too.
+`login_hint` is the one command that signs the person in with every scope
+the helpers need.
+
+The readiness helper receives only this battery's declared APPA credential
+variables. It must perform read-only checks, reuse the battery's authentication
+logic, and write one JSON object to stdout:
+
+```json
+{"status":"ready","authentication":"token","reason":"verified"}
+```
+
+`status` is `ready`, `needs_configuration`, or `unavailable`.
+`authentication` is `token`, `cli`, or `none`. Reasons are `verified`,
+`missing_configuration`, `missing_credential`, `cli_not_authenticated`,
+`missing_executable`, `invalid_credential`, `insufficient_access`,
+`provider_unavailable`, `check_failed`, or `check_timed_out`.
+Only `ready` may use `verified`, and `ready` must use it.
+
+Do not print credentials, identity information, freeform messages, or provider
+response bodies. APPA rejects unknown JSON fields and translates reason codes into
+UI text. It discards stderr, limits stdout to 4 KiB, and stops checks after 15 seconds.
+Checks must not install software or start an interactive login. `login_hint` is
+shown to the user and never executed automatically.
+
+A successful check establishes only the access it actually tested. For example,
+a viewer check cannot prove access to every repository. Without a provider
+check, APPA decides readiness itself: the battery is ready when its required
+executables exist and every `token_env` variable has a value. APPA reports this
+as `ready` with reason `configured`; the token is set but not tested. A battery
+that declares nothing is ready.
 
 ## Test the battery
 

@@ -719,8 +719,9 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
+        externals.credential_store = config.credential_store.clone();
         Ok(Deployment {
             config,
             resident: RuntimeEngine::from_policy(&policy, naming),
@@ -1602,6 +1603,27 @@ impl Runtime {
     /// against the key of the configuration it just validated: a process that kept
     /// running across the install serves the policy it loaded at startup, and only a
     /// difference here is worth reloading.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn dashboard(&self, adapter: appa_runtime_api::Adapter) -> serde_json::Value {
+        let deployment = self.inner.deployment();
+        let validation = crate::tool_validation::resolve(
+            deployment.config.policy_file().value(),
+            adapter,
+            &deployment.config.inventory,
+            &deployment.config.server_aliases,
+        )
+        .report;
+        serde_json::json!({
+            "validation": validation,
+            "policy_key": self.serving_policy_key(),
+            "policy": deployment.config.policy_file().value(),
+            "included": deployment.config.included_batteries(),
+            "inventory": deployment.config.inventory,
+            "server_aliases": deployment.config.server_aliases,
+            "stats": crate::telemetry::dashboard_counts(),
+        })
+    }
+
     #[cfg(feature = "daemon")]
     pub(crate) fn serving_policy_key(&self) -> String {
         let serving = self

@@ -341,6 +341,7 @@ mod tests {
                 credentials: vec![],
                 benefit: None,
                 setup: vec![],
+                readiness: None,
                 detect: vec![],
             },
         )

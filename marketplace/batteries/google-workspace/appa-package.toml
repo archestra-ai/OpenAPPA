@@ -17,3 +17,6 @@ setup = [
   "An access token expires after about one hour. Refresh it from the stored refresh token before you pass it again.",
   "Reading the directory can need a user with admin rights.",
 ]
+
+[battery.readiness]
+required_executables = ["python3"]

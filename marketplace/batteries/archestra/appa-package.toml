@@ -13,3 +13,6 @@ setup = [
   "In Archestra, click your name in the sidebar, open your personal settings, then API Keys.",
   "Create a personal API key as a user whose role can read the organization's members and teams. The key starts with `arch_`.",
 ]
+
+[battery.readiness]
+required_executables = ["python3"]

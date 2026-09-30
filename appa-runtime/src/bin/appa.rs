@@ -14,6 +14,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the local dashboard and consolidated battery setup.
+    Ui(appa_runtime::ui::Args),
     /// Run headless Claude with runtime-owned file tools and native tools removed.
     ClaudeFiles(appa_runtime::claude_files::Args),
     /// Internal trajectory-bound MCP server launched by claude-files.
@@ -40,6 +42,7 @@ enum Command {
         command: PluginCommand,
     },
     /// Inspect policy battery packages for a deployment.
+    #[command(alias = "batteries")]
     Battery {
         #[command(subcommand)]
         command: PackageCommand,
@@ -153,6 +156,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum PackageCommand {
+    /// Inspect credentials, dependencies, and optional read-only provider checks.
+    Status(appa_runtime::ui::StatusArgs),
     /// List selected packages offline, or explicitly fetch the available catalog.
     List(appa_runtime::installation::cli::List),
     /// Add a battery's policy to this deployment in one operation.
@@ -198,6 +203,10 @@ fn main() -> ExitCode {
         }
     };
     match parsed.command {
+        Command::Ui(args) => appa_runtime::ui::run(args),
+        Command::Battery {
+            command: PackageCommand::Status(args),
+        } => appa_runtime::ui::status(args),
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
         Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
             Ok(_) => ExitCode::SUCCESS,
@@ -288,6 +297,10 @@ fn main() -> ExitCode {
             };
             let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str(), &session_tools);
             print!("{}", description.text);
+            match appa_runtime::ui::describe_readiness(&config, &batteries_dir) {
+                Ok(readiness) => print!("{readiness}"),
+                Err(_) => eprintln!("Battery readiness: checks unavailable"),
+            }
             if check && !description.valid {
                 ExitCode::FAILURE
             } else {

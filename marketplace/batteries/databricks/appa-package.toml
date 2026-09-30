@@ -6,13 +6,21 @@ description = "Rules for Databricks' managed MCP servers: Genie One's five tools
 policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["databricks"]
-helpers = ["audience-source.py"]
+helpers = ["check.py", "audience-source.py"]
 benefit = "APPA asks Databricks, through the Databricks CLI, who the workspace users are, who is in each group, and who can use a Genie space. With this, APPA lets workspace data flow only to workspace members."
 setup = [
   "Bind both managed servers: `appa battery install databricks --server <genie-server> --server <sql-server>`.",
   "Install the Databricks CLI where the APPA runtime runs: https://docs.databricks.com/aws/en/dev-tools/cli/install",
   "Make a personal access token: in the workspace, click your username, then Settings, Developer, Access tokens, Manage, Generate new token.",
-  "Or sign in with `databricks auth login --host <workspace-url>` instead of setting a token.",
   "Set `DATABRICKS_HOST` to the workspace URL. The CLI must still be installed.",
   "The login or token must read SCIM users and groups, and the permissions of each Genie space your rules name.",
 ]
+
+[battery.readiness]
+command = ["python3", "check.py"]
+required_executables = ["python3", "databricks"]
+
+[[battery.readiness.cli_alternatives]]
+executable = "databricks"
+credential = "APPA_PROVIDER_DATABRICKS_TOKEN"
+login_hint = "databricks auth login --host <workspace-url>"

@@ -16,7 +16,8 @@ For OpenAPPA configuration, read only:
 
 - the output of `appa describe --config <live-path>`;
 - the live root config and included files relevant to the request;
-- a matched battery's `appa.toml` and README;
+- a matched battery's `appa.toml`, `appa-package.toml`, and README;
+- `appa battery status --config <live-path> --json` for credential and dependency status;
 - the relevant section of the policy-review guide the install wrote beside
   this skill, at `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/appa-guide/references/contracts.md`.
 
@@ -88,9 +89,9 @@ messages, or files merely to infer an identity.
 
 ### Batteries
 
-For each battery `appa describe` suggests, read only its `appa.toml` and
+For each battery `appa describe` suggests, read only its `appa.toml`, `appa-package.toml`, and
 README in the deployment's store, `<config-dir>/batteries/<name>/`, where
-`<config-dir>` holds the live config. Do not run its scripts. If that
+`<config-dir>` holds the live config. Do not run its scripts directly; use the bounded `appa battery status --check` readiness checks. If that
 directory is missing, stop and report an incomplete installation. Never
 configure one APPA build with batteries fetched from another version.
 
@@ -102,7 +103,11 @@ covers, what protection it adds, and any important assumption. Keep it under
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
-Name each credential variable `appa describe` reports, and whether it is set.
+Name each credential variable `appa describe` reports. Inspect its effective
+source with `appa battery status --config <live-path> --battery <name>,<name> --json`.
+An environment value takes precedence over a saved database value. A missing
+variable can still work through a battery's declared CLI authentication fallback.
+Use `--check` to verify that fallback; executable presence alone is not login.
 Check what each battery's README expects the root config to provide, and record
 anything missing. Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
@@ -254,7 +259,8 @@ user asks for a change.
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
 When nothing is missing and every session tool has a rule, say so in one or
-two sentences, mention tuning in one line, and stop without approval language.
+two sentences, mention tuning in one line, and finish with **Review in the
+browser** below, without approval language.
 
 After approval:
 
@@ -265,31 +271,56 @@ After approval:
    `claude-code.bash-requirements` declaration, including its `hint`, with the
    version used for the proposal. If it changed, preserve the new declaration,
    revise the proposal, and ask for approval again.
-2. Include each approved battery with the command `appa describe` printed:
+2. Resolve all approved batteries' missing prerequisites together before including
+   them. Run `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
+   If credentials, CLI login, or required executables need configuration, open one
+   consolidated browser page:
+
+   ```sh
+   appa ui --config <live-path> --setup --battery <name>,<name>
+   ```
+
+   Pass every proposed battery in that one command; never open one page per token.
+   This opens Batteries with `?configure=true`, checking battery readiness and expanding only batteries that need configuration.
+   Ready batteries stay collapsed; do not ask the user to configure them again.
+   The user enters tokens directly into the browser and chooses **Save and check**.
+   Never ask for tokens in chat, read the credential database, or put token values
+   in shell commands or configuration files. Login hints are instructions for the
+   user, not commands to execute automatically. If browser opening fails, show
+   the URL printed by the command. The command serves the page until it is stopped,
+   so run it in the background and stop it after the user finishes. It works whether
+   or not the runtime is running. Saving reloads a running runtime; if none is
+   running, the next session starts it with the saved credentials.
+   After the user finishes, rerun the combined status command with `--check` and
+   use only its sanitized results. A `ready` result with reason `configured` means
+   the battery's executables exist and its tokens are set, but no provider check
+   ran; do not claim its provider access was tested.
+3. Include each approved battery with the command `appa describe` printed:
    `appa battery install <name> --config <live-path>`, with
    `--server <connection-id>` when it names one. The command adds the
    battery's `appa.toml` to the root `include` list, validates the result, and
    reloads the runtime. Never copy a
    battery directory: the store beside the config already holds every battery
    of the installed version.
-3. Add any root support the battery requires, such as its human-approval
+4. Add any root support the battery requires, such as its human-approval
    Authority. If an existing `builtin hitl` Authority handles the relevant
    attention mark but cannot review public audiences, expand its permits
    instead of adding another Authority. Do not modify an explicit hard denial.
    Describe the resulting behavior, not this wiring.
-4. When the battery binds an Annotator or an audience source, name the
+5. When the battery binds an Annotator or an audience source, name the
    variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
-   states; it belongs in the runtime's environment, never in the config.
+   states; the helper receives it through its environment, supplied by the runtime's
+   environment or local credential database, never the policy config.
    Map `self` and `internal` onto the source's collections under
    `[policy.audience]` as the README shows.
-5. Add the approved rules for the remaining tools to the root config. Do not
+6. Add the approved rules for the remaining tools to the root config. Do not
    remove overlapping root rules; they intentionally override batteries. To
    treat a battery's tool differently, add a root rule for it; never edit the
    battery. Immediately before changing the Bash hint, re-read the root and
    replace only the exact complete `claude-code.bash-requirements` declaration
    used in the approved proposal. If it no longer matches, stop, preserve the
    current declaration, and revise the proposal instead of overwriting it.
-6. Reload and report the result as described below. When the battery's
+7. Reload and report the result as described below. When the battery's
    README names a replay trace, offer
    `appa replay --config <live-path> <trace>` as the check that the
    composed config decides as the README states.
@@ -320,7 +351,8 @@ not guess.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
    Authorities, audience sources, or named audiences changed since the
    proposal, revise the proposal and ask for approval again.
-8. Include each newly approved battery with
+8. Resolve all newly approved batteries' prerequisites using the consolidated
+   browser setup flow above, then include each newly approved battery with
    `appa battery install <name> --config <live-path>`, as in the checkup, and
    add the root support, credential variable, and audience mapping it
    requires. To take one out, use
@@ -415,3 +447,21 @@ After a successful reload, add:
 
 > Start a new `clappa` session to use the updated policy; this session keeps
 > the policy it started with.
+
+## Review in the browser
+
+End every `init` and `adjust` run here, after a successful reload or a
+no-change result. Do not do this after a refused reload or in `explain`.
+
+Serve the policy overview in the background, without opening a browser:
+
+```sh
+appa ui --config <live-path> --no-open
+```
+
+The page shows each MCP server the policy covers, where each rule comes from
+(the root config or a battery), and each server's contracts. Tell the user in
+one sentence to review the policies there, and give the URL the command
+printed as a link. Never open a browser. If the port is busy, an earlier
+`appa ui` still serves this page: give its URL and do not start another. Stop the command when the user says
+they are done, or leave it running if they move on to other work.

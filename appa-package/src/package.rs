@@ -98,6 +98,27 @@ pub struct Battery {
     /// The programs whose presence on `PATH` means the battery is relevant
     /// on this machine: a Claude Code install includes it when one is found.
     pub detect: Vec<ExecutableName>,
+    pub readiness: Option<Readiness>,
+}
+
+/// Optional, bounded, read-only battery authentication check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Readiness {
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub required_executables: Vec<String>,
+    #[serde(default)]
+    pub cli_alternatives: Vec<CliAlternative>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliAlternative {
+    pub executable: String,
+    pub credential: String,
+    pub login_hint: String,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -245,6 +266,7 @@ struct RawBattery {
     benefit: Option<String>,
     #[serde(default)]
     setup: Vec<String>,
+    readiness: Option<Readiness>,
     #[serde(default)]
     detect: Vec<String>,
 }
@@ -327,6 +349,7 @@ impl RawBattery {
             credentials: Vec::new(),
             benefit,
             setup,
+            readiness: self.readiness,
             detect,
         })
     }
@@ -473,6 +496,7 @@ mod tests {
                 credentials: vec![],
                 benefit: None,
                 setup: vec![],
+                readiness: None,
                 detect: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
@@ -510,7 +534,7 @@ mod tests {
         ));
     }
 
-    /// `benefit` is one line the install prints verbatim, so a
+    /// `benefit` is one line the install and the UI print verbatim, so a
     /// blank or multi-line one is refused where it is read.
     #[test]
     fn a_battery_benefit_is_one_non_empty_line() {
