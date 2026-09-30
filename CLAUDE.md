@@ -8,19 +8,6 @@ into this sink?* It is declarative and algebraic — no guardrails, no prompt
 filtering, no bespoke `if`s; any imperative judgment lives in registered
 external authorities and sanitizers, never in the engine.
 
-## IMPORTANT
-The golden set is `website/content/docs/how-it-works.md`,
-`website/content/docs/contracts.md` and `website/lib/terms.ts`. Golden
-files must agree with each other in every commit: a change that alters
-what another golden file also states lands together with the matching
-update, and a commit that leaves two golden files contradicting each
-other is not allowed. Non-golden files — the code and the rest of the
-website, for now — can be harshly outdated.
-
-The normative specification is not in this repository. Where the spec
-and this code disagree, the spec is right and the code has drift to
-close; do not cite rule ids here.
-
 ## Rules:
 - Never add "Where next" to the bottom of the page with links to other pages. Those links get stale. If you see such a section, remove.
 
@@ -42,21 +29,15 @@ close; do not cite rule ids here.
   security term when it adds precision or establishes lineage, and gloss it
   for public readers at first use. Never let it displace the agentic term as
   the primary name for a concept that has one.
-- Do not invent new terms, especially when working with spec. Try to use 
+- Do not invent new terms, especially in docs. Try to use 
   existing definitions. If you want to introduce a new one - ask a user and 
   explain why.
 
-## Document precedence
+## Source of truth
 
-1. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
-   implemented, and the reference for what a term means.
-2. `website/content/docs/how-it-works.md` — the reader-facing
-   introduction. `website/content/docs/contracts.md` is the
-   policy-review guide, and `website/lib/terms.ts` restates the
-   vocabulary as the website's term-popover definitions.
-
-Non-normative still means consistent: a change to one golden file lands
-with the matching update to the others.
+`appa-engine/src/lib.rs` defines the concepts and semantics of the engine
+as implemented, and is the reference for what a term means. Everything
+else, including the website docs, follows it.
 
 ## No history, no compatibility
 
@@ -87,7 +68,7 @@ Applies to discussion and work in this repository.
   different work. Recommend one option and state the tradeoff; decide routine
   implementation details without asking.
 - Match depth to the task. Keep routine implementation updates concise, but
-  show the reasoning behind changes to the model, spec, architecture, or
+  show the reasoning behind changes to the model, architecture, or
   security guarantees.
 - Use concrete references such as paths, types, and commands. Mark
   uncertainty as uncertainty rather than smoothing it into confident prose.
@@ -106,9 +87,8 @@ better as a result.
   fluency, but not complete or current knowledge of both AI and security.
 - Do not require prior training in information-flow control. Introduce the
   minimum specialized vocabulary needed to state the idea accurately.
-- Match the presentation to the document. The spec is normative and precise;
-  guides build a usable mental model; glossaries and references optimize for
-  lookup. Product framing belongs in introductions and guides, not in
+- Match the presentation to the document. Guides build a usable mental
+  model; glossaries and references optimize for lookup. Product framing belongs in introductions and guides, not in
   normative or reference material.
 - In guides, show how remedy plans and narrowing keep an agent productive when
   those behaviors are relevant. Do not force the value proposition into every
@@ -119,14 +99,14 @@ better as a result.
 - Use APPA's defined terms consistently. Terms that readers must type in TOML
   or use through an API, including `delta`, `requires`, `emits`, `attention`,
   `contains`, `within`, and `permits`, must be taught rather than paraphrased away.
-- Prefer plain technical English and the shortest accurate term. Specifications and normative documentation MUST follow ASD-STE100 (Simplified Technical English): short sentences (maximum 20–25 words), active voice, precise technical vocabulary, zero conversational fluff or oversimplification, and strict preservation of technical and modal nuances (such as capability `can` vs action `does`, `MUST`, `MAY`, `MUST NOT`). Gloss specialized IFC or security vocabulary at first use; omit it when it adds no precision.
+- Prefer plain technical English and the shortest accurate term. Reference documentation MUST follow ASD-STE100 (Simplified Technical English): short sentences (maximum 20–25 words), active voice, precise technical vocabulary, zero conversational fluff or oversimplification, and strict preservation of technical and modal nuances (such as capability `can` vs action `does`, `MUST`, `MAY`, `MUST NOT`). Gloss specialized IFC or security vocabulary at first use; omit it when it adds no precision.
 - Reader-facing prose may explain a wire term in ordinary language. Show the
   exact wire term where readers need to recognize or type it.
 - Name concrete behavior and cost instead of relying on broad category words.
 
 **Claims**
 
-- Lead with the strongest consequence the spec supports. Do not weaken a
+- Lead with the strongest consequence the engine enforces. Do not weaken a
   guarantee with `helps`, `aims to`, or `is designed to` when APPA actually
   enforces or proves the property.
 - Headlines and introductions may compress formal scope for clarity, provided
@@ -134,14 +114,14 @@ better as a result.
   flow decisions deterministic" is stronger and more accurate than a broad
   claim that APPA makes agents safe.
 - Use `proven`, `provable`, and `deterministic` only for a specific property
-  with support in the spec or its cited proof. Translate the formal property
+  with support in the engine's semantics or a cited proof. Translate the formal property
   into its operational consequence rather than relying on the adjective.
 - State a claim's assumptions and limits once, plainly and nearby. Do not
   repeat caveats until they obscure the guarantee.
 - Prefer mechanical, falsifiable comparisons over claims about entire product
   categories. Name what APPA checks, prevents, or preserves.
-- State guarantees at guide level and keep the rules or proof that support
-  them in the spec.
+- State guarantees at guide level; keep the mechanism that supports them in
+  `appa-engine/src/lib.rs`.
 
 **Style and structure**
 

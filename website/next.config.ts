@@ -4,8 +4,8 @@ const nextConfig: NextConfig = {
   // The MCP and llms.txt routes read doc markdown from disk on every request;
   // make sure the content directory ships with their serverless functions.
   outputFileTracingIncludes: {
-    "/mcp": ["./content/**/*"],
-    "/llms.txt": ["./content/**/*"],
+    "/mcp": ["./content/docs/**/*"],
+    "/llms.txt": ["./content/docs/**/*"],
   },
   // PostHog is reached through this origin rather than directly. Two reasons:
   // requests to a posthog.com hostname are blocked by most content blockers,
