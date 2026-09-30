@@ -136,6 +136,7 @@ dependencies = [
  "rig-agent",
  "rig-core",
  "rmcp 3.4.0",
+ "rusqlite",
  "rustls",
  "schemars",
  "serde",

@@ -48,6 +48,7 @@ name = "replay"
 required-features = ["daemon"]
 
 [dependencies]
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-codex = { path = "../appa-adapter-codex" }
