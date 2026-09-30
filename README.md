@@ -40,24 +40,22 @@ runs.
 
 ## Benchmarks
 
-Agent security has to be measured on two axes at once: an agent that permits
-unauthorized flows is unsafe, and an agent that refuses valid work is useless.
-We measure **task completion** (utility on legitimate goals) and **attack
-success rate** (ASR, policy breaches under adversarial inputs).
+Agent security has two axes: an agent that permits unauthorized flows is
+unsafe, and an agent that refuses valid work is useless. We measure both on
+[Bench-Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp)
+(20 multi-step enterprise workflows) and
+[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
+(OWASP Top 10 for Agentic Applications), with standard and adversarial
+prompts. No scored attack succeeded against OpenAPPA in 1,320 evaluations,
+while it completed 88–90% of tasks; Microsoft FIDES let 28–35% of attacks
+through, and Claude Code auto mode let 10 through across the two suites.
 
-Across 20 multi-step enterprise workflows in Bench-Corp (200 episodes per model):
-
-| Model | Guarded OpenAPPA (Utility / ASR) | FIDES middleware (Utility / ASR) | FIDES native (Utility / ASR) |
+| | OpenAPPA | Claude Auto mode | FIDES (Microsoft) |
 |---|---:|---:|---:|
-| GPT-5.6 Luna | **88.0% / 0%** | 38.5% / 32.0% | 37.0% / 32.5% |
-| DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
-| Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
+| Task completion | **89%** | 90% | 41% |
+| Attacks that succeeded | **0%** | 10% | 31% |
 
-Across the complete 24-task [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
-suite (OWASP Top 10 for Agentic Applications), guarded OpenAPPA recorded **0/720 observed attacks**
-and led task completion under adversarial prompts across all three models.
-
-Full methodology, ablations, and paper: [Benchmarks](https://openappa.com/evaluation).
+[Read the full benchmark results](https://openappa.com/evaluation)
 
 ## Try it: Claude Code
 

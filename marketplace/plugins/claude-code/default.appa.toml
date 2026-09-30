@@ -149,6 +149,11 @@ delta = {}
 name = "host/claude-code/ScheduleWakeup"
 delta = {}
 
+# A feedback draft is queued locally and sent only after this user approves it.
+[[policy.tool]]
+name = "host/claude-code/SendFeedback"
+delta = {}
+
 [[policy.tool]]
 name = "host/claude-code/SendUserFile"
 delta = {}
@@ -306,6 +311,36 @@ delta = { trust = "suspicious" }
 [[policy.tool]]
 name = "host/claude-code/ReadNotifications"
 delta = { trust = "suspicious" }
+
+# A claude.ai design-system project is shared with this user's organization.
+[[policy.tool]]
+name = "host/claude-code/DesignSync"
+requires = { audience = { contains = ["internal"] } }
+delta = {}
+
+# A routine runs in a cloud session this policy does not protect, so its
+# prompt may reach anyone. Run titles and logs quote what that session read
+# from repositories, issues and web pages.
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list_runs)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get_run_log)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger"
+requires = { audience = { contains = ["public"] } }
+delta = {}
 
 # Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime
 # itself, and gated by the same algebra as any other sink that leaves this
