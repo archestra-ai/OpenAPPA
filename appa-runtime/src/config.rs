@@ -2456,7 +2456,6 @@ mod tests {
 
     #[cfg(feature = "daemon")]
     #[test]
-    #[cfg(unix)]
     fn root_command_metadata_and_include_origins_compose() {
         let dir = tempfile::tempdir().unwrap();
         let root_dir = dir.path().canonicalize().unwrap();
@@ -2642,7 +2641,6 @@ mod tests {
 
     /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
     /// forwarded to the child that reads it, and only from the passthrough namespace.
-    #[cfg(unix)]
     #[test]
     fn a_command_forwards_one_credential_and_only_from_the_passthrough_namespace() {
         let with = |token_env: &str| {
@@ -2743,12 +2741,9 @@ mod tests {
         for section in Section::ALL {
             let config = parse(&entry(section, "url = \"https://x.internal\"")).expect("a url binds everywhere");
             assert!(matches!(bound(section, &config, "x"), Some(Bound::Url)));
-            #[cfg(unix)]
-            {
-                let config =
-                    parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
-                assert!(matches!(bound(section, &config, "x"), Some(Bound::Command(_))));
-            }
+            let config =
+                parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
+            assert!(matches!(bound(section, &config, "x"), Some(Bound::Command(_))));
             assert!(
                 matches!(
                     parse(&entry(section, "command = [\"\"]")),
@@ -2790,7 +2785,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_audience_lookup_names_a_direct_target_and_a_roster_is_only_a_target() {
         let with = |audience: &str| format!("{MINIMAL}\n{audience}\n");
@@ -3187,7 +3181,6 @@ mod tests {
 
     /// A command's working directory is its declaring file's, in every section, and the
     /// composed bytes record it so a stored deployment reloads the same binding.
-    #[cfg(unix)]
     #[test]
     fn included_command_paths_are_relative_to_their_declaring_configs() {
         let dir = tempfile::tempdir().expect("temp directory");
