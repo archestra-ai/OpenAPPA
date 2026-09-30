@@ -821,7 +821,8 @@ mod tests {
                     cwd: None,
                 },
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )

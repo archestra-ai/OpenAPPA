@@ -4,8 +4,8 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, SpawnRef, ToolOutcome,
-    TrajectoryId, WireDecision, WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, PromptKey, ProposedCall, Ruling, SpawnKind,
+    SpawnRef, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::{
@@ -207,7 +207,9 @@ fn bare_hook(
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
         HookEvent::SessionStart { root, .. } => root,
-        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
+        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } | HookEvent::ChildReturn { root, .. } => {
+            root
+        }
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
@@ -307,6 +309,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
         HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
         HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
     }
 }
@@ -349,15 +352,16 @@ async fn dispatch_event(
     };
     match event {
         HookEvent::SessionStart { root, principal } => dispatcher.session_start(root, principal),
-        HookEvent::Prompt { actor, .. } => dispatcher.prompt(actor),
+        HookEvent::Prompt { actor, settles, .. } => dispatcher.prompt(actor, settles),
         HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
         HookEvent::ToolCall {
             actor,
             call,
             call_id,
             spawn,
+            prompt,
             ruling,
-        } => dispatcher.tool_call(actor, call, call_id, spawn, ruling).await,
+        } => dispatcher.tool_call(actor, call, call_id, spawn, prompt, ruling).await,
         HookEvent::SpawnResume { actor, call, child } => dispatcher.spawn_resume(actor, call, child).await,
         HookEvent::ToolResult {
             actor,
@@ -379,6 +383,7 @@ async fn dispatch_event(
         }
         HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
         HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
+        HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
     }
 }
 
@@ -432,8 +437,14 @@ impl Dispatcher<'_> {
     /// The mark gates nothing, so this answers `Ack` whether or not it landed: a mark that
     /// did not land leaves the interrupted call open until the turn ends, which is what
     /// happens anyway when no prompt hook arrives at all.
-    fn prompt(&mut self, actor: Actor) -> HookDecision {
-        if let Err(error) = self.runtime.record_prompt(&actor) {
+    /// A prompt that reports a background call finished is the host's notice, not the user's
+    /// turn: it closes that call and leaves the turn's mark alone.
+    fn prompt(&mut self, actor: Actor, settles: Option<String>) -> HookDecision {
+        let recorded = match settles {
+            Some(call_id) => self.runtime.record_call_settled(&actor, call_id),
+            None => self.runtime.record_prompt(&actor),
+        };
+        if let Err(error) = recorded {
             tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
         }
         HookDecision::Ack
@@ -466,9 +477,13 @@ impl Dispatcher<'_> {
         actor: Actor,
         call: ProposedCall,
         call_id: Option<String>,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
+        prompt: Option<PromptKey>,
         ruling: Option<Ruling>,
     ) -> HookDecision {
+        let missing_start = MissingStart::OpenLate {
+            prompt: prompt.as_ref(),
+        };
         if self.runtime.prompted(&actor) {
             // The first proposal after a prompt that no turn end preceded:
             // the user interrupted the previous turn, and whatever it left
@@ -479,7 +494,7 @@ impl Dispatcher<'_> {
             if let Err(error) = on_actor(
                 self.runtime,
                 &actor,
-                MissingStart::OpenLate,
+                missing_start,
                 self.options,
                 |session| async move { session.on_turn_end().await },
             )
@@ -494,10 +509,11 @@ impl Dispatcher<'_> {
         if is_control_tool(&call.tool) {
             return control_call(self.runtime, &actor, &call, ruling);
         }
-        match on_actor(self.runtime, &actor, MissingStart::OpenLate, self.options, |session| {
+        match on_actor(self.runtime, &actor, missing_start, self.options, |session| {
             let call = call.clone();
             let call_id = call_id.clone();
-            async move { session.on_tool_call_identified(call, call_id, spawn).await }
+            let prompt = prompt.clone();
+            async move { session.on_tool_call_identified(call, call_id, spawn, prompt).await }
         })
         .await
         {
@@ -661,6 +677,28 @@ impl Dispatcher<'_> {
             Err(error) => fold(error, Refusal::Block),
         }
     }
+
+    /// A return the subagent makes without ending: it crosses exactly as a stop's return would,
+    /// and the subagent runs on whatever the answer.
+    async fn child_return(&mut self, root: TrajectoryId, child: TrajectoryId, value: String) -> HookDecision {
+        let said = Some(value.clone());
+        match on_child(
+            self.runtime,
+            &root,
+            &child,
+            MissingStart::Refuse,
+            self.options,
+            |session| {
+                let value = value.clone();
+                async move { session.on_child_return(value).await }
+            },
+        )
+        .await
+        {
+            Ok(decision) => return_decision(said, decision),
+            Err(error) => fold(error, Refusal::Block),
+        }
+    }
 }
 
 fn outcome_decision(
@@ -806,15 +844,18 @@ fn quoted_offer(call: &ProposedCall) -> Result<Option<OfferId>, crate::api::Offe
 /// nothing a missing start could supply, and opening a child on its end
 /// would let a stop the family never saw start cross a value.
 #[derive(Clone, Copy)]
-enum MissingStart {
-    OpenLate,
+enum MissingStart<'a> {
+    /// A fan-out spawn's child names the prompt its spawn was released under.
+    OpenLate {
+        prompt: Option<&'a PromptKey>,
+    },
     Refuse,
 }
 
 async fn on_actor<T, Run>(
     runtime: &Runtime,
     actor: &Actor,
-    missing_start: MissingStart,
+    missing_start: MissingStart<'_>,
     presentation: &EmbeddedPresentationOptions,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
@@ -831,7 +872,7 @@ async fn on_child<T, Run>(
     runtime: &Runtime,
     root: &TrajectoryId,
     child: &TrajectoryId,
-    missing_start: MissingStart,
+    missing_start: MissingStart<'_>,
     presentation: &EmbeddedPresentationOptions,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
@@ -843,11 +884,11 @@ where
         event(runtime.session_with_presentation(root, child, presentation.clone())?).await,
         missing_start,
     ) {
-        (Err(EventError::SpawnNotTaken), MissingStart::OpenLate) => {
+        (Err(EventError::SpawnNotTaken), MissingStart::OpenLate { prompt }) => {
             // `AlreadyOpen` means the start hook landed between the two
             // attempts; the event now finds its child, so it is not
             // refused for a race the harness has already resolved.
-            match root_session.open_late(child.clone())? {
+            match root_session.open_late(child.clone(), prompt)? {
                 LateOpen::Opened => {
                     tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
                 }
@@ -1023,7 +1064,8 @@ mod tests {
             },
             call: spawn_call(),
             call_id: None,
-            spawn: true,
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
             ruling: None,
         };
         let HookDecision::DenyCall { offers, .. } = handle(runtime, spawn()).await else {
@@ -1978,6 +2020,7 @@ mod tests {
             HookEvent::Prompt {
                 actor: actor.clone(),
                 text: "approve".into(),
+                settles: None,
             },
         )
         .await;
@@ -2067,7 +2110,8 @@ mod tests {
                 },
                 call: call(),
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )
@@ -2097,7 +2141,8 @@ mod tests {
                     cwd: None,
                 },
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )
@@ -2137,7 +2182,8 @@ mod tests {
                     cwd: None,
                 },
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )

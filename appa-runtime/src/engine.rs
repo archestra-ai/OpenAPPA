@@ -82,7 +82,7 @@ use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
     HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, SpawnKind};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -267,7 +267,7 @@ pub enum EngineEvent {
         call: ProposedCall,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
     },
     ToolOutcome {
         dispatch: EngineDispatchId,
@@ -1267,7 +1267,7 @@ impl RuntimeEngine {
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let resolved = match self
@@ -1302,13 +1302,16 @@ impl RuntimeEngine {
             evidence,
             UnresolvedAudience::Denied { tool: &call.tool },
             |audience| {
-                let decide = |marked: bool| {
+                let decide = |spawn: Option<SpawnKind>| {
                     let batch = ProposalBatch {
                         id: batch_id(entropy),
                         trajectory: trajectory.clone(),
                         provider_results: Vec::new(),
                         proposals: vec![proposed.clone()],
-                        spawn: marked.then(|| SpawnMark::at(0)),
+                        spawn: spawn.map(|kind| match kind {
+                            SpawnKind::Single => SpawnMark::at(0),
+                            SpawnKind::FanOut => SpawnMark::fan_out(0),
+                        }),
                         offer_nonce: engine_nonce(entropy),
                         evidence: evidence
                             .iter()
@@ -1325,7 +1328,7 @@ impl RuntimeEngine {
                     self.engine.handle(view, CoreEvent::Proposals(batch))
                 };
                 match decide(spawn) {
-                    Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                    Err(TransitionError::SpawnUncontrolled) if spawn.is_some() => decide(None),
                     decided => decided,
                 }
             },
@@ -4015,7 +4018,7 @@ mod tests {
                         call: call.clone(),
                         evidence,
                         entropy: OfferNonce([7u8; 32]),
-                        spawn: false,
+                        spawn: None,
                     },
                     &EmbeddedPresentationOptions::default(),
                 )

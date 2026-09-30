@@ -378,7 +378,7 @@ pub fn resolve(
             continue;
         }
         let declared = covered.iter().any(|rule| rule_matches(rule, identity.as_str()));
-        let covered = declared || (report.wildcard && (!spawn || adapter.wildcard_covers_spawn));
+        let covered = declared || (report.wildcard && (spawn.is_none() || adapter.wildcard_covers_spawn));
         report.tools.push(ToolCheck {
             tool: host.clone(),
             status: if covered {
@@ -388,7 +388,7 @@ pub fn resolve(
                     reason: format!(
                         "{} is not covered by policy{}",
                         identity,
-                        if *spawn {
+                        if spawn.is_some() {
                             "; delegation requires an explicit contract"
                         } else {
                             "; add a contract or wildcard annotator"

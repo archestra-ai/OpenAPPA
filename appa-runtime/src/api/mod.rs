@@ -20,7 +20,8 @@ pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
 pub use crate::external::Diagnostics;
 pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
 pub use appa_runtime_api::{
-    Actor, OfferedRemedy, OutcomeBody, ProposedCall, Review, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
+    TrajectoryId,
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
@@ -491,6 +492,10 @@ pub(crate) enum EventError {
     CallOutstanding,
     #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
     SpawnOutstanding,
+    #[error("a fan-out spawn released under this prompt still starts subagents; wait for it to finish")]
+    FanOutOutstanding,
+    #[error("a fan-out spawn needs the host's call id and prompt id: its subagents bind to it by prompt")]
+    FanOutUnkeyed,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -589,6 +594,8 @@ impl EventError {
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
+            | EventError::FanOutOutstanding
+            | EventError::FanOutUnkeyed
             | EventError::CallIdReused
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
@@ -2818,6 +2825,26 @@ impl Runtime {
         )
     }
 
+    /// The host reported this actor's bound call finished. A fan-out spawn binds no new child
+    /// after it; recording a call the log never bound, or one already settled, adds nothing.
+    pub(crate) fn record_call_settled(&self, acting: &Actor, call_id: String) -> Result<(), EventError> {
+        let trajectory = acting_trajectory(acting);
+        let log = self.inner.log(&acting.root)?;
+        let open = log
+            .call_bindings()
+            .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id && !binding.settled);
+        match open {
+            true => self.inner.append_host(
+                &acting.root,
+                &HostObservation::CallSettled {
+                    trajectory: trajectory.clone(),
+                    call_id,
+                },
+            ),
+            false => Ok(()),
+        }
+    }
+
     /// What the prompt left open is settled, and this actor's standing survives it.
     pub(crate) fn record_prompt_settled(&self, acting: &Actor) -> Result<(), EventError> {
         self.inner.append_host(
@@ -4232,7 +4259,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         cwd: None,
                     },
                     call_id: None,
-                    spawn: false,
+                    spawn: None,
+                    prompt: None,
                     ruling: None,
                 },
             )
@@ -5228,6 +5256,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::Prompt {
                 actor,
                 text: "go on".to_string(),
+                settles: None,
             },
         )
         .await;
@@ -5553,7 +5582,8 @@ url = "{url}"
                     cwd: None,
                 },
                 call_id: None,
-                spawn,
+                spawn: spawn.then_some(SpawnKind::Single),
+                prompt: None,
                 ruling: None,
             },
         )

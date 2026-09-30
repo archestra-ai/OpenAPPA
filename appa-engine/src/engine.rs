@@ -6262,7 +6262,10 @@ mod tests {
     fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::value::ForkId) {
         let mut log = vec![opened(e)];
         let blocked = e
-            .handle(&viewing(e, &log), spawn_batch("fan-out", Some(crate::transition::SpawnMark::fan_out(0))))
+            .handle(
+                &viewing(e, &log),
+                spawn_batch("fan-out", Some(crate::transition::SpawnMark::fan_out(0))),
+            )
             .expect("a fan-out spawn blocks with its return declarations");
         log.extend(appended_facts(blocked));
         let (offer, _) = opened_offers(&log)
@@ -6354,7 +6357,10 @@ mod tests {
                 e.fork_of(&view, child),
                 Some(crate::value::ForkId::member(dispatch, child))
             );
-            assert_eq!(e.return_policy_of(&view, child).map(|policy| policy.sanitizer), Some(None));
+            assert_eq!(
+                e.return_policy_of(&view, child).map(|policy| policy.sanitizer),
+                Some(None)
+            );
         }
         assert_eq!(e.fork_status(&view, &fan_out), ForkStatus::FanOut);
         assert!(

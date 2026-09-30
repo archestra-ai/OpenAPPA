@@ -50,10 +50,7 @@ fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
             detail: error.to_string(),
         })?,
     };
-    Ok(IdentifiedTool {
-        canonical,
-        spawn: false,
-    })
+    Ok(IdentifiedTool { canonical, spawn: None })
 }
 
 fn spell(canonical: &CanonicalTool) -> Option<String> {
@@ -130,6 +127,7 @@ fn call(actor: &Actor, raw: &str) -> HookEvent {
             cwd: None,
         },
         spawn: identified.spawn,
+        prompt: None,
         ruling: None,
     }
 }
@@ -192,7 +190,8 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
                     arguments: serde_json::value::RawValue::from_string(plan.to_string()).expect("an object"),
                     cwd: None,
                 },
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             }
         )

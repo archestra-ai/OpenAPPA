@@ -37,9 +37,9 @@
 //! withheld too, from the tool and response its bytes still carry: the
 //! result has run either way, and a hook that only exits non-zero leaves
 //! that output in front of the model.
-use appa_runtime_api::{HookEvent, OutcomeBody, ToolOutcome};
+use appa_runtime_api::{HookEvent, OutcomeBody, SpawnKind, ToolOutcome};
 
-use crate::identity::{is_mcp_tool, is_spawn_tool};
+use crate::identity::{is_mcp_tool, spawn_kind};
 
 pub(crate) const REDACTED: &str = "[appa] redacted";
 
@@ -64,10 +64,10 @@ enum Restatement {
 
 impl Restatement {
     fn of(tool: &str) -> Self {
-        match (is_spawn_tool(tool), is_mcp_tool(tool)) {
-            (true, _) => Self::Spawn,
-            (false, true) => Self::TextBlock,
-            (false, false) => Self::Leaves,
+        match (spawn_kind(tool), is_mcp_tool(tool)) {
+            (Some(SpawnKind::Single), _) => Self::Spawn,
+            (Some(SpawnKind::FanOut) | None, true) => Self::TextBlock,
+            (Some(SpawnKind::FanOut) | None, false) => Self::Leaves,
         }
     }
 }

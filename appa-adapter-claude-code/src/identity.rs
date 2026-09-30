@@ -21,7 +21,7 @@
 //! Where the runtime would name that tool it says the canonical id, never
 //! a spelling that dispatches the control tool instead.
 
-use appa_runtime_api::{CanonicalTool, IdentifiedTool, ParseRefusal};
+use appa_runtime_api::{CanonicalTool, IdentifiedTool, ParseRefusal, SpawnKind};
 
 /// The registered spelling of the runtime's own control tool: `execute_remedy_plan`
 /// on the `appa` MCP server the install registers. Only this spelling is the control
@@ -78,12 +78,18 @@ pub(crate) fn spell(tool: &CanonicalTool) -> Option<String> {
 pub(crate) fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
     Ok(IdentifiedTool {
         canonical: canonical(raw)?,
-        spawn: is_spawn_tool(raw),
+        spawn: spawn_kind(raw),
     })
 }
 
-pub(crate) fn is_spawn_tool(tool: &str) -> bool {
-    tool == "Agent" || tool == "Task"
+/// `Agent` (`Task` is its older name) starts one subagent; `Workflow` runs a script that starts
+/// any number of them under the one return declaration its call makes.
+pub(crate) fn spawn_kind(tool: &str) -> Option<SpawnKind> {
+    match tool {
+        "Agent" | "Task" => Some(SpawnKind::Single),
+        "Workflow" => Some(SpawnKind::FanOut),
+        _ => None,
+    }
 }
 
 pub(crate) fn is_mcp_tool(tool: &str) -> bool {
@@ -173,12 +179,16 @@ mod tests {
 
     #[test]
     fn identification_carries_the_canonical_identity_and_spawn() {
-        for tool in ["Agent", "Task"] {
+        for (tool, kind) in [
+            ("Agent", SpawnKind::Single),
+            ("Task", SpawnKind::Single),
+            ("Workflow", SpawnKind::FanOut),
+        ] {
             let identified = identified(tool).expect("identifies");
-            assert!(identified.spawn, "{tool} is the spawn");
+            assert_eq!(identified.spawn, Some(kind), "{tool}");
             assert_eq!(identified.canonical.as_str(), format!("host/claude-code/{tool}"));
         }
-        assert!(!identified("Bash").expect("identifies").spawn);
+        assert_eq!(identified("Bash").expect("identifies").spawn, None);
         assert!(matches!(identified("mcp__github"), Err(ParseRefusal::Malformed { .. })));
     }
 

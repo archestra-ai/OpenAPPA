@@ -55,6 +55,7 @@ impl HostState {
                 // the records back from the end.
                 HostObservation::Inventory { .. }
                 | HostObservation::CallBound { .. }
+                | HostObservation::CallSettled { .. }
                 | HostObservation::PromptSeen { .. }
                 | HostObservation::PromptSettled { .. } => {}
                 HostObservation::Vouched { actor, key, ruling } => {

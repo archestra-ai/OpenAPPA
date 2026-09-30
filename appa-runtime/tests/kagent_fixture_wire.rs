@@ -74,7 +74,7 @@ fn each_raw_spelling_arrives_as_the_canonical_tool_the_policy_names() {
             .unwrap_or_else(|refusal| panic!("`{name}` is admitted: {refusal:?}"))
             .expect("an event naming a tool is never a ping");
         let (call, spawn) = match &accepted.event {
-            HookEvent::ToolCall { call, spawn, .. } => (call, *spawn),
+            HookEvent::ToolCall { call, spawn, .. } => (call, spawn.is_some()),
             HookEvent::ToolResult { call, .. } | HookEvent::SpawnResult { call, .. } => (call, false),
             other => panic!("`{name}` names a tool on {other:?}"),
         };
@@ -155,7 +155,8 @@ fn the_runtime_prefixes_the_trajectory_ids_the_plugin_leaves_bare() {
         let root_id = match &accepted.event {
             HookEvent::SessionStart { root, .. }
             | HookEvent::ChildStart { root, .. }
-            | HookEvent::ChildEnd { root, .. } => root.0.clone(),
+            | HookEvent::ChildEnd { root, .. }
+            | HookEvent::ChildReturn { root, .. } => root.0.clone(),
             HookEvent::Prompt { actor, .. }
             | HookEvent::TurnEnd { actor }
             | HookEvent::ToolCall { actor, .. }

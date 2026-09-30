@@ -112,7 +112,8 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
             actor: actor(),
             call: send(RAW_BODY),
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         },
     )

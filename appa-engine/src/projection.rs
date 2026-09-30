@@ -1253,9 +1253,9 @@ impl Views<'_> {
     pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::check::CallRole {
         match subject {
             SubjectKey::Call { batch, position, .. }
-                if self.decided_batch(batch).is_some_and(|decided| {
-                    crate::transition::SpawnMark::marks(decided.spawn, *position as usize)
-                }) =>
+                if self
+                    .decided_batch(batch)
+                    .is_some_and(|decided| crate::transition::SpawnMark::marks(decided.spawn, *position as usize)) =>
             {
                 crate::check::CallRole::MarkedSpawn
             }

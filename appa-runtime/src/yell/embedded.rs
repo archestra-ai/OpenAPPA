@@ -129,7 +129,8 @@ mod tests {
                     actor: request.actor.clone(),
                     call,
                     call_id: None,
-                    spawn: false,
+                    spawn: None,
+                    prompt: None,
                     ruling: None
                 }
             )

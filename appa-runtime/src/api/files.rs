@@ -376,7 +376,7 @@ impl super::Runtime {
             cwd: None,
         };
         let session = self.session(&actor.root, super::acting_trajectory(actor))?;
-        match session.on_tool_call_identified(call.clone(), None, false).await? {
+        match session.on_tool_call_identified(call.clone(), None, None, None).await? {
             super::ToolCallDecision::Deny { feedback, .. } => Ok(FileReply::Failure(feedback)),
             super::ToolCallDecision::Allow { .. } => session.execute_file(call).await,
         }

@@ -110,6 +110,7 @@ pub(crate) enum HookKind {
     ToolResult,
     ChildStart,
     ChildEnd,
+    ChildReturn,
     SpawnResult,
     /// The body did not parse.
     Unparsable,

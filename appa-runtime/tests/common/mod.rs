@@ -250,7 +250,8 @@ pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision
             actor: actor(),
             call,
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         },
     )

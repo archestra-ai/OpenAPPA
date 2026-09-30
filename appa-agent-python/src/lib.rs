@@ -9,7 +9,7 @@ use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
-    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -229,6 +229,7 @@ impl SessionInner {
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),
             text: user_prompt.to_string(),
+            settles: None,
         })?;
         Ok(inner)
     }
@@ -358,7 +359,8 @@ impl SessionInner {
             actor: self.actor(child),
             call: call.clone(),
             call_id: call_id.map(str::to_string),
-            spawn,
+            spawn: spawn.then_some(SpawnKind::Single),
+            prompt: None,
             ruling: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {

@@ -1417,11 +1417,14 @@ impl<'a> Sequence<'a> {
                         }
                     }
                     ForkId::Member { spawn, .. } => {
-                        let backed = self.projection.prepared_fork(&ForkId::of(spawn)).is_some_and(|fan_out| {
-                            fan_out.kind == SpawnKind::FanOut
-                                && &fan_out.parent == trajectory
-                                && &fan_out.return_policy == return_policy
-                        });
+                        let backed = self
+                            .projection
+                            .prepared_fork(&ForkId::of(spawn))
+                            .is_some_and(|fan_out| {
+                                fan_out.kind == SpawnKind::FanOut
+                                    && &fan_out.parent == trajectory
+                                    && &fan_out.return_policy == return_policy
+                            });
                         if !backed || *kind != SpawnKind::Single {
                             return Err(TransitionRefusal::UnbackedReturnPolicy);
                         }
@@ -3287,8 +3290,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
             DecidedAct::Proposals(_),
             Fact::DispatchOpened { .. }
             | Fact::ForkPrepared {
-                fork: ForkId::Spawn(_),
-                ..
+                fork: ForkId::Spawn(_), ..
             }
             | Fact::CallApprovalConsumed { .. }
             | Fact::CandidateConsumed { .. },

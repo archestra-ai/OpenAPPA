@@ -489,7 +489,8 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
         actor: actor.clone(),
         call: call.clone(),
         call_id: None,
-        spawn: false,
+        spawn: None,
+        prompt: None,
         ruling: None,
     };
     match hooks::handle(runtime, event).await {

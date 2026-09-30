@@ -78,15 +78,17 @@ fn error_class(error: &EventError) -> &'static str {
         EventError::UndeclaredTool { .. } => "undeclared_tool",
         EventError::UndeclaredSpawn { .. } => "undeclared_spawn",
         EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => "principal",
-        EventError::CallOutstanding | EventError::SpawnOutstanding | EventError::ChildDispatchOpen => {
-            "outstanding_call"
-        }
+        EventError::CallOutstanding
+        | EventError::SpawnOutstanding
+        | EventError::FanOutOutstanding
+        | EventError::ChildDispatchOpen => "outstanding_call",
         EventError::CallIdReused => "call_id_reused",
         EventError::TrajectoryEnded => "trajectory_ended",
         EventError::UnknownTrajectory | EventError::TrajectoryExists => "trajectory",
         EventError::UnknownDispatch | EventError::OutcomeMismatch => "dispatch",
         EventError::UnknownOffer | EventError::RemedyArguments { .. } => "remedy",
         EventError::NotAChild
+        | EventError::FanOutUnkeyed
         | EventError::SpawnNotTaken
         | EventError::SpawnAmbiguous
         | EventError::BindingMismatch => "spawn",

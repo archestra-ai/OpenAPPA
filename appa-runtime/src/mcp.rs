@@ -1715,7 +1715,8 @@ max_body_bytes = 4096
                     cwd: None,
                 },
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )
@@ -1739,7 +1740,8 @@ max_body_bytes = 4096
                 cwd: None,
             },
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         };
         let first = crate::hooks::handle_embedded_with_options(
@@ -1844,7 +1846,8 @@ max_body_bytes = 4096
                 cwd: None,
             },
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         }
     }
