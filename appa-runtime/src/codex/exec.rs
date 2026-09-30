@@ -309,6 +309,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_overflow_stops_the_child_and_withholds_all_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("continued-after-overflow");
+        let report = execute(
+            Specification {
+                command: format!(
+                    "dd if=/dev/zero bs=1024 count=1025 2>/dev/null; sleep 2; touch '{}'",
+                    marker.display()
+                ),
+                shell: "/bin/sh".into(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+            },
+            || true,
+        )
+        .unwrap();
+        assert_eq!(report.exit_code, None);
+        assert!(report.stdout.is_empty());
+        assert!(report.stderr.is_empty());
+        assert!(!marker.exists());
+    }
+
+    #[test]
     fn escaped_descendant_cannot_hold_capture_open_indefinitely() {
         if Command::new("python3").arg("--version").output().is_err() {
             return;

@@ -11,6 +11,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import uuid
 
 
 def main() -> int:
@@ -66,20 +67,28 @@ def main() -> int:
                 ["codex", "sandbox", "-P", "probe", "-C", str(project), "/bin/sh", "-c", wrapper],
                 cwd=project, env=sandbox_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-            early = bool(select.select([sandbox.stdout], [], [], 0.4)[0])
+            early_polls = [bool(select.select([sandbox.stdout], [], [], 0.3)[0]) for _ in range(3)]
             stdout, stderr = sandbox.communicate(timeout=20)
             event.update({"hook_event_name": "PostToolUse", "tool_input": {"command": wrapper},
                           "tool_response": stdout.decode(errors="replace")})
             post = subprocess.run(hook_args, input=json.dumps(event), text=True, capture_output=True,
                                   env=hook_env, timeout=15)
+            forged = subprocess.run(
+                ["codex", "sandbox", "-P", "probe", "-C", str(project), str(appa),
+                 "codex-exec", "--url", url, str(uuid.uuid4())],
+                cwd=project, env=sandbox_env, capture_output=True, timeout=15,
+            )
             valid = (
-                not early and sandbox.returncode == 0 and stdout == b"APPA_PROXY_BEGINAPPA_PROXY_END"
+                not any(early_polls) and sandbox.returncode == 0 and stdout == b"APPA_PROXY_BEGINAPPA_PROXY_END"
                 and post.returncode == 0 and post.stdout == "{}"
+                and forged.returncode != 0 and b"APPA_PROXY" not in forged.stdout + forged.stderr
             )
             print(json.dumps({
                 "status": "pass" if valid else "fail", "sandbox_exit": sandbox.returncode,
-                "early_stdout": early, "output_marker": "complete" if stdout == b"APPA_PROXY_BEGINAPPA_PROXY_END" else "other",
+                "early_stdout_polls": early_polls,
+                "output_marker": "complete" if stdout == b"APPA_PROXY_BEGINAPPA_PROXY_END" else "other",
                 "post_ack": post.returncode == 0 and post.stdout == "{}",
+                "forged_handle_refused": forged.returncode != 0 and b"APPA_PROXY" not in forged.stdout + forged.stderr,
                 "sandbox_stderr_tail": stderr.decode(errors="replace")[-300:] if not valid else "",
             }, indent=2))
             return 0 if valid else 1

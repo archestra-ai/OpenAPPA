@@ -91,6 +91,54 @@ fn wrapper_emits_only_the_admitted_result() {
 }
 
 #[test]
+fn lost_result_admission_never_releases_child_output() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = uuid::Uuid::new_v4().to_string();
+    let cwd = std::env::current_dir().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (request, _) = read_request(&mut socket);
+        assert!(request.contains("/consume"));
+        answer(
+            &mut socket,
+            serde_json::json!({"command":"printf private-stdout; printf private-stderr >&2", "shell":"/bin/sh", "cwd":cwd}),
+        );
+        let (mut socket, _) = listener.accept().unwrap();
+        let (request, _) = read_request(&mut socket);
+        assert!(request.contains("/running"));
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        let (request, body) = read_request(&mut socket);
+        assert!(request.contains("/report"));
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let base64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(
+            base64.decode(report["stdout"].as_str().unwrap()).unwrap(),
+            b"private-stdout"
+        );
+        assert_eq!(
+            base64.decode(report["stderr"].as_str().unwrap()).unwrap(),
+            b"private-stderr"
+        );
+        // The runtime disconnects after it receives the report.
+        drop(socket);
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["codex-exec", "--url", &url, &handle])
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.windows(7).any(|bytes| bytes == b"private"));
+}
+
+#[test]
 fn codex_hook_prepares_and_settles_a_runtime_owned_command() {
     use std::process::Stdio;
 
@@ -172,6 +220,23 @@ fn codex_hook_prepares_and_settles_a_runtime_owned_command() {
         "tool_response":{"stdout":"diagnostic", "exit_code":7}
     }));
     assert_eq!(post, serde_json::json!({}));
+    let duplicate = hook(serde_json::json!({
+        "hook_event_name":"PostToolUse", "session_id":"s1", "tool_name":"Bash",
+        "tool_use_id":"c2", "cwd":dir.path(), "tool_input":{"command":wrapper},
+        "tool_response":{"stdout":"diagnostic", "exit_code":7}
+    }));
+    assert_eq!(duplicate, serde_json::json!({}));
+    for (session, agent) in [("other-session", None), ("s1", Some("other-agent"))] {
+        let mut foreign = serde_json::json!({
+            "hook_event_name":"PostToolUse", "session_id":session, "tool_name":"Bash",
+            "tool_use_id":"c2", "cwd":dir.path(), "tool_input":{"command":wrapper},
+            "tool_response":{"stdout":"diagnostic", "exit_code":7}
+        });
+        if let Some(agent) = agent {
+            foreign["agent_id"] = serde_json::json!(agent);
+        }
+        assert_eq!(hook(foreign)["decision"], "block");
+    }
 
     let pre = hook(serde_json::json!({
         "hook_event_name":"PreToolUse", "session_id":"s1", "tool_name":"Bash",
