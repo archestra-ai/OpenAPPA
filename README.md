@@ -15,6 +15,7 @@
 [Discord](https://discord.gg/B5fmSxHKZ7)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
+[![NeurIPS 2026 Workshop](https://img.shields.io/badge/NeurIPS%202026-Workshop-4B8BBE.svg)](https://agentwild-workshop.github.io/neurips2026/)
 [![Status: Preview & RFC](https://img.shields.io/badge/status-preview%20%26%20RFC-orange.svg)](https://openappa.com)
 [![Discord](https://img.shields.io/badge/discord-join%20chat-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/B5fmSxHKZ7)
 
@@ -147,12 +148,17 @@ agent_yell` in the config is the answer either way. That call is checked by
 your policy like any other, so a session narrowed to `self` or `internal`
 reaches a human review instead of sending.
 
-## Status
+## Status & Paper
 
 OpenAPPA is a **preview and an RFC**. The model is settled enough to build
 against and deliberately open to argument — config and wire surfaces may break
-without shims. Read the [paper](https://openappa.com/paper), then open an
-issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
+without shims.
+
+The underlying algebra, recovery guarantees, and empirical benchmarks are published in:
+- **Paper:** [APPA: Recoverable Information-Flow Control for Real-World LLM Agents](https://openappa.com/paper) ([arXiv:2607.24625](https://arxiv.org/abs/2607.24625))
+- **Venue:** Accepted to the **Third Workshop on Agents in the Wild: Safety, Security, and Beyond ([Agents in the Wild @ NeurIPS 2026](https://agentwild-workshop.github.io/neurips2026/))**.
+
+Read the paper, then open an issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 ## License
 

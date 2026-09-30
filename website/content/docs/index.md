@@ -7,7 +7,7 @@ description: OpenAPPA is an open-source, deterministic security engine for real-
 
 OpenAPPA is a frontier deterministic AI guardrail that is 100% resistant to data exfiltration caused by prompt injection or model hallucination, and the first of its kind that doesn't break agents.
 
-It is open, vendor-agnostic, and MIT-licensed.
+Backed by a [NeurIPS-accepted paper](/paper), it is open, vendor-agnostic, and MIT-licensed.
 
 And yes, it outperforms competitors on benchmarks:
 
