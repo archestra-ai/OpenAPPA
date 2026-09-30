@@ -26,12 +26,11 @@
 OpenAPPA sits between an agent and its tools and answers one question before
 every action: **is this data allowed to go to this destination?**
 
-It is powered by APPA — Agentic Permissions Policy Algebra — which tracks the
-sensitivity and trust of everything an agent reads and checks every outbound
-call against it. Checks run *before* dispatch, so sensitive data never reaches
-an unauthorized tool. Classifiers and PII detectors are probabilistic; a
-declared flow decision here holds on every run, which is what it takes to trust
-an agent around medical or financial records.
+It is powered by APPA (Agentic Permissions Policy Algebra). OpenAPPA tracks the
+sensitivity and trust of everything an agent reads and checks each tool call
+against it *before* the call runs, so sensitive data never reaches an
+unauthorized tool. Classifiers and PII detectors are probabilistic, while this
+check is deterministic and returns the same decision on every run.
 
 Policy is declarative TOML. The engine decides from the event log alone and
 makes no network or file calls, so the same log always gets the same decision.
