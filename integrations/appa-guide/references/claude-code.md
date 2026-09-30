@@ -247,15 +247,16 @@ are included. Then group the proposal by server. Show:
 - every configured MCP server whose tools could not be inspected: "<server>
   is configured, but I could not inspect its tools in this session."
 
-At the end of the proposal, add **Needed for this to work** when any required
-support is missing. Group every missing requirement there and propose the
-concrete fix. For example: "Slack needs your approval before publishing, but
-approval is not set up yet. I'll add it." Do not merely report "no HITL
-authority," and do not mix missing requirements with unchanged rules. List
-there every suggested or already-included battery that the `--check` result
-does not report `ready`, and say that its setup runs after approval. Never
-list a battery that `--check` reports `ready`, such as one ready through a
-CLI sign-in.
+At the end of the proposal, add **Needed setup** when any required support is
+missing. Show a table with the columns Battery and Setup, one row per battery
+that `--check` does not report `ready`. Setup is the sign-in command, or "a
+token on a local page". Never list a battery that is ready or needs no setup,
+such as one ready through a CLI sign-in. Under the table, say that setup runs
+after approval and that the user can skip any one step. Also list there every
+other missing requirement with its concrete fix. For example: "Slack needs your
+approval before publishing, but approval is not set up yet. I'll add it." Do
+not merely report "no HITL authority," and do not mix missing requirements
+with unchanged rules.
 
 Close with one plain sentence: "You can ask later to change what requires
 approval or what gets blocked." Keep specific tuning options for when the
@@ -298,7 +299,8 @@ After approval:
      sign-in first. Ask the user to run its `login_hint` with the `!` prefix,
      for example `! gh auth login -s user:email`, and to say "done". Do not
      show token steps or start a token page in that message. Never run the
-     sign-in yourself. Then check that battery again. Only when it is still
+     sign-in yourself. Also add "or say **skip** to set up <Battery>
+     later". Then check that battery again. Only when it is still
      not ready, or the user says the sign-in does not work, continue with the
      token below. A battery whose CLI is not installed goes to the token
      directly.
@@ -309,12 +311,14 @@ After approval:
      appa ui --config <live-path> --battery <name> --no-open
      ```
 
-     Give the URL it prints as a link, and add "or say skip". The page shows
-     only the token field. When the battery is ready, the command prints the
+     Give the URL it prints as a link, and add "or say **skip** to set up
+     <Battery> later". The page shows only the token field. When the battery
+     is ready, the command prints the
      battery's sanitized status as JSON and exits, and its exit brings you
      back. Continue from that JSON; do not ask the user if they are done. If a
      check fails, the page stays open and shows why. If the user says skip,
-     stop the command. After 15 minutes the command exits with an error;
+     stop the command. A skip applies only to this battery; continue with
+     the next step. After 15 minutes the command exits with an error;
      treat that as a skip. A skipped battery is still included, because its
      rules need no token. Leave out only the parts that need the token: the
      audience mapping in step 5, and any other part a reload refuses without
@@ -478,14 +482,15 @@ Briefly say what succeeded, what failed, and whether the file was restored.
 If the fix changes who may receive information, say how before asking for
 approval. Describe only behavior supported by the README or observed results.
 
-For each battery whose token was skipped, add a **One step left out**
-paragraph: name what was left out, list in one or two bullets what does not
-work until the token is set (take it from the battery's README), and end
-with how to finish it: run `/appa-guide set up the <Battery> token`. Also say
-that the token can instead come from `APPA_PROVIDER_<PROVIDER>_TOKEN` in the
-runtime's environment or, when the battery declares a CLI sign-in, from its
-`login_hint`, for example `gh auth login -s user:email`; after either, the
-same `/appa-guide` request adds back what was left out.
+Keep the report to about five lines. Do not repeat what each battery
+does.
+
+For each battery whose setup was skipped, add one short group:
+"**<Battery> <token or sign-in> not set.** The <Battery> battery is
+included. Until you set it:" then one or two bullets from the battery's
+README on what does not work, then "To set it later:
+`/appa-guide set up the <Battery> <token or sign-in>`." The skip was the
+user's choice: do not call the setup unfinished.
 
 After a successful reload, add:
 
