@@ -80,15 +80,9 @@ clappa
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
-Setup, upgrade and uninstall: [Claude Code
-integration](https://openappa.com/claude-code) ·
-[`marketplace/plugins/claude-code`](marketplace/plugins/claude-code/README.md).
-
-Plugin and battery installation, explicit version updates, offline bundles,
-and kagent deployment preparation: [marketplace guide](marketplace/README.md).
-
-**Amp:** [amppa](integrations/amp/README.md) is the source-distributed Amp plugin.
-It checks tool calls and results through the same APPA runtime, locally or in an orb.
+[Claude Code](https://openappa.com/claude-code) ·
+[kagent](https://openappa.com/kagent) ·
+[Amp](integrations/amp/README.md)
 
 ## Testing
 
