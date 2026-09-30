@@ -496,7 +496,7 @@ feedback, and a subsequent supported action before claiming recovery.
 `canary` is the tripwire behind the `Nightly Canary` workflow
 (`.github/workflows/nightly-canary.yml`): the `appa` and `appa-open` arms over
 the full scenario set, one rep per cell, always under `redteam-chaos`, on a
-pinned model pair (`openai/gpt-5.6-terra`, `deepseek/deepseek-v4-flash-0731`,
+pinned model pair (`openai/gpt-6-luna`, `deepseek/deepseek-v4-flash-0731`,
 override with repeatable `--model`).
 
 ```bash

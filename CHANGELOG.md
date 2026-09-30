@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.29.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.28.0...v0.29.0) (2026-09-29)
+
+
+### Features
+
+* add runtime web UI and manifest-driven battery setup ([#524](https://github.com/archestra-ai/OpenAPPA/issues/524)) ([5fe7580](https://github.com/archestra-ai/OpenAPPA/commit/5fe75804576692f4f1dd153c3f0d63b3e1f45e20))
+* **amp:** add amppa v1 information-flow plugin ([#514](https://github.com/archestra-ai/OpenAPPA/issues/514)) ([fadca49](https://github.com/archestra-ai/OpenAPPA/commit/fadca4908400a772fb6feec332494917b84dfda3))
+* **appa-guide:** end init and adjust by opening appa ui for policy review ([#529](https://github.com/archestra-ai/OpenAPPA/issues/529)) ([fcf8f0c](https://github.com/archestra-ai/OpenAPPA/commit/fcf8f0c5f9d7bc7d089cceff6daee89572afdf80))
+* **batteries:** benefit line and setup steps in every battery manifest ([#534](https://github.com/archestra-ai/OpenAPPA/issues/534)) ([f1ea20c](https://github.com/archestra-ai/OpenAPPA/commit/f1ea20ce84efdee05b6110412b4917b5dcb25594))
+* **claude-code:** let WebFetch reach trusted docs sites without approval ([#528](https://github.com/archestra-ai/OpenAPPA/issues/528)) ([32a131c](https://github.com/archestra-ai/OpenAPPA/commit/32a131ccf980566c7ddf3f4f12eb17e0e3f3f1f1))
+* context providers for annotators; trust follows the author ([#522](https://github.com/archestra-ai/OpenAPPA/issues/522)) ([fef3f5e](https://github.com/archestra-ai/OpenAPPA/commit/fef3f5e1f609615285a3fe447bd1f21de55aa021))
+* **engine:** withhold side-effecting tool results ([#465](https://github.com/archestra-ai/OpenAPPA/issues/465)) ([7564209](https://github.com/archestra-ai/OpenAPPA/commit/7564209e51ed43655e154a083e43d8f808c507e9))
+* **github:** a listing keeps trust when the team wrote every listed item ([#525](https://github.com/archestra-ai/OpenAPPA/issues/525)) ([3966a0c](https://github.com/archestra-ai/OpenAPPA/commit/3966a0c7297f98c2ca55da567a0826fd5d929448))
+* **guide:** derive Bash classifier hints from batteries ([#526](https://github.com/archestra-ai/OpenAPPA/issues/526)) ([4310ed2](https://github.com/archestra-ai/OpenAPPA/commit/4310ed26a631fb9bbef9dd987af418feb4d1f79b))
+* **runtime:** expose checked trajectory status read ([#509](https://github.com/archestra-ai/OpenAPPA/issues/509)) ([7ca74a2](https://github.com/archestra-ai/OpenAPPA/commit/7ca74a241b3b586d5d236d669cfaeafa4339dfa6))
+* **ui:** battery story, actionable statuses, simpler overview ([#535](https://github.com/archestra-ai/OpenAPPA/issues/535)) ([3b816ff](https://github.com/archestra-ai/OpenAPPA/commit/3b816ffd028fec38db2ba755d390d621a6f66245))
+
+
+### Bug Fixes
+
+* **docs:** drop outdated numbers ([#537](https://github.com/archestra-ai/OpenAPPA/issues/537)) ([881d9ce](https://github.com/archestra-ai/OpenAPPA/commit/881d9ce22190394e843fff07ba04583483e29df1))
+* **docs:** restore token overhead header to keep shared anchor ([#539](https://github.com/archestra-ai/OpenAPPA/issues/539)) ([a19eba3](https://github.com/archestra-ai/OpenAPPA/commit/a19eba3c05bf8136af5cc80689241fac775e6142))
+* **engine:** fall through to wildcard for unmatched argument selectors ([#515](https://github.com/archestra-ai/OpenAPPA/issues/515)) ([05c0487](https://github.com/archestra-ai/OpenAPPA/commit/05c04872b8441dc45cdfcb6a79aa7aba667128bd))
+* **init:** fix duplicate hooks when updating from old clappa ([#495](https://github.com/archestra-ai/OpenAPPA/issues/495)) ([1a3b4c7](https://github.com/archestra-ai/OpenAPPA/commit/1a3b4c7a6b5acc1612aa1b7f36ec64739c2e33d0))
+
+
+### Dependencies
+
+* bump astral-sh/setup-uv from 10.1.0 to 10.2.0 ([#517](https://github.com/archestra-ai/OpenAPPA/issues/517)) ([baf1b32](https://github.com/archestra-ai/OpenAPPA/commit/baf1b32c01c7a8ad2b4177c29c858a7bc5fad866))
+* bump jsonschema from 0.56.0 to 0.57.0 ([#519](https://github.com/archestra-ai/OpenAPPA/issues/519)) ([8a52e12](https://github.com/archestra-ai/OpenAPPA/commit/8a52e123327b848f9169d09dba564cd473256e35))
+* bump the rust-dependencies group with 2 updates ([#518](https://github.com/archestra-ai/OpenAPPA/issues/518)) ([a3db5d3](https://github.com/archestra-ai/OpenAPPA/commit/a3db5d3b7b2790197d394386820a8baeb860702d))
+* bump zip from 6.0.0 to 8.6.0 ([#391](https://github.com/archestra-ai/OpenAPPA/issues/391)) ([337f272](https://github.com/archestra-ai/OpenAPPA/commit/337f272d9cf3cb65fd09d264d06e0417b6637409))
+
+
+### Miscellaneous Chores
+
+* **bench:** pin nightly canary to gpt-6-luna ([#538](https://github.com/archestra-ai/OpenAPPA/issues/538)) ([dcbb599](https://github.com/archestra-ai/OpenAPPA/commit/dcbb599c9e79d1e1c47782fde7c6fef12e038778))
+
 ## [0.28.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.27.0...v0.28.0) (2026-09-28)
 
 

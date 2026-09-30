@@ -7,4 +7,10 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["huggingface"]
 helpers = ["audience-source.py", "repo-visibility.py", "hf_token.py"]
-setup = "Falls back to your Hugging Face CLI login (hf auth login) when the variable is unset; a read token suffices for reads, a write token for hf_fs_write and create_repo."
+benefit = "APPA asks the Hugging Face Hub if each repository a call names is public, private, or gated. With this, APPA keeps private and gated content with you, and writes to a public repository only data that anyone may see."
+setup = [
+  "Or use your Hugging Face CLI login: run `hf auth login`.",
+  "Create a token of type Read at https://huggingface.co/settings/tokens. It starts with `hf_`.",
+  "The MCP server connection has its own token: it needs Write only for `hf_fs_write` and `create_repo`.",
+  "For a private Hub endpoint, set `HF_ENDPOINT` to its root URL.",
+]

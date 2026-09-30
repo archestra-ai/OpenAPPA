@@ -1069,7 +1069,7 @@ pub(crate) fn battery_at(marketplace: &Path, entry: &PackageEntry) -> Result<Bat
     let package = appa_package::validate_package(&marketplace.join(entry.path.as_str()))
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
     match package.role {
-        Role::Battery(battery) => Ok(battery),
+        Role::Battery(battery) => Ok(*battery),
         Role::Plugin(_) => Err(InstallError::Invalid(format!("{} is not a battery", entry.name))),
     }
 }

@@ -7,3 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude_ai_Grain"]
 helpers = []
+benefit = "Rules for the Grain server's tools: APPA keeps meeting content internal and suspicious, and asks a person before a share by link, an invite, or a seat, team, or settings change."

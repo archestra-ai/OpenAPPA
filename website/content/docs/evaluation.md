@@ -143,12 +143,11 @@ IFC-tuned Auto matched it on Bench-Corp but let six attacks through on
 AgentThreatBench. Stock Auto, which never saw the policy, let ten through.
 
 That protection costs completion and tokens. OpenAPPA completed 75% of tasks in
-both suites; the Auto configurations completed 85–96%. Compared with the same
-agent under a permissive policy, guarded OpenAPPA used 6.5× the reported tokens
-on Bench-Corp and 2.3× on AgentThreatBench. These multiples cover the whole
-guarded agent, including isolated child trajectories and recovery, not the
-policy engine alone. Claude's SDK does not report the tokens Auto's classifier
-spends, so total costs are not directly comparable.
+both suites; the Auto configurations completed 85–96%. Guarded OpenAPPA also
+used more tokens than the same agent under a permissive policy, because
+isolated child trajectories and recovery run on top of the task. Claude's SDK
+does not report the tokens Auto's classifier spends, so total costs are not
+directly comparable.
 
 ## What we measured
 

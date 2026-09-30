@@ -88,9 +88,13 @@ pub struct Battery {
     /// manifest cannot disagree with the policy about what its helpers read.
     /// An install names each one to the person who then has to set it.
     pub credentials: Vec<String>,
-    /// What the manifest tells the person after an install and the variable
-    /// names cannot: the token's scopes, or a login the helpers fall back to.
-    pub setup: Option<String>,
+    /// One line that tells the person what the battery's helpers ask the
+    /// provider, and what APPA does better with the answer.
+    pub benefit: Option<String>,
+    /// The steps the person follows after an install, one line each, that the
+    /// variable names cannot say: which token to make, where, with which
+    /// scopes, or a login the helpers fall back to.
+    pub setup: Vec<String>,
     /// The programs whose presence on `PATH` means the battery is relevant
     /// on this machine: a Claude Code install includes it when one is found.
     pub detect: Vec<ExecutableName>,
@@ -139,7 +143,7 @@ impl Plugin {
 /// What a package is. A manifest declares exactly one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
-    Battery(Battery),
+    Battery(Box<Battery>),
     Plugin(Plugin),
 }
 
@@ -188,7 +192,7 @@ impl Package {
                     path: path.to_path_buf(),
                 });
             }
-            (Some(battery), None) => Role::Battery(battery.validate(&name, path)?),
+            (Some(battery), None) => Role::Battery(Box::new(battery.validate(&name, path)?)),
             (None, Some(plugin)) => Role::Plugin(plugin.validate(path)?),
         };
         Ok(Self {
@@ -238,7 +242,9 @@ struct RawBattery {
     namespaces: Vec<String>,
     #[serde(default)]
     helpers: Vec<String>,
-    setup: Option<String>,
+    benefit: Option<String>,
+    #[serde(default)]
+    setup: Vec<String>,
     #[serde(default)]
     detect: Vec<String>,
 }
@@ -279,17 +285,25 @@ impl RawBattery {
         for helper in &self.helpers {
             helpers.push(relative(helper, "battery.helpers", path)?);
         }
-        // One line the install prints verbatim: a blank or multi-line note is
-        // a manifest mistake, refused where it is read rather than tidied.
-        let setup = match self.setup.as_deref().map(str::trim) {
+        // Each is a line the install and the UI print verbatim: a blank or
+        // multi-line one is a manifest mistake, refused where it is read
+        // rather than tidied.
+        let benefit = match self.benefit.as_deref().map(one_line) {
             None => None,
-            Some(note) if !note.is_empty() && !note.contains(['\n', '\r']) => Some(note.to_owned()),
-            Some(_) => {
-                return Err(ManifestError::Setup {
+            Some(Some(line)) => Some(line),
+            Some(None) => {
+                return Err(ManifestError::Benefit {
                     path: path.to_path_buf(),
                 });
             }
         };
+        let mut setup = Vec::new();
+        for (index, step) in self.setup.iter().enumerate() {
+            setup.push(one_line(step).ok_or_else(|| ManifestError::Setup {
+                path: path.to_path_buf(),
+                step: index + 1,
+            })?);
+        }
         let mut detect = Vec::new();
         for program in self.detect {
             let parsed = ExecutableName::parse(&program).ok_or_else(|| ManifestError::Detect {
@@ -311,10 +325,17 @@ impl RawBattery {
             helpers,
             audiences: Vec::new(),
             credentials: Vec::new(),
+            benefit,
             setup,
             detect,
         })
     }
+}
+
+/// `text` trimmed, when it is one non-empty line.
+fn one_line(text: &str) -> Option<String> {
+    let line = text.trim();
+    (!line.is_empty() && !line.contains(['\n', '\r'])).then(|| line.to_owned())
 }
 
 /// Every plugin field, so the host that does not own one can refuse it by
@@ -450,7 +471,8 @@ mod tests {
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
                 credentials: vec![],
-                setup: None,
+                benefit: None,
+                setup: vec![],
                 detect: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
@@ -488,23 +510,46 @@ mod tests {
         ));
     }
 
-    /// `setup` is one line the install prints verbatim, so a blank or
-    /// multi-line note is refused where it is read.
+    /// `benefit` is one line the install prints verbatim, so a
+    /// blank or multi-line one is refused where it is read.
     #[test]
-    fn a_battery_setup_note_is_one_non_empty_line() {
-        let with = |note: &str| manifest(&BATTERY.replace("helpers", &format!("setup = {note:?}\nhelpers")));
+    fn a_battery_benefit_is_one_non_empty_line() {
+        let with = |line: &str| manifest(&BATTERY.replace("helpers", &format!("benefit = {line:?}\nhelpers")));
         assert_eq!(
-            with("Uses your gh login when unset.")
+            with(" APPA asks GitHub who can see a repository. ")
                 .unwrap()
                 .battery()
                 .unwrap()
-                .setup
+                .benefit
                 .as_deref(),
-            Some("Uses your gh login when unset.")
+            Some("APPA asks GitHub who can see a repository.")
         );
-        assert!(matches!(with("  "), Err(ManifestError::Setup { .. })));
-        assert!(matches!(with("one\ntwo"), Err(ManifestError::Setup { .. })));
-        assert!(matches!(with("one\rtwo"), Err(ManifestError::Setup { .. })));
+        assert!(matches!(with("  "), Err(ManifestError::Benefit { .. })));
+        assert!(matches!(with("one\ntwo"), Err(ManifestError::Benefit { .. })));
+        assert!(matches!(with("one\rtwo"), Err(ManifestError::Benefit { .. })));
+    }
+
+    /// Each `setup` step is one line the install numbers and prints verbatim,
+    /// so a blank or multi-line step is refused where it is read, by number.
+    #[test]
+    fn each_battery_setup_step_is_one_non_empty_line() {
+        let with = |steps: &[&str]| manifest(&BATTERY.replace("helpers", &format!("setup = {steps:?}\nhelpers")));
+        assert_eq!(
+            with(&["Run `gh auth login`.", " Or make a token. "])
+                .unwrap()
+                .battery()
+                .unwrap()
+                .setup,
+            vec!["Run `gh auth login`.".to_owned(), "Or make a token.".to_owned()]
+        );
+        assert!(with(&[]).unwrap().battery().unwrap().setup.is_empty());
+        assert!(matches!(with(&["ok", "  "]), Err(ManifestError::Setup { step: 2, .. })));
+        assert!(matches!(with(&["one\ntwo"]), Err(ManifestError::Setup { step: 1, .. })));
+        assert!(matches!(with(&["one\rtwo"]), Err(ManifestError::Setup { step: 1, .. })));
+        assert!(matches!(
+            manifest(&BATTERY.replace("helpers", "setup = \"one line\"\nhelpers")),
+            Err(ManifestError::Syntax { .. })
+        ));
     }
 
     /// A battery covers the namespace its own name spells until it says

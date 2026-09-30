@@ -7,4 +7,8 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["cloudflare"]
 helpers = []
-setup = "Bind each Cloudflare server you run: appa battery install cloudflare --server <docs-server> --server <observability-server>. A deployment with one of them binds that one."
+benefit = "Rules for Cloudflare's documentation and Workers Observability servers: APPA keeps Worker logs, telemetry, and code internal and treats their text as suspicious. It covers no write tool."
+setup = [
+  "Bind each Cloudflare server you run: `appa battery install cloudflare --server <docs-server> --server <observability-server>`.",
+  "If you run only one of the two servers, bind only that one.",
+]

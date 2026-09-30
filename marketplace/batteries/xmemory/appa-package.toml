@@ -7,4 +7,8 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["xmemory"]
 helpers = []
-setup = "Bind each xmemory server you run: appa battery install xmemory --server <instance-server> --server <admin-server>. A deployment with one of them binds that one."
+benefit = "Rules for the 32 tools of the xmemory instance and admin servers: APPA keeps memory internal, lets only trusted data into memory, and asks a person before a schema migration or an instance deletion."
+setup = [
+  "Bind each xmemory server you run: `appa battery install xmemory --server <instance-server> --server <admin-server>`.",
+  "If you run only one of the two servers, bind only that one.",
+]

@@ -8,4 +8,10 @@ hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
 detect = ["gh"]
 helpers = ["audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
-setup = "Falls back to your gh login (gh auth login) when the variable is unset; a token needs the repo and read:org scopes, and user:email to name the viewer by address."
+benefit = "APPA asks GitHub if a repository is public or private, who its collaborators are, and who wrote each issue and pull request. With this, APPA lets private-repository data flow only to its collaborators and marks text from outside authors as suspicious."
+setup = [
+  "Or use your `gh` login: run `gh auth login -s user:email` with the `repo` and `read:org` scopes.",
+  "Create a classic personal access token at https://github.com/settings/tokens/new with the `repo`, `read:org`, and `user:email` scopes. It starts with `ghp_`.",
+  "To list a repository's collaborators, the token's owner needs push access to that repository.",
+  "For GitHub Enterprise Server, set `GITHUB_API_URL` to its API root, for example `https://github.example.com/api/v3`.",
+]

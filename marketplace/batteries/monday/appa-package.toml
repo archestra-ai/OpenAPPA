@@ -7,4 +7,10 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["monday"]
 helpers = ["audience-source.py"]
-setup = "Connect https://mcp.monday.com/mcp with OAuth or a monday API token. Give the notification audience source a monday API token with users:read; map internal to the authorized reader cohort and self to the credential owner. The host human authority handles monday-review. Installation adds policy, not a connection or board permissions."
+benefit = "APPA asks monday.com for the confirmed email of a notification's recipient. With this, APPA sends a notification only with data that recipient may see."
+setup = [
+  "Connect the MCP server https://mcp.monday.com/mcp with OAuth or a monday API token. The install adds policy, not a connection.",
+  "In monday.com, click your profile picture, then Developers, then API token, then Show. Copy your personal API token.",
+  "An app token needs the `users:read` scope.",
+  "In your root config, map `internal` to the people who may see all the connection reaches, and `self` to the token owner.",
+]

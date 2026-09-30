@@ -309,11 +309,6 @@ fn credential_is_set(variable: &str) -> bool {
     std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
-/// What a person has to do after a battery is included that the include itself
-/// does not: set the credential variables its helpers read, or whatever else its
-/// manifest's `setup` says. `is_set` looks a variable up where this command
-/// runs; the runtime may run elsewhere, so the answer is information, never a
-/// refusal. Batteries with nothing to say are absent.
 /// A blank line before a run's first narration, so its output does not start
 /// against the shell prompt. `--json` emits one document and nothing else.
 fn begin(target: &Target) {
@@ -341,27 +336,38 @@ const START_OVER_COMMANDS: [&str; 2] = [
     "appa plugin install claude-code",
 ];
 
+/// What a person has to do after a battery is included that the include itself
+/// does not: set the credential variables its helpers read, or whatever else its
+/// manifest's `setup` steps say. The manifest's `benefit`
+/// rides along, so the person knows what the setup buys. `is_set` looks a variable up where this command
+/// runs; the runtime may run elsewhere, so the answer is information, never a
+/// refusal. Batteries with nothing to say are absent.
 fn setup_notices<'a>(
     batteries: impl IntoIterator<Item = (&'a PackageName, &'a Battery)>,
     is_set: impl Fn(&str) -> bool,
 ) -> serde_json::Value {
     let notices: Vec<serde_json::Value> = batteries
         .into_iter()
-        .filter(|(_, battery)| !battery.credentials.is_empty() || battery.setup.is_some())
+        .filter(|(_, battery)| !battery.credentials.is_empty() || !battery.setup.is_empty())
         .map(|(name, battery)| {
             let credentials: Vec<serde_json::Value> = battery
                 .credentials
                 .iter()
                 .map(|variable| serde_json::json!({"variable": variable, "set": is_set(variable)}))
                 .collect();
-            serde_json::json!({"battery": name.as_str(), "credentials": credentials, "note": battery.setup})
+            serde_json::json!({
+                "battery": name.as_str(),
+                "credentials": credentials,
+                "benefit": battery.benefit,
+                "setup": battery.setup,
+            })
         })
         .collect();
     serde_json::Value::from(notices)
 }
 
-/// One line per battery with something to set up, after the install or
-/// suggestion line it belongs to.
+/// One headline per battery with something to set up, after the install or
+/// suggestion line it belongs to, then its benefit and its numbered steps.
 fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Value) -> io::Result<()> {
     for notice in result["setup"].as_array().into_iter().flatten() {
         let reads: Vec<String> = notice["credentials"]
@@ -377,13 +383,22 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
             })
             .collect();
         let battery = notice["battery"].as_str().unwrap_or_default();
-        let note = notice["note"].as_str().unwrap_or_default();
-        let line = match (reads.is_empty(), note.is_empty()) {
-            (false, false) => format!("{battery} reads {}. {note}", reads.join(", ")),
-            (false, true) => format!("{battery} reads {}.", reads.join(", ")),
-            (true, _) => format!("{battery}: {note}"),
+        let headline = match reads.is_empty() {
+            false => format!("{battery} reads {}.", reads.join(", ")),
+            true => format!("{battery} setup:"),
         };
-        writeln!(output, "{}", style.detail(&line))?;
+        writeln!(output, "{}", style.detail(&headline))?;
+        if let Some(benefit) = notice["benefit"].as_str() {
+            writeln!(output, "{}", style.detail(benefit))?;
+        }
+        let steps = notice["setup"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str);
+        for (number, step) in steps.enumerate() {
+            writeln!(output, "{}", style.detail(&format!("{}. {step}", number + 1)))?;
+        }
     }
     Ok(())
 }
@@ -1532,19 +1547,21 @@ mod tests {
         assert!(many.contains("Their tools"), "{many}");
     }
 
-    /// A battery whose helpers read a credential, or whose manifest has a
-    /// setup note, gets one line naming both and whether the variable is set
-    /// where the command ran; a battery with neither gets none.
+    /// A battery whose helpers read a credential, or whose manifest has setup
+    /// steps, gets a headline naming each variable and whether it is set where
+    /// the command ran, then its benefit and its numbered steps; a battery
+    /// with neither gets nothing, whatever its benefit.
     #[test]
-    fn setup_notices_name_each_credential_and_the_manifest_note() {
-        let battery = |credentials: &[&str], setup: Option<&str>| Battery {
+    fn setup_notices_name_each_credential_the_benefit_and_the_steps() {
+        let battery = |credentials: &[&str], benefit: Option<&str>, setup: &[&str]| Battery {
             policy: appa_package::RelativePath::parse("appa.toml").unwrap(),
             hosts: vec![appa_package::Host::ClaudeCode],
             namespaces: vec![],
             helpers: vec![],
             audiences: vec![],
             credentials: credentials.iter().map(|variable| variable.to_string()).collect(),
-            setup: setup.map(str::to_owned),
+            benefit: benefit.map(str::to_owned),
+            setup: setup.iter().map(|step| step.to_string()).collect(),
             detect: vec![],
         };
         let github = PackageName::parse("github").unwrap();
@@ -1553,25 +1570,35 @@ mod tests {
         let batteries = [
             (
                 &github,
-                battery(&["APPA_PROVIDER_GITHUB_TOKEN"], Some("Uses your gh login when unset.")),
+                battery(
+                    &["APPA_PROVIDER_GITHUB_TOKEN"],
+                    Some("APPA asks GitHub who can see a repository."),
+                    &["Run `gh auth login`.", "Or set a token."],
+                ),
             ),
-            (&linear, battery(&["APPA_PROVIDER_LINEAR_TOKEN"], None)),
-            (&notion, battery(&[], None)),
+            (&linear, battery(&["APPA_PROVIDER_LINEAR_TOKEN"], None, &[])),
+            (&notion, battery(&[], Some("Rules for every Notion tool."), &[])),
         ];
 
         let setup = setup_notices(batteries.iter().map(|(name, battery)| (*name, battery)), |variable| {
             variable == "APPA_PROVIDER_LINEAR_TOKEN"
         });
+        assert_eq!(
+            setup[0]["setup"],
+            serde_json::json!(["Run `gh auth login`.", "Or set a token."])
+        );
         let mut rendered = Vec::new();
         render_setup(&mut rendered, Style::Plain, &serde_json::json!({"setup": setup})).unwrap();
 
         // Wrapped under the commands they explain; a battery with neither a
-        // credential nor a note contributes nothing.
+        // credential nor a step contributes nothing.
         let rendered = String::from_utf8(rendered).unwrap();
         assert!(rendered.contains("github reads APPA_PROVIDER_GITHUB_TOKEN (not set in this shell)."));
-        assert!(rendered.contains("Uses your gh login when unset."));
+        assert!(rendered.contains("APPA asks GitHub who can see a repository."));
+        assert!(rendered.contains("1. Run `gh auth login`."));
+        assert!(rendered.contains("2. Or set a token."));
         assert!(rendered.contains("linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell)."));
-        assert!(!rendered.contains("notion"));
+        assert!(!rendered.contains("otion"));
         assert_eq!(rendered.lines().filter(|line| line.contains("reads")).count(), 2);
     }
 
