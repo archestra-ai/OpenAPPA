@@ -110,12 +110,10 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 None => ToolOutcome::Indeterminate,
                 Some(response) if call.tool.starts_with("mcp__") && mcp_error(response) => ToolOutcome::Indeterminate,
                 Some(response) => ToolOutcome::Success {
-                    body: OutcomeBody::Available(
-                        response
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| response.to_string()),
-                    ),
+                    // The runtime wire carries a JSON value. Codex often
+                    // supplies a plain string for patch and MCP results, so
+                    // preserve that string as a JSON string value.
+                    body: OutcomeBody::Available(response.to_string()),
                 },
             };
             if call.tool == "spawn_agent" {
@@ -194,16 +192,18 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_string_result_is_not_json_quoted() {
+    fn a_codex_string_result_crosses_the_wire_as_a_json_string() {
         let body = br#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"c1","tool_input":{"command":"echo hi"},"tool_response":"hello\n"}"#;
         let event = parse(body).unwrap().unwrap();
+        appa_runtime_api::WireEvent::from_event(appa_runtime_api::AdapterName::Codex, &event)
+            .expect("a Codex string result crosses the runtime wire");
         let HookEvent::ToolResult { outcome, .. } = event else {
             panic!("tool result")
         };
         assert_eq!(
             outcome,
             ToolOutcome::Success {
-                body: OutcomeBody::Available("hello\n".into())
+                body: OutcomeBody::Available("\"hello\\n\"".into())
             }
         );
     }
