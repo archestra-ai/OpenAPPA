@@ -1103,11 +1103,6 @@ impl Config {
         Ok(config)
     }
 
-    #[cfg(feature = "daemon")]
-    pub(crate) fn inspect_local(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        Self::load_with_keys(path, battery_dirs, KeySource::Deferred)
-    }
-
     fn load_with_keys(path: &Path, battery_dirs: &[PathBuf], keys: KeySource<'_>) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
             path: path.display().to_string(),

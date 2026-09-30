@@ -337,13 +337,15 @@ async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries
     axum::Json(catalog)
 }
 
-/// What `appa ui` shows while this runtime serves: the policy it runs, and which tokens and
-/// programs this process itself can reach. Loopback management only.
-async fn dashboard(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    let mut data = state.runtime.dashboard(state.adapter);
-    data["config"] = serde_json::json!(state.config);
-    data["prerequisites"] = crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default();
-    axum::Json(data)
+/// What `appa ui` reads while this runtime serves: its configuration, the batteries it
+/// includes, and which tokens and programs this process itself can reach. Loopback
+/// management only.
+async fn prerequisites(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "config": state.config,
+        "included": state.runtime.included_batteries(),
+        "prerequisites": crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default(),
+    }))
 }
 
 /// Battery checks run in this process's environment, which is the one enforcement uses.
@@ -615,7 +617,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .route("/status", get(status))
         .route("/report", post(report))
         .route("/reload", post(reload))
-        .route("/dashboard", get(dashboard))
+        .route("/prerequisites", get(prerequisites))
         .route("/battery-check", post(battery_check))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()

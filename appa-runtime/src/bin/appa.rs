@@ -14,7 +14,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open the local dashboard and consolidated battery setup.
+    /// Ask for one battery's token on a local page; exit when the battery is ready.
     Ui(appa_runtime::ui::Args),
     /// Run headless Claude with runtime-owned file tools and native tools removed.
     ClaudeFiles(appa_runtime::claude_files::Args),
