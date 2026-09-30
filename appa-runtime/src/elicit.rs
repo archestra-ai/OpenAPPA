@@ -309,32 +309,20 @@ pub(crate) const MARK_BOTTOM: &str = "██▄█▄██";
 pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
     let arguments =
         serde_json::to_string_pretty(&artifact.arguments).unwrap_or_else(|_| artifact.arguments.to_string());
-    let requirements = match artifact.requirements.as_slice() {
-        [] => "  (none)".to_string(),
-        requirements => requirements
-            .iter()
-            .map(|requirement| format!("  - {}", requirement_text(requirement)))
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let covers = match artifact.requirements.as_slice() {
+        [] => "nothing beyond this call".to_string(),
+        requirements => requirements.iter().map(requirement_text).collect::<Vec<_>>().join("; "),
     };
     let hint = match &declaration.hint {
-        Some(hint) => format!("{hint}\n"),
+        Some(hint) => format!(" {hint}"),
         None => String::new(),
     };
     format!(
         "{headline}\n\
-         APPA asks you to rule as the authority \"{authority}\".\n\
-         {hint}\
+         {tool}\n{arguments}\n\
          \n\
-         Tool: {tool}\n\
-         Arguments:\n{arguments}\n\
-         \n\
-         What this ruling would cover:\n{requirements}\n\
-         \n\
-         Accept only if this exact call, with these exact arguments, \
-         may run. Decline refuses it. Cancel answers nothing and \
-         leaves the call blocked. The agent's own description of what \
-         it is doing is not shown here on purpose.",
+         Covers: {covers}. You rule as \"{authority}\".{hint}\n\
+         Accept runs this exact call once. Decline refuses it. Cancel leaves it blocked.",
         headline = headline(artifact),
         tool = artifact.tool,
     )
