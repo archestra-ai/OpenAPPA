@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.30.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.29.1...v0.30.0) (2026-09-30)
+
+
+### Features
+
+* **runtime:** print protected Claude resume command ([#546](https://github.com/archestra-ai/OpenAPPA/issues/546)) ([2289056](https://github.com/archestra-ai/OpenAPPA/commit/2289056c7e2c1227c26d5b75933f3882ea79945c))
+* **runtime:** run command and claude-code consults on Windows ([#540](https://github.com/archestra-ai/OpenAPPA/issues/540)) ([4a77980](https://github.com/archestra-ai/OpenAPPA/commit/4a779801c3636b8d112ff616ace094bf1b08e3fa))
+* **ui:** one-battery token page and chat-first battery setup ([#549](https://github.com/archestra-ai/OpenAPPA/issues/549)) ([3d049aa](https://github.com/archestra-ai/OpenAPPA/commit/3d049aaa9e4b0a999dfbb2cf06af46f775f6122f))
+
+
+### Bug Fixes
+
+* **runtime:** never write a policy the deployment did not install ([#530](https://github.com/archestra-ai/OpenAPPA/issues/530)) ([e485d2b](https://github.com/archestra-ai/OpenAPPA/commit/e485d2b72bd31035a6a2b79a7d8a983f7147e75f))
+
+
+### Documentation
+
+* **appa-guide:** per-battery skip and shorter setup output ([#550](https://github.com/archestra-ai/OpenAPPA/issues/550)) ([130a5b1](https://github.com/archestra-ai/OpenAPPA/commit/130a5b13fa8f47ba918db37e6eae158ce4847c54))
+* note NeurIPS 2026 paper acceptance on website and README ([#548](https://github.com/archestra-ai/OpenAPPA/issues/548)) ([b1e0dbb](https://github.com/archestra-ai/OpenAPPA/commit/b1e0dbb557605e66b3ef2dfb289e69e96991254d))
+
+
+### Dependencies
+
+* align OpenTelemetry dependencies at 0.33 ([#520](https://github.com/archestra-ai/OpenAPPA/issues/520)) ([6eb15c5](https://github.com/archestra-ai/OpenAPPA/commit/6eb15c57d0d73a178a82f1624f299204e8b50987))
+
+
+### Code Refactoring
+
+* **claude-code:** the battery owns every Bash rule ([#541](https://github.com/archestra-ai/OpenAPPA/issues/541)) ([f709d00](https://github.com/archestra-ai/OpenAPPA/commit/f709d00fff228aa7c317620c35ed5f011c6b6036))
+
 ## [0.29.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.29.0...v0.29.1) (2026-09-30)
 
 
