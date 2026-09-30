@@ -668,12 +668,14 @@ impl Installation {
             // No activation or config mutation has happened yet. This journal
             // belongs to the aborted attempt, not to the editor's new bytes.
             let journal = self.state.join("transaction.json");
-            fs::remove_file(&journal).and_then(|()| {
-                #[cfg(unix)]
-                File::open(&self.state)?.sync_all()?;
-                Ok(())
-            }).map_err(|error| InstallError::Recovery {
-                path: journal, reason: format!("config was edited and remains untouched, but its uncommitted journal could not be removed: {error}"),
+            let removed = fs::remove_file(&journal);
+            #[cfg(unix)]
+            let removed = removed.and_then(|()| File::open(&self.state)?.sync_all());
+            removed.map_err(|error| InstallError::Recovery {
+                path: journal,
+                reason: format!(
+                    "config was edited and remains untouched, but its uncommitted journal could not be removed: {error}"
+                ),
             })?;
             return Err(InstallError::Changed(self.config.clone()));
         }
