@@ -91,6 +91,65 @@ fn wrapper_emits_only_the_admitted_result() {
 }
 
 #[test]
+fn outer_pipe_input_does_not_reach_the_child_or_echo() {
+    use std::process::Stdio;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = uuid::Uuid::new_v4().to_string();
+    let cwd = std::env::current_dir().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (request, _) = read_request(&mut socket);
+        assert!(request.contains("/consume"));
+        answer(
+            &mut socket,
+            serde_json::json!({
+                "command":"IFS= read -r input || :; printf '%s' \"$input\"",
+                "shell":"/bin/sh", "cwd":cwd
+            }),
+        );
+        let (mut socket, body) = loop {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (request, body) = read_request(&mut socket);
+            if request.contains("/running") {
+                socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                continue;
+            }
+            assert!(request.contains("/report"));
+            break (socket, body);
+        };
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["stdout"], "");
+        assert_eq!(report["stderr"], "");
+        answer(
+            &mut socket,
+            serde_json::json!({
+                "stdout": base64::engine::general_purpose::STANDARD.encode("closed"),
+                "stderr": "", "exit_code": 0
+            }),
+        );
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["codex-exec", "--url", &url, &handle])
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"NO-ECHO-MARKER\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"closed");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn lost_result_admission_never_releases_child_output() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

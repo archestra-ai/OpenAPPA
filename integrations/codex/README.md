@@ -1,9 +1,42 @@
-# Codex proxy compatibility probe
+# Codex proxy compatibility
 
-`proxy_probe.py` exercises a runtime-owned Bash job through the installed Codex CLI's command sandbox. Build `appa` first with `cargo build -p appa`, then run `python3 integrations/codex/proxy_probe.py`. The probe creates a temporary project and Codex profile, makes no model call, and reports whether a rewritten wrapper reaches the runtime and releases only the admitted result after completion.
+## Probe
 
-The current command proxy is a **Unix, finite, noninteractive** implementation. It launches the selected `sh`, `bash`, or `zsh` login shell without a controlling terminal, buffers at most 1 MiB of combined output, and checks that the job remains active while it runs. Native Windows command execution, forwarded stdin, terminal jobs, and shell modes that cannot be reproduced are unsupported and refused. The proxy must be used with a protected launcher and a Codex sandbox profile that permits the disclosed `127.0.0.1` HTTP exception; the hook alone cannot guarantee coverage if Codex skips or disables it.
+Build `appa` with `cargo build -p appa`.
+Run `python3 integrations/codex/proxy_probe.py`.
 
-A runtime restart invalidates live job handles. Settled ownership is retained to prevent replay, but a post-hook arriving after restart is withheld because the old turn's liveness cannot be proved. Stop, Interrupt, and a new prompt also close live jobs and prevent late post-hook acknowledgement.
+The probe uses a temporary project and a temporary Codex profile. It makes no model call.
+It checks the rewritten wrapper, the admitted result, early output, and a forged job handle.
 
-On cancellation, the wrapper kills the shell's process group and its ordinary descendants. A command that deliberately daemonizes by creating another session can escape that group and continue after the wrapper settles indeterminately. The installed Codex 0.159 sandbox also leaves such a descendant running when its parent exits. Do not treat this proxy as containment for daemonizing commands; policy should deny them until a process-tree containment mechanism is available. Output from an escaped descendant that retains the wrapper's pipes is withheld, but its side effects cannot be rolled back.
+## Scope
+
+The proxy supports finite Unix commands without later input. It starts the selected `sh`, `bash`, or `zsh` login shell without a controlling terminal.
+It closes child stdin and buffers at most 1 MiB of combined output. It checks job status while the child runs.
+
+Native Windows commands, later input, terminal jobs, and unsupported shell modes remain outside this proxy scope.
+The protected launcher requires a Codex sandbox profile with the disclosed `127.0.0.1` HTTP exception.
+The hook cannot guarantee coverage if Codex skips or disables it.
+
+## Later input on Codex CLI 0.159.2
+
+Tests ran on macOS 26.6.2 arm64 on 30 September 2026.
+A direct `codex sandbox` command received input through a FIFO without echo.
+A disposable model-controlled Codex session then ran the rewritten APPA wrapper.
+Its non-TTY command received EOF before later input arrived.
+Codex returned `write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open`.
+The terminal retry echoed the synthetic `HELLO` input.
+
+This release did not provide a non-echoing pipe for later input in the tested command session.
+The wrapper keeps child stdin closed. The reserved `host/codex/appa_stdin` policy stays inactive.
+
+## Lifetime and output
+
+A runtime restart invalidates live job handles. Persistent ownership prevents replay.
+The runtime withholds a post-hook after restart because it cannot verify the old turn.
+Stop, Interrupt, and a new prompt close live jobs and block late post-hook acknowledgement.
+
+On cancellation, the wrapper kills the shell process group and ordinary descendants.
+A deliberately daemonized child can escape that group and continue after the wrapper settles indeterminately.
+Codex CLI 0.159.0 also left such a child alive after its parent exited.
+Do not use this proxy to contain daemonized commands. The policy must deny them until process-tree containment exists.
+The wrapper withholds output from an escaped child that retains its pipes. It cannot reverse that child's side effects.
