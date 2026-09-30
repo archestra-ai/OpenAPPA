@@ -2354,6 +2354,11 @@ samp {
   color: var(--text);
 }
 
+/* A figure inside the panel sits under the sentence without the page margins. */
+.oversimplified .bench-panel {
+  margin: 4px 0 0;
+}
+
 /* The legend sits across the top border and notches it. */
 .oversimplified-label {
   margin-left: 6px;

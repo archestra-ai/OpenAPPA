@@ -79,6 +79,36 @@ clappa
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
+## Other agents
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### [Add to your agent →](https://openappa.com/add-to-agent)
+
+Embed the APPA runtime in your own agent from any language, or connect an agent through hooks.
+
+</td>
+<td width="33%" valign="top">
+
+### [Try at the LLM proxy level →](https://openappa.com/archestra)
+
+[Archestra](https://archestra.ai)'s 1.4 Release Candidate implements OpenAPPA for Codex, and any other agent in the enterprise.
+
+</td>
+<td width="33%" valign="top">
+
+### [Amp →](integrations/amp/README.md)
+
+[amppa](integrations/amp/README.md) is the source-distributed Amp plugin. It
+checks tool calls and results through the same APPA runtime, locally or in an
+orb.
+
+</td>
+</tr>
+</table>
+
 ## Testing
 
 The APPA CLI provides two commands to check policy decisions before you merge a

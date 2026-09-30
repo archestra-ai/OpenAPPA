@@ -21,7 +21,8 @@ function BenchRow({ name, pct, label, isSubject }: BenchRowProps) {
   );
 }
 
-export function BenchmarkHighlight() {
+/** `link` is off where the chart already sits on the full results page. */
+export function BenchmarkHighlight({ link = true }: { link?: boolean }) {
   return (
     <section className="bench-panel" aria-label="Benchmark results">
       <div className="bench-charts">
@@ -35,9 +36,11 @@ export function BenchmarkHighlight() {
         ))}
       </div>
 
-      <Link className="bench-panel-link" href={BENCHMARK_HIGHLIGHT.link.href}>
-        {BENCHMARK_HIGHLIGHT.link.label} →
-      </Link>
+      {link && (
+        <Link className="bench-panel-link" href={BENCHMARK_HIGHLIGHT.link.href}>
+          {BENCHMARK_HIGHLIGHT.link.label} →
+        </Link>
+      )}
     </section>
   );
 }
