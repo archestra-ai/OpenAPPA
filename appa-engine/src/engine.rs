@@ -6334,6 +6334,24 @@ mod tests {
             "a child started after a sibling's return crossed inherits what it carried"
         );
         assert_eq!(e.validate_replay(&log), Ok(()));
+
+        // A log preparing the second member before the crossing, at the basis it stood at then,
+        // would bind it at a seed that misses what the crossing carried.
+        let prepared = |log: &[Fact], child: &TrajectoryId| {
+            log.iter()
+                .position(|fact| matches!(fact, Fact::ForkPrepared { fork, .. } if fork == &crate::value::ForkId::member(fan_out.dispatch(), child)))
+                .expect("the member is prepared")
+        };
+        let mut early = log.clone();
+        let mut second_prepared = early.remove(prepared(&early, &second));
+        let first_prepared = prepared(&early, &first);
+        if let (Fact::ForkPrepared { snapshot, .. }, Fact::ForkPrepared { snapshot: before, .. }) =
+            (&mut second_prepared, &early[first_prepared])
+        {
+            *snapshot = before.clone();
+        }
+        early.insert(first_prepared + 2, second_prepared);
+        assert_eq!(e.validate_replay(&early), Err(TransitionRefusal::ForkBasisMismatch));
     }
 
     #[test]

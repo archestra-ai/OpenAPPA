@@ -1457,6 +1457,13 @@ impl<'a> Sequence<'a> {
                 if views.dispatch_failed(fork.dispatch()) {
                     return Err(TransitionRefusal::SpawnFailed);
                 }
+                // A member is seeded at the parent's label as the child starts, so nothing may
+                // cross into the parent between its preparation and its binding.
+                if matches!(fork, ForkId::Member { .. })
+                    && self.projection.view(&preparation.parent).freeze_basis() != preparation.snapshot
+                {
+                    return Err(TransitionRefusal::ForkBasisMismatch);
+                }
             }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
         }
