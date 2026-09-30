@@ -33,9 +33,10 @@ an unauthorized tool. Classifiers and PII detectors are probabilistic; a
 declared flow decision here holds on every run, which is what it takes to trust
 an agent around medical or financial records.
 
-Policy is declarative TOML. The decision core is a pure function of the event
-log with no I/O. Run it in-process, or as a sidecar process that checks each
-tool call before it runs.
+Policy is declarative TOML. The engine decides from the event log alone and
+makes no network or file calls, so the same log always gets the same decision.
+Run it in-process, or as a sidecar process that checks each tool call before it
+runs.
 
 ## Benchmarks
 
