@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.29.0...v0.29.1) (2026-09-30)
+
+
+### Documentation
+
+* drop stale spec.md and the golden-docs concept ([#542](https://github.com/archestra-ai/OpenAPPA/issues/542)) ([5b420e4](https://github.com/archestra-ai/OpenAPPA/commit/5b420e4fa1d216e232fa87da9c5e212c85c3acd1))
+
+
+### Reverts
+
+* remove local UI, readiness checks, and credential database ([fec036a](https://github.com/archestra-ai/OpenAPPA/commit/fec036a1c683665fda4e85350e2c0e6d7857df7e))
+* remove local UI, readiness checks, and credential database ([#524](https://github.com/archestra-ai/OpenAPPA/issues/524), [#529](https://github.com/archestra-ai/OpenAPPA/issues/529)) ([#536](https://github.com/archestra-ai/OpenAPPA/issues/536)) ([fec036a](https://github.com/archestra-ai/OpenAPPA/commit/fec036a1c683665fda4e85350e2c0e6d7857df7e))
+
 ## [0.29.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.28.0...v0.29.0) (2026-09-29)
 
 
