@@ -724,19 +724,36 @@ const CLAPPA: &str = "clappa.cmd";
 #[cfg(not(windows))]
 const CLAPPA: &str = "clappa";
 
-/// The armed launcher: a gated Claude session that also loads the settings
-/// carrying APPA's status line.
+/// The armed launcher delegates process supervision to the deployed binary.
+/// The shim exists only to keep `clappa` short and stable on PATH.
 fn armed_clappa(paths: &DeploymentPaths) -> String {
+    let binary = paths.data_dir.join("bin").join(appa_filename());
     let settings = settings::clappa_settings_path(paths);
-    let settings = settings.to_string_lossy();
     if cfg!(windows) {
-        format!("@echo off\r\nset APPA_GATE=1\r\nclaude --settings \"{settings}\" %*\r\n")
+        windows_clappa(&binary, &settings, &paths.data_dir)
     } else {
         format!(
-            "#!/bin/sh\nexec env APPA_GATE=1 claude --settings {} \"$@\"\n",
-            settings::sh_literal(&settings)
+            "#!/bin/sh\nexec {} protected-launch --settings {} --data-dir {} -- \"$@\"\n",
+            settings::sh_literal(&binary.to_string_lossy()),
+            settings::sh_literal(&settings.to_string_lossy()),
+            settings::sh_literal(&paths.data_dir.to_string_lossy()),
         )
     }
+}
+
+fn windows_clappa(binary: &Path, settings: &Path, data_dir: &Path) -> String {
+    format!(
+        "@echo off\r\nsetlocal\r\ncall {} protected-launch --settings {} --data-dir {} -- %*\r\nset \"status=%errorlevel%\"\r\nendlocal & exit /b %status%\r\n",
+        cmd_literal(binary),
+        cmd_literal(settings),
+        cmd_literal(data_dir),
+    )
+}
+
+/// A quoted batch-file word. Windows paths cannot contain `"`; doubling `%`
+/// prevents environment expansion when cmd.exe parses the installed shim.
+fn cmd_literal(path: &Path) -> String {
+    format!("\"{}\"", path.to_string_lossy().replace('%', "%%"))
 }
 
 fn install_clappa(paths: &DeploymentPaths) -> Result<PathBuf, InitError> {
@@ -896,11 +913,11 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), armed_clappa(&paths).as_bytes());
     }
 
-    /// `clappa` starts Claude gated, with its settings file as one argument
-    /// whatever the data directory is called, and passes the user's arguments on.
+    /// `clappa` invokes the deployed host by absolute path, with its settings
+    /// and data directory, and passes the user's arguments on.
     #[cfg(unix)]
     #[test]
-    fn clappa_starts_a_gated_claude_with_its_settings() {
+    fn clappa_calls_the_deployed_host_with_its_settings() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let paths = DeploymentPaths {
@@ -909,30 +926,43 @@ mod tests {
             data_dir: root.path().join("it's data"),
             claude_dir: root.path().join("claude"),
         };
-        let launcher = install_clappa(&paths).unwrap();
-        let bin = root.path().join("fake-claude");
-        fs::create_dir(&bin).unwrap();
+        let binary = paths.data_dir.join("bin/appa");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
         fs::write(
-            bin.join("claude"),
-            "#!/bin/sh\nprintf 'gate=%s\\n' \"$APPA_GATE\"\nfor argument; do printf '%s\\n' \"$argument\"; done\n",
+            &binary,
+            "#!/bin/sh\nfor argument; do printf '%s\\n' \"$argument\"; done\n",
         )
         .unwrap();
-        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
-        let output = std::process::Command::new(&launcher)
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let launcher = install_clappa(&paths).unwrap();
+        let output = std::process::Command::new(launcher)
             .arg("-p")
             .arg("two words")
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env_remove("APPA_GATE")
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8(output.stdout).unwrap(),
             format!(
-                "gate=1\n--settings\n{}\n-p\ntwo words\n",
-                settings::clappa_settings_path(&paths).display()
+                "protected-launch\n--settings\n{}\n--data-dir\n{}\n--\n-p\ntwo words\n",
+                settings::clappa_settings_path(&paths).display(),
+                paths.data_dir.display(),
             )
         );
+    }
+
+    #[test]
+    fn windows_clappa_returns_from_the_deployed_host_without_leaking_environment() {
+        let script = windows_clappa(
+            Path::new(r"C:\Data 100%\appa.exe"),
+            Path::new(r"C:\Data 100%\clappa.settings.json"),
+            Path::new(r"C:\Data 100%"),
+        );
+        assert_eq!(
+            script,
+            "@echo off\r\nsetlocal\r\ncall \"C:\\Data 100%%\\appa.exe\" protected-launch --settings \"C:\\Data 100%%\\clappa.settings.json\" --data-dir \"C:\\Data 100%%\" -- %*\r\nset \"status=%errorlevel%\"\r\nendlocal & exit /b %status%\r\n"
+        );
+        assert!(!script.contains("set APPA_GATE"));
     }
 
     #[test]

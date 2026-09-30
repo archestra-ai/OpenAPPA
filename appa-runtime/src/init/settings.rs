@@ -37,6 +37,7 @@ pub(super) struct HookTarget<'a> {
 const SESSION_START_TIMEOUT: Duration = Duration::from_secs(160);
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(130);
 const TURN_END_TIMEOUT: Duration = Duration::from_secs(40);
+const LAUNCH_RECORD_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct Event {
     name: &'static str,
@@ -257,7 +258,19 @@ fn groups(target: &HookTarget<'_>, binary: &str) -> Result<Vec<(&'static str, Va
     let url = target.url;
     let entry = |args: Vec<String>, timeout: Duration| json!({"type": "command", "command": binary, "args": args, "timeout": timeout.as_secs()});
     let context = |args: &[&str]| json!({"type": "command", "command": binary, "args": args});
-    let mut groups = Vec::with_capacity(EVENTS.len() + 1);
+    let data_dir = portable(target.data_dir)?.to_owned();
+    let launch_recorder = |event: &str| {
+        entry(
+            vec![
+                "record-launch".to_owned(),
+                "--data-dir".to_owned(),
+                data_dir.clone(),
+                event.to_owned(),
+            ],
+            LAUNCH_RECORD_TIMEOUT,
+        )
+    };
+    let mut groups = Vec::with_capacity(EVENTS.len() + 2);
     // The start of the deployed runtime and the first post share one process:
     // Claude Code runs an event's entries in parallel, so a separate start
     // entry could not be ordered before the post. The advice entry beside it
@@ -277,8 +290,10 @@ fn groups(target: &HookTarget<'_>, binary: &str) -> Result<Vec<(&'static str, Va
             SESSION_START_TIMEOUT,
         ),
         context(&["session-context"]),
+        launch_recorder("start"),
     ]});
     groups.push(("SessionStart", session_start));
+    groups.push(("SessionEnd", json!({"hooks": [launch_recorder("end")]})));
     for event in EVENTS {
         let mut args = vec!["hook".to_owned(), "--deployment-url".to_owned(), url.to_owned()];
         let timeout = if event.turn_end {
@@ -496,6 +511,24 @@ mod tests {
         let session_start = &installed["hooks"]["SessionStart"][0]["hooks"];
         assert_eq!(session_start[0]["args"][3], "--ensure-runtime");
         assert_eq!(session_start[1]["args"], json!(["session-context"]));
+        assert_eq!(
+            session_start[2],
+            json!({
+                "type": "command",
+                "command": binary,
+                "args": ["record-launch", "--data-dir", paths.data_dir, "start"],
+                "timeout": 1,
+            })
+        );
+        assert_eq!(
+            installed["hooks"]["SessionEnd"][0]["hooks"][0],
+            json!({
+                "type": "command",
+                "command": binary,
+                "args": ["record-launch", "--data-dir", paths.data_dir, "end"],
+                "timeout": 1,
+            })
+        );
         let subagent_start = &installed["hooks"]["SubagentStart"][0]["hooks"];
         assert_eq!(subagent_start[0]["args"][0], "hook");
         assert_eq!(subagent_start[1]["args"], json!(["session-context", "--subagent"]));

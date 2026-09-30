@@ -362,20 +362,13 @@ The hook entries run in every session but are inert until a session
 opts in with `APPA_GATE=1`. Keep normal `claude` sessions unprotected
 and use a separate `clappa` command for protected ones. The install creates
 it as an executable beside the `appa` command — a PATH command works in
-every open terminal with no shell reload, unlike an alias:
+every open terminal with no shell reload. The launcher calls the deployed
+`appa` binary by absolute path. That binary sets `APPA_GATE=1`, adds a
+per-launch token, runs Claude Code in the foreground, and preserves its exit
+status.
 
-```sh
-#!/bin/sh
-exec env APPA_GATE=1 claude "$@"
-```
-
-When that directory is not on your `PATH`, use the alias form instead
-and reload your shell: `alias clappa='APPA_GATE=1 claude'`. For native
-Windows, add this function to your PowerShell profile:
-
-```powershell
-function clappa { $env:APPA_GATE = "1"; try { claude @args } finally { Remove-Item Env:APPA_GATE -ErrorAction SilentlyContinue } }
-```
+Do not replace the installed command with an `APPA_GATE=1` alias. An alias
+cannot record the resumable session or load `clappa`'s session settings.
 
 Only sessions started with `APPA_GATE=1` are protected. The binary reads
 the variable from the Claude Code process environment, fixed at launch,
@@ -385,6 +378,21 @@ into it. Protection belongs to the process, not the saved conversation:
 resume a protected conversation with `clappa --resume`, not `claude --resume`.
 Exit and restart a conversation already resumed through plain `claude`; it
 cannot become protected in place.
+Claude Code's own exit hint names `claude`, which starts an unprotected
+process. When Claude saved a resumable transcript, `clappa` appends the
+protected command in normal terminal text:
+
+```text
+Resume this session with:
+claude --resume 01234567-89ab-4cde-8012-3456789abcde
+
+Resume with OpenAPPA protection:
+clappa --resume 01234567-89ab-4cde-8012-3456789abcde
+```
+
+An empty session or a session that fails before its current transcript exists
+does not print the OpenAPPA block. After `/clear`, the command names the new
+session.
 The entries live in the user's settings: a project whose settings
 set `disableAllHooks` turns them off for its sessions, and `clappa` cannot
 protect a session there.

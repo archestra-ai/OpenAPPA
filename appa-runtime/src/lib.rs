@@ -29,6 +29,8 @@ mod mascot;
 #[cfg(feature = "daemon")]
 pub mod mcp;
 #[cfg(feature = "daemon")]
+pub mod protected_launch;
+#[cfg(feature = "daemon")]
 pub mod replay;
 #[cfg(feature = "daemon")]
 #[path = "main.rs"]

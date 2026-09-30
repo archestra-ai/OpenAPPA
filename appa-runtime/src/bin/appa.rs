@@ -127,6 +127,26 @@ enum Command {
         subagent: bool,
     },
 
+    /// Internal host for a protected Claude Code process.
+    #[command(hide = true)]
+    ProtectedLaunch {
+        #[arg(long)]
+        settings: PathBuf,
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(last = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
+
+    /// Internal SessionStart and SessionEnd launch recorder.
+    #[command(hide = true)]
+    RecordLaunch {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(value_enum)]
+        event: appa_runtime::protected_launch::Event,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
@@ -263,6 +283,12 @@ fn main() -> ExitCode {
         } else {
             appa_runtime::session_context::Delivery::SessionStdout
         }),
+        Command::ProtectedLaunch {
+            settings,
+            data_dir,
+            arguments,
+        } => appa_runtime::protected_launch::launch(&settings, &data_dir, &arguments),
+        Command::RecordLaunch { data_dir, event } => appa_runtime::protected_launch::record(&data_dir, event),
         Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,

@@ -222,6 +222,8 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             "PostToolUse",
             "PostToolUseFailure",
             "PreToolUse",
+            "SessionEnd",
+            "SessionStart",
             "SessionStart",
             "SessionStart",
             "Stop",
@@ -324,8 +326,13 @@ fn reinstall_migrates_a_legacy_plugin_install_to_native_hooks() {
     );
     assert_eq!(
         entries.iter().filter(|(event, _)| event == "SessionStart").count(),
-        2,
-        "the native post and context hooks are each registered once"
+        3,
+        "the native post, context, and launch recorder are each registered once"
+    );
+    assert_eq!(
+        entries.iter().filter(|(event, _)| event == "SessionEnd").count(),
+        1,
+        "the launch recorder is registered once"
     );
 }
 
