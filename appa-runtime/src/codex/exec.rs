@@ -105,8 +105,8 @@ fn execute(specification: Specification, mut still_authorized: impl FnMut() -> b
     {
         return Err("the approved command shell is unavailable".into());
     }
-    // Native terminal input is deliberately closed until the stdin policy path
-    // is available; an interactive command cannot receive unchecked bytes.
+    // Child stdin stays closed. This proxy supports finite commands without
+    // later input.
     #[cfg(unix)]
     let mut command = Command::new(shell);
     #[cfg(not(unix))]

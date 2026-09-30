@@ -13,7 +13,7 @@ It checks the rewritten wrapper, the admitted result, early output, and a forged
 The proxy supports finite Unix commands without later input. It starts the selected `sh`, `bash`, or `zsh` login shell without a controlling terminal.
 It closes child stdin and buffers at most 1 MiB of combined output. It checks job status while the child runs.
 
-Native Windows commands, later input, terminal jobs, and unsupported shell modes remain outside this proxy scope.
+Native Windows commands, later input, PTY programs, prompts, full-screen tools, daemonized children, and unsupported shell modes remain outside this proxy scope.
 The protected launcher requires a Codex sandbox profile with the disclosed `127.0.0.1` HTTP exception.
 The hook cannot guarantee coverage if Codex skips or disables it.
 
@@ -27,7 +27,7 @@ Codex returned `write_stdin failed: stdin is closed for this session; rerun exec
 The terminal retry echoed the synthetic `HELLO` input.
 
 This release did not provide a non-echoing pipe for later input in the tested command session.
-The wrapper keeps child stdin closed. The reserved `host/codex/appa_stdin` policy stays inactive.
+The wrapper keeps child stdin closed. Later input is unsupported.
 
 ## Lifetime and output
 
