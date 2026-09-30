@@ -154,11 +154,11 @@ OpenAPPA is a **preview and an RFC**. The model is settled enough to build
 against and deliberately open to argument — config and wire surfaces may break
 without shims.
 
-The underlying algebra, recovery guarantees, and empirical benchmarks are published in:
-- **Paper:** [APPA: Recoverable Information-Flow Control for Real-World LLM Agents](https://openappa.com/paper) ([arXiv:2607.24625](https://arxiv.org/abs/2607.24625))
-- **Venue:** Accepted to the **Third Workshop on Agents in the Wild: Safety, Security, and Beyond ([Agents in the Wild @ NeurIPS 2026](https://agentwild-workshop.github.io/neurips2026/))**.
+The formal algebra and recovery guarantees are published in:
+- **Paper:** [APPA: Recoverable Information-Flow Control for Real-World LLM Agents](https://arxiv.org/abs/2607.24625)
+- **Venue:** Accepted to the [NeurIPS 2026 Workshop on Agents in the Wild](https://agentwild-workshop.github.io/neurips2026/).
 
-Read the paper, then open an issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
+Latest evaluation numbers are updated on the [website](https://openappa.com/evaluation). Read the paper, then open an issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 ## License
 
