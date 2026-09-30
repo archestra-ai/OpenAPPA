@@ -175,6 +175,7 @@ mod tests {
                     floor: Label::bottom(),
                     sanitizer: None,
                 },
+                kind: crate::transition::SpawnKind::Single,
             },
             Fact::ForkOpened {
                 trajectory: child.clone(),

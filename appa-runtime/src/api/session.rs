@@ -916,7 +916,7 @@ impl Session {
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let next = match (context.fork_status(&fork), &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
-                            (ForkStatus::Unprepared, _) => SpawnPlan::Outcome,
+                            (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
                             (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
                                 fork: fork.clone(),
                                 child: child.clone(),
@@ -1119,7 +1119,7 @@ impl Session {
             let fork = fork(context)?;
             match context.fork_status(&fork) {
                 ForkStatus::Unprepared | ForkStatus::Failed | ForkStatus::ParentEnded => Err(EventError::SpawnNotTaken),
-                ForkStatus::Prepared | ForkStatus::Bound(_) => {
+                ForkStatus::Prepared | ForkStatus::Bound(_) | ForkStatus::FanOut => {
                     contract = context.fork_return_contract(&fork);
                     Ok(EngineEvent::BindFork {
                         fork,

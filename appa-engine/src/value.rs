@@ -333,18 +333,32 @@ impl DispatchId {
 
 /// Identifies one prepared fork. Derived from the dispatch whose release prepared it,
 /// never minted by a runtime: one release prepares one fork, and a repeat of the same spawn call
-/// is a new dispatch and so a new fork. The child's own identity is not part of it — the host does
-/// not know that yet when the spawn is released.
+/// is a new dispatch and so a new fork. A single spawn's fork does not name its child — the host
+/// does not know that yet when the spawn is released. A fan-out spawn's member fork does: it is
+/// prepared when that child starts, one per child.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ForkId(DispatchId);
+pub enum ForkId {
+    Spawn(DispatchId),
+    Member { spawn: DispatchId, child: TrajectoryId },
+}
 
 impl ForkId {
     pub fn of(dispatch: &DispatchId) -> Self {
-        ForkId(dispatch.clone())
+        ForkId::Spawn(dispatch.clone())
     }
 
+    pub fn member(spawn: &DispatchId, child: &TrajectoryId) -> Self {
+        ForkId::Member {
+            spawn: spawn.clone(),
+            child: child.clone(),
+        }
+    }
+
+    /// The spawn dispatch that released this fork, or the fan-out spawn a member belongs to.
     pub fn dispatch(&self) -> &DispatchId {
-        &self.0
+        match self {
+            ForkId::Spawn(dispatch) | ForkId::Member { spawn: dispatch, .. } => dispatch,
+        }
     }
 }
 

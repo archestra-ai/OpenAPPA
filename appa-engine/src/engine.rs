@@ -50,6 +50,8 @@ pub enum ForkStatus {
     Unprepared,
     Prepared,
     Bound(TrajectoryId),
+    /// A fan-out spawn's fork: open for its children to start members under, never bound itself.
+    FanOut,
     Failed,
     ParentEnded,
 }
@@ -464,7 +466,10 @@ impl Engine {
         if parent.has_ended(&prepared.parent) {
             return ForkStatus::ParentEnded;
         }
-        ForkStatus::Prepared
+        match prepared.kind {
+            crate::transition::SpawnKind::Single => ForkStatus::Prepared,
+            crate::transition::SpawnKind::FanOut => ForkStatus::FanOut,
+        }
     }
 
     /// The family's forks in flight: prepared, bound to no child yet, their
@@ -476,6 +481,12 @@ impl Engine {
         let projection = view.projection();
         projection
             .prepared_forks()
+            .filter(|fork| {
+                matches!(fork, ForkId::Spawn(_))
+                    && projection
+                        .prepared_fork(fork)
+                        .is_some_and(|prepared| prepared.kind == crate::transition::SpawnKind::Single)
+            })
             .filter(|fork| projection.bound_child(fork).is_none() && projection.is_dispatch_open(fork.dispatch()))
             .filter(|fork| {
                 let parent = &projection
@@ -489,12 +500,14 @@ impl Engine {
     }
 
     fn decide_binding(&self, view: &EngineView, binding: &ForkBinding) -> Result<EngineDecision, TransitionError> {
-        let parent = view
+        let prepared = view
             .projection()
             .prepared_fork(&binding.fork)
-            .ok_or(TransitionError::UnbindableFork)?
-            .parent
-            .clone();
+            .ok_or(TransitionError::UnbindableFork)?;
+        if let (crate::transition::SpawnKind::FanOut, ForkId::Spawn(spawn)) = (prepared.kind, &binding.fork) {
+            return self.decide_member_binding(view, spawn, &binding.child);
+        }
+        let parent = prepared.parent.clone();
         let views = view.projection().view(&parent);
         if let Some(bound) = view.projection().bound_child(&binding.fork) {
             if bound != &binding.child {
@@ -535,6 +548,59 @@ impl Engine {
             follow_up: FollowUp::Fork {
                 child: binding.child.clone(),
             },
+        })
+    }
+
+    /// A fan-out spawn's child starting: its own member fork, prepared now under the fan-out's
+    /// return policy and seeded at the parent's label as it stands now, so a child started after
+    /// a sibling's return crossed inherits what that return carried. A child already bound to its
+    /// member is addressed again, as a single spawn's child is.
+    fn decide_member_binding(
+        &self,
+        view: &EngineView,
+        spawn: &DispatchId,
+        child: &TrajectoryId,
+    ) -> Result<EngineDecision, TransitionError> {
+        let member = ForkId::member(spawn, child);
+        if view.projection().prepared_fork(&member).is_some() {
+            return self.decide_binding(
+                view,
+                &ForkBinding {
+                    fork: member,
+                    child: child.clone(),
+                },
+            );
+        }
+        let fan_out = view
+            .projection()
+            .prepared_fork(&ForkId::of(spawn))
+            .expect("the caller found this fan-out fork prepared");
+        let views = view.projection().view(&fan_out.parent);
+        if view.projection().is_opened(child) {
+            return Err(TransitionError::ChildAlreadyUsed);
+        }
+        if views.has_ended(&fan_out.parent) {
+            return Err(TransitionError::BranchEnded);
+        }
+        if views.dispatch_failed(spawn) {
+            return Err(TransitionError::UnbindableFork);
+        }
+        let batch = vec![
+            Fact::ForkPrepared {
+                trajectory: fan_out.parent.clone(),
+                fork: member.clone(),
+                snapshot: views.freeze_basis(),
+                return_policy: fan_out.return_policy.clone(),
+                kind: crate::transition::SpawnKind::Single,
+            },
+            Fact::ForkOpened {
+                trajectory: child.clone(),
+                fork: member.clone(),
+            },
+        ];
+        Ok(EngineDecision {
+            append: Some(self.decided(view, crate::basis::DecidedAct::Binding(member), batch)?),
+            follow_up: FollowUp::Fork { child: child.clone() },
         })
     }
 
@@ -1445,7 +1511,7 @@ impl Engine {
             .map(|(position, _)| (position, &proposals[position]))
         {
             let contract = self.validated_contract(call)?.into_owned();
-            let role = match batch.spawn == Some(SpawnMark::at(position)) {
+            let role = match SpawnMark::marks(batch.spawn, position) {
                 true => CallRole::MarkedSpawn,
                 false => CallRole::Ordinary,
             };
@@ -3117,7 +3183,7 @@ pub(crate) fn compose_batch<'a>(
             }
             // An approval declaring a child's return policy spends only at the marked spawn's
             // position, and one declaring none only at an ordinary one.
-            let marked = spawn == Some(SpawnMark::at(position));
+            let marked = SpawnMark::marks(spawn, position);
             let spends = if singleton { approval(&views, call) } else { None }.filter(|offer| {
                 views
                     .approval(offer)
@@ -3175,7 +3241,7 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| malformed(EngineError::InvalidCall(error)))?;
-            let role = match spawn == Some(SpawnMark::at(position)) {
+            let role = match SpawnMark::marks(spawn, position) {
                 true => CallRole::MarkedSpawn,
                 false => CallRole::Ordinary,
             };
@@ -3266,12 +3332,16 @@ pub(crate) fn compose_batch<'a>(
                     .expect(
                         "a marked spawn releases only by spending an approval that declares its child's return policy",
                     );
+                let kind = spawn
+                    .map(SpawnMark::kind)
+                    .expect("a marked spawn's role comes from the batch's spawn mark");
                 let fork = ForkId::of(&dispatch);
                 facts.push(Fact::ForkPrepared {
                     trajectory: trajectory.clone(),
                     fork: fork.clone(),
                     snapshot: views.freeze_basis(),
                     return_policy,
+                    kind,
                 });
                 Some(fork)
             } else {
@@ -6185,6 +6255,196 @@ mod tests {
             ),
             Err(crate::transition::TransitionError::UnopenedTrajectory)
         );
+    }
+
+    /// A parent that declared `floor` for a fan-out spawn and released it: the log and the
+    /// fan-out fork.
+    fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::value::ForkId) {
+        let mut log = vec![opened(e)];
+        let blocked = e
+            .handle(&viewing(e, &log), spawn_batch("fan-out", Some(crate::transition::SpawnMark::fan_out(0))))
+            .expect("a fan-out spawn blocks with its return declarations");
+        log.extend(appended_facts(blocked));
+        let (offer, _) = opened_offers(&log)
+            .into_iter()
+            .find(|(_, plan)| plan.return_step() == Some(None))
+            .expect("the bare declaration is offered");
+        let approved = e
+            .handle(
+                &viewing(e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(ReturnPolicy { floor, sanitizer: None }),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the declaration approves the fan-out spawn");
+        log.extend(appended_facts(approved));
+        let released = e
+            .handle(
+                &viewing(e, &log),
+                spawn_batch("fan-out-approved", Some(crate::transition::SpawnMark::fan_out(0))),
+            )
+            .expect("the approved fan-out spawn releases");
+        let fork = match answered(&released) {
+            ([release], []) => release.fork.clone().expect("the fan-out spawn carries its fork"),
+            other => panic!("the approved fan-out spawn releases alone, got {other:?}"),
+        };
+        log.extend(appended_facts(released));
+        (log, fork)
+    }
+
+    fn member_started(e: &Engine, log: &mut Vec<Fact>, fan_out: &crate::value::ForkId, child: &TrajectoryId) {
+        let bound = e
+            .handle(
+                &viewing(e, log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork: fan_out.clone(),
+                    child: child.clone(),
+                }),
+            )
+            .expect("a fan-out child starts its member fork");
+        log.extend(appended_facts(bound));
+    }
+
+    #[test]
+    fn a_fan_out_child_starts_at_the_parents_label_including_earlier_siblings_returns() {
+        let internal = Audience::restricted([ReaderId::new("insider")]);
+        let e = engine(vec![plain_tool("spawn"), internal_read()]);
+        let (mut log, fan_out) = fan_out_family(&e, known(TRUSTED, internal.clone()));
+        let (first, second) = (TrajectoryId::new("first"), TrajectoryId::new("second"));
+
+        member_started(&e, &mut log, &fan_out, &first);
+        let seed = |log: &[Fact], child: &TrajectoryId| {
+            viewing(&e, log)
+                .views(child)
+                .expect("the member's child is opened")
+                .current_label()
+        };
+        assert_eq!(seed(&log, &first), partial(TRUSTED, Audience::public()));
+
+        reads(&e, &mut log, &first, "read_internal");
+        let crossing = crossed(&e, &log, &first, "what the first child read");
+        log.extend(crossing);
+        member_started(&e, &mut log, &fan_out, &second);
+
+        assert_eq!(
+            seed(&log, &second).audience,
+            internal,
+            "a child started after a sibling's return crossed inherits what it carried"
+        );
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn one_fan_out_declaration_backs_a_member_fork_per_child() {
+        let e = engine(vec![plain_tool("spawn")]);
+        let (mut log, fan_out) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+        let children = ["a", "b", "c"].map(TrajectoryId::new);
+        for child in &children {
+            member_started(&e, &mut log, &fan_out, child);
+        }
+        let view = viewing(&e, &log);
+        for child in &children {
+            let dispatch = fan_out.dispatch();
+            assert_eq!(
+                e.fork_of(&view, child),
+                Some(crate::value::ForkId::member(dispatch, child))
+            );
+            assert_eq!(e.return_policy_of(&view, child).map(|policy| policy.sanitizer), Some(None));
+        }
+        assert_eq!(e.fork_status(&view, &fan_out), ForkStatus::FanOut);
+        assert!(
+            e.forks_in_flight(&view).is_empty(),
+            "a fan-out fork never waits for a single child to bind it"
+        );
+
+        let again = e
+            .handle(
+                &view,
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork: fan_out.clone(),
+                    child: children[0].clone(),
+                }),
+            )
+            .expect("a started child addressed again resumes");
+        assert!(matches!(
+            appended_facts(again).as_slice(),
+            [Fact::Boundary {
+                kind: BoundaryKind::Resume { .. },
+                ..
+            }]
+        ));
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_member_fork_replays_only_under_its_fan_out_spawn_and_for_its_own_child() {
+        let e = engine(vec![plain_tool("spawn")]);
+        let (mut log, fan_out) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+        let child = TrajectoryId::new("child");
+        let before = log.len();
+        member_started(&e, &mut log, &fan_out, &child);
+        let (records, started) = log.split_at(before);
+        let tampered = |mutate: &dyn Fn(&mut Vec<Fact>)| {
+            let mut facts = started.to_vec();
+            mutate(&mut facts);
+            e.validate_replay(&[records, &facts].concat())
+        };
+
+        assert_eq!(
+            tampered(&|facts| {
+                facts.retain(|fact| !matches!(fact, Fact::ForkPrepared { .. }));
+                for fact in facts.iter_mut() {
+                    if let Fact::ForkOpened { fork, .. } = fact {
+                        *fork = fan_out.clone();
+                    }
+                }
+            }),
+            Err(TransitionRefusal::UnknownFork),
+            "a fan-out fork binds no child itself"
+        );
+        assert_eq!(
+            tampered(&|facts| {
+                for fact in facts.iter_mut() {
+                    if let Fact::ForkOpened { trajectory, .. } = fact {
+                        *trajectory = TrajectoryId::new("someone-else");
+                    }
+                }
+            }),
+            Err(TransitionRefusal::UnknownFork),
+            "a member binds only the child it names"
+        );
+        assert_eq!(
+            tampered(&|facts| {
+                for fact in facts.iter_mut() {
+                    if let Fact::ForkPrepared { return_policy, .. } = fact {
+                        return_policy.floor = Label::bottom();
+                    }
+                }
+            }),
+            Err(TransitionRefusal::UnbackedReturnPolicy),
+            "a member carries exactly its fan-out spawn's return policy"
+        );
+    }
+
+    #[test]
+    fn a_single_spawn_releases_while_a_fan_out_fork_is_open() {
+        let e = engine(vec![plain_tool("spawn")]);
+        let (log, _) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+        let view = viewing(&e, &log);
+        assert!(e.forks_in_flight(&view).is_empty());
+        let single = [log.clone(), declared_spawn(&e, &log, "single")].concat();
+        let released = e
+            .handle(
+                &viewing(&e, &single),
+                spawn_batch("single-approved", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("the single spawn releases");
+        assert!(matches!(answered(&released), ([_], [])));
     }
 
     #[test]
