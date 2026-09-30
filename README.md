@@ -94,16 +94,9 @@ Embed the APPA runtime in your own agent from any language, or connect an agent 
 
 ### [Try at the LLM proxy level →](https://openappa.com/archestra)
 
-[Archestra](https://archestra.ai)'s 1.4 Release Candidate implements OpenAPPA for Codex, and any other agent in the enterprise.
-
-</td>
-<td width="33%" valign="top">
-
-### [Amp →](integrations/amp/README.md)
-
-[amppa](integrations/amp/README.md) is the source-distributed Amp plugin. It
-checks tool calls and results through the same APPA runtime, locally or in an
-orb.
+[Archestra](https://archestra.ai)'s 1.4 Release Candidate implements OpenAPPA
+for Claude Code, Claude Desktop, Cursor, Codex, OpenCode, Copilot CLI, n8n, and
+any other agent that talks to a model through its LLM proxy.
 
 </td>
 </tr>
