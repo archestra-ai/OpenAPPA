@@ -80,7 +80,7 @@ clappa
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
-[Claude Code](https://openappa.com/claude-code) ·
+Try on: [Claude Code](https://openappa.com/claude-code) ·
 [kagent](https://openappa.com/kagent) ·
 [Amp](integrations/amp/README.md)
 
