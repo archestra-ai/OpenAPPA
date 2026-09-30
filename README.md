@@ -35,8 +35,7 @@ an agent around medical or financial records.
 
 Policy is declarative TOML, and the engine is a pure decision core — a function
 of the event log, no IO — so it embeds inside your own agent: in-process from
-Rust or Python, or as a sidecar every step is checked against. Broader coverage
-across those surfaces is the active work.
+Rust or Python, or as a sidecar every step is checked against.
 
 ## Benchmarks
 
@@ -78,27 +77,6 @@ clappa
 ```text
 /appa-guide
 ```
-
-The installer verifies the checksum of the release binary for Linux or macOS
-and places it in `~/.local/bin`. Windows users unpack the zip from the
-[releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
-checkout, `cargo install --locked --path appa-runtime --force` builds the binary
-instead, and the same install command installs that build's own version.
-
-A release binary installs the version published for its tag; a checkout build
-installs the commit it was built from.
-
-The native `appa` command deploys the runtime and registers it in your Claude
-Code user settings as the session's hooks, together with the runtime's MCP
-server, the `appa-guide` skill, and the `clappa` launcher, which adds APPA's
-status line to the sessions it starts. Rerunning it rewrites only what it wrote
-and preserves an existing policy. Fresh policies use a fail-closed Claude annotator as a compatibility
-net for MCP tools they do not yet name. Start `clappa`, then run
-`/appa-guide` to replace that fallback with exact connector contracts; the
-same skill explains blocks and tunes the defaults.
-Plain `claude` sessions stay untouched. Resume a protected conversation with
-`clappa --resume`, because `claude --resume` starts an unprotected process.
-Exit and restart a conversation already resumed through plain `claude`.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
