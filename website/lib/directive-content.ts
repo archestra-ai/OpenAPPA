@@ -20,6 +20,7 @@ export const BATTERY_REVIEW_CHECKLIST = {
 } as const;
 
 export const BENCHMARK_HIGHLIGHT = {
+  tldr: "No scored attack got past OpenAPPA in 1,320 evaluations while it completed 89% of tasks; Claude Auto mode and Microsoft FIDES let 10% and 31% of attacks through.",
   charts: [
     {
       title: "Task completion",

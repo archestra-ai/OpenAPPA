@@ -78,6 +78,29 @@ clappa
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
+## Other agents
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### [Add to your agent →](https://openappa.com/add-to-agent)
+
+Embed the APPA runtime in your own agent from any language, or connect an agent through hooks.
+
+</td>
+<td width="50%" valign="top">
+
+### [Try at the LLM proxy level →](https://openappa.com/archestra)
+
+[Archestra](https://archestra.ai)'s 1.4 Release Candidate implements OpenAPPA
+for Claude Code, Claude Desktop, Cursor, Codex, OpenCode, Copilot CLI, n8n, and
+any other agent that talks to a model through its LLM proxy.
+
+</td>
+</tr>
+</table>
+
 ## Testing
 
 The APPA CLI provides two commands to check policy decisions before you merge a

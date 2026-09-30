@@ -13,6 +13,8 @@ And yes, it outperforms competitors on benchmarks:
 
 :::benchmark-highlight:::
 
+:::video-fireship:::
+
 ## Non-deterministic guardrails miss the problem
 
 The industry's answer to approval fatigue is a second model that judges each tool call: Claude Code's auto mode, Codex's auto-review, and other [auto-modes](/openappa-vs-auto-mode).
