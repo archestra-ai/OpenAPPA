@@ -5,9 +5,10 @@ labels on the requester's own secrets. `appa plugin install claude-code`
 includes it on a first install; `appa battery remove claude-code` takes it out,
 and a later plugin install does not bring it back.
 
-It covers six built-in tools, which the policy names `host/claude-code/Bash`,
-`host/claude-code/Monitor`, `host/claude-code/Read`, `host/claude-code/Grep`,
-`host/claude-code/Write` and `host/claude-code/Edit`:
+It covers seven built-in tools, which the policy names `host/claude-code/Bash`,
+`host/claude-code/Monitor`, `host/claude-code/PowerShell`,
+`host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write` and
+`host/claude-code/Edit`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows the session
@@ -67,7 +68,11 @@ It covers six built-in tools, which the policy names `host/claude-code/Bash`,
   `appa/batteries/`). Every other path takes the session's label as it is.
 
 The battery also routes `host/claude-code/Monitor` through the Bash
-Annotator. Both Annotators run the local `claude` command; on Windows it must
+Annotator. `host/claude-code/PowerShell`, which Claude Code offers on Windows
+beside Bash, gets the Bash rules: the same credential selectors, written for
+both path separators and for the Windows homes of the GitHub CLI and gcloud
+configs, plus `Get-StoredCredential`; the same publishing selectors; the Bash
+Annotator for every other command; and the same masked results. Both Annotators run the local `claude` command; on Windows it must
 resolve to `claude.exe`. The default config `appa plugin install claude-code`
 writes adds the wildcard fallback for tools no rule names.
 

@@ -1,7 +1,7 @@
 //! Claude Code battery: a command naming a credential path, or one of the Databricks CLI's
 //! credential commands with its global flags anywhere before the verb, narrows the session
 //! to `self` by a static rule, and no classifier is asked. Every other shell command, and
-//! every Monitor call, is the Annotator's.
+//! every Monitor call, is the Annotator's. PowerShell follows the same rules.
 #![cfg(unix)]
 mod common;
 
@@ -11,8 +11,16 @@ use common::{fake_claude, propose, raw, repo_root, root};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
+    shell("host/claude-code/Bash", command)
+}
+
+fn powershell(command: &str) -> ProposedCall {
+    shell("host/claude-code/PowerShell", command)
+}
+
+fn shell(tool: &str, command: &str) -> ProposedCall {
     ProposedCall {
-        tool: "host/claude-code/Bash".to_string(),
+        tool: tool.to_string(),
         arguments: raw(serde_json::json!({ "command": command })),
         cwd: None,
     }
@@ -128,6 +136,36 @@ async fn a_publishing_command_naming_a_credential_narrows_before_the_repository_
         matches!(decision, HookDecision::Refuse { .. }),
         "a push naming no credential is the repository annotator's: {decision:?}"
     );
+}
+
+#[tokio::test]
+async fn a_powershell_command_naming_a_credential_narrows_with_either_path_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    for command in [
+        r"Get-Content $HOME\.aws\credentials",
+        "Get-Content ~/.kube/config",
+        r#"Get-Content "$env:APPDATA\GitHub CLI\hosts.yml""#,
+        r"Copy-Item $env:APPDATA\gcloud\credentials.db .",
+        "Get-StoredCredential -Target github",
+        "databricks --profile dev auth token",
+        "git push origin main; Get-Content .env",
+    ] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+
+    for command in ["git push origin main", "Get-ChildItem -Recurse"] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::Refuse { .. }),
+            "{command} is an Annotator's: {decision:?}"
+        );
+    }
 }
 
 #[tokio::test]

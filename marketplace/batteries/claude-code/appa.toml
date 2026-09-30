@@ -1,4 +1,4 @@
-# Optional Claude Code rules for Bash, Monitor, Read, Grep, Write and Edit.
+# Optional Claude Code rules for Bash, Monitor, PowerShell, Read, Grep, Write and Edit.
 #
 # Order matters: the first matching rule wins, so the argument-selected
 # credential rules come before each tool's bare rule. A name written
@@ -221,6 +221,229 @@ description = "Runs a shell command or opens a WebSocket and streams each output
 annotator = "claude-code.bash-requirements"
 
 
+# --- PowerShell: the Bash rules, spelled for Windows ---
+
+# Claude Code on Windows offers PowerShell beside Bash, with the same `command`
+# argument and result. PowerShell takes either path separator, so each
+# directory rule is written for both; `\\` is one literal backslash in a
+# selector. The Windows homes of the GitHub CLI and gcloud configs, and the
+# CredentialManager module's `Get-StoredCredential`, are named here too. A
+# selector matches case-sensitively, so another spelling reaches the Annotator.
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.env*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.claude.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.credentials.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.netrc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*id_rsa*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*id_ed25519*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.git-credentials*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.npmrc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.pypirc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.vault-token*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.databrickscfg*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.ssh/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.ssh\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.aws/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.aws\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.kube/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.kube\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.azure/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.azure\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.gnupg/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.gnupg\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.password-store/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.password-store\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.config/gh/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.config\\gh\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.config/gcloud/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.docker/config.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*.docker\\config.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*GitHub CLI*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*\\gcloud\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*Get-StoredCredential*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*databricks*auth token*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*databricks*auth env*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*databricks*secrets get-secret*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*databricks*configure*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*git push*)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*git -* push*)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*gh pr *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*gh issue *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*gh release *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*gh api *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*gh repo *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/PowerShell"
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-requirements"
+
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the AWS secret access key, the value of any assignment
 # whose key names a secret, and long high-entropy runs. It carries no tags, so
@@ -238,7 +461,7 @@ audience = { from = ["self"], to = ["public"] }
 
 # The battery withholds its own tool's result so the sanitizer can run on it.
 [policy.deployment]
-confined_results = ["host/claude-code/Bash"]
+confined_results = ["host/claude-code/Bash", "host/claude-code/PowerShell"]
 
 [externals.sanitizers.redact-secrets]
 builtin = "redact-secrets"
