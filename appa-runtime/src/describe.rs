@@ -812,6 +812,57 @@ mod tests {
     }
 
     #[test]
+    fn codex_callable_names_use_hook_identities_for_coverage_and_proposals() {
+        let tools = [
+            "exec_command",
+            "web__run",
+            "image_gen__imagegen",
+            "mcp__github__exec_command",
+            "mcp__appa__execute_remedy_plan",
+        ]
+        .map(str::to_owned);
+        let adapter = appa_adapter_codex::adapter();
+        let policy = appa_policy::Config::from_toml_str_routed(
+            "version = 2\n[[tool]]\nname = \"host/codex/appa_exec\"\ndelta = {}\n",
+            BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let coverage = SessionCoverage::of(&tools, adapter, Some(&policy));
+        assert_eq!(coverage.declared, 1);
+        assert_eq!(
+            coverage.refused,
+            [
+                "host/codex/webrun",
+                "host/codex/image_genimagegen",
+                "mcp/github/exec_command"
+            ]
+        );
+        assert!(coverage.unrecognized.is_empty());
+        assert!(coverage.wildcard.is_empty());
+        assert_eq!(
+            coverage.servers,
+            [appa_package::Namespace::parse("github").unwrap()].into()
+        );
+
+        // A proposal copies the refused identities into explicit rules.
+        let proposed = coverage
+            .refused
+            .iter()
+            .map(|name| format!("[[tool]]\nname = {name:?}\ndelta = {{}}\n"))
+            .collect::<String>();
+        let policy = appa_policy::Config::from_toml_str_routed(
+            &format!("version = 2\n[[tool]]\nname = \"host/codex/appa_exec\"\ndelta = {{}}\n{proposed}"),
+            BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let covered = SessionCoverage::of(&tools, adapter, Some(&policy));
+        assert_eq!(covered.declared, 4);
+        assert!(covered.refused.is_empty());
+    }
+
+    #[test]
     fn missing_config_is_described_without_creating_it() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("missing.toml");
