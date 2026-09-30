@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-codex"
-version = "0.28.0"
+version = "0.29.1"
 dependencies = [
  "appa-runtime-api",
  "serde",
