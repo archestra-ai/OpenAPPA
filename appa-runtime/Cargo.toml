@@ -92,7 +92,7 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
-opentelemetry-appender-tracing = { version = "0.32", optional = true }
+opentelemetry-appender-tracing = { version = "0.33", optional = true }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["logs", "metrics", "trace"], optional = true }
 tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
