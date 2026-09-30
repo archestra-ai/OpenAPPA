@@ -14,14 +14,10 @@ external authorities and sanitizers, never in the engine.
 ## Naming
 
 - Use the `appa` prefix for new OpenAPPA-owned crates, binaries, environment
-  variables, and protocol identifiers. Existing unprefixed names are
-  deliberate, not violations: core's internal module names (`engine`, `plan`,
-  `turn`, …) and the reserved `assistant.response` sink. Never introduce new
-  `baton`-named
-  identifiers: `baton` was the earlier name and can happen only in stale spots.
-- "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
-  "Sanitizer", "Remedy plan" are defined terms — use them as
-  `appa-engine/src/lib.rs` defines them, not colloquially.
+  variables, and protocol identifiers. Core's unprefixed internal module
+  names (`engine`, `plan`, `turn`, …) are deliberate, not violations.
+- Use APPA's defined terms (glossary: `website/lib/terms.ts`) as defined,
+  not colloquially.
 - **Agentic terminology first.** In comments, docs, and identifiers, lead with
   the agentic vocabulary: *trajectory* (not execution trace or session
   history), *flow* (not information transfer or operation), *turn*, *tool
@@ -29,9 +25,9 @@ external authorities and sanitizers, never in the engine.
   security term when it adds precision or establishes lineage, and gloss it
   for public readers at first use. Never let it displace the agentic term as
   the primary name for a concept that has one.
-- Do not invent new terms, especially in docs. Try to use 
-  existing definitions. If you want to introduce a new one - ask a user and 
-  explain why.
+- Do not invent new terms, especially in docs. Try to use existing
+  definitions. If you want to introduce a new one - ask a user and explain
+  why.
 
 ## Source of truth
 
@@ -88,8 +84,8 @@ better as a result.
 - Do not require prior training in information-flow control. Introduce the
   minimum specialized vocabulary needed to state the idea accurately.
 - Match the presentation to the document. Guides build a usable mental
-  model; glossaries and references optimize for lookup. Product framing belongs in introductions and guides, not in
-  normative or reference material.
+  model; glossaries and references optimize for lookup. Product framing
+  belongs in introductions and guides, not in reference material.
 - In guides, show how remedy plans and narrowing keep an agent productive when
   those behaviors are relevant. Do not force the value proposition into every
   section.
@@ -114,8 +110,9 @@ better as a result.
   flow decisions deterministic" is stronger and more accurate than a broad
   claim that APPA makes agents safe.
 - Use `proven`, `provable`, and `deterministic` only for a specific property
-  with support in the engine's semantics or a cited proof. Translate the formal property
-  into its operational consequence rather than relying on the adjective.
+  with support in the engine's semantics or a cited proof. Translate the
+  formal property into its operational consequence rather than relying on
+  the adjective.
 - State a claim's assumptions and limits once, plainly and nearby. Do not
   repeat caveats until they obscure the guarantee.
 - Prefer mechanical, falsifiable comparisons over claims about entire product
@@ -141,15 +138,12 @@ make invalid states unrepresentable with boring tools.** "Boring Rust"
 constrains the mechanism vocabulary (no trait acrobatics, no `dyn`, no
 type-level programming); type-first design constrains the data vocabulary
 (invariants live in the shape of data). They compose: `Label::combine` only
-ever narrows, `AnnotationMandate` is an enum, `ResolvedCall` derives its digest
-instead of storing it, and `CanonicalArguments` derives its RFC 8785 bytes
-from the one validated value — so a permissive delta, a tool declaration that
-is both static and Annotator-routed, a digest belonging to different
-arguments, and a payload disagreeing with its own canonical bytes are each
-unrepresentable.
-Enums,
-visibility and validated constructors do the enforcement; no typestate
-generics anywhere.
+ever narrows, `ResolvedCall` derives its digest instead of storing it, and
+`CanonicalArguments` derives its RFC 8785 bytes from the one validated value
+— so a permissive delta, a digest belonging to different arguments, and a
+payload disagreeing with its own canonical bytes are each unrepresentable.
+Enums, visibility and validated constructors do the enforcement; no
+typestate generics anywhere.
 
 Where an invariant should live:
 
@@ -161,8 +155,8 @@ Where an invariant should live:
 - **Temporal/stateful invariants → one runtime choke point, never
   typestate.** Lifecycle ordering (no double release, no
   completion-before-release) is refused at event admission — the single
-  enforcement point — because encoding it as
-  type-state would infect every signature with generics. This is a
+  enforcement point — because encoding it as type-state would infect every
+  signature with generics. This is a
   deliberate standing decision, not a gap.
 - **The budget test: type-level enforcement is worth it only while it stays
   out of caller signatures.** The moment an invariant needs a type
@@ -192,10 +186,7 @@ Mechanics:
   registered sanitizers"). Free `unwrap` belongs in CLI entrypoints and
   tests only.
 - Never hold a lock across `.await` inside a critical section — the store's
-  methods are synchronous and never await under their mutexes. The
-  deliberate exception is the turn lease: `Turn` holds an
-  `OwnedMutexGuard<()>` for its whole lifetime, inference and tool awaits
-  included, because a trajectory's turns are serialized by construction.
+  methods are synchronous and never await under their mutexes.
 - Observability is `tracing` only (decision path at `debug!`, algebra at
   `trace!`), borrow-only and never behavior-changing; exporter wiring stays
   out of core (`appa-runtime -v`/`-vv` selects the level).
