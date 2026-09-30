@@ -92,49 +92,11 @@ It checks tool calls and results through the same APPA runtime, locally or in an
 
 ## Testing
 
-Install [mise](https://mise.jdx.dev/) and prepare the repository:
-
-```sh
-mise install
-mise run setup
-```
-
-Mise supplies the locked Rust, Python, Go, and Node toolchains plus `uv`,
-`pnpm`, and the Claude Code CLI used by the harness tests. The setup task
-delegates package installation to Cargo, uv, Go, and pnpm, using their
-committed manifests and lockfiles.
-
-Run the repository-wide evaluation before handing off a change:
-
-```sh
-mise exec -- scripts/appa-eval.sh
-```
-
-It runs the Rust, Python, and Go suites, the deterministic kagent integration,
-the website checks, and the real Claude Code harness against local scripted
-inference. It does not need a model account. Use `--quick` for the shorter
-inner loop. Use `--live-model` only when you intend to consume the configured
-Claude account for an additional compatibility canary. Individual integration
-READMEs document narrower commands for focused iteration.
-
-## When APPA is in the way
-
-```sh
-appa yell "the hook blocked a Bash call I needed and the remedy went nowhere"
-```
-
-The report carries your message and what APPA decided — rulings, remedies, label
-changes, and the policy they were made under. It never carries a prompt, a tool
-argument, a tool output, or a path. You are asked twice: whether to replace the
-names your policy chose with tokens such as `tool-1`, and whether to send the
-finished file, which is named before you answer and kept either way.
-
-The agent can report on its own through the `yell` tool, on a deployment that
-turns it on. A first `appa plugin install claude-code` asks in a terminal, and
-`--agent-yell` or `--no-agent-yell` answers for a script; `[reporting]
-agent_yell` in the config is the answer either way. That call is checked by
-your policy like any other, so a session narrowed to `self` or `internal`
-reaches a human review instead of sending.
+Test policy decisions before you merge a change, without running your agent's
+tools. `appa describe --check` checks that your configuration loads, and
+`appa replay` checks scripted tool calls against the decisions you expect. Run
+both locally or as a required CI check; see
+[Validation](https://www.openappa.com/validation).
 
 ## Status & Paper
 
