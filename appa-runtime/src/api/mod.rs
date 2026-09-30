@@ -2830,9 +2830,10 @@ impl Runtime {
     pub(crate) fn record_call_settled(&self, acting: &Actor, call_id: String) -> Result<(), EventError> {
         let trajectory = acting_trajectory(acting);
         let log = self.inner.log(&acting.root)?;
-        let open = log
-            .call_bindings()
-            .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id && !binding.settled);
+        let open = !log.settled_calls().contains(&(trajectory, call_id.as_str()))
+            && log
+                .call_bindings()
+                .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id);
         match open {
             true => self.inner.append_host(
                 &acting.root,

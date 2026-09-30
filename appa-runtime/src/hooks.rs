@@ -437,15 +437,15 @@ impl Dispatcher<'_> {
     /// The mark gates nothing, so this answers `Ack` whether or not it landed: a mark that
     /// did not land leaves the interrupted call open until the turn ends, which is what
     /// happens anyway when no prompt hook arrives at all.
-    /// A prompt that reports a background call finished is the host's notice, not the user's
-    /// turn: it closes that call and leaves the turn's mark alone.
+    /// A prompt that reports a background call finished also closes that call.
     fn prompt(&mut self, actor: Actor, settles: Option<String>) -> HookDecision {
-        let recorded = match settles {
-            Some(call_id) => self.runtime.record_call_settled(&actor, call_id),
-            None => self.runtime.record_prompt(&actor),
-        };
-        if let Err(error) = recorded {
+        if let Err(error) = self.runtime.record_prompt(&actor) {
             tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
+        }
+        if let Some(call_id) = settles
+            && let Err(error) = self.runtime.record_call_settled(&actor, call_id)
+        {
+            tracing::warn!(root = %actor.root.0, %error, "the finished call was not recorded");
         }
         HookDecision::Ack
     }

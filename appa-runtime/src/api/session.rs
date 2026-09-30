@@ -1798,9 +1798,11 @@ impl Decided<'_> {
     /// The fan-out spawn released under this prompt that still binds children: its fork
     /// prepared, its call not reported finished, its parent live.
     fn open_fan_out(&self, prompt: &PromptKey) -> Option<appa_engine::value::ForkId> {
+        let settled = self.log.settled_calls();
         self.log
             .call_bindings()
-            .filter(|binding| !binding.settled && binding.prompt == Some(prompt.0.as_str()))
+            .filter(|binding| binding.prompt == Some(prompt.0.as_str()))
+            .filter(|binding| !settled.contains(&(binding.trajectory, binding.call_id)))
             .map(|binding| appa_engine::value::ForkId::of(binding.dispatch))
             .find(|fork| matches!(self.fork_status(fork), ForkStatus::FanOut))
     }

@@ -228,8 +228,6 @@ pub struct CallBinding<'a> {
     pub call_id: &'a str,
     pub dispatch: &'a DispatchId,
     pub prompt: Option<&'a str>,
-    /// The host reported the call finished.
-    pub settled: bool,
 }
 
 impl Log {
@@ -271,14 +269,20 @@ impl Log {
                 call_id,
                 dispatch,
                 prompt: prompt.as_deref(),
-                settled: self.host.iter().any(|later| {
-                    later.seq >= record.seq
-                        && matches!(&later.observation, HostObservation::CallSettled { trajectory: settled, call_id: id }
-                            if settled == trajectory && id == call_id)
-                }),
             }),
             _ => None,
         })
+    }
+
+    /// The bound calls the host reported finished, as (trajectory, call id).
+    pub fn settled_calls(&self) -> std::collections::BTreeSet<(&TrajectoryId, &str)> {
+        self.host
+            .iter()
+            .filter_map(|record| match &record.observation {
+                HostObservation::CallSettled { trajectory, call_id } => Some((trajectory, call_id.as_str())),
+                _ => None,
+            })
+            .collect()
     }
 }
 
