@@ -82,10 +82,21 @@ The native `appa` command deploys the runtime and registers it in your Claude
 Code user settings as the session's hooks, together with the runtime's MCP
 server, the `appa-guide` skill, and the `clappa` launcher, which adds APPA's
 status line to the sessions it starts. Rerunning it rewrites only what it wrote
-and preserves an existing policy. Fresh policies use a fail-closed Claude annotator as a compatibility
-net for MCP tools they do not yet name. Start `clappa`, then run
-`/appa-guide` to replace that fallback with exact connector contracts; the
-same skill explains blocks and tunes the defaults.
+and preserves an existing policy.
+
+Then start a protected session and run the policy setup skill:
+
+```sh
+clappa
+```
+
+```text
+/appa-guide
+```
+
+Fresh policies use a fail-closed Claude annotator as a compatibility net for
+MCP tools they do not yet name. `/appa-guide` replaces that fallback with exact
+connector contracts; the same skill explains blocks and tunes the defaults.
 Plain `claude` sessions stay untouched. Resume a protected conversation with
 `clappa --resume`, because `claude --resume` starts an unprotected process.
 Exit and restart a conversation already resumed through plain `claude`.
