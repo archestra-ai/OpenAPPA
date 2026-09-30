@@ -83,14 +83,14 @@ clappa
 
 <table>
 <tr>
-<td width="33%" valign="top">
+<td width="50%" valign="top">
 
 ### [Add to your agent →](https://openappa.com/add-to-agent)
 
 Embed the APPA runtime in your own agent from any language, or connect an agent through hooks.
 
 </td>
-<td width="33%" valign="top">
+<td width="50%" valign="top">
 
 ### [Try at the LLM proxy level →](https://openappa.com/archestra)
 
