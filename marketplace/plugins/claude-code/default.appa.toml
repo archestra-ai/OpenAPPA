@@ -47,6 +47,14 @@ version = 2
 name = "host/claude-code/Agent"
 delta = {}
 
+# A workflow is a fan-out spawn: its script starts any number of subagents
+# under the one return declaration made at the `Workflow` call, which offers
+# every route above except `attest-schema`. Each subagent's return is checked
+# on its own, whether it arrives in its `StructuredOutput` call or at its stop.
+[[policy.tool]]
+name = "host/claude-code/Workflow"
+delta = {}
+
 [[policy.tool]]
 name = "host/claude-code/AskUserQuestion"
 delta = {}
@@ -188,10 +196,6 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/ToolSearch"
-delta = {}
-
-[[policy.tool]]
-name = "host/claude-code/Workflow"
 delta = {}
 
 # --- tools that bring outside content into the session ---

@@ -1252,17 +1252,13 @@ impl Views<'_> {
     /// of no decided batch — a stage that is not a call's — is ordinary.
     pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::check::CallRole {
         match subject {
-            SubjectKey::Call { batch, position, .. }
-                if self
-                    .decided_batch(batch)
-                    .is_some_and(|decided| crate::transition::SpawnMark::marks(decided.spawn, *position as usize)) =>
-            {
-                crate::check::CallRole::MarkedSpawn
+            SubjectKey::Call { batch, position, .. } => match self.decided_batch(batch) {
+                Some(decided) => crate::check::CallRole::of(decided.spawn, *position as usize),
+                None => crate::check::CallRole::Ordinary,
+            },
+            SubjectKey::Approval(_) | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_) => {
+                crate::check::CallRole::Ordinary
             }
-            SubjectKey::Call { .. }
-            | SubjectKey::Approval(_)
-            | SubjectKey::ConfinedResult(_)
-            | SubjectKey::Return(_) => crate::check::CallRole::Ordinary,
         }
     }
 

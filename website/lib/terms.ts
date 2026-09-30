@@ -187,6 +187,8 @@ const TERMS = {
     "One root and its spawned subagent trajectories, recorded in the same event log under the family's opening policy. Their effect history is family-wide.",
   "subagent fork":
     "A child trajectory bound to an approved spawn in the parent's family. Its content snapshot refers to values in that family log, and its answer crosses a checked return path.",
+  "fan-out spawn":
+    "A spawn that starts any number of subagents under one return declaration, such as Claude Code's Workflow tool. Each subagent binds its own subagent fork, starts at the parent's label at its start, and its answer crosses the checked return path separately.",
   "root fork":
     "An independent family opened from an identified source trajectory. It freezes the source label and denials, family effects and unsettled reservations, and opening policy. Later activity stays separate; there is no spawn dispatch or child-return contract.",
 } as const satisfies Record<string, string>;

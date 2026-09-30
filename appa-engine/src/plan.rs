@@ -363,7 +363,7 @@ pub(crate) fn plan(
         plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
     }
     let fork_advice = match (role, &raw.narrowing) {
-        (CallRole::MarkedSpawn, _) => None,
+        (CallRole::MarkedSpawn(_), _) => None,
         (_, None) => Some(ForkAdvice::SameLabel),
         (_, Some(narrowing)) => Some(ForkAdvice::Narrowing {
             standing: match &floor {
@@ -443,7 +443,7 @@ pub(crate) fn enumerate_plans(
         // An ordinary call declares no return policy; a marked spawn declares exactly one.
         let returns: Vec<Option<Option<SanitizerName>>> = match role {
             CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn => return_options(registry, floor).into_iter().map(Some).collect(),
+            CallRole::MarkedSpawn(kind) => return_options(registry, floor, kind).into_iter().map(Some).collect(),
         };
         for required in assignments {
             for settlement in &settlements {
@@ -848,7 +848,7 @@ pub(crate) fn input_hops(
     context: &MembershipContext<'_>,
     needs: &mut NeededAtoms,
 ) -> Vec<SanitizerName> {
-    if role == CallRole::MarkedSpawn {
+    if matches!(role, CallRole::MarkedSpawn(_)) {
         return Vec::new();
     }
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
@@ -1053,13 +1053,20 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// The return sanitizers a marked spawn may declare here, in registry name order behind the
 /// bare floor: the reserved attestation when it is registered, and every untagged output
 /// sanitizer. Under a floor, a sanitizer whose mandate lands below it is not offered — the
-/// grandchild's return could never cross the child.
-pub(crate) fn return_options(registry: &Registry, floor: Option<&Floor>) -> Vec<Option<SanitizerName>> {
+/// grandchild's return could never cross the child. A fan-out spawn is not offered the
+/// attestation: it holds only for a child started while the parent is trusted, which the
+/// declaration checks once and a fan-out's later children need not meet.
+pub(crate) fn return_options(
+    registry: &Registry,
+    floor: Option<&Floor>,
+    kind: crate::transition::SpawnKind,
+) -> Vec<Option<SanitizerName>> {
     let mut options = vec![None];
     options.extend(
         registry
             .sanitizers()
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
+            .filter(|sanitizer| kind == crate::transition::SpawnKind::Single || !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| {
                 floor.is_none_or(|floor| {
                     Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
@@ -1085,7 +1092,7 @@ fn preserving_return_exists(
     context: &MembershipContext<'_>,
 ) -> bool {
     let unchanged = Floor::new(current.clone(), None);
-    return_options(registry, floor)
+    return_options(registry, floor, crate::transition::SpawnKind::Single)
         .into_iter()
         .flatten()
         .filter_map(|name| registry.sanitizer(&name))

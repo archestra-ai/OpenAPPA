@@ -1511,10 +1511,7 @@ impl Engine {
             .map(|(position, _)| (position, &proposals[position]))
         {
             let contract = self.validated_contract(call)?.into_owned();
-            let role = match SpawnMark::marks(batch.spawn, position) {
-                true => CallRole::MarkedSpawn,
-                false => CallRole::Ordinary,
-            };
+            let role = CallRole::of(batch.spawn, position);
             let raw = match check::evaluate(
                 &contract,
                 &final_views,
@@ -3241,10 +3238,7 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| malformed(EngineError::InvalidCall(error)))?;
-            let role = match SpawnMark::marks(spawn, position) {
-                true => CallRole::MarkedSpawn,
-                false => CallRole::Ordinary,
-            };
+            let role = CallRole::of(spawn, position);
             // The derivations earlier blocks' remedies staged for exactly these bytes. Taking one
             // puts the call at that sanitizer's stage — its derived label and spent lineage —
             // while every other term is judged against current state, so a trajectory that
@@ -3256,7 +3250,7 @@ pub(crate) fn compose_batch<'a>(
             // bytes the call clears if any of them covers it: it is judged under each in subject
             // order and takes the first that clears, else it blocks under the first.
             let stages: Vec<(crate::basis::SubjectKey, CallStage)> = match role {
-                CallRole::MarkedSpawn => Vec::new(),
+                CallRole::MarkedSpawn(_) => Vec::new(),
                 CallRole::Ordinary => staged(&views, call, &taken)
                     .into_iter()
                     .filter_map(|subject| {
@@ -3325,7 +3319,7 @@ pub(crate) fn compose_batch<'a>(
                 ));
             }
             facts.push(opening);
-            let prepares_fork = if role == CallRole::MarkedSpawn {
+            let prepares_fork = if matches!(role, CallRole::MarkedSpawn(_)) {
                 let return_policy = consumes
                     .and_then(|offer| views.approval(&offer))
                     .and_then(|prepared| prepared.return_policy.clone())
@@ -13398,6 +13392,37 @@ mod tests {
         assert_eq!(
             e.handle(&viewing(&e, &log), child_report(&log, &child, ChildSubmission::Void)),
             Err(crate::transition::TransitionError::BranchEnded)
+        );
+    }
+
+    #[test]
+    fn a_fan_out_spawn_is_offered_every_return_route_but_the_attestation() {
+        let e = open_engine(returning_registry(vec![
+            lifting_sanitizer("attest-schema"),
+            lifting_sanitizer("scrub"),
+        ]));
+        let log = vec![opened(&e)];
+        let routes = |mark| {
+            let blocked = e
+                .handle(&viewing(&e, &log), spawn_batch("marked", Some(mark)))
+                .expect("a marked spawn blocks");
+            let mut routes: Vec<Option<String>> = opened_offers(&appended_facts(blocked))
+                .into_iter()
+                .filter_map(|(_, plan)| {
+                    plan.return_step()
+                        .map(|route| route.map(|name| name.as_str().to_string()))
+                })
+                .collect();
+            routes.sort();
+            routes
+        };
+        assert_eq!(
+            routes(crate::transition::SpawnMark::at(0)),
+            vec![None, Some("attest-schema".to_string()), Some("scrub".to_string())]
+        );
+        assert_eq!(
+            routes(crate::transition::SpawnMark::fan_out(0)),
+            vec![None, Some("scrub".to_string())]
         );
     }
 

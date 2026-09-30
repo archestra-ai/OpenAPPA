@@ -2346,10 +2346,7 @@ impl<'a> Sequence<'a> {
                 continue;
             };
             let context = self.context(act.expansions());
-            let role = match SpawnMark::marks(spawn, position) {
-                true => crate::check::CallRole::MarkedSpawn,
-                false => crate::check::CallRole::Ordinary,
-            };
+            let role = crate::check::CallRole::of(spawn, position);
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
