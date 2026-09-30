@@ -92,11 +92,20 @@ It checks tool calls and results through the same APPA runtime, locally or in an
 
 ## Testing
 
-Test policy decisions before you merge a change, without running your agent's
-tools. `appa describe --check` checks that your configuration loads, and
-`appa replay` checks scripted tool calls against the decisions you expect. Run
-both locally or as a required CI check; see
-[Validation](https://www.openappa.com/validation).
+The APPA CLI provides two commands to check policy decisions before you merge a
+change, without running your agent's tools:
+
+- `appa describe --check` checks that your configuration loads.
+- `appa replay` checks scripted tool calls against the decisions you expect.
+
+```sh
+appa describe --config appa.toml --check
+appa replay --config appa.toml policy-tests/
+```
+
+Run them locally, or make them a required CI check to block merges when
+validation fails. [Validation](https://www.openappa.com/validation) has a
+GitHub Actions workflow and a worked example.
 
 ## Status & Paper
 
