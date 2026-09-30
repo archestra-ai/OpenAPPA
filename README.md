@@ -5,7 +5,7 @@
   <img alt="OpenAPPA" src="website/public/brand/openappa-lockup-light.svg" width="440">
 </picture>
 
-**Deterministic security for real-world agentic applications.**
+**Deterministic guardrails that don't break agents.**
 
 [Website](https://openappa.com) ·
 [How it works](https://openappa.com/how-it-works) ·
