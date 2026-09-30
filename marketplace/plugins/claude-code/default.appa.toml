@@ -330,6 +330,14 @@ name = "host/claude-code/RemoteTrigger(action:get_run_log)"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get)"
+delta = {}
+
+[[policy.tool]]
 name = "host/claude-code/RemoteTrigger"
 requires = { audience = { contains = ["public"] } }
 delta = {}
