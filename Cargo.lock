@@ -108,6 +108,7 @@ version = "0.29.1"
 dependencies = [
  "appa-adapter-amp",
  "appa-adapter-claude-code",
+ "appa-adapter-codex",
  "appa-adapter-kagent",
  "appa-builtin",
  "appa-engine",
@@ -172,6 +173,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "appa-adapter-codex"
+version = "0.29.1"
+dependencies = [
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

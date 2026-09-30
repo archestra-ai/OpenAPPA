@@ -70,6 +70,14 @@ impl Endpoint {
             self.prefix, self.authority
         )
     }
+
+    fn proxy_request_head(&self, method: &str, path: &str, length: usize) -> String {
+        format!(
+            "{method} http://{}{}{path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {length}\r\nConnection: close\r\n\r\n",
+            self.authority, self.prefix, self.authority
+        )
+    }
 }
 
 /// The wall clock the whole round trip runs against. Every socket operation takes
@@ -126,10 +134,46 @@ pub(crate) fn request(
     body: &[u8],
     deadline: &Deadline,
 ) -> Result<Answer, String> {
-    let (mut socket, address) = connect(&endpoint.addresses()?, deadline)?;
+    request_with_route(endpoint, method, path, body, deadline, None)
+}
+
+/// The Codex execution wrapper runs inside a network sandbox whose HTTP proxy is
+/// the only route to the allowed loopback host. This explicit entry point ignores
+/// `NO_PROXY`; ordinary hook traffic retains the direct path above. A proxy must
+/// itself be on loopback, and the destination is validated independently.
+pub(crate) fn request_for_sandboxed_wrapper(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    deadline: &Deadline,
+    proxy: Option<&str>,
+) -> Result<Answer, String> {
+    let proxy = proxy.map(Endpoint::parse).transpose()?;
+    if proxy.as_ref().is_some_and(|proxy| !proxy.prefix.is_empty()) {
+        return Err("the Codex HTTP proxy URL must not have a path".into());
+    }
+    request_with_route(endpoint, method, path, body, deadline, proxy.as_ref())
+}
+
+fn request_with_route(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    deadline: &Deadline,
+    proxy: Option<&Endpoint>,
+) -> Result<Answer, String> {
+    endpoint.addresses()?;
+    let destination = proxy.unwrap_or(endpoint);
+    let (mut socket, address) = connect(&destination.addresses()?, deadline)?;
     socket.set_nodelay(true).ok();
 
-    for part in [endpoint.request_head(method, path, body.len()).as_bytes(), body] {
+    let head = match proxy {
+        Some(_) => endpoint.proxy_request_head(method, path, body.len()),
+        None => endpoint.request_head(method, path, body.len()),
+    };
+    for part in [head.as_bytes(), body] {
         socket
             .set_write_timeout(Some(deadline.left()?))
             .map_err(|error| format!("cannot bound the write to {address}: {error}"))?;
@@ -284,6 +328,50 @@ mod tests {
         .expect("the complete body answers before the connection closes");
         assert_eq!(answer.body, b"{}");
         server.join().expect("the server exits");
+    }
+
+    #[test]
+    fn a_sandboxed_wrapper_uses_the_explicit_loopback_proxy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 1024];
+            let count = socket.read(&mut bytes).unwrap();
+            let request = std::str::from_utf8(&bytes[..count]).unwrap();
+            assert!(
+                request.starts_with("GET http://127.0.0.1:8766/health HTTP/1.1\r\n"),
+                "{request}"
+            );
+            assert!(request.contains("Host: 127.0.0.1:8766\r\n"), "{request}");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let endpoint = Endpoint::parse("http://127.0.0.1:8766").unwrap();
+        let answer = request_for_sandboxed_wrapper(
+            &endpoint,
+            "GET",
+            "/health",
+            b"",
+            &Deadline::spanning(Duration::from_secs(1)),
+            Some(&format!("http://{proxy_address}")),
+        )
+        .unwrap();
+        assert_eq!(answer.body, b"ok");
+        server.join().unwrap();
+
+        assert!(
+            request_for_sandboxed_wrapper(
+                &endpoint,
+                "GET",
+                "/health",
+                b"",
+                &Deadline::spanning(Duration::from_secs(1)),
+                Some("http://192.0.2.1:8888"),
+            )
+            .is_err()
+        );
     }
 
     /// A URL naming a host that resolves to more than one address — the

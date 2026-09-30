@@ -6,9 +6,11 @@
 //! is the user's own to restart". Neither is read from a shell, so the
 //! precedence lives here rather than in a `${VAR:-default}` expansion.
 
+use appa_runtime_api::AdapterName;
 use clap::Args;
 
 pub const DEFAULT_RUNTIME_URL: &str = "http://127.0.0.1:8787";
+pub const DEFAULT_CODEX_RUNTIME_URL: &str = "http://127.0.0.1:8766";
 
 #[derive(Args, Clone)]
 pub struct RuntimeUrl {
@@ -31,6 +33,10 @@ pub struct RuntimeTarget {
 
 impl RuntimeUrl {
     pub fn resolve(&self) -> RuntimeTarget {
+        self.resolve_for(AdapterName::ClaudeCode)
+    }
+
+    pub fn resolve_for(&self, adapter: AdapterName) -> RuntimeTarget {
         match (&self.url, &self.deployment_url) {
             (Some(url), _) => RuntimeTarget {
                 url: url.clone(),
@@ -41,7 +47,13 @@ impl RuntimeUrl {
                 user_owned: false,
             },
             (None, None) => RuntimeTarget {
-                url: DEFAULT_RUNTIME_URL.to_owned(),
+                url: match adapter {
+                    AdapterName::Codex => DEFAULT_CODEX_RUNTIME_URL,
+                    AdapterName::ClaudeCode | AdapterName::Kagent | AdapterName::Amp | AdapterName::Embedded => {
+                        DEFAULT_RUNTIME_URL
+                    }
+                }
+                .to_owned(),
                 user_owned: false,
             },
         }
@@ -73,5 +85,9 @@ mod tests {
         let default = RuntimeUrl::of(None, None).resolve();
         assert_eq!(default.url, DEFAULT_RUNTIME_URL);
         assert!(!default.user_owned);
+
+        let codex = RuntimeUrl::of(None, None).resolve_for(AdapterName::Codex);
+        assert_eq!(codex.url, DEFAULT_CODEX_RUNTIME_URL);
+        assert!(!codex.user_owned);
     }
 }

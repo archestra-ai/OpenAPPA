@@ -50,6 +50,7 @@ required-features = ["daemon"]
 [dependencies]
 appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
+appa-adapter-codex = { path = "../appa-adapter-codex" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,
 # statuses, and version shared with deployer modules.

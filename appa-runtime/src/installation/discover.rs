@@ -28,9 +28,10 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
             });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
-        // kagent and embedding hosts keep their own inventories. amppa does not
-        // participate in marketplace installation or automatic battery discovery.
-        Host::Kagent | Host::Amp | Host::Embedded => BTreeSet::new(),
+        // These hosts do not discover marketplace batteries from local MCP files.
+        // Kagent and embedding hosts keep their own inventories; amppa does not
+        // participate in marketplace installation or automatic discovery.
+        Host::Codex | Host::Kagent | Host::Amp | Host::Embedded => BTreeSet::new(),
     }
 }
 
@@ -151,7 +152,7 @@ pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search:
                 .map(|(name, _)| name.clone())
                 .collect()
         }
-        Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
+        Host::Codex | Host::Kagent | Host::Amp | Host::Embedded => Vec::new(),
     }
 }
 

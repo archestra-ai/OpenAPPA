@@ -52,8 +52,8 @@ struct Args {
     #[arg(long, env = "APPA_CONFIG", global = true)]
     config: Option<PathBuf>,
 
-    #[arg(long, env = "APPA_DB", default_value = "appa.db")]
-    db: PathBuf,
+    #[arg(long, env = "APPA_DB")]
+    db: Option<PathBuf>,
 
     /// Host-installed agentsh backend directory for isolated declared-input processing.
     #[arg(long, env = "APPA_FILE_PROCESS_BACKEND")]
@@ -76,8 +76,8 @@ struct Args {
 
     /// The address to serve. Port 0 takes a free port; the runtime prints the URL it
     /// serves as the one line on stdout once it listens.
-    #[arg(long, default_value = "127.0.0.1:8787")]
-    listen: SocketAddr,
+    #[arg(long)]
+    listen: Option<SocketAddr>,
 
     /// Optional dedicated listener for the kagent appa-guide MCP surface.
     #[arg(long, env = "APPA_GUIDE_LISTEN")]
@@ -177,6 +177,7 @@ fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
     match adapter {
         AdapterName::Amp => appa_adapter_amp::adapter(),
         AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
+        AdapterName::Codex => appa_adapter_codex::adapter(),
         AdapterName::Kagent => appa_adapter_kagent::adapter(),
         AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
     }
@@ -294,6 +295,12 @@ async fn validate_tools(
 async fn health(State(state): State<AppState>) -> String {
     let stale = state.executable.as_ref().is_some_and(ExecutableAtStart::is_replaced);
     health_answer(stale, std::process::id())
+}
+
+/// The served harness identity. Hook clients check this before posting so a
+/// healthy runtime belonging to another deployment is never silently reused.
+async fn adapter_identity(State(state): State<AppState>) -> &'static str {
+    state.adapter.name.as_str()
 }
 
 /// The policy this process serves, so an install can tell whether a runtime it left
@@ -449,6 +456,17 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
+    if args.adapter == AdapterName::Codex
+        && matches!(
+            &args.command,
+            Some(RuntimeCommand::Ensure { .. } | RuntimeCommand::Stop { .. })
+        )
+    {
+        eprintln!(
+            "appa runtime: Codex lifecycle commands require the separate Codex deployment and are not active yet"
+        );
+        return ExitCode::FAILURE;
+    }
     let annotating = match args.command {
         Some(RuntimeCommand::Ensure { target, data_dir }) => return ensure(&target, args.config, data_dir),
         Some(RuntimeCommand::Stop { target }) => return stop(&target),
@@ -497,8 +515,35 @@ async fn serve(args: Args) -> ExitCode {
     result
 }
 
+fn default_listen(adapter: AdapterName) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], if adapter == AdapterName::Codex { 8766 } else { 8787 }))
+}
+
+fn default_config_path(adapter: AdapterName) -> PathBuf {
+    PathBuf::from(if adapter == AdapterName::Codex {
+        "appa-codex.toml"
+    } else {
+        "appa.toml"
+    })
+}
+
+fn default_db_path(adapter: AdapterName) -> PathBuf {
+    PathBuf::from(if adapter == AdapterName::Codex {
+        "appa-codex.db"
+    } else {
+        "appa.db"
+    })
+}
+
 async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
-    let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
+    let config_path = args.config.unwrap_or_else(|| default_config_path(args.adapter));
+    if args.adapter == AdapterName::Codex && !config_path.exists() {
+        eprintln!(
+            "appa runtime: Codex requires an existing policy at {}",
+            config_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
 
     match ensure_default_config(&config_path) {
         Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
@@ -525,7 +570,8 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
         serving_tools: config.tool_names().into_iter().collect(),
     }));
-    let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
+    let db = args.db.unwrap_or_else(|| default_db_path(args.adapter));
+    let runtime = match Runtime::open_served(config, db, args.modules_dir, adapter) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("appa runtime: {error}");
@@ -598,6 +644,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()
         .route("/health", get(health))
+        .route("/adapter", get(adapter_identity))
         .route("/batteries", get(batteries))
         .route("/hook", post(hook))
         .route(
@@ -617,20 +664,18 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .merge(management)
         .with_state(state);
 
-    let listener = match tokio::net::TcpListener::bind(args.listen).await {
+    let listen = args.listen.unwrap_or_else(|| default_listen(args.adapter));
+    let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("appa runtime: cannot bind {}: {error}", args.listen);
+            eprintln!("appa runtime: cannot bind {listen}: {error}");
             return ExitCode::FAILURE;
         }
     };
     let listen = match listener.local_addr() {
         Ok(listen) => listen,
         Err(error) => {
-            eprintln!(
-                "appa runtime: cannot read the bound address of {}: {error}",
-                args.listen
-            );
+            eprintln!("appa runtime: cannot read the bound address of {}: {error}", listen);
             return ExitCode::FAILURE;
         }
     };
@@ -728,7 +773,21 @@ mod tests {
     #[test]
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
         let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
-        assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+        assert_eq!(
+            default.listen.unwrap_or_else(|| default_listen(default.adapter)),
+            "127.0.0.1:8787".parse().expect("the default parses")
+        );
+        assert_eq!(default_config_path(default.adapter), PathBuf::from("appa.toml"));
+        assert_eq!(default_db_path(default.adapter), PathBuf::from("appa.db"));
+
+        let codex =
+            Args::try_parse_from(["appa runtime", "--adapter", "codex"]).expect("the Codex runtime command parses");
+        assert_eq!(
+            codex.listen.unwrap_or_else(|| default_listen(codex.adapter)),
+            "127.0.0.1:8766".parse().expect("the Codex address parses")
+        );
+        assert_eq!(default_config_path(codex.adapter), PathBuf::from("appa-codex.toml"));
+        assert_eq!(default_db_path(codex.adapter), PathBuf::from("appa-codex.db"));
         assert_eq!(
             default.guide_listen, None,
             "Claude Code exposes no guide management listener"
@@ -742,7 +801,7 @@ mod tests {
             .expect("an explicit shared-runtime address parses");
         assert_eq!(
             shared.listen,
-            "0.0.0.0:18787".parse().expect("the shared address parses")
+            Some("0.0.0.0:18787".parse().expect("the shared address parses"))
         );
         assert!(shared.mcp_allowed_hosts.is_empty());
 
