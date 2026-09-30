@@ -92,10 +92,10 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 opentelemetry = { version = "0.33", default-features = false, features = ["metrics"] }
-opentelemetry-appender-tracing = { version = "0.32", optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["logs", "metrics", "trace"], optional = true }
-tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+opentelemetry-appender-tracing = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
 url = "2"
 # The report id: a v4 UUID the receiver stores one object under. A consult record's id is
 # a v7, so a host's dataset sorts by time.
