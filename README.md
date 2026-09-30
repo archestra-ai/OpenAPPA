@@ -80,10 +80,6 @@ clappa
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
-Try on: [Claude Code](https://openappa.com/claude-code) ·
-[kagent](https://openappa.com/kagent) ·
-[Amp](integrations/amp/README.md)
-
 ## Testing
 
 The APPA CLI provides two commands to check policy decisions before you merge a
