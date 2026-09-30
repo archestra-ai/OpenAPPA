@@ -226,8 +226,9 @@ annotator = "claude-code.bash-requirements"
 # Claude Code on Windows offers PowerShell beside Bash, with the same `command`
 # argument and result. PowerShell takes either path separator, so each
 # directory rule is written for both; `\\` is one literal backslash in a
-# selector. The Windows homes of the GitHub CLI and gcloud configs, and the
-# CredentialManager module's `Get-StoredCredential`, are named here too. A
+# selector. The Windows homes of the GitHub CLI and gcloud configs, the
+# CredentialManager module's `Get-StoredCredential` and SecretManagement's
+# `Get-Secret` are named here too, and `/proc/*/environ` for a WSL command. A
 # selector matches case-sensitively, so another spelling reaches the Annotator.
 [[policy.tool]]
 name = 'host/claude-code/PowerShell(command:*.env*)'
@@ -355,7 +356,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'host/claude-code/PowerShell(command:*.config/gcloud/*)'
+name = 'host/claude-code/PowerShell(command:*/gcloud/*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -381,6 +382,16 @@ tags = ["credentials"]
 
 [[policy.tool]]
 name = 'host/claude-code/PowerShell(command:*Get-StoredCredential*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*Get-Secret*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'host/claude-code/PowerShell(command:*/proc/*environ*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 

@@ -1,7 +1,7 @@
 # The policy `appa plugin install claude-code` writes for a Claude Code session.
 #
 # It names Claude Code's built-in tools, and it includes the Claude Code
-# battery, which carries the Bash, Monitor, Read, Grep, Write and Edit rules
+# battery, which carries the Bash, Monitor, PowerShell, Read, Grep, Write and Edit rules
 # and their Annotators. A named tool without a `delta` restricts nothing: the
 # result's label is the combination of its sources, unchanged.
 #

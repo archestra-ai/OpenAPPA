@@ -166,7 +166,7 @@ fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
 /// is where a restatement puts the text that stands in for it.
 fn content_slot(tool: &str) -> Option<&'static str> {
     match tool {
-        "Bash" => Some("/stdout"),
+        "Bash" | "PowerShell" => Some("/stdout"),
         "Read" => Some("/file/content"),
         "Grep" => Some("/content"),
         "WebFetch" => Some("/result"),
@@ -544,6 +544,11 @@ mod tests {
         for (tool, response, slot) in [
             ("WebFetch", serde_json::json!({"result": "the page body"}), "/result"),
             ("Write", serde_json::json!({"content": "the file body"}), "/content"),
+            (
+                "PowerShell",
+                serde_json::json!({"stdout": "", "stderr": "a warning longer than the output", "interrupted": false}),
+                "/stdout",
+            ),
         ] {
             let replacement = swap_leaves(tool, response, "[appa] withheld");
             assert_eq!(

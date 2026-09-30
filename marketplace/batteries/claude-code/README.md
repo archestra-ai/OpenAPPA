@@ -71,7 +71,7 @@ The battery also routes `host/claude-code/Monitor` through the Bash
 Annotator. `host/claude-code/PowerShell`, which Claude Code offers on Windows
 beside Bash, gets the Bash rules: the same credential selectors, written for
 both path separators and for the Windows homes of the GitHub CLI and gcloud
-configs, plus `Get-StoredCredential`; the same publishing selectors; the Bash
+configs, plus `Get-StoredCredential` and `Get-Secret`; the same publishing selectors; the Bash
 Annotator for every other command; and the same masked results. Both Annotators run the local `claude` command; on Windows it must
 resolve to `claude.exe`. The default config `appa plugin install claude-code`
 writes adds the wildcard fallback for tools no rule names.

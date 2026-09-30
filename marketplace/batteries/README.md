@@ -8,7 +8,7 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | five built-in tools of a Claude Code session: `host/claude-code/Bash`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash calls; the stock `redact-secrets` sanitizer masks each withheld Bash result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `claude-code/` | seven built-in tools of a Claude Code session: `host/claude-code/Bash`, `Monitor`, `PowerShell`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash, PowerShell and Monitor calls; the stock `redact-secrets` sanitizer masks each withheld Bash and PowerShell result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
 | `google-workspace/` | the claude.ai Google Drive connector, all 11 tools; viewer-only untrusted reads, trusted writes, reviewed sharing | the `google-workspace` audience source: viewer, active Workspace users, a Workspace group with nested groups expanded |
