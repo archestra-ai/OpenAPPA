@@ -207,7 +207,7 @@ Coding agents delegate. When the main agent starts a subagent with Claude Code's
 
 This lets a subagent read something sensitive, such as a private ticket or a credential-adjacent log, and return only a result the main session may hold. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
 
-Claude Code ends a subagent that declares `maxTurns` without the return check. So while a subagent definition in the project, the user's agent directory, or an installed plugin declares `maxTurns`, OpenAPPA refuses the session's prompts.
+Claude Code ends a subagent that declares `maxTurns` without the return check. So while a subagent definition in the project, the user's agent directory, or an installed plugin declares `maxTurns`, OpenAPPA refuses the session's prompts. OpenAPPA reads only the frontmatter in the first 64 KiB of a definition. A frontmatter that does not close in that range, or that has lines other than block-style `key: value` entries, comments, and indented continuations, counts as one that declares `maxTurns`.
 
 ## Protected sessions
 

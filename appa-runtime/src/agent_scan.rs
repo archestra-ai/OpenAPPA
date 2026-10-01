@@ -7,6 +7,7 @@
 //! directories hold the definitions a session can start; agents passed on the
 //! command line (`--agents`, `--plugin-dir`) are not scanned.
 
+use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,15 @@ use std::path::{Path, PathBuf};
 /// frontmatter, at the top; the rest of a file under a project directory is
 /// whatever size the project made it, and the hook must not follow it there.
 const DEFINITION_HEAD_BYTES: u64 = 64 * 1024;
+
+/// Why a definition stops the session from being protected. A frontmatter this
+/// scan cannot read through counts as one that declares `maxTurns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Finding {
+    MaxTurns,
+    Unclosed,
+    Unparseable,
+}
 
 /// The refusal a prompt gets while a definition in reach declares `maxTurns`,
 /// naming each file, or `None` when the session can be protected.
@@ -28,20 +38,27 @@ pub(crate) fn refusal() -> Option<String> {
         return None;
     }
     let mut message = String::from(
-        "[appa] this session cannot be protected while a subagent definition declares maxTurns: \
+        "[appa] this session cannot be protected while a subagent definition may declare maxTurns: \
          Claude Code ends that subagent without the return check and hands the parent its \
-         partial output unchecked. Remove maxTurns from:",
+         partial output unchecked. Fix each definition:",
     );
-    for path in declaring {
-        message.push_str("\n  ");
-        message.push_str(&path.display().to_string());
+    for (path, finding) in declaring {
+        let remedy = match finding {
+            Finding::MaxTurns => "declares maxTurns; remove it",
+            Finding::Unclosed => "frontmatter is not closed by a `---` line within the first 64 KiB; shorten it",
+            Finding::Unparseable => {
+                "frontmatter has a line other than a plain `key: value`, an indented continuation, or a comment; \
+                 rewrite it in block style"
+            }
+        };
+        message.push_str(&format!("\n  {}: {remedy}", path.display()));
     }
     Some(message)
 }
 
 /// Every definition under the project, user, and installed plugin agent
-/// directories that declares `maxTurns`, in path order.
-pub(crate) fn declaring_max_turns(project: Option<&Path>, claude: Option<&Path>) -> Vec<PathBuf> {
+/// directories that may declare `maxTurns`, in path order.
+pub(crate) fn declaring_max_turns(project: Option<&Path>, claude: Option<&Path>) -> Vec<(PathBuf, Finding)> {
     let mut found = Vec::new();
     if let Some(project) = project {
         found.extend(definitions_in(&project.join(".claude/agents")));
@@ -50,9 +67,12 @@ pub(crate) fn declaring_max_turns(project: Option<&Path>, claude: Option<&Path>)
         found.extend(definitions_in(&claude.join("agents")));
         found.extend(plugin_definitions_under(&claude.join("plugins/cache")));
     }
-    found.retain(|path| declares_max_turns(path));
-    found.sort();
-    found
+    let mut declaring: Vec<_> = found
+        .into_iter()
+        .filter_map(|path| finding(&path).map(|finding| (path, finding)))
+        .collect();
+    declaring.sort();
+    declaring
 }
 
 /// The `.md` files directly inside one agents directory.
@@ -91,35 +111,59 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn declares_max_turns(path: &Path) -> bool {
-    let Ok(file) = fs::File::open(path) else {
-        return false;
-    };
+fn finding(path: &Path) -> Option<Finding> {
+    let file = fs::File::open(path).ok()?;
     let mut head = Vec::new();
-    if file.take(DEFINITION_HEAD_BYTES).read_to_end(&mut head).is_err() {
-        return false;
-    }
-    String::from_utf8_lossy(&head).lines().any(declares)
+    file.take(DEFINITION_HEAD_BYTES).read_to_end(&mut head).ok()?;
+    frontmatter_finding(&String::from_utf8_lossy(&head))
 }
 
-/// The line carries the key as YAML reads it: `maxTurns` first on the line,
-/// indented or not, bare or in one layer of quotes, then its colon with or
-/// without a space before it.
-fn declares(line: &str) -> bool {
-    let line = line.trim_start();
-    let (quote, line) = match line.strip_prefix('"') {
-        Some(rest) => (Some('"'), rest),
-        None => match line.strip_prefix('\'') {
-            Some(rest) => (Some('\''), rest),
-            None => (None, line),
-        },
+/// Claude Code reads a definition's settings from the YAML frontmatter that
+/// opens it; a file that does not open with `---` defines no agent. Inside the
+/// frontmatter every line at the mapping's indentation must be a plain
+/// `key: value`, so a flow mapping or an escaped key cannot carry `maxTurns`
+/// past the scan.
+fn frontmatter_finding(head: &str) -> Option<Finding> {
+    let head = head.strip_prefix('\u{feff}').unwrap_or(head);
+    let mut lines = head.lines();
+    match lines.next().map(str::trim_end) {
+        Some("---") => {}
+        _ if head.trim_start().starts_with("---") => return Some(Finding::Unparseable),
+        _ => return None,
+    }
+    let mut top = None;
+    for line in lines {
+        if line.trim_end() == "---" {
+            return None;
+        }
+        let content = line.trim_start_matches(' ');
+        if content.trim().is_empty() || content.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - content.len();
+        match indent.cmp(top.get_or_insert(indent)) {
+            Ordering::Greater => {}
+            Ordering::Less => return Some(Finding::Unparseable),
+            Ordering::Equal => match key(content) {
+                Some("maxTurns") => return Some(Finding::MaxTurns),
+                Some(_) => {}
+                None => return Some(Finding::Unparseable),
+            },
+        }
+    }
+    Some(Finding::Unclosed)
+}
+
+/// The key a block mapping line opens with: plain or in one layer of quotes
+/// without escapes, then its colon, ending the line or followed by a space.
+fn key(content: &str) -> Option<&str> {
+    let (key, rest) = match content.as_bytes().first()? {
+        quote @ (b'"' | b'\'') => content[1..].split_once(char::from(*quote))?,
+        _ => content.split_at(content.find([':', ' ', '\t']).unwrap_or(content.len())),
     };
-    line.strip_prefix("maxTurns")
-        .and_then(|rest| match quote {
-            Some(quote) => rest.strip_prefix(quote),
-            None => Some(rest),
-        })
-        .is_some_and(|rest| rest.trim_start().starts_with(':'))
+    let value = rest.trim_start_matches([' ', '\t']).strip_prefix(':')?;
+    let plain = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    (plain && (value.is_empty() || value.starts_with([' ', '\t']))).then_some(key)
 }
 
 #[cfg(test)]
@@ -142,10 +186,10 @@ mod tests {
         );
         write(&project.join(".claude/agents/free.md"), "---\nname: free\n---\n");
         write(&project.join(".claude/agents/notes.txt"), "maxTurns: 3\n");
-        write(&claude.join("agents/user-capped.md"), "maxTurns: 1\n");
+        write(&claude.join("agents/user-capped.md"), "---\nmaxTurns: 1\n---\n");
         write(
             &claude.join("plugins/cache/market/tool/1.0/agents/plugin-capped.md"),
-            "description: x\nmaxTurns: 2\n",
+            "---\ndescription: x\nmaxTurns: 2\n---\n",
         );
         write(
             &claude.join("plugins/cache/market/tool/1.0/skills/not-an-agent.md"),
@@ -169,15 +213,20 @@ mod tests {
             "---\nname: unclosed\n\"maxTurns: 4\n---\n",
         );
 
+        write(&claude.join("agents/no-frontmatter.md"), "maxTurns: 1\n");
         assert_eq!(
             declaring_max_turns(Some(&project), Some(&claude)),
             vec![
-                claude.join("agents/indented.md"),
-                claude.join("agents/quoted.md"),
-                claude.join("agents/spaced.md"),
-                claude.join("agents/user-capped.md"),
-                claude.join("plugins/cache/market/tool/1.0/agents/plugin-capped.md"),
-                project.join(".claude/agents/capped.md"),
+                (claude.join("agents/indented.md"), Finding::MaxTurns),
+                (claude.join("agents/quoted.md"), Finding::MaxTurns),
+                (claude.join("agents/spaced.md"), Finding::MaxTurns),
+                (claude.join("agents/unclosed.md"), Finding::Unparseable),
+                (claude.join("agents/user-capped.md"), Finding::MaxTurns),
+                (
+                    claude.join("plugins/cache/market/tool/1.0/agents/plugin-capped.md"),
+                    Finding::MaxTurns
+                ),
+                (project.join(".claude/agents/capped.md"), Finding::MaxTurns),
             ]
         );
         assert!(declaring_max_turns(None, None).is_empty());
@@ -192,17 +241,17 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary directory");
         let claude = root.path().join("claude");
         let plugin = claude.join("plugins/cache/market/tool/1.0");
-        write(&plugin.join("agents/capped.md"), "maxTurns: 2\n");
+        write(&plugin.join("agents/capped.md"), "---\nmaxTurns: 2\n---\n");
         std::os::unix::fs::symlink(&claude, plugin.join("back")).expect("the cycle is linked");
         assert_eq!(
             declaring_max_turns(None, Some(&claude)),
-            vec![plugin.join("agents/capped.md")]
+            vec![(plugin.join("agents/capped.md"), Finding::MaxTurns)]
         );
     }
 
     /// Only the head of a definition is read: a declaration in the frontmatter
-    /// of a large file is found, and the size of what follows it is the
-    /// project's business, not the hook's.
+    /// of a large file is found, the body is not scanned, and a frontmatter
+    /// that does not close within the head counts as declaring.
     #[test]
     fn a_definition_is_read_only_as_far_as_its_frontmatter_reaches() {
         let root = tempfile::tempdir().expect("temporary directory");
@@ -216,9 +265,34 @@ mod tests {
             &project.join(".claude/agents/buried.md"),
             &format!("---\nname: buried\n---\n{prose}maxTurns: 3\n"),
         );
+        let padding = "# padding\n".repeat(8_000);
+        write(
+            &project.join(".claude/agents/padded.md"),
+            &format!("---\nname: padded\n{padding}maxTurns: 3\n---\n"),
+        );
         assert_eq!(
             declaring_max_turns(Some(&project), None),
-            vec![project.join(".claude/agents/large.md")]
+            vec![
+                (project.join(".claude/agents/large.md"), Finding::MaxTurns),
+                (project.join(".claude/agents/padded.md"), Finding::Unclosed),
+            ]
         );
+    }
+
+    #[test]
+    fn only_frontmatter_lines_the_scan_can_classify_pass() {
+        let cases = [
+            ("---\nname: plain\ndescription: x\n---\nmaxTurns: 3\n", None),
+            ("---\nname: x\ntools:\n  - Read\n# note\n\n---\n", None),
+            ("---\nname: x\ndescription: |\n  {maxTurns: 1}\n---\n", None),
+            ("---\n{maxTurns: 1}\n---\n", Some(Finding::Unparseable)),
+            ("---\nname: x\n\"max\\u0054urns\": 1\n---\n", Some(Finding::Unparseable)),
+            ("---\n  name: x\nmaxTurns: 1\n---\n", Some(Finding::Unparseable)),
+            ("\n---\nmaxTurns: 1\n---\n", Some(Finding::Unparseable)),
+            ("---\nname: x\n", Some(Finding::Unclosed)),
+        ];
+        for (definition, expected) in cases {
+            assert_eq!(frontmatter_finding(definition), expected, "{definition:?}");
+        }
     }
 }
