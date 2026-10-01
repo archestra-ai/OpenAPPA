@@ -144,6 +144,8 @@ fn frontmatter_finding(head: &str) -> Option<Finding> {
         match indent.cmp(top.get_or_insert(indent)) {
             Ordering::Greater => {}
             Ordering::Less => return Some(Finding::Unparseable),
+            // A block sequence may sit at its key's own indentation (`tools:\n- Read`).
+            Ordering::Equal if content == "-" || content.starts_with("- ") => {}
             Ordering::Equal => match key(content) {
                 Some("maxTurns") => return Some(Finding::MaxTurns),
                 Some(_) => {}
@@ -284,6 +286,7 @@ mod tests {
         let cases = [
             ("---\nname: plain\ndescription: x\n---\nmaxTurns: 3\n", None),
             ("---\nname: x\ntools:\n  - Read\n# note\n\n---\n", None),
+            ("---\nname: x\ntools:\n- Read\n- Grep\n---\n", None),
             ("---\nname: x\ndescription: |\n  {maxTurns: 1}\n---\n", None),
             ("---\n{maxTurns: 1}\n---\n", Some(Finding::Unparseable)),
             ("---\nname: x\n\"max\\u0054urns\": 1\n---\n", Some(Finding::Unparseable)),

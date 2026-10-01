@@ -27,8 +27,9 @@ refused with the reason, or with the exact text to return when a
 sanitizer rewrote it, and the subagent keeps running until it stops with
 a message that crosses; the parent then receives that message unchanged.
 A subagent definition that declares `maxTurns` blocks the session's
-prompts: Claude Code ends such a subagent without the return check. The
-project and user agent directories and the installed plugins are
+prompts: Claude Code ends such a subagent without the return check. A
+frontmatter the scan cannot read to its closing `---` within 64 KiB, or
+that is not in block style, blocks prompts the same way. The project and user agent directories and the installed plugins are
 scanned; agents passed on the command line are not.
 
 ## Security scope and implementation order
