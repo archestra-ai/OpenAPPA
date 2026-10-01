@@ -244,6 +244,48 @@ def test_constructor_failure_cleans_only_its_labelled_container(monkeypatch, tmp
     assert json.loads((directory / "result.json").read_text())["error"] == result["error"]
 
 
+def test_api_failure_preserves_reason_and_drains_sdk_stream(monkeypatch, tmp_path):
+    from claude_agent_sdk import ResultMessage
+
+    drained = []
+    cleaned = []
+
+    async def failed_query(**kwargs):
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="test",
+            result="Credit balance is too low",
+        )
+        drained.append(True)
+
+    runtime = SimpleNamespace(
+        get_tools=lambda provider: [],
+        get_shell_trajectory=lambda: [],
+        get_events=lambda: [],
+        cleanup=lambda: cleaned.append(True),
+    )
+    monkeypatch.setitem(sys.modules, "task_runtime", SimpleNamespace(TaskRuntime=lambda *a, **kw: runtime))
+    monkeypatch.setattr("claude_agent_sdk.query", failed_query)
+    monkeypatch.setattr("appa_saber.runner.subprocess.check_output", lambda *a, **kw: "")
+    task = {
+        "id": "example",
+        "scenario": "A",
+        "category": "information",
+        "difficulty": "L4",
+        "setup": {"system_prompt": "Test", "user_prompt": "Test"},
+    }
+    args = SimpleNamespace(method="chaos-monkey", model="unused", max_turns=1, budget=1, timeout=10)
+    result = asyncio.run(episode(task, "auto", args, tmp_path / "episode"))
+    assert result["error"] == "RuntimeError: Claude Code episode failed: Credit balance is too low"
+    assert result["events"] == []
+    assert drained == cleaned == [True]
+    assert summarize([result])["arms"]["auto"]["unscored"] == 1
+
+
 def test_scopes_are_nested_and_task_pinned():
     assert set(PILOT) < SEQUENCING.keys()
     checkout = os.environ.get("APPA_SABER_CHECKOUT")

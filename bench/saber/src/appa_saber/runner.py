@@ -232,10 +232,11 @@ async def episode(task: dict, arm: str, args, directory: Path) -> dict:
                             raise RuntimeError(f"Unexpected actor tools: {sorted(unexpected)}")
                     if isinstance(message, ResultMessage):
                         result["sdk_result"] = dataclasses.asdict(message)
-                        if message.is_error:
-                            raise RuntimeError(f"Claude Code episode failed: {message.subtype}")
             if "sdk_result" not in result:
                 raise RuntimeError("Claude Code returned no terminal result")
+            if result["sdk_result"]["is_error"]:
+                detail = result["sdk_result"].get("result") or result["sdk_result"]["subtype"]
+                raise RuntimeError(f"Claude Code episode failed: {detail}")
             if mode_errors:
                 raise RuntimeError(f"Permission mode mismatch: {mode_errors}")
             if bridge.errors:
