@@ -976,7 +976,7 @@ mod tests {
         let body = serde_json::to_vec(&wire).expect("serializes");
         let (status, answer) = answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
         match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
-            Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+            Ok(Ok(decision)) => (status, (codec.render)(claude_hook_json, &event, &decision)),
             _ => (status, answer),
         }
     }

@@ -79,6 +79,7 @@ OpenAPPA intercepts Claude Code events through native lifecycle hooks:
 - **Unified tool coverage:** Intercepts both built-in commands (`Bash`, `Read`, `Edit`, `Write`) and all external MCP tools transparently.
 - **Pre-execution evaluation:** Before any tool runs, `PreToolUse` passes the call to the local APPA runtime, evaluating the flow against the session's accumulated labels (`audience × trust`).
 - **Fail-closed with remedies:** Allowed actions execute immediately. Disallowed flows are blocked before execution; OpenAPPA returns the policy conflict along with actionable remedies (such as sanitizer filters or operator approval). Unanswered hooks fail closed.
+- **Auto mode on top:** In [auto mode](/openappa-vs-auto-mode#running-both), OpenAPPA does not approve a call it allows. Claude Code's classifier still reviews that call and can deny it. A call OpenAPPA blocks stays blocked.
 - **Session isolation:** `clappa` launches Claude Code with APPA's policy enforcement and status line. Your regular `claude` command remains completely unchanged.
 
 ## Choose protection per session

@@ -51,7 +51,7 @@ struct Event {
 /// The events a protected session posts, after SessionStart. Stop and
 /// StopFailure report a finished turn, which decides nothing, so their entry
 /// never blocks and takes the shorter deadline.
-const EVENTS: [Event; 8] = [
+const EVENTS: [Event; 9] = [
     Event {
         name: "UserPromptSubmit",
         matcher: None,
@@ -72,6 +72,12 @@ const EVENTS: [Event; 8] = [
     },
     Event {
         name: "PostToolUseFailure",
+        matcher: Some("*"),
+        turn_end: false,
+        opens_context: false,
+    },
+    Event {
+        name: "PermissionDenied",
         matcher: Some("*"),
         turn_end: false,
         opens_context: false,

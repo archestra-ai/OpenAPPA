@@ -208,6 +208,7 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     assert_eq!(
         events,
         [
+            "PermissionDenied",
             "PostToolUse",
             "PostToolUseFailure",
             "PreToolUse",

@@ -36,7 +36,7 @@ use appa_runtime_api::{Adapter, AdapterName, Codec};
 pub fn codec() -> Codec {
     Codec {
         parse: parse::parse,
-        render: render::render,
+        render: render::answer,
         withholding: render::withholding,
     }
 }

@@ -61,7 +61,7 @@ fn the_written_entries_run_the_deployed_binary_and_post_to_the_deployment_endpoi
         // The advice entry only prints; it posts nothing.
         .filter(|(_, hook)| hook["args"][0] == "hook")
         .collect();
-    assert_eq!(posting.len(), 9, "one posting entry per event of a protected session");
+    assert_eq!(posting.len(), 10, "one posting entry per event of a protected session");
     for (event, hook) in posting {
         let args: Vec<&str> = hook["args"]
             .as_array()
