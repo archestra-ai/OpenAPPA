@@ -362,6 +362,11 @@ async fn an_oversized_peer_message_is_neither_sent_nor_taken_in() {
     )
     .await;
     assert_eq!(status, 409, "{answer}");
+
+    // The limit is the body's, at send and on arrival alike: the frame around it is free.
+    let largest = "x".repeat(64 * 1024);
+    sent(&runtime, "a", B_ADDRESS, &largest, "a2").await;
+    assert!(!blocked(&prompt(&runtime, "b", &frame(&largest)).await));
 }
 
 #[tokio::test]

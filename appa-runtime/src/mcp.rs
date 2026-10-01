@@ -275,7 +275,13 @@ impl RuntimeTools {
                 "[appa] This call was not seen by a hook, so no session holds the message for it.",
             )]);
         };
-        match self.runtime.take_held(&actor.root, &args.id) {
+        let Ok(id) = appa_eventlog::HeldPeerId::parse(&args.id) else {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "[appa] {} is not a held message id: copy the id from the notice exactly.",
+                args.id
+            ))]);
+        };
+        match self.runtime.take_held(&actor.root, &id) {
             Ok(Some(body)) => CallToolResult::success(vec![ContentBlock::text(body)]),
             Ok(None) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "[appa] No peer message {} is held for this session: it was read or it expired.",

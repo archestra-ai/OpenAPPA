@@ -558,6 +558,20 @@ impl PostgresStore {
     pub(crate) fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
         let receiver = receiver.as_str().to_owned();
         let now = millis(now);
+        // Asked on every acknowledged hook: a receiver with nothing new takes no lock.
+        let (probe_receiver, probe_now) = (receiver.clone(), now);
+        let pending: bool = self
+            .query(move |client| {
+                Ok(client.query_one(
+                    "SELECT EXISTS (SELECT 1 FROM openappa_held_peer_messages \
+                     WHERE receiver = $1 AND NOT notified AND expires_at > $2)",
+                    &[&probe_receiver, &probe_now],
+                )?)
+            })?
+            .get(0);
+        if !pending {
+            return Ok(Vec::new());
+        }
         self.serialized(held_lock(&receiver), move |client| {
             client
                 .query(

@@ -150,7 +150,7 @@ pub(crate) fn session_is_gated() -> bool {
 
 /// Where the protected launcher bound this session's peer messages, inherited by every hook
 /// process. It stays out of the session's tool environment.
-const PEER_ADDRESS_VAR: &str = "APPA_PEER_ADDRESS";
+pub(crate) const PEER_ADDRESS_VAR: &str = "APPA_PEER_ADDRESS";
 
 /// A session start names the address its launcher bound. A value that is no peer address
 /// leaves the session unaddressed, and the hook says so on stderr rather than refusing the

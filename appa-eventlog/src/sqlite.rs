@@ -371,6 +371,16 @@ impl Sqlite {
     }
 
     pub(crate) fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
+        // Asked on every acknowledged hook: a receiver with nothing new takes no write lock.
+        let pending: bool = self.connection().query_row(
+            "SELECT EXISTS (SELECT 1 FROM held_peer_messages
+             WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2)",
+            params![receiver.as_str(), millis(now)],
+            |row| row.get(0),
+        )?;
+        if !pending {
+            return Ok(Vec::new());
+        }
         immediate(&mut self.connection(), |transaction| {
             let notices = {
                 let mut statement = transaction.prepare(

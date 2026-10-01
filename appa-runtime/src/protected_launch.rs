@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 use uuid::Uuid;
 
-use crate::hook_client::session_is_gated;
+use crate::hook_client::{PEER_ADDRESS_VAR, session_is_gated};
 
 const GATE: &str = "APPA_GATE";
 const LAUNCH: &str = "APPA_LAUNCH";
-const PEER_ADDRESS: &str = "APPA_PEER_ADDRESS";
 const MESSAGING_FLAG: &str = "--messaging-socket-path";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -43,7 +42,7 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
         command
             .arg(MESSAGING_FLAG)
             .arg(&messaging.socket)
-            .env(PEER_ADDRESS, &messaging.address);
+            .env(PEER_ADDRESS_VAR, &messaging.address);
     }
     let child = command
         .args(arguments)

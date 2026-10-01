@@ -186,7 +186,10 @@ impl Runtime {
                 root != sender && matches(log) && pinned_alike(sent, log) && self.live(root, root).is_ok()
             })
             .collect();
-        Ok(<[(TrajectoryId, Log); 1]>::try_from(found).ok().map(|[peer]| peer))
+        Ok(match found.len() {
+            1 => found.into_iter().next(),
+            _ => None,
+        })
     }
 
     /// The send gate. `to` as a socket address must be a verified peer's; any other `to` is
@@ -312,13 +315,17 @@ impl Runtime {
         frame: &PeerFrame,
         text: &str,
     ) -> Result<Received, EventError> {
-        within_limit(text)?;
-        let log = self.inner.log(root)?;
-        let (body, attributed) = match (frame, frame.digest()) {
-            (PeerFrame::Parsed { body }, Some(digest)) => (body.as_str(), self.attributed(&log, &digest)?),
-            _ => (text, None),
+        let body = match frame {
+            PeerFrame::Parsed { body } => body.as_str(),
+            PeerFrame::Malformed => text,
         };
+        within_limit(body)?;
+        let log = self.inner.log(root)?;
         let digest = PeerDigest::of_body(body);
+        let attributed = match frame {
+            PeerFrame::Parsed { .. } => self.attributed(&log, &digest)?,
+            PeerFrame::Malformed => None,
+        };
         let current = self.current_label(&log, root)?;
         if let Some(label) = &attributed
             && current.combine(label) == current
@@ -371,13 +378,10 @@ impl Runtime {
     }
 
     /// Take a held message's body for the session that holds it; `None` when it is gone.
-    pub(crate) fn take_held(&self, root: &TrajectoryId, id: &str) -> Result<Option<String>, EventError> {
-        let Ok(id) = HeldPeerId::parse(id) else {
-            return Ok(None);
-        };
+    pub(crate) fn take_held(&self, root: &TrajectoryId, id: &HeldPeerId) -> Result<Option<String>, EventError> {
         self.inner
             .store
-            .take_peer_message(root, &id, SystemTime::now())
+            .take_peer_message(root, id, SystemTime::now())
             .map(|held| held.map(|held| held.body))
             .map_err(|error| EventError::Storage(error.to_string()))
     }
