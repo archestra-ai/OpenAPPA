@@ -1080,7 +1080,9 @@ impl Session {
     pub fn start_child(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<(Session, Option<String>), EventError> {
         let child = id.clone();
         self.bind_child(id, |context| match &spawn {
-            SpawnRef::Binding(binding) => crate::engine::parse_fork(binding).ok_or(EventError::SpawnNotTaken),
+            SpawnRef::Binding(binding) => {
+                crate::engine::parse_fork(context.log, binding).ok_or(EventError::SpawnNotTaken)
+            }
             SpawnRef::InFlight => context.in_flight_fork(&child),
             SpawnRef::FanOut(prompt) => context.fan_out_fork(&child, prompt),
         })
@@ -6053,6 +6055,58 @@ delta = {}
             dispatch_open(&runtime, &root()),
             "the spawn dispatch stays open through every refusal"
         );
+    }
+
+    #[tokio::test]
+    async fn a_binding_naming_the_prepared_fork_under_another_seal_opens_no_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let issued = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let fork = runtime
+            .log_facts(&root())
+            .into_iter()
+            .find_map(|fact| match fact {
+                appa_engine::fact::Fact::ForkPrepared { fork, .. } => Some(fork),
+                _ => None,
+            })
+            .expect("the release prepared a fork");
+
+        for seal in [&[0u8; 32][..], &rand::random::<[u8; 32]>()[..], &[]] {
+            let error = session
+                .on_child_start(
+                    child("c1"),
+                    SpawnRef::Binding(crate::engine::sealed_binding(&fork, seal)),
+                )
+                .err()
+                .expect("a binding the runtime did not issue opens no child");
+            assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        }
+        assert!(!opened(&runtime, &child("c1")));
+
+        session
+            .on_child_start(child("c1"), SpawnRef::Binding(issued))
+            .expect("the issued binding opens the child");
+        assert_eq!(fork_opened_count(&runtime), 1);
+    }
+
+    #[tokio::test]
+    async fn an_issued_binding_survives_a_runtime_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        drop(session);
+        drop(runtime);
+
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
+        let session = runtime.session(&root(), &root()).expect("the session reattaches");
+        session
+            .on_child_start(child("c1"), SpawnRef::Binding(binding))
+            .expect("the binding issued before the restart opens the child");
+        assert!(opened(&runtime, &child("c1")));
     }
 
     #[tokio::test]

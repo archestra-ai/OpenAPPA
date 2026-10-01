@@ -1339,12 +1339,18 @@ impl RuntimeEngine {
             AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views), presentation)?;
+        let then = self.deliver_proposals(
+            &batch_id(entropy),
+            decision.follow_up,
+            &self.return_bounds(&views),
+            presentation,
+        )?;
         Ok(EngineDecision { append, then })
     }
 
     fn deliver_proposals(
         &self,
+        batch: &ProposalBatchId,
         follow_up: FollowUp,
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
@@ -1359,7 +1365,7 @@ impl RuntimeEngine {
             } => {
                 if let Some(release) = releases.into_iter().next() {
                     return Ok(Next::ModelResponse {
-                        invocations: vec![released(&release)],
+                        invocations: vec![released(batch, &release)],
                         feedback: Vec::new(),
                     });
                 }
@@ -2945,18 +2951,55 @@ fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
     EngineOfferNonce::new(entropy.0)
 }
 
+/// Fresh entropy, recorded only in the family log. It keys the seal of every spawn binding the
+/// batch releases, so it never leaves the runtime.
 fn batch_id(entropy: &OfferNonce) -> ProposalBatchId {
     ProposalBatchId::new(hex(&entropy.0))
 }
 
-fn fork_binding(fork: &ForkId) -> SpawnBinding {
-    SpawnBinding(serde_json::to_string(fork).expect("a fork id serializes"))
+const BINDING_ENCODING: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+/// The binding a released spawn is handed out under: the fork it names and a seal keyed by the
+/// releasing batch's identity, both base64url. Only the harness the release was delivered to
+/// holds the seal, so a caller who can reproduce the spawn's arguments still cannot name its fork.
+fn fork_binding(batch: &ProposalBatchId, fork: &ForkId) -> SpawnBinding {
+    use hmac::Mac;
+    sealed_binding(fork, &spawn_seal(batch, fork).finalize().into_bytes())
 }
 
-/// Recover the fork one spawn binding names. `None` for a binding
-/// this runtime did not mint.
-pub(crate) fn parse_fork(binding: &SpawnBinding) -> Option<ForkId> {
-    serde_json::from_str(&binding.0).ok()
+pub(crate) fn sealed_binding(fork: &ForkId, seal: &[u8]) -> SpawnBinding {
+    use base64::Engine;
+    let fork = serde_json::to_vec(fork).expect("a fork id serializes");
+    SpawnBinding(format!(
+        "{}.{}",
+        BINDING_ENCODING.encode(fork),
+        BINDING_ENCODING.encode(seal)
+    ))
+}
+
+fn spawn_seal(batch: &ProposalBatchId, fork: &ForkId) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::{KeyInit, Mac};
+    let mut seal =
+        hmac::Hmac::<sha2::Sha256>::new_from_slice(batch.as_str().as_bytes()).expect("HMAC takes a key of any length");
+    seal.update(&serde_json::to_vec(fork).expect("a fork id serializes"));
+    seal
+}
+
+/// Recover the fork one spawn binding names, checking its seal in constant time against the
+/// batch that released the fork in this family's log. `None` for a binding this runtime did not
+/// mint for this family.
+pub(crate) fn parse_fork(log: &Log, binding: &SpawnBinding) -> Option<ForkId> {
+    use base64::Engine;
+    use hmac::Mac;
+    let (fork, seal) = binding.0.split_once('.')?;
+    let fork: ForkId = serde_json::from_slice(&BINDING_ENCODING.decode(fork).ok()?).ok()?;
+    let seal = BINDING_ENCODING.decode(seal).ok()?;
+    let batch = log.facts().iter().find_map(|fact| match fact {
+        Fact::ProposalBatchDecided { batch, released, .. } if released.contains(fork.dispatch()) => Some(batch),
+        _ => None,
+    })?;
+    spawn_seal(batch, &fork).verify_slice(&seal).ok()?;
+    Some(fork)
 }
 
 const RENDERED_OFFER_CHARS: usize = 16;
@@ -3023,11 +3066,11 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
         .collect()
 }
 
-fn released(release: &Released) -> ReleasedCall {
+fn released(batch: &ProposalBatchId, release: &Released) -> ReleasedCall {
     ReleasedCall {
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
-        fork: release.fork.as_ref().map(fork_binding),
+        fork: release.fork.as_ref().map(|fork| fork_binding(batch, fork)),
         dispatch: release.dispatch.clone(),
     }
 }

@@ -169,7 +169,7 @@ Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me i
 
 The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked up front.
 
-Each delegation is bound to the spawn the parent's gate released. The parent's plugin forwards that spawn's binding in the `x-appa-spawn-binding` A2A header. The subagent's plugin opens the child trajectory on that spawn only. A delegated request without a binding is refused before the subagent runs. The binding is derived from the delegation, not secret, so expose a gated agent's A2A endpoint only to trusted callers inside the cluster.
+Each delegation is bound to the spawn the parent's gate released. The parent's plugin forwards that spawn's binding in the `x-appa-spawn-binding` A2A header. The subagent's plugin opens the child trajectory on that spawn only. A delegated request without a binding is refused before the subagent runs. The binding is a per-delegation secret: the runtime seals it to that one release, so a caller who reproduces the delegation cannot forge it. The request carries it as a bearer token, so keep a gated agent's A2A traffic inside the cluster.
 
 #### 5. Dynamic input rules
 

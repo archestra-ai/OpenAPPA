@@ -3409,8 +3409,7 @@ name = \"Bash\"
     }
 
     pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
-        let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
-        super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
+        crate::engine::sealed_binding(&appa_engine::value::ForkId::of(&engine_dispatch(label)), &[0; 32])
     }
 }
 
