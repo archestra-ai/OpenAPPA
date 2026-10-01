@@ -218,7 +218,10 @@ async fn the_runtime_refuses_requests_carrying_a_browser_origin() {
         .await
         .expect("the blocking task joins");
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::builder().no_proxy().build().expect("the client builds");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("the client builds");
     let post = |path: &str, origin: Option<&str>| {
         let request = client
             .post(format!("{}{path}", runtime.url))
@@ -232,7 +235,9 @@ async fn the_runtime_refuses_requests_carrying_a_browser_origin() {
     };
 
     for path in ["/hook", "/validate", "/mcp"] {
-        let refused = post(path, Some("https://attacker.example")).await.expect("the runtime answers");
+        let refused = post(path, Some("https://attacker.example"))
+            .await
+            .expect("the runtime answers");
         assert_eq!(refused.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
     }
     let answered = post("/hook", None).await.expect("the runtime answers");
