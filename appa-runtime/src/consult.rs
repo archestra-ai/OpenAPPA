@@ -23,6 +23,7 @@ use appa_engine::plan::RequiredRuling;
 use appa_engine::registry::AudienceVocabulary;
 use appa_engine::registry::TrustChain;
 use appa_engine::value::ResolvedCall;
+use appa_runtime_api::Ruling;
 
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
@@ -365,16 +366,13 @@ pub struct AuthorityAnswer {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Ruling {
-    Approve,
-    Deny,
-}
-
 impl AuthorityAnswer {
     pub fn from_wire(answer: &serde_json::Value) -> Option<AuthorityAnswer> {
         serde_json::from_value(answer.clone()).ok()
+    }
+
+    pub fn to_wire(ruling: Ruling) -> serde_json::Value {
+        serde_json::json!({ "ruling": ruling })
     }
 }
 

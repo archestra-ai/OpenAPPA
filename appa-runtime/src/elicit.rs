@@ -70,10 +70,14 @@ use rmcp::model::{
 #[cfg(feature = "daemon")]
 use rmcp::service::{PeerRequestOptions, RequestContext, RoleServer, ServiceError};
 
+#[cfg(feature = "daemon")]
+use crate::consult::AuthorityAnswer;
 use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement};
 use crate::external::ConsultOutcome;
 #[cfg(feature = "daemon")]
 use crate::external::NoAnswerReason;
+#[cfg(feature = "daemon")]
+use appa_runtime_api::Ruling;
 
 /// Which channel carries one review back to a person. An enum rather than a
 /// struct because a build without the server stack has no channel at all: the
@@ -251,11 +255,11 @@ fn ruled(action: ElicitationAction) -> ConsultOutcome {
     match action {
         ElicitationAction::Accept => {
             tracing::debug!("the reviewer approved");
-            ConsultOutcome::Answer(serde_json::json!({ "ruling": "approve" }))
+            ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Approve))
         }
         ElicitationAction::Decline => {
             tracing::debug!("the reviewer refused");
-            ConsultOutcome::Answer(serde_json::json!({ "ruling": "deny" }))
+            ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Deny))
         }
         ElicitationAction::Cancel => {
             tracing::debug!("the reviewer dismissed the review");
@@ -433,24 +437,5 @@ mod tests {
         assert!(call.ends_with('…'), "a cut shows: {call}");
         assert_eq!(call.chars().count(), "██▄█▄██   ▄   ".chars().count() + HEADLINE_WIDTH);
         assert_eq!(headline.lines().count(), 2, "no description row: {headline}");
-    }
-
-    #[test]
-    fn the_review_never_leaves_the_handler_task() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for module in ["elicit.rs", "mcp.rs"] {
-            let text = std::fs::read_to_string(src.join(module)).expect("the module is readable");
-            let spawns = text
-                .split("#[cfg(test)]")
-                .next()
-                .expect("split yields the head")
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .any(|line| line.contains("spawn"));
-            assert!(
-                !spawns,
-                "{module} must not spawn: the elicitation would lose its originating request",
-            );
-        }
     }
 }

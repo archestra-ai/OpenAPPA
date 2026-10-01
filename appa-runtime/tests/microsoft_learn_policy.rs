@@ -1,14 +1,9 @@
 //! Microsoft Learn battery: public documentation reads, untrusted results, no write.
 mod common;
 
-use appa_runtime::{
-    api::{RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
-};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
-use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
+use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -27,38 +22,17 @@ fn other(tool: &str, args: serde_json::Value) -> ProposedCall {
     }
 }
 
-/// A loopback audience source answering every collection with one fixed roster: the
-/// suite's own `internal` read needs a source to narrow onto.
-async fn members_source() -> String {
-    let router = Router::new().route(
-        "/audience",
-        post(|_body: String| async move {
-            serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
-        }),
-    );
-    format!("{}/audience", serve(router).await)
-}
-
 /// The battery under a root that adds three tools of its own: the battery declares no
 /// write and narrows no audience, so its label is only observable against a tool that
 /// needs trusted data, one that needs a public audience, and one that restricts the
 /// trajectory to `internal`.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let target = dir.path().join("marketplace/batteries/microsoft-learn");
-    std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/microsoft-learn/appa.toml"),
-        target.join("appa.toml"),
-    )
-    .unwrap();
-    let path = dir.path().join("appa.toml");
     let source = members_source().await;
-    std::fs::write(
-        &path,
-        format!(
-            r#"include = ["marketplace/batteries/microsoft-learn/appa.toml"]
-
-[policy]
+    battery_runtime(
+        dir.path(),
+        "microsoft-learn",
+        &format!(
+            r#"[policy]
 version = 2
 
 [policy.audience]
@@ -89,21 +63,7 @@ selectors = [{{ template = "members", feeds = "internal" }}]
 "#
         ),
     )
-    .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None,
-                address: None,
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    .await
 }
 
 /// Accept one call's restriction for the rest of the session, then run it.

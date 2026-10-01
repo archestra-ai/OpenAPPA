@@ -152,18 +152,6 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
     }
 }
 
-/// The tool identification the runtime applies to every call of the host it serves. The one
-/// place this crate names the adapter crates. `--adapter` parses served names only
-/// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
-fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
-    match adapter {
-        AdapterName::Amp => appa_adapter_amp::adapter(),
-        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
-        AdapterName::Kagent => appa_adapter_kagent::adapter(),
-        AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
-    }
-}
-
 fn log_level(verbose: u8) -> &'static str {
     match verbose {
         0 => "info",
@@ -228,8 +216,7 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
 /// two sides must render the digest identically, so they share this one definition.
 pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(crate::engine::hex(&Sha256::digest(bytes)))
 }
 
 #[derive(Clone)]
@@ -519,7 +506,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
-    let adapter = served(args.adapter);
+    let adapter = crate::describe::served(args.adapter);
     let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
         catalog: crate::batteries::snapshot(&battery_dirs),
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),

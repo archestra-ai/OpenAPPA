@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appa_runtime::api::{OfferId, Runtime};
+use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
@@ -276,6 +277,49 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
         .await,
         HookDecision::Ack
     );
+}
+
+/// The runtime over the root config at `config`, its store in `dir`, with the suite's
+/// root session started.
+pub async fn session_runtime(dir: &Path, config: &Path) -> Arc<Runtime> {
+    let runtime = Arc::new(Runtime::open(Config::load(config).unwrap(), dir.join("runtime.db"), None).unwrap());
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    runtime
+}
+
+/// The shipped `battery` copied verbatim into `dir`, under a root config that includes it
+/// and then declares `root_policy`.
+pub async fn battery_runtime(dir: &Path, battery: &str, root_policy: &str) -> Arc<Runtime> {
+    let include = format!("marketplace/batteries/{battery}/appa.toml");
+    let target = dir.join(&include);
+    std::fs::create_dir_all(target.parent().expect("the battery file sits in a directory")).unwrap();
+    std::fs::copy(repo_root().join(&include), target).unwrap();
+    let path = dir.join("appa.toml");
+    std::fs::write(&path, format!("include = [\"{include}\"]\n\n{root_policy}")).unwrap();
+    session_runtime(dir, &path).await
+}
+
+/// A loopback audience source answering every collection with one fixed roster, for a
+/// battery whose `internal` reads need a source to narrow onto.
+pub async fn members_source() -> String {
+    let router = axum::Router::new().route(
+        "/audience",
+        axum::routing::post(|_body: String| async move {
+            serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
+        }),
+    );
+    format!("{}/audience", serve(router).await)
 }
 
 pub fn audit_len(runtime: &Runtime) -> usize {

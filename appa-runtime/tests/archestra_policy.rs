@@ -2,14 +2,10 @@
 //! whichever of a tool's first-match rules the call selects.
 mod common;
 
-use appa_runtime::{
-    api::{RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
-};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, offer_of, propose, ran, raw, repo_root, serve, session_runtime};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -77,20 +73,7 @@ max_body_bytes = 1048576
 "#,
     )
     .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None,
-                address: None,
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    session_runtime(dir.path(), &path).await
 }
 
 /// The session read a note only team `t1` (alice) may see.

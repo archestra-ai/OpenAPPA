@@ -51,7 +51,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
         supports_delegation: adapter.name != appa_runtime_api::AdapterName::Amp,
         ..EmbeddedPresentationOptions::default()
     };
-    let handled = handle_internal_with_options(runtime, event, presentation).await;
+    let handled = handle_internal(runtime, event, presentation).await;
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
@@ -232,7 +232,9 @@ const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or outpu
 /// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
 /// reaches — keeps it.
 pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
-    handle_internal(runtime, event).await.decision
+    handle_internal(runtime, event, EmbeddedPresentationOptions::default())
+        .await
+        .decision
 }
 
 /// Dispatches one hook for an embedded host, returning a typed `EmbeddedHookOutcome`.
@@ -246,7 +248,7 @@ pub async fn handle_embedded_with_options(
     event: HookEvent,
     presentation: EmbeddedPresentationOptions,
 ) -> EmbeddedHookOutcome {
-    let handled = handle_internal_with_options(runtime, event, presentation).await;
+    let handled = handle_internal(runtime, event, presentation).await;
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
@@ -267,11 +269,7 @@ pub(crate) struct Handled {
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
-pub(crate) async fn handle_internal(runtime: &Runtime, event: HookEvent) -> Handled {
-    handle_internal_with_options(runtime, event, EmbeddedPresentationOptions::default()).await
-}
-
-async fn handle_internal_with_options(
+pub(crate) async fn handle_internal(
     runtime: &Runtime,
     event: HookEvent,
     presentation_options: EmbeddedPresentationOptions,
@@ -1023,9 +1021,6 @@ mod tests {
     use crate::api::Runtime;
     use crate::config::Config;
 
-    /// The client side of the wire, as `appa hook` runs it: the
-    /// Claude Code hook JSON these tests are written in is translated onto the wire,
-    /// and the wire decision is rendered back into Claude Code's hook answer.
     /// The event the served runtime reads from one Claude Code hook body: parsed by the
     /// codec and identified on the wire, exactly as [`answer`] does it, so a test can put the
     /// same event in front of the dispatcher and read what it recorded.
@@ -1039,7 +1034,14 @@ mod tests {
         Some(accepted.event)
     }
 
-    async fn through_the_wire(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {
+    fn json(event: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(event).expect("the fixture serializes")
+    }
+
+    /// The client side of the wire, as `appa hook` runs it: the
+    /// Claude Code hook JSON these tests are written in is translated onto the wire,
+    /// and the wire decision is rendered back into Claude Code's hook answer.
+    async fn hook(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {
         let codec = appa_adapter_claude_code::codec();
         let event = match (codec.parse)(claude_hook_json) {
             Ok(Some(event)) => event,
@@ -1094,10 +1096,6 @@ mod tests {
 
     fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
         Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens")
-    }
-
-    async fn call_hook(runtime: &Runtime, body: &[u8]) -> (u16, serde_json::Value) {
-        through_the_wire(runtime, body).await
     }
 
     fn spawn_call() -> crate::api::ProposedCall {
@@ -1180,7 +1178,7 @@ mod tests {
             if spawn {
                 // The parent's spawn blocks on the return menu; the model declares and
                 // proposes the spawn again.
-                let (status, answer) = call_hook(&runtime, &body).await;
+                let (status, answer) = hook(&runtime, &body).await;
                 assert_eq!(status, 200, "hook {name} refused: {answer}");
                 assert_eq!(
                     answer["hookSpecificOutput"]["permissionDecision"], "deny",
@@ -1199,7 +1197,7 @@ mod tests {
                 }];
                 declare_return(&runtime, &root, &offers).await;
             }
-            let (status, answer) = call_hook(&runtime, &body).await;
+            let (status, answer) = hook(&runtime, &body).await;
 
             assert_eq!(status, 200, "hook {name} refused: {answer}");
             match name {
@@ -1252,20 +1250,20 @@ mod tests {
     async fn a_turn_end_answers_with_no_opinion_even_over_an_unknown_session() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        for hook in ["Stop", "StopFailure", "SubagentStop"] {
+        for name in ["Stop", "StopFailure", "SubagentStop"] {
             let mut body = serde_json::json!({
-                "hook_event_name": hook,
+                "hook_event_name": name,
                 "session_id": "never-opened",
                 "last_assistant_message": "the summary",
             });
-            if hook == "SubagentStop" {
+            if name == "SubagentStop" {
                 body["agent_id"] = serde_json::Value::String("a1".to_string());
             }
-            let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&body).expect("re-serializes")).await;
+            let (status, answer) = hook(&runtime, &json(&body)).await;
             assert_eq!(
                 (status, answer),
                 (200, serde_json::json!({})),
-                "the {hook} hook blocked"
+                "the {name} hook blocked"
             );
         }
     }
@@ -1284,28 +1282,17 @@ mod tests {
                 "tool_input": {"command": command},
             })
         };
-        let released = call_hook(&runtime, &serde_json::to_vec(&propose("ls")).expect("re-serializes")).await;
+        let released = hook(&runtime, &json(&propose("ls"))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
         // The harness refused it at its permission prompt: no outcome hook fires.
-        let wedged = call_hook(
-            &runtime,
-            &serde_json::to_vec(&propose("echo hi")).expect("re-serializes"),
-        )
-        .await;
+        let wedged = hook(&runtime, &json(&propose("echo hi"))).await;
         assert_eq!(wedged.1["hookSpecificOutput"]["permissionDecision"], "deny");
 
         let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
-        assert_eq!(
-            call_hook(&runtime, &serde_json::to_vec(&stop).expect("re-serializes")).await,
-            (200, serde_json::json!({})),
-        );
+        assert_eq!(hook(&runtime, &json(&stop)).await, (200, serde_json::json!({})),);
 
-        let freed = call_hook(
-            &runtime,
-            &serde_json::to_vec(&propose("echo hi")).expect("re-serializes"),
-        )
-        .await;
+        let freed = hook(&runtime, &json(&propose("echo hi"))).await;
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
@@ -1345,10 +1332,6 @@ mod tests {
         })
     }
 
-    async fn hook(runtime: &Runtime, body: &serde_json::Value) -> (u16, serde_json::Value) {
-        call_hook(runtime, &serde_json::to_vec(body).expect("re-serializes")).await
-    }
-
     fn closed_as_unknown(runtime: &Runtime) -> bool {
         runtime
             .audit(&appa_runtime_api::TrajectoryId("cc:s1".to_string()))
@@ -1372,7 +1355,7 @@ mod tests {
     async fn the_first_call_after_a_prompt_frees_a_call_an_interrupt_left_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        let released = hook(&runtime, &json(&bash_call("ping -c 30 127.0.0.1"))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
         let actor = Actor {
             root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
@@ -1382,10 +1365,10 @@ mod tests {
         runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
-        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
         assert!(!closed_as_unknown(&runtime), "the prompt itself records nothing");
 
-        let freed = hook(&runtime, &bash_call("ls")).await;
+        let freed = hook(&runtime, &json(&bash_call("ls"))).await;
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
         assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
@@ -1394,7 +1377,7 @@ mod tests {
             "the interrupted turn's vouch is released"
         );
 
-        let late = hook(&runtime, &bash_result("ping -c 30 127.0.0.1")).await;
+        let late = hook(&runtime, &json(&bash_result("ping -c 30 127.0.0.1"))).await;
         assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
     }
 
@@ -1406,21 +1389,21 @@ mod tests {
     async fn a_prompt_queued_behind_a_running_call_keeps_its_result() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        let released = hook(&runtime, &json(&bash_call("sleep 30"))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
-        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
         assert_eq!(
-            hook(&runtime, &bash_result("sleep 30")).await,
+            hook(&runtime, &json(&bash_result("sleep 30"))).await,
             (200, serde_json::json!({})),
             "the running call's result lands on its open dispatch",
         );
         assert!(!closed_as_unknown(&runtime), "nothing was closed as unreported");
 
-        let next = hook(&runtime, &bash_call("ls")).await;
+        let next = hook(&runtime, &json(&bash_call("ls"))).await;
         assert_eq!(next.1["hookSpecificOutput"]["permissionDecision"], "allow");
         assert!(!closed_as_unknown(&runtime));
-        let repeated = hook(&runtime, &bash_result("sleep 30")).await;
+        let repeated = hook(&runtime, &json(&bash_result("sleep 30"))).await;
         assert_eq!(
             repeated.1["decision"], "block",
             "a second report of the same result is refused"
@@ -1435,14 +1418,18 @@ mod tests {
     async fn a_prompt_acknowledges_over_a_store_that_cannot_append() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &identified_bash_call("ping -c 30 127.0.0.1", "toolu_1")).await;
+        let released = hook(
+            &runtime,
+            &json(&identified_bash_call("ping -c 30 127.0.0.1", "toolu_1")),
+        )
+        .await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
         runtime.store().fail_commit_after(0);
 
-        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
         runtime.store().fail_commit_after(u64::MAX - 1);
 
-        let next = hook(&runtime, &identified_bash_call("ls", "toolu_2")).await;
+        let next = hook(&runtime, &json(&identified_bash_call("ls", "toolu_2"))).await;
         assert_eq!(
             next.1["hookSpecificOutput"]["permissionDecision"], "allow",
             "the prompt left no mark, so the proposal is decided as any proposal is"
@@ -1450,7 +1437,7 @@ mod tests {
         assert!(!closed_as_unknown(&runtime), "nothing settled the interrupted call yet");
 
         let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
-        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&stop)).await, (200, serde_json::json!({})));
         assert!(
             closed_as_unknown(&runtime),
             "the turn's end closed what the prompt left open"
@@ -1463,14 +1450,14 @@ mod tests {
     async fn a_turn_end_settles_the_prompt_mark() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
         let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
-        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+        assert_eq!(hook(&runtime, &json(&stop)).await, (200, serde_json::json!({})));
 
-        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        let released = hook(&runtime, &json(&bash_call("sleep 30"))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
-            hook(&runtime, &bash_result("sleep 30")).await,
+            hook(&runtime, &json(&bash_result("sleep 30"))).await,
             (200, serde_json::json!({}))
         );
         assert!(!closed_as_unknown(&runtime));
@@ -1482,10 +1469,10 @@ mod tests {
     async fn a_deny_of_the_dispatchers_own_names_appa() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        let released = hook(&runtime, &json(&bash_call("sleep 30"))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
-        let denied = hook(&runtime, &bash_call("ls")).await;
+        let denied = hook(&runtime, &json(&bash_call("ls"))).await;
         assert_eq!(denied.1["hookSpecificOutput"]["permissionDecision"], "deny");
         let reason = denied.1["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
@@ -1506,7 +1493,7 @@ mod tests {
             "tool_input": ["not", "an", "object"],
             "tool_use_id": "toolu_1",
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&event)).await;
         assert_eq!(status, 200);
         let rendered = answer["hookSpecificOutput"]
             .as_object()
@@ -1538,7 +1525,7 @@ mod tests {
             "tool_input": {"command": "ls"},
         });
         let body = serde_json::to_vec(&event).expect("serializes");
-        assert_eq!(call_hook(&runtime, &body).await.0, 200);
+        assert_eq!(hook(&runtime, &body).await.0, 200);
 
         let second = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -1546,7 +1533,7 @@ mod tests {
             "tool_name": "Write",
             "tool_input": {"file_path": "/tmp/x", "content": "y"},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&second).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&second)).await;
         assert_eq!(status, 200);
         assert_eq!(
             answer["hookSpecificOutput"]["permissionDecision"], "deny",
@@ -1564,7 +1551,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": {"command": "cat secret.txt"},
         });
-        call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
+        hook(&runtime, &json(&pre)).await;
 
         let post = serde_json::json!({
             "hook_event_name": "PostToolUse",
@@ -1573,7 +1560,7 @@ mod tests {
             "tool_input": {"command": "cat secret.txt"},
             "tool_response": {"content": "the secret"},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&post).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&post)).await;
         assert_eq!(status, 200, "the outcome refused: {answer}");
         assert_eq!(answer, serde_json::json!({}), "a plain success answers with no opinion");
     }
@@ -1589,7 +1576,7 @@ mod tests {
             "tool_name": "AskUserQuestion",
             "tool_input": questions,
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&pre)).await;
         assert_eq!(status, 200, "the release refused: {answer}");
 
         let post = serde_json::json!({
@@ -1602,7 +1589,7 @@ mod tests {
             },
             "tool_response": {"answers": {"Declare the tool?": "No, skip it"}},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&post).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&post)).await;
         assert_eq!(status, 200, "the rewritten report refused: {answer}");
         assert_eq!(answer, serde_json::json!({}), "the rewritten report lands");
 
@@ -1612,7 +1599,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
         });
-        let (_, answer) = call_hook(&runtime, &serde_json::to_vec(&next).expect("serializes")).await;
+        let (_, answer) = hook(&runtime, &json(&next)).await;
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
@@ -1626,14 +1613,14 @@ mod tests {
             "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&event)).await;
         assert_eq!(status, 200);
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
 
         // The control call is passed through rather than released: the engine never sees it,
         // so its entry names no dispatch, where an ordinary call's names the one it opened.
         let parsed = through_the_codec(&event).expect("the control call parses");
-        let control = handle_internal(&runtime, parsed).await;
+        let control = handle_internal(&runtime, parsed, EmbeddedPresentationOptions::default()).await;
         assert!(
             matches!(control.decision, HookDecision::PassControl),
             "the control tool is passed through, not checked: {:?}",
@@ -1651,7 +1638,12 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
         });
-        let ordinary = handle_internal(&runtime, through_the_codec(&call).expect("the call parses")).await;
+        let ordinary = handle_internal(
+            &runtime,
+            through_the_codec(&call).expect("the call parses"),
+            EmbeddedPresentationOptions::default(),
+        )
+        .await;
         assert!(
             matches!(ordinary.decision, HookDecision::AllowCall { .. }),
             "an ordinary call in the same session is released: {:?}",
@@ -1688,7 +1680,7 @@ mod tests {
                 "tool_name": raw,
                 "tool_input": {"offer_id": "whatever"},
             });
-            let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+            let (status, answer) = hook(&runtime, &json(&event)).await;
             // Not the exemption's allow: the lookalike reaches the engine, and nothing
             // covers the name, so the refusal is typed and rides the error wire.
             assert_eq!(status, 409, "{raw} must reach the engine, not the exemption: {answer}");
@@ -1801,7 +1793,7 @@ mod tests {
             "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"content": "Authorized."},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&event)).await;
         assert_eq!(status, 200);
         assert_eq!(answer, serde_json::json!({}));
     }
@@ -1817,9 +1809,7 @@ mod tests {
             "agent_id": "a1",
         });
         assert_eq!(
-            call_hook(&runtime, &serde_json::to_vec(&start).expect("serializes"))
-                .await
-                .0,
+            hook(&runtime, &json(&start)).await.0,
             409,
             "an uncorrelated subagent start refuses",
         );
@@ -1831,7 +1821,7 @@ mod tests {
             "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {"offer_id": "0ffe000000000001"},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&control).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&control)).await;
         assert_eq!(status, 200);
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
 
@@ -1843,7 +1833,7 @@ mod tests {
             "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"ok": true},
         });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&outcome).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&outcome)).await;
         assert_eq!(status, 200);
         assert_eq!(
             answer,
@@ -1942,7 +1932,7 @@ mod tests {
 
         // The trajectory is live either way: the inventory is observed beside the session,
         // never instead of opening it.
-        let call = through_the_wire(
+        let call = hook(
             &runtime,
             br#"{"hook_event_name":"PreToolUse","session_id":"inv","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
         )
@@ -2276,7 +2266,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         runtime.store().fail_commit_after(0);
-        let (status, answer) = hook(&runtime, &bash_call("ls")).await;
+        let (status, answer) = hook(&runtime, &json(&bash_call("ls"))).await;
         assert_eq!(status, 409, "the harness must fail closed on a storage failure");
         assert!(
             answer.get("error").is_some(),
@@ -2288,7 +2278,7 @@ mod tests {
     async fn an_unreadable_hook_event_is_a_400() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let (status, answer) = call_hook(&runtime, b"not json").await;
+        let (status, answer) = hook(&runtime, b"not json").await;
         assert_eq!(status, 400);
         assert!(
             answer["error"]
@@ -2303,7 +2293,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let event = serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s1"});
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &json(&event)).await;
         assert_eq!(status, 409);
         assert_eq!(answer, serde_json::json!({"error": "PreToolUse without a tool call"}));
     }
@@ -2355,7 +2345,7 @@ mod tests {
     async fn a_released_yell_vouches_for_the_trajectory_that_made_it() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = yelling_runtime(&dir);
-        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        let released = hook(&runtime, &json(&yell_call("the hook blocked", true))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
         assert_eq!(
@@ -2377,7 +2367,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         // The default fixture declares no `yell` and has no wildcard: undeclared is refused.
         let runtime = open_runtime(&dir);
-        let refused = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        let refused = hook(&runtime, &json(&yell_call("the hook blocked", true))).await;
         assert_ne!(refused.1["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
             runtime.take_vouched(&ticket("the hook blocked", true)),
@@ -2391,7 +2381,7 @@ mod tests {
     async fn a_yell_vouch_answers_only_the_call_it_was_given_for() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = yelling_runtime(&dir);
-        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        let released = hook(&runtime, &json(&yell_call("the hook blocked", true))).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
         let nobody = Err(crate::api::Unvouched::Nobody);
@@ -2406,7 +2396,7 @@ mod tests {
     async fn an_unspent_yell_vouch_does_not_outlive_its_turn() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = yelling_runtime(&dir);
-        hook(&runtime, &yell_call("the hook blocked", true)).await;
+        hook(&runtime, &json(&yell_call("the hook blocked", true))).await;
 
         let actor = Actor {
             root: TrajectoryId("cc:s1".to_string()),

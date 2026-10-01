@@ -18,7 +18,7 @@ use crate::config::{
     AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
     Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
-use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
 use crate::model::claude_code::ClaudeCodeBackend;
@@ -28,6 +28,7 @@ use crate::process_tree::ProcessTree;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
+use appa_runtime_api::Ruling;
 
 const HITL: &str = "hitl";
 
@@ -199,7 +200,7 @@ impl Backend {
 
 fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
     match &consult.body {
-        ConsultBody::Authority { .. } => Ok(serde_json::json!({ "ruling": "approve" })),
+        ConsultBody::Authority { .. } => Ok(AuthorityAnswer::to_wire(Ruling::Approve)),
         ConsultBody::Sanitizer { artifact, .. } => Ok(serde_json::json!({ "body": artifact.body })),
         _ => Err(NoAnswerReason::Unregistered),
     }
@@ -476,7 +477,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
     ) -> ConsultOutcome {
         self.dispatch(consult, elicitation, ruling, None).await
     }
@@ -488,7 +489,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
     ) -> (ConsultOutcome, Option<Transcript>) {
         let mut transcript = self.backend(consult).and_then(Backend::recorded).map(Transcript::of);
         let outcome = self.dispatch(consult, elicitation, ruling, transcript.as_mut()).await;
@@ -505,7 +506,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
         seen: Option<&mut Transcript>,
     ) -> ConsultOutcome {
         let kind = consult.kind();
@@ -531,12 +532,7 @@ impl ExternalServices {
             Backend::Hitl => match (ruling, elicitation, &consult.body) {
                 (Some(ruling), _, ConsultBody::Authority { .. }) => {
                     tracing::debug!(name, ?ruling, "the harness's own reviewer answered this hitl consult");
-                    Ok(serde_json::json!({
-                        "ruling": match ruling {
-                            appa_runtime_api::Ruling::Approve => "approve",
-                            appa_runtime_api::Ruling::Deny => "deny",
-                        }
-                    }))
+                    Ok(AuthorityAnswer::to_wire(ruling))
                 }
                 (None, Some(elicitation), ConsultBody::Authority { declaration, artifact }) => {
                     return elicitation.ask(name, declaration, artifact).await;

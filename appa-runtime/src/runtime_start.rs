@@ -131,10 +131,7 @@ fn probe(endpoint: &Endpoint) -> Health {
     let body = String::from_utf8_lossy(&answer.body).trim().to_owned();
     match body.as_str() {
         "ok" => Health::Ok,
-        _ => match body
-            .strip_prefix("stale ")
-            .and_then(crate::init::endpoint::positive_pid)
-        {
+        _ => match crate::init::endpoint::stale_pid(&body) {
             Some(pid) => Health::Stale(pid),
             None => Health::Other(body),
         },

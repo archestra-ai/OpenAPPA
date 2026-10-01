@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use appa_package::generation::{ArtifactDigest, Artifacts, Generation, Platform};
 use serde::{Deserialize, Serialize};
 
-use super::{InstallError, Installation, acquisition, io, open_regular, require_directory_or_absent, sync_directory};
+use super::{
+    InstallError, Installation, acquisition, invalid, io, open_regular, require_directory_or_absent, sync_directory,
+};
 
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -86,16 +88,11 @@ impl ClaudeArtifacts {
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
         let stage = tempfile::tempdir_in(&directory).map_err(|error| io("stage native binary", &directory, error))?;
-        let binary_name = if matches!(platform, Platform::WindowsAmd64 | Platform::WindowsArm64) {
-            "appa.exe"
-        } else {
-            "appa"
-        };
-        if binary_name == "appa.exe" {
+        let binary_name = crate::init::paths::appa_filename();
+        if cfg!(windows) {
             extract_windows_binary(&binary_archive, &stage.path().join(binary_name))?;
         } else {
-            super::archive::extract_bundle_archive(&binary_archive, stage.path())
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            super::archive::extract_bundle_archive(&binary_archive, stage.path()).map_err(invalid)?;
         }
         let entries: Vec<_> = fs::read_dir(stage.path())
             .map_err(|error| io("inspect binary archive", stage.path(), error))?
@@ -191,9 +188,7 @@ fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallEr
             "runtime ZIP must contain exactly appa.exe".into(),
         ));
     }
-    let mut entry = archive
-        .by_index(0)
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let mut entry = archive.by_index(0).map_err(invalid)?;
     if entry.name() != "appa.exe"
         || !entry.is_file()
         || entry.size() > MAX_BINARY_BYTES

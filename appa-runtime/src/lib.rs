@@ -20,7 +20,6 @@ pub mod init;
 pub mod installation;
 #[cfg(feature = "daemon")]
 mod loopback_http;
-pub mod managed_files;
 #[cfg(feature = "daemon")]
 mod management;
 #[cfg(feature = "daemon")]

@@ -287,21 +287,6 @@ impl Session {
         deployment: Arc<Deployment>,
         trajectory: TrajectoryId,
         root: TrajectoryId,
-    ) -> Session {
-        Self::attach_with_presentation(
-            inner,
-            deployment,
-            trajectory,
-            root,
-            EmbeddedPresentationOptions::default(),
-        )
-    }
-
-    pub(super) fn attach_with_presentation(
-        inner: Arc<Inner>,
-        deployment: Arc<Deployment>,
-        trajectory: TrajectoryId,
-        root: TrajectoryId,
         presentation: EmbeddedPresentationOptions,
     ) -> Session {
         Session {
@@ -842,11 +827,7 @@ impl Session {
     ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
-                let open = context.open_dispatches();
-                let dispatch = match context.classify_report(call, call_id, &open) {
-                    Ok(dispatch) => dispatch,
-                    Err(case) => return Err(self.refuse_report(case, call, &open)),
-                };
+                let dispatch = context.classify_report(call, call_id)?;
                 Ok(EngineEvent::ToolOutcome {
                     dispatch,
                     outcome: o.clone(),
@@ -867,10 +848,7 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.policy(&opened)?;
         let decision = self.drive(&policy, Some(opened), true, Opening::default(), |context| {
-            let open = context.open_dispatches();
-            let dispatch = context
-                .classify_report(&call, None, &open)
-                .map_err(|case| self.refuse_report(case, &call, &open))?;
+            let dispatch = context.classify_report(&call, None)?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
                 ForkStatus::Bound(bound) if bound == child => {}
@@ -929,11 +907,7 @@ impl Session {
             let decision = self
                 .drive_with_evidence(
                     |context, evidence| {
-                        let open = context.open_dispatches();
-                        let dispatch = match context.classify_report(&call, call_id.as_deref(), &open) {
-                            Ok(dispatch) => dispatch,
-                            Err(case) => return Err(self.refuse_report(case, &call, &open)),
-                        };
+                        let dispatch = context.classify_report(&call, call_id.as_deref())?;
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let next = match (context.fork_status(&fork), &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
@@ -1162,6 +1136,7 @@ impl Session {
                     Arc::clone(&self.deployment),
                     id,
                     self.root.clone(),
+                    EmbeddedPresentationOptions::default(),
                 ),
                 contract,
             )),
@@ -1771,16 +1746,17 @@ impl Decided<'_> {
         &self,
         call: &ProposedCall,
         call_id: Option<&str>,
-        open: &[OpenDispatch],
-    ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
+    ) -> Result<appa_engine::value::DispatchId, EventError> {
+        let open = self.open_dispatches();
         classify_report_identified(
             call,
             call_id,
             || self.canonical_bytes(call),
-            open,
+            &open,
             self.log.call_bindings(),
             &self.session.trajectory,
         )
+        .map_err(|case| self.session.refuse_report(case, call, &open))
     }
 
     /// Is a call this trajectory has open one the harness gave no identity for? Its outcome can

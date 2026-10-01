@@ -130,7 +130,7 @@ impl PermitKey {
         hasher.update(tool.as_bytes());
         hasher.update([0]);
         hasher.update(appa_engine::params::canonical_bytes(arguments));
-        Self::Call(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+        Self::Call(crate::engine::hex(&hasher.finalize()))
     }
 
     /// How a record spells this key. The two variants can never mean each other, so the
@@ -1023,9 +1023,14 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
 }
 
 fn inventory_refused(error: appa_runtime_api::ParseRefusal) -> EventError {
-    let (appa_runtime_api::ParseRefusal::Malformed { detail } | appa_runtime_api::ParseRefusal::Unreadable { detail }) =
-        error;
-    EventError::InventoryRefused(detail)
+    EventError::InventoryRefused(refusal_detail(error))
+}
+
+/// What a refused parse says, whichever way it was refused.
+pub(crate) fn refusal_detail(refusal: appa_runtime_api::ParseRefusal) -> String {
+    let (appa_runtime_api::ParseRefusal::Unreadable { detail } | appa_runtime_api::ParseRefusal::Malformed { detail }) =
+        refusal;
+    detail
 }
 
 impl Runtime {
@@ -2006,7 +2011,13 @@ impl Runtime {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
             })?;
-        Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
+        Ok(Session::attach(
+            Arc::clone(&self.inner),
+            deployment,
+            root.clone(),
+            root,
+            EmbeddedPresentationOptions::default(),
+        ))
     }
 
     /// Reopens a persisted trajectory. There is no stored view: the next
@@ -2033,7 +2044,7 @@ impl Runtime {
         if !known {
             return Err(EventError::UnknownTrajectory);
         }
-        Ok(Session::attach_with_presentation(
+        Ok(Session::attach(
             Arc::clone(&self.inner),
             self.inner.deployment(),
             trajectory.clone(),
@@ -2287,7 +2298,15 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, RemedyArguments::default(), None, None).await
+        self.remedy(
+            acting,
+            offer,
+            RemedyArguments::default(),
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Execute one surfaced remedy offer with the arguments a plan declaring a subagent's
@@ -2298,7 +2317,15 @@ impl Runtime {
         offer: OfferId,
         arguments: RemedyArguments,
     ) -> RemedyOutcome {
-        self.remedy(acting, offer, arguments, None, None).await
+        self.remedy(
+            acting,
+            offer,
+            arguments,
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Executes an embedded remedy plan for an authenticated actor.
@@ -2315,7 +2342,7 @@ impl Runtime {
         args: ExecuteRemedyPlanArgs,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        self.execute_remedy_outcome(args, None, Some(actor), presentation, true)
+        self.execute_remedy_outcome(args, RemedyCaller::Embedded { actor, presentation })
             .await
     }
 
@@ -2330,24 +2357,30 @@ impl Runtime {
         self.render_remedy(
             self.execute_remedy_outcome(
                 args,
-                elicitation,
-                expected_actor,
-                EmbeddedPresentationOptions::default(),
-                false,
+                RemedyCaller::Daemon {
+                    elicitation,
+                    expected_actor,
+                },
             )
             .await,
         )
     }
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
-    async fn execute_remedy_outcome(
-        &self,
-        args: ExecuteRemedyPlanArgs,
-        elicitation: Option<&Elicitation>,
-        expected_actor: Option<&Actor>,
-        presentation: EmbeddedPresentationOptions,
-        strict_freshness: bool,
-    ) -> RemedyOutcome {
+    async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
+        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon {
+                elicitation,
+                expected_actor,
+            } => (
+                elicitation,
+                expected_actor,
+                EmbeddedPresentationOptions::default(),
+                false,
+            ),
+        };
         let quoted = match OfferId::parse(&args.offer_id) {
             Ok(quoted) => quoted,
             Err(reason) => {
@@ -2387,7 +2420,7 @@ impl Runtime {
                 reason: RemedyRefusal::UnknownOffer,
             }
         } else {
-            self.remedy_with_presentation(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
+            self.remedy(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
                 .await
         };
         // Recorded from the typed outcome, before rendering turns it into the text the
@@ -2429,6 +2462,21 @@ impl Runtime {
             },
         }
     }
+}
+
+/// Who executes a remedy. An embedded host names the actor it authenticated and how it
+/// renders; it is held to the offer being current. The daemon relays the peer's elicitation
+/// and the actor the connection vouches for, if any.
+enum RemedyCaller<'a> {
+    Embedded {
+        actor: &'a Actor,
+        presentation: EmbeddedPresentationOptions,
+    },
+    #[cfg(feature = "daemon")]
+    Daemon {
+        elicitation: Option<&'a Elicitation>,
+        expected_actor: Option<&'a Actor>,
+    },
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
@@ -2490,25 +2538,6 @@ impl Runtime {
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
     pub(crate) async fn remedy(
-        &self,
-        acting: &Actor,
-        quoted: OfferId,
-        arguments: RemedyArguments,
-        elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
-    ) -> RemedyOutcome {
-        self.remedy_with_presentation(
-            acting,
-            quoted,
-            arguments,
-            elicitation,
-            ruling,
-            EmbeddedPresentationOptions::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn remedy_with_presentation(
         &self,
         acting: &Actor,
         quoted: OfferId,

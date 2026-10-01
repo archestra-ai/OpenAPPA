@@ -175,7 +175,7 @@ fn install_claude(
     //    A runtime whose binary an install replaced on disk still owns the
     //    endpoint, and its health answer names the stale pid.
     clear_stale_endpoint(&endpoint)?;
-    if endpoint_health(&endpoint)?.is_some() {
+    if endpoint_health(&endpoint).is_some() {
         // An install claims the endpoint. The runtime an earlier deployment of
         // this user's left there is stopped, whichever build or config it
         // serves; a process that is not this user's appa runtime is refused
@@ -339,7 +339,7 @@ fn switch_over(
     progress("starting the runtime");
     // A runtime answering `ok` here was running before this install and stays
     // the user's; anything the start brings up after silence is ours to stop.
-    let running_before = endpoint_health(endpoint)?.is_some_and(|answer| answer == "ok");
+    let running_before = endpoint_health(endpoint).is_some_and(|answer| answer == "ok");
     start_runtime(target)?;
     let pid = verify_runtime_deployment(target.binary, target.config, endpoint)?;
     if !running_before {

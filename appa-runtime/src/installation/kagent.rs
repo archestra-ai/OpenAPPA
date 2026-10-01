@@ -9,10 +9,6 @@ const MAX_PREPARED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PREPARED_ENTRIES: usize = 20000;
 const CONFIG_MAP_BUDGET: usize = 700 * 1024;
 
-fn invalid(error: impl ToString) -> InstallError {
-    InstallError::Invalid(error.to_string())
-}
-
 fn json(value: &impl Serialize) -> Result<Vec<u8>, InstallError> {
     serde_json::to_vec_pretty(value).map_err(invalid)
 }
@@ -179,7 +175,7 @@ pub(super) fn prepare(
     } else {
         portable
     };
-    let catalog = Marketplace::read(&packages.join("marketplace.toml")).map_err(invalid)?;
+    let catalog = read_catalog(&packages)?;
     for entry in &catalog.packages {
         if entry.kind == PackageKind::Battery && selection.batteries.contains(entry.name.as_str()) {
             let destination = assets.join(format!(

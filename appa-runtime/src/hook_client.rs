@@ -15,10 +15,9 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appa_runtime_api::{
-    AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, PeerAddress, WireDecision, WireEvent,
-};
+use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, PeerAddress, WireDecision, WireEvent};
 
+use crate::api::refusal_detail;
 use crate::loopback_http::{Answer, Deadline, Endpoint, request};
 use crate::runtime_start::{self, Deployment};
 use crate::runtime_url::RuntimeTarget;
@@ -105,9 +104,7 @@ pub(crate) const TURN_END_BUDGET: Duration = Duration::from_secs(30);
 fn decision_of(body: &[u8]) -> Result<HookDecision, String> {
     let wire: WireDecision = serde_json::from_slice(body)
         .map_err(|error| format!("the runtime's answer is not a wire decision: {error}"))?;
-    wire.into_decision().map_err(|refusal| match refusal {
-        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
-    })
+    wire.into_decision().map_err(refusal_detail)
 }
 
 /// Put one answer where the harness reads it. Whether a failed write matters is the
@@ -132,19 +129,14 @@ fn deliver(answer: &serde_json::Value) -> ExitCode {
 /// The host event read as the typed event it reports: `None` for a hook the adapter does
 /// not gate, whose answer is the empty opinion without a round trip.
 fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent>, String> {
-    match (codec.parse)(host_event) {
-        Ok(event) => Ok(event),
-        Err(ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail }) => Err(detail),
-    }
+    (codec.parse)(host_event).map_err(refusal_detail)
 }
 
 /// One parsed event on the canonical wire. Crossing is a step of its own because the event
 /// outlives its failure: an event that cannot cross still reports what the host did, so a
 /// result the tool already produced is withheld rather than left in front of the model.
 fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
-    let wire = WireEvent::from_event(HOST, event).map_err(|refusal| match refusal {
-        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
-    })?;
+    let wire = WireEvent::from_event(HOST, event).map_err(refusal_detail)?;
     serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
 }
 

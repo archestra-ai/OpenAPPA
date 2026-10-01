@@ -2,14 +2,9 @@
 //! can still be written from it.
 mod common;
 
-use appa_runtime::{
-    api::{AuditEvent, RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
-};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
-use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
+use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -39,27 +34,12 @@ async fn accept_and_run(runtime: &Arc<Runtime>, call: ProposedCall) {
 }
 
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let router = Router::new().route(
-        "/audience",
-        post(|_body: String| async move {
-            serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
-        }),
-    );
-    let source = format!("{}/audience", serve(router).await);
-    let target = dir.path().join("marketplace/batteries/grain");
-    std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/grain/appa.toml"),
-        target.join("appa.toml"),
-    )
-    .unwrap();
-    let path = dir.path().join("appa.toml");
-    std::fs::write(
-        &path,
-        format!(
-            r#"include = ["marketplace/batteries/grain/appa.toml"]
-
-[policy]
+    let source = members_source().await;
+    battery_runtime(
+        dir.path(),
+        "grain",
+        &format!(
+            r#"[policy]
 version = 2
 
 [policy.audience]
@@ -75,21 +55,7 @@ selectors = [{{ template = "members", feeds = "internal" }}]
 "#
         ),
     )
-    .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None,
-                address: None,
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    .await
 }
 
 /// A transcript carries what outside participants said and lowers the trust. A clip is

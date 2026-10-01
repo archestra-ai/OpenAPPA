@@ -196,6 +196,19 @@ enum PluginCommand {
     Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
+fn claude_exit<T>(outcome: Result<T, appa_runtime::init::InitError>) -> ExitCode {
+    match outcome {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("appa: {error}");
+            match error {
+                appa_runtime::init::InitError::Recovery { .. } => ExitCode::from(3),
+                _ => ExitCode::FAILURE,
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("runtime")) {
         let args = iter::once(OsString::from("appa runtime")).chain(env::args_os().skip(2));
@@ -228,17 +241,7 @@ fn main() -> ExitCode {
             command: PackageCommand::Status(args),
         } => appa_runtime::ui::status(args),
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
-        Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                if matches!(error, appa_runtime::init::InitError::Recovery { .. }) {
-                    ExitCode::from(3)
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
-        },
+        Command::ActivateClaude { config } => claude_exit(appa_runtime::init::activate_claude_code(&config)),
         Command::Plugin {
             command: PluginCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),
@@ -248,13 +251,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::RemoveClaude { config: _ } => claude_exit(appa_runtime::init::claude_code_remove()),
         Command::Battery {
             command: PackageCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Battery, args),
@@ -321,7 +318,7 @@ fn main() -> ExitCode {
             } else {
                 batteries_dir
             };
-            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str(), &session_tools);
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter, &session_tools);
             print!("{}", description.text);
             match appa_runtime::ui::describe_readiness(&config, &batteries_dir) {
                 Ok(readiness) => print!("{readiness}"),

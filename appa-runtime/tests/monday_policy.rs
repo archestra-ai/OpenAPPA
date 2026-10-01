@@ -1,14 +1,10 @@
 //! monday battery: internal reads and reviewed writes, like Linear and PostHog.
 mod common;
 
-use appa_runtime::{
-    api::{AuditEvent, RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
-};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -94,20 +90,7 @@ selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members",
         ),
     )
     .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None,
-                address: None,
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    session_runtime(dir.path(), &path).await
 }
 
 async fn accept_read(runtime: &Arc<Runtime>, read: ProposedCall) {

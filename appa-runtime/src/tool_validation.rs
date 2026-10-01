@@ -204,10 +204,7 @@ pub fn resolve(
     let observed = match inventory.identities(adapter) {
         Ok(observed) => observed,
         Err(error) => {
-            report.errors.push(match error {
-                appa_runtime_api::ParseRefusal::Unreadable { detail }
-                | appa_runtime_api::ParseRefusal::Malformed { detail } => detail,
-            });
+            report.errors.push(crate::api::refusal_detail(error));
             return ResolvedPolicy { policy, report };
         }
     };
