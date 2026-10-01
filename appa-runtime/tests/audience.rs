@@ -174,7 +174,9 @@ async fn narrowed_under(dir: &tempfile::TempDir, policy: &str, audience_url: &st
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -319,7 +321,9 @@ max_body_bytes = 4096
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,

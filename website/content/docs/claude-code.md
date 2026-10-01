@@ -105,6 +105,31 @@ The OpenAPPA block appears only when Claude Code saved a transcript that can be 
 
 Projects configured with `disableAllHooks: true` disable all hooks, preventing `clappa` from enforcing policy in that session.
 
+## Peer messages between protected sessions
+
+Protected sessions can coordinate with `SendMessage`. A peer message carries the sender's label, and it never narrows the receiver without the receiver's own read.
+
+`clappa` gives each session a messaging address, such as `uds:/tmp/appa-501/3f2a9c1e7b04.sock`. The runtime records that address when the session starts.
+
+| `to` | Rule |
+| --- | --- |
+| The address of exactly one other live protected session under the same policy and principal | Allowed at any label |
+| Any other socket address | Denied |
+| A session name | Requires audience `public`: a name can belong to any session, including an unprotected one |
+
+When a send by name is denied and one protected peer has that name, the denial gives the peer's address. The model can then send again to that address. `recipient`, when set, MUST equal `to`.
+
+Each allowed send records the message's digest and the sender's label. On arrival, the receiver takes the `combine` of every recorded label for that digest:
+
+- **The label does not narrow the receiver.** The message enters as a prompt.
+- **The label narrows the receiver, or no send stands behind the message.** The runtime holds the message and blocks the prompt. The model gets a notice at its next prompt or successful tool result. The notice gives an id and the label that a read brings. A message no send stands behind reads as `suspicious` and `public`.
+
+The model reads a held message with `read_peer_message(id)` on the `appa` MCP server. The result carries the held label, so the read narrows the session as any tool result does. A read inside a subagent keeps the parent's label. A held message is read once and expires after 24 hours. The runtime refuses a peer message larger than 64 KiB, both at send and on arrival.
+
+The body of a held message stays out of the receiver's event log. The sender's `SendMessage` arguments are logged like every tool call.
+
+The runtime's hook endpoint is unauthenticated on loopback. A local process that forges hook events can register an address it controls. The address check stops an unprotected listener the model starts; it does not stop a process that attacks the runtime's hook endpoint.
+
 ## Uninstall
 
 Remove OpenAPPA's hooks and MCP registration while keeping your local policy and database:

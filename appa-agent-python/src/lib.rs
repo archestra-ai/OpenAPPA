@@ -225,11 +225,15 @@ impl SessionInner {
         inner.event(HookEvent::SessionStart {
             root: trajectory,
             principal: None,
+            address: None,
+            title: None,
         })?;
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),
             text: user_prompt.to_string(),
             settles: None,
+            peer: None,
+            title: None,
         })?;
         Ok(inner)
     }

@@ -67,3 +67,15 @@ CREATE TABLE openappa_processed_results (
     )
 );
 CREATE INDEX openappa_results_pending_idx ON openappa_processed_results (root) WHERE status = 'pending';
+
+CREATE TABLE openappa_held_peer_messages (
+    seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id text NOT NULL UNIQUE,
+    receiver text NOT NULL,
+    digest text NOT NULL,
+    label jsonb NOT NULL,
+    body text NOT NULL,
+    expires_at bigint NOT NULL,
+    notified boolean NOT NULL DEFAULT false
+);
+CREATE INDEX openappa_held_peer_messages_receiver_idx ON openappa_held_peer_messages (receiver, seq);

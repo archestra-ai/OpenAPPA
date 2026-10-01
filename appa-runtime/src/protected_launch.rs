@@ -13,6 +13,8 @@ use crate::hook_client::session_is_gated;
 
 const GATE: &str = "APPA_GATE";
 const LAUNCH: &str = "APPA_LAUNCH";
+const PEER_ADDRESS: &str = "APPA_PEER_ADDRESS";
+const MESSAGING_FLAG: &str = "--messaging-socket-path";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Event {
@@ -31,12 +33,19 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
         std::process::exit(1);
     }
     cleanup(&session);
+    let messaging = messaging(&token, arguments);
 
     #[cfg(unix)]
     let signals = Signals::install();
-    let child = Command::new("claude")
-        .arg("--settings")
-        .arg(settings)
+    let mut command = Command::new("claude");
+    command.arg("--settings").arg(settings);
+    if let Some(messaging) = &messaging {
+        command
+            .arg(MESSAGING_FLAG)
+            .arg(&messaging.socket)
+            .env(PEER_ADDRESS, &messaging.address);
+    }
+    let child = command
         .args(arguments)
         .env(GATE, "1")
         .env(LAUNCH, token.to_string())
@@ -45,6 +54,7 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
         Ok(child) => child,
         Err(error) => {
             cleanup(&session);
+            close(messaging.as_ref());
             eprintln!("clappa: cannot start Claude Code: {error}");
             std::process::exit(1);
         }
@@ -59,6 +69,7 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
         Ok(status) => status,
         Err(error) => {
             cleanup(&session);
+            close(messaging.as_ref());
             eprintln!("clappa: cannot wait for Claude Code: {error}");
             std::process::exit(1);
         }
@@ -66,7 +77,99 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     let mut stdout = std::io::stdout();
     print_resume(&session, stdout.is_terminal(), &mut stdout);
     cleanup(&session);
+    close(messaging.as_ref());
     terminate_as(status)
+}
+
+/// The messaging endpoint `clappa` gives one Claude process, and the address
+/// its peers send to.
+struct Messaging {
+    socket: PathBuf,
+    address: OsString,
+}
+
+/// `None` when the user chose their own endpoint, or when no private one can
+/// be made; the session then starts without a peer address.
+fn messaging(token: &Uuid, arguments: &[OsString]) -> Option<Messaging> {
+    if chooses_own_endpoint(arguments) {
+        return None;
+    }
+    match endpoint(token) {
+        Ok(messaging) => Some(messaging),
+        Err(reason) => {
+            eprintln!("clappa: peer messages are off for this session: {reason}");
+            None
+        }
+    }
+}
+
+fn chooses_own_endpoint(arguments: &[OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        argument.to_str().is_some_and(|argument| {
+            argument == MESSAGING_FLAG
+                || argument
+                    .strip_prefix(MESSAGING_FLAG)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
+    })
+}
+
+fn endpoint_name(token: &Uuid) -> String {
+    token.simple().to_string()[..12].to_owned()
+}
+
+#[cfg(unix)]
+fn endpoint(token: &Uuid) -> Result<Messaging, String> {
+    const MAX_SOCKET_PATH: usize = 104;
+    let socket = private_socket_dir()?.join(format!("{}.sock", endpoint_name(token)));
+    if socket.as_os_str().len() >= MAX_SOCKET_PATH {
+        return Err(format!("{} is longer than a Unix socket path allows", socket.display()));
+    }
+    let mut address = OsString::from("uds:");
+    address.push(&socket);
+    Ok(Messaging { socket, address })
+}
+
+#[cfg(unix)]
+fn private_socket_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let uid = unsafe { libc::getuid() };
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        Some(runtime) => PathBuf::from(runtime).join("appa"),
+        None => PathBuf::from(format!("/tmp/appa-{uid}")),
+    };
+    match fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("cannot create {}: {error}", dir.display())),
+    }
+    let metadata = fs::symlink_metadata(&dir).map_err(|error| format!("cannot inspect {}: {error}", dir.display()))?;
+    match (metadata.is_dir(), metadata.uid() == uid, metadata.mode() & 0o777) {
+        (true, true, 0o700) => Ok(dir),
+        _ => Err(format!(
+            "{} is not a directory private to this user (mode 0700)",
+            dir.display()
+        )),
+    }
+}
+
+// Unverified: the address form Claude Code uses for a named pipe is assumed.
+#[cfg(windows)]
+fn endpoint(token: &Uuid) -> Result<Messaging, String> {
+    let name = format!("appa-{}", endpoint_name(token));
+    Ok(Messaging {
+        socket: PathBuf::from(format!(r"\\.\pipe\{name}")),
+        address: OsString::from(format!("pipe:{name}")),
+    })
+}
+
+fn close(messaging: Option<&Messaging>) {
+    #[cfg(unix)]
+    if let Some(messaging) = messaging {
+        cleanup(&messaging.socket);
+    }
+    #[cfg(not(unix))]
+    let _ = messaging;
 }
 
 /// Record one lifecycle edge without contacting or starting the runtime.
@@ -223,6 +326,17 @@ mod tests {
         fs::remove_file(&transcript).unwrap();
         record_event(&launch, Event::End, event.to_string().as_bytes()).unwrap();
         assert!(!launch.exists(), "an empty session removes an earlier resumable id");
+    }
+
+    #[test]
+    fn either_spelling_of_the_users_messaging_flag_is_their_own_endpoint() {
+        let arguments = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(chooses_own_endpoint(&arguments(&["--messaging-socket-path", "/s"])));
+        assert!(chooses_own_endpoint(&arguments(&["--messaging-socket-path=/s"])));
+        assert!(!chooses_own_endpoint(&arguments(&[
+            "--messaging-socket-pathx",
+            "--resume"
+        ])));
     }
 
     #[test]

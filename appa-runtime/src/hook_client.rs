@@ -10,11 +10,12 @@
 //! the wire carries the host's raw tool spelling and the runtime identifies the
 //! rest itself, so nothing this client says about a call is trusted.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, WireDecision, WireEvent};
+use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, PeerAddress, WireDecision, WireEvent};
 
 use crate::api::refusal_detail;
 use crate::loopback_http::{Answer, Deadline, Endpoint, request};
@@ -147,6 +148,40 @@ pub(crate) fn session_is_gated() -> bool {
     std::env::var_os("APPA_GATE").is_some_and(|value| value == "1")
 }
 
+/// Where the protected launcher bound this session's peer messages, inherited by every hook
+/// process. It stays out of the session's tool environment.
+const PEER_ADDRESS_VAR: &str = "APPA_PEER_ADDRESS";
+
+/// A session start names the address its launcher bound. A value that is no peer address
+/// leaves the session unaddressed, and the hook says so on stderr rather than refusing the
+/// start.
+fn with_peer_address(event: HookEvent, bound: Option<OsString>) -> HookEvent {
+    match event {
+        HookEvent::SessionStart {
+            root,
+            principal,
+            address: None,
+            title,
+        } => HookEvent::SessionStart {
+            root,
+            principal,
+            address: bound.and_then(peer_address),
+            title,
+        },
+        other => other,
+    }
+}
+
+fn peer_address(bound: OsString) -> Option<PeerAddress> {
+    let parsed = match bound.to_str() {
+        Some(text) => PeerAddress::parse(text).map_err(|error| error.to_string()),
+        None => Err("the value is not UTF-8".to_string()),
+    };
+    parsed
+        .inspect_err(|error| eprintln!("OpenAPPA hook ignored {PEER_ADDRESS_VAR}: {error}"))
+        .ok()
+}
+
 /// Post the hook event on stdin to `target`. With `ensure` the deployed runtime
 /// is brought up first: the harness runs an event's hooks in parallel, so the
 /// SessionStart entry that starts the runtime is the one that posts to it, and a
@@ -186,7 +221,7 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
             }
             return ExitCode::SUCCESS;
         }
-        Ok(Some(event)) => event,
+        Ok(Some(event)) => with_peer_address(event, std::env::var_os(PEER_ADDRESS_VAR)),
         // Bytes this codec cannot read at all are still a hook: where they report a result
         // the harness has already produced, the codec renders the withholding for it, so
         // the output the tool produced does not stay in front of the model.

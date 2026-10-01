@@ -1065,7 +1065,7 @@ impl RuntimeEngine {
     }
 
     /// The label by name: each dimension as chain names and reader ids.
-    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
+    pub(crate) fn render_label(&self, label: &Label) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
         let trust = if label.trust == Trust::new(u8::MAX) {
             chain

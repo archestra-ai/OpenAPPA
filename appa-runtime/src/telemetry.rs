@@ -73,6 +73,7 @@ fn error_class(error: &EventError) -> &'static str {
         EventError::AnnotationRefused { .. } => "annotation_refused",
         EventError::UndeclaredTool { .. } => "undeclared_tool",
         EventError::UndeclaredSpawn { .. } => "undeclared_spawn",
+        EventError::PeerMessageTooLarge { .. } => "peer_message",
         EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => "principal",
         EventError::CallOutstanding
         | EventError::SpawnOutstanding

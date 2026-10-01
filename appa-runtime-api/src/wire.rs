@@ -45,8 +45,8 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedInputSanitizer, OfferedRemedy, OfferedReturn,
-    OutcomeBody, ParseRefusal, PromptKey, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnKind,
-    SpawnRef, ToolOutcome, TrajectoryId,
+    OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, Review, ReviewChannel, Ruling,
+    SessionTitle, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -150,10 +150,13 @@ enum Field {
     Cwd,
     PromptId,
     Settles,
+    Peer,
+    Title,
+    Address,
 }
 
 impl Field {
-    const ALL: [Field; 14] = [
+    const ALL: [Field; 17] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -168,6 +171,9 @@ impl Field {
         Field::Cwd,
         Field::PromptId,
         Field::Settles,
+        Field::Peer,
+        Field::Title,
+        Field::Address,
     ];
 
     fn spelling(self) -> &'static str {
@@ -186,6 +192,9 @@ impl Field {
             Field::Cwd => "cwd",
             Field::PromptId => "prompt_id",
             Field::Settles => "settles",
+            Field::Peer => "peer",
+            Field::Title => "title",
+            Field::Address => "address",
         }
     }
 }
@@ -203,8 +212,15 @@ fn fields_read(name: EventName) -> &'static [Field] {
         // no reader and is admitted. What a probe may not carry is a
         // dispatch — no call, no result, no ruling.
         EventName::Ping => &[Field::RootId, Field::ChildId],
-        EventName::SessionStart => &[Field::RootId],
-        EventName::Prompt => &[Field::RootId, Field::ChildId, Field::Text, Field::Settles],
+        EventName::SessionStart => &[Field::RootId, Field::Address, Field::Title],
+        EventName::Prompt => &[
+            Field::RootId,
+            Field::ChildId,
+            Field::Text,
+            Field::Settles,
+            Field::Peer,
+            Field::Title,
+        ],
         EventName::TurnEnd => &[Field::RootId, Field::ChildId],
         EventName::ToolCall => &[
             Field::RootId,
@@ -440,6 +456,14 @@ pub struct WireEvent {
     /// The host call a prompt reports finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settles: Option<String>,
+    /// The peer frame a prompt arrived in, `Malformed` included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<SessionTitle>,
+    /// Where a starting session receives peer messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<PeerAddress>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -477,6 +501,9 @@ impl WireEvent {
             cwd: None,
             prompt_id: None,
             settles: None,
+            peer: None,
+            title: None,
+            address: None,
         }
     }
 
@@ -498,6 +525,9 @@ impl WireEvent {
             Field::Cwd => self.cwd.is_some(),
             Field::PromptId => self.prompt_id.is_some(),
             Field::Settles => self.settles.is_some(),
+            Field::Peer => self.peer.is_some(),
+            Field::Title => self.title.is_some(),
+            Field::Address => self.address.is_some(),
         }
     }
 
@@ -525,23 +555,38 @@ impl WireEvent {
             HookEvent::SessionStart { principal: Some(_), .. } => {
                 return Err(malformed("a session principal is named in process, never on the wire"));
             }
-            HookEvent::SessionStart { root, principal: None } => {
+            HookEvent::SessionStart {
+                root,
+                principal: None,
+                address,
+                title,
+            } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
                 })?;
                 Self {
                     root_id: Some(root_id),
+                    address: address.clone(),
+                    title: title.clone(),
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
-            HookEvent::Prompt { actor, text, settles } => {
+            HookEvent::Prompt {
+                actor,
+                text,
+                settles,
+                peer,
+                title,
+            } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
                     root_id: Some(root_id),
                     child_id,
                     text: Some(text.clone()),
                     settles: settles.clone(),
+                    peer: peer.clone(),
+                    title: title.clone(),
                     ..Self::bare(adapter, EventName::Prompt)
                 }
             }
@@ -735,6 +780,9 @@ impl WireEvent {
             cwd,
             prompt_id,
             settles,
+            peer,
+            title,
+            address,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -793,12 +841,16 @@ impl WireEvent {
             EventName::SessionStart => accepted(HookEvent::SessionStart {
                 root: root()?,
                 principal: None,
+                address,
+                title,
             }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt {
                     actor: actor()?,
                     text,
                     settles: settles.filter(|settles| !settles.is_empty()),
+                    peer,
+                    title,
                 }),
                 None => Err(malformed("prompt without its text")),
             },
@@ -1545,11 +1597,15 @@ mod tests {
         let foreign = HookEvent::SessionStart {
             root: TrajectoryId("kagent:r1".to_string()),
             principal: None,
+            address: None,
+            title: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
         let principal = HookEvent::SessionStart {
             root: TrajectoryId("cc:s1".to_string()),
             principal: Some("alice@corp.example".to_string()),
+            address: None,
+            title: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
@@ -1614,6 +1670,8 @@ mod tests {
             },
             text: "<task-notification>".to_string(),
             settles: Some("toolu-1".to_string()),
+            peer: None,
+            title: None,
         };
         match through(&notice) {
             HookEvent::Prompt { settles, .. } => assert_eq!(settles.as_deref(), Some("toolu-1")),
@@ -1637,6 +1695,91 @@ mod tests {
         assert!(WireEvent::read(both).expect("reads").into_event(&CLAUDE_CODE).is_err());
         let bare = br#"{"protocol":1,"adapter":"claude-code","event":"child_return","root_id":"s1","child_id":"a1"}"#;
         assert!(WireEvent::read(bare).expect("reads").into_event(&CLAUDE_CODE).is_err());
+    }
+
+    /// A prompt's peer frame and title, and a session start's address, cross the wire and back
+    /// unchanged; a `Malformed` frame stays malformed rather than vanishing.
+    #[test]
+    fn peer_fields_round_trip_through_the_wire() {
+        let through = |event: &HookEvent| {
+            let wire = WireEvent::from_event(AdapterName::ClaudeCode, event).expect("translates");
+            let bytes = serde_json::to_vec(&wire).expect("serializes");
+            WireEvent::read(&bytes)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE)
+                .expect("parses")
+                .expect("event")
+                .event
+        };
+        let address = PeerAddress::parse("uds:/tmp/appa-peer-probe/a.sock").expect("an address");
+        let title = SessionTitle::parse("peer-b").expect("a title");
+        for peer in [
+            Some(PeerFrame::Parsed {
+                body: "PROBE-UDS-7731 first line".to_string(),
+            }),
+            Some(PeerFrame::Malformed),
+            None,
+        ] {
+            for title in [Some(title.clone()), None] {
+                let prompt = HookEvent::Prompt {
+                    actor: Actor {
+                        root: TrajectoryId("cc:s1".to_string()),
+                        child: None,
+                    },
+                    text: "hello".to_string(),
+                    settles: None,
+                    peer: peer.clone(),
+                    title,
+                };
+                assert_eq!(through(&prompt), prompt);
+            }
+        }
+        for (address, title) in [(Some(address), Some(title)), (None, None)] {
+            let start = HookEvent::SessionStart {
+                root: TrajectoryId("cc:s1".to_string()),
+                principal: None,
+                address,
+                title,
+            };
+            assert_eq!(through(&start), start);
+        }
+    }
+
+    /// A peer value the types would refuse is refused on the envelope, and each peer field is
+    /// refused on every event that does not read it.
+    #[test]
+    fn invalid_or_misplaced_peer_fields_are_refused() {
+        let posted = |event: &str, field: &str| {
+            let row = format!(r#"{{"protocol":1,"adapter":"claude-code","event":"{event}","root_id":"s1",{field}}}"#);
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE))
+        };
+        let refused = [
+            ("session_start", r#""address":"tcp://127.0.0.1:9""#.to_string()),
+            ("session_start", r#""address":"uds:""#.to_string()),
+            ("session_start", "\"address\":\"uds:/tmp/a\\u0007.sock\"".to_string()),
+            ("prompt", r#""text":"x","title":"   ""#.to_string()),
+            ("prompt", "\"text\":\"x\",\"title\":\"a\\nb\"".to_string()),
+            (
+                "prompt",
+                r#""text":"x","peer":{"frame":"parsed","from":"uds:/a","body":"b"}"#.to_string(),
+            ),
+            (
+                "prompt",
+                r#""text":"x","peer":{"frame":"malformed","body":"b"}"#.to_string(),
+            ),
+            ("prompt", r#""text":"x","address":"uds:/a""#.to_string()),
+            ("session_start", r#""title":"  ""#.to_string()),
+            ("session_start", r#""peer":{"frame":"malformed"}"#.to_string()),
+            ("turn_end", r#""peer":{"frame":"malformed"}"#.to_string()),
+        ];
+        for (event, field) in refused {
+            let read = posted(event, &field);
+            assert!(
+                matches!(read, Err(ParseRefusal::Malformed { .. })),
+                "{event} with {field} must be refused, got {read:?}"
+            );
+        }
+        assert!(posted("prompt", r#""text":"x","title":" peer-b ""#).is_ok());
     }
 
     /// A tool call's working directory rides the wire with it; no other event reads one.

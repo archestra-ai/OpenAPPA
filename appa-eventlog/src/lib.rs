@@ -13,7 +13,7 @@
 //! dispatched by `match`: SQLite for standalone use and optional PostgreSQL for
 //! embedded hosts that install the schema through their own migrations.
 //!
-//! Five tables:
+//! Six tables:
 //!
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
@@ -24,7 +24,9 @@
 //!   disagree with the log because a record and its key row commit or roll back together;
 //! - operations and processed results — typed receipts for idempotent claims. They are not
 //!   engine facts. SQLite and Memory keep them beside the log; PostgreSQL hosts install the
-//!   equivalent `openappa_*` tables through their own migrations.
+//!   equivalent `openappa_*` tables through their own migrations;
+//! - held peer messages — a message body one root holds for another until the receiver takes
+//!   it. The body lives only there, never in the log.
 //!
 //! ### Storage Backend Scope & Retention
 //!
@@ -53,16 +55,18 @@
 //! re-validation on read is the gate.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub use appa_engine::fact::Fact;
+use appa_engine::label::Label;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::DispatchId;
 pub use appa_engine::value::TrajectoryId;
-use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
+use appa_runtime_api::{AdapterName, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory};
 
 mod encoding;
 pub mod files;
+mod held;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod receipts;
@@ -71,6 +75,7 @@ mod sqlite;
 use encoding::encode;
 use sqlite::Sqlite;
 
+pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
 pub use receipts::{
     OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
     ReceiptBinding, ReceiptError, SessionScope,
@@ -185,23 +190,55 @@ pub enum HostObservation {
     PromptSettled { actor: HostActor },
     /// This actor's turn ended: its prompt mark and every vouch it still held are over.
     TurnEnded { actor: HostActor },
+    /// This root receives peer messages at `address`.
+    Addressed { address: PeerAddress },
+    /// This root's host shows it under `title`.
+    Titled { title: SessionTitle },
+    /// This root sent the peer message whose body digests to `digest`, carrying `label`, from
+    /// the dispatch the send ran under.
+    PeerSent {
+        digest: PeerDigest,
+        label: Label,
+        dispatch: DispatchId,
+    },
+    /// This root admitted the peer message whose body digests to `digest`.
+    PeerAdmitted { digest: PeerDigest },
 }
 
 impl HostObservation {
     /// The key this observation names, where it names one: a standing taken, held, or spent.
     /// The store writes it beside the record so [`LogStore::roots_mentioning`] can find the
     /// families that recorded it.
-    pub fn key(&self) -> Option<&str> {
+    pub fn key(&self) -> Option<String> {
         match self {
-            Self::Vouched { key, .. } | Self::Claimed { key, .. } | Self::Released { key, .. } => Some(key),
+            Self::Vouched { key, .. } | Self::Claimed { key, .. } | Self::Released { key, .. } => Some(key.clone()),
+            Self::Addressed { address } => Some(peer_address_key(address)),
+            Self::Titled { title } => Some(peer_title_key(title)),
+            Self::PeerSent { digest, .. } => Some(peer_sent_key(digest)),
             Self::Inventory { .. }
             | Self::CallBound { .. }
             | Self::CallSettled { .. }
             | Self::PromptSeen { .. }
             | Self::PromptSettled { .. }
-            | Self::TurnEnded { .. } => None,
+            | Self::TurnEnded { .. }
+            | Self::PeerAdmitted { .. } => None,
         }
     }
+}
+
+/// The key a [`HostObservation::Addressed`] record names, for [`LogStore::roots_mentioning`].
+pub fn peer_address_key(address: &PeerAddress) -> String {
+    format!("peer-address:{address}")
+}
+
+/// The key a [`HostObservation::Titled`] record names.
+pub fn peer_title_key(title: &SessionTitle) -> String {
+    format!("peer-title:{title}")
+}
+
+/// The key a [`HostObservation::PeerSent`] record names.
+pub fn peer_sent_key(digest: &PeerDigest) -> String {
+    format!("peer-sent:{digest}")
 }
 
 /// Whose observation this is: the family's root, and the child where the harness named one.
@@ -539,7 +576,7 @@ impl LogStore {
             &based_on.root,
             based_on.basis,
             encode(facts, Some(observation)),
-            observation.key(),
+            observation.key().as_deref(),
         )
     }
 
@@ -634,6 +671,67 @@ impl LogStore {
             Store::Sqlite(sqlite) => sqlite.has_pending_receipts(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.has_pending_receipts(root).map_err(Into::into),
+        }
+    }
+
+    /// Hold a peer message for `receiver`, not yet notified, until `now + ttl`. The same
+    /// transaction drops the receiver's expired messages, then its oldest beyond `quota`.
+    #[allow(clippy::too_many_arguments, reason = "each argument is one column of the held row")]
+    pub fn hold_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        digest: PeerDigest,
+        label: &Label,
+        body: &str,
+        now: SystemTime,
+        ttl: Duration,
+        quota: usize,
+    ) -> Result<HeldNotice, HeldError> {
+        let held = held::NewHeld::new(label, now, ttl)?;
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.hold_peer_message(receiver, digest, body, &held, now, quota),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.hold_peer_message(receiver, digest, body, &held, now, quota),
+        }?;
+        Ok(held.notice(digest, label))
+    }
+
+    /// The receiver's unexpired messages it was not yet told of, oldest first. Each is told
+    /// once: the same transaction marks them notified.
+    pub fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.peer_notices(receiver, now),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.peer_notices(receiver, now),
+        }
+    }
+
+    /// One unexpired held message of the receiver, without its body and without taking it.
+    pub fn peek_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldNotice>, HeldError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.peek_peer_message(receiver, id, now),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.peek_peer_message(receiver, id, now),
+        }
+    }
+
+    /// Take one held message of the receiver with its body, deleting it. An expired message is
+    /// deleted and reads as `None`.
+    pub fn take_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldPeerMessage>, HeldError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.take_peer_message(receiver, id, now),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.take_peer_message(receiver, id, now),
         }
     }
 }
@@ -1160,6 +1258,103 @@ mod tests {
             store.roots_mentioning("offer:on").unwrap(),
             Vec::new(),
             "a key matches whole, so one key is never a prefix of another"
+        );
+    }
+
+    fn peer_observations(root: &TrajectoryId) -> [HostObservation; 4] {
+        let digest = PeerDigest::of_body("hello");
+        [
+            HostObservation::Addressed {
+                address: PeerAddress::parse("uds:/tmp/appa/peer.sock").expect("the address parses"),
+            },
+            HostObservation::Titled {
+                title: SessionTitle::parse("peer-a").expect("the title parses"),
+            },
+            HostObservation::PeerSent {
+                digest,
+                label: Label::new(
+                    appa_engine::label::Trust::new(1),
+                    appa_engine::label::Audience::public(),
+                ),
+                dispatch: DispatchId::new(
+                    root.clone(),
+                    serde_json::from_value(serde_json::json!("00".repeat(32))).expect("a call digest parses"),
+                    0,
+                ),
+            },
+            HostObservation::PeerAdmitted { digest },
+        ]
+    }
+
+    #[test]
+    fn peer_observations_name_their_keys_and_the_roots_that_recorded_them() {
+        let store = opened();
+        let [addressed, titled, sent, admitted] = peer_observations(&root());
+        let address = PeerAddress::parse("uds:/tmp/appa/peer.sock").expect("the address parses");
+        let title = SessionTitle::parse("peer-a").expect("the title parses");
+        let digest = PeerDigest::of_body("hello");
+        let keys = [
+            peer_address_key(&address),
+            peer_title_key(&title),
+            peer_sent_key(&digest),
+        ];
+        assert_eq!(
+            [&addressed, &titled, &sent].map(HostObservation::key),
+            keys.clone().map(Some)
+        );
+        assert_eq!(admitted.key(), None);
+        assert_eq!(
+            keys,
+            [
+                "peer-address:uds:/tmp/appa/peer.sock".to_owned(),
+                "peer-title:peer-a".to_owned(),
+                format!("peer-sent:{digest}"),
+            ]
+        );
+
+        for observation in [&addressed, &titled, &sent, &admitted] {
+            store
+                .append_host(&store.log(&root()).unwrap(), &[], observation)
+                .unwrap();
+        }
+        for key in &keys {
+            assert_eq!(store.roots_mentioning(key).unwrap(), vec![root()], "{key}");
+        }
+        assert_eq!(
+            store
+                .roots_mentioning(&peer_sent_key(&PeerDigest::of_body("other")))
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            observations(&store.log(&root()).unwrap()),
+            vec![addressed, titled, sent, admitted],
+            "the records read back as written"
+        );
+    }
+
+    #[test]
+    fn peer_observations_round_trip_under_their_wire_spelling() {
+        let digest = PeerDigest::of_body("hello");
+        for observation in peer_observations(&root()) {
+            let wire = serde_json::to_value(&observation).expect("an observation serializes");
+            assert_eq!(
+                serde_json::from_value::<HostObservation>(wire).expect("an observation deserializes"),
+                observation
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(HostObservation::PeerAdmitted { digest }).unwrap(),
+            serde_json::json!({"kind": "peer_admitted", "digest": digest.to_string()})
+        );
+        assert!(
+            serde_json::from_value::<HostObservation>(serde_json::json!({
+                "kind": "peer_admitted",
+                "digest": digest.to_string(),
+                "body": "hello",
+            }))
+            .is_err(),
+            "an admitted record never carries the body"
         );
     }
 
@@ -1778,6 +1973,60 @@ mod tests {
             Ok(())
         })
         .expect("the isolated test receipts clean up");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_held_message_is_notified_once_and_taken_once() {
+        let store = postgres_store(1);
+        let unique = tempfile::tempdir().expect("a unique receiver name exists");
+        let suffix = unique.path().display().to_string();
+        held::tests::a_held_message_is_notified_once_and_taken_once(&store, &suffix);
+        let receiver = format!("held-receiver:{suffix}");
+        let remaining: i64 = store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                Ok(client
+                    .query_one(
+                        "SELECT COUNT(*) FROM openappa_held_peer_messages WHERE receiver=$1",
+                        &[&receiver],
+                    )?
+                    .get(0))
+            })
+            .expect("the held rows count");
+        assert_eq!(remaining, 0, "every held row was taken");
+    }
+
+    /// The peer keys are written beside the record on this backend too.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_peer_keys_find_the_root_that_recorded_them() {
+        let store = postgres_store(1);
+        let root = postgres_root(&store, "peer");
+        let observations = peer_observations(&root);
+        for observation in &observations {
+            store.append_host(&store.log(&root).unwrap(), &[], observation).unwrap();
+        }
+        for key in observations.iter().filter_map(HostObservation::key) {
+            assert!(store.roots_mentioning(&key).unwrap().contains(&root), "{key}");
+        }
+        let cleaned = root.as_str().to_owned();
+        store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_host_keys WHERE root=$1", &[&cleaned])?;
+                Ok(())
+            })
+            .unwrap();
+        forget_postgres_roots(&store, vec![root]);
     }
 
     #[cfg(all(feature = "postgres", feature = "fault-injection"))]

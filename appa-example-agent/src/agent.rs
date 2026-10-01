@@ -201,6 +201,8 @@ impl Agent {
             .expect_ack(HookEvent::SessionStart {
                 root: root.clone(),
                 principal: None,
+                address: None,
+                title: None,
             })
             .await
         {
@@ -213,6 +215,8 @@ impl Agent {
             },
             text: task.clone(),
             settles: None,
+            peer: None,
+            title: None,
         };
         if let Err(stop) = run.expect_ack(prompt).await {
             return Outcome::Stopped(stop);

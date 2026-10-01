@@ -4,9 +4,11 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::SystemTime;
 
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
+use appa_runtime_api::PeerDigest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 
@@ -15,6 +17,7 @@ use crate::HostObservation;
 #[cfg(feature = "fault-injection")]
 use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
+use crate::held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage, NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
     ProcessedResultRequest, ReceiptError, SessionScope, StoredJson, StoredOperation, StoredOperationInput,
@@ -23,7 +26,7 @@ use crate::receipts::{
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
@@ -61,7 +64,18 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          approved_output TEXT,
                          decision TEXT,
                          PRIMARY KEY (organization_id, session_id, tool_call_id)
-                     );";
+                     );
+                     CREATE TABLE held_peer_messages (
+                         seq INTEGER PRIMARY KEY,
+                         id TEXT NOT NULL UNIQUE,
+                         receiver TEXT NOT NULL,
+                         digest TEXT NOT NULL,
+                         label TEXT NOT NULL,
+                         body TEXT NOT NULL,
+                         expires_at INTEGER NOT NULL,
+                         notified INTEGER NOT NULL
+                     );
+                     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);";
 
 pub(crate) struct Sqlite(Mutex<Connection>);
 
@@ -317,6 +331,111 @@ impl Sqlite {
             .optional()?;
         Ok(found.is_some())
     }
+
+    pub(crate) fn hold_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        digest: PeerDigest,
+        body: &str,
+        held: &NewHeld,
+        now: SystemTime,
+        quota: usize,
+    ) -> Result<(), HeldError> {
+        let label_json = held.label.to_string();
+        immediate(&mut self.connection(), |transaction| {
+            transaction.execute(
+                "INSERT INTO held_peer_messages (id, receiver, digest, label, body, expires_at, notified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    held.id.as_str(),
+                    receiver.as_str(),
+                    digest.to_string(),
+                    label_json,
+                    body,
+                    held.expires_at
+                ],
+            )?;
+            // Every receiver's expired rows go, so a session that ended unread leaves none.
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE expires_at <= ?1",
+                params![millis(now)],
+            )?;
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE receiver = ?1 AND seq NOT IN (
+                     SELECT seq FROM held_peer_messages WHERE receiver = ?1 ORDER BY seq DESC LIMIT ?2
+                 )",
+                params![receiver.as_str(), quota_limit(quota)],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
+        immediate(&mut self.connection(), |transaction| {
+            let notices = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, digest, label, expires_at FROM held_peer_messages
+                     WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2 ORDER BY seq ASC",
+                )?;
+                statement
+                    .query_map(params![receiver.as_str(), millis(now)], held_row)?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            transaction.execute(
+                "UPDATE held_peer_messages SET notified = 1
+                 WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2",
+                params![receiver.as_str(), millis(now)],
+            )?;
+            notices.into_iter().map(decode_held).collect()
+        })
+    }
+
+    pub(crate) fn peek_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldNotice>, HeldError> {
+        self.connection()
+            .query_row(
+                "SELECT id, digest, label, expires_at FROM held_peer_messages
+                 WHERE receiver = ?1 AND id = ?2 AND expires_at > ?3",
+                params![receiver.as_str(), id.as_str(), millis(now)],
+                held_row,
+            )
+            .optional()?
+            .map(decode_held)
+            .transpose()
+    }
+
+    pub(crate) fn take_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldPeerMessage>, HeldError> {
+        immediate(&mut self.connection(), |transaction| {
+            let found = transaction
+                .query_row(
+                    "SELECT id, digest, label, expires_at, body FROM held_peer_messages
+                     WHERE receiver = ?1 AND id = ?2",
+                    params![receiver.as_str(), id.as_str()],
+                    |row| Ok((held_row(row)?, row.get::<_, String>(4)?)),
+                )
+                .optional()?;
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE receiver = ?1 AND id = ?2",
+                params![receiver.as_str(), id.as_str()],
+            )?;
+            match found {
+                Some((stored, body)) if stored.3 > millis(now) => Ok(Some(HeldPeerMessage {
+                    notice: decode_held(stored)?,
+                    body,
+                })),
+                Some(_) | None => Ok(None),
+            }
+        })
+    }
 }
 
 /// A held connection that one append runs on.
@@ -354,7 +473,7 @@ impl Appender<'_> {
             for (root, observation) in records {
                 let at = position(transaction, root)?;
                 let key = observation.and_then(HostObservation::key);
-                insert_batch(transaction, root, at, &encode(&[], *observation), key)?;
+                insert_batch(transaction, root, at, &encode(&[], *observation), key.as_deref())?;
             }
             Ok(())
         })
@@ -444,11 +563,11 @@ fn is_taken(error: &rusqlite::Error) -> bool {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results', 'held_peer_messages')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 5)
+    Ok(found == 6)
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -520,6 +639,29 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
         .optional()?)
 }
 
+/// A held row's notice columns: id, digest, label JSON, expiry.
+type HeldRow = (String, String, String, i64);
+
+fn held_row(row: &rusqlite::Row<'_>) -> Result<HeldRow, rusqlite::Error> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn decode_held((id, digest, label, expires_at): HeldRow) -> Result<HeldNotice, HeldError> {
+    StoredNotice {
+        id,
+        digest,
+        label: serde_json::from_str(&label).map_err(|error| HeldError::Corrupt(error.to_string()))?,
+        expires_at,
+    }
+    .decode()
+}
+
+impl From<rusqlite::Error> for HeldError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.to_string())
+    }
+}
+
 fn json(raw: &str) -> StoredJson {
     serde_json::from_str(raw).map_err(|error| ReceiptError::storage(error.to_string()))
 }
@@ -535,11 +677,14 @@ mod tests {
     fn a_fresh_sqlite_store_has_the_frozen_schema() {
         let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected: Vec<(String, String, Option<String>)> = [
+            ("held_peer_messages", Some("CREATE TABLE held_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, receiver TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL, expires_at INTEGER NOT NULL, notified INTEGER NOT NULL )")),
+            ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
+            ("sqlite_autoindex_held_peer_messages_1", None),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
             ("sqlite_autoindex_operations_1", None),
@@ -548,7 +693,10 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, sql)| {
-            let kind = if sql.is_some() { "table" } else { "index" };
+            let kind = match sql {
+                Some(sql) if sql.starts_with("CREATE TABLE") => "table",
+                Some(_) | None => "index",
+            };
             (kind.to_owned(), name.to_owned(), sql.map(str::to_owned))
         })
         .collect();
@@ -566,7 +714,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("the version reads");
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             let mut statement = connection
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
                 .expect("the schema query prepares");
@@ -598,6 +746,30 @@ mod tests {
         match LogStore::open(Backend::Sqlite { path }).err() {
             Some(OpenError::ForeignSchema { found, expected, .. }) => {
                 assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
+            }
+            other => panic!("expected a schema refusal, got {other:?}"),
+        }
+    }
+
+    /// A file the previous build wrote — without the held peer messages table, stamped 5 — is
+    /// refused rather than read as this build's schema.
+    #[test]
+    fn a_database_from_the_previous_schema_version_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
+        let previous = Connection::open(&path).expect("the file reopens");
+        previous
+            .execute_batch("DROP TABLE held_peer_messages")
+            .expect("the newer table drops");
+        previous
+            .pragma_update(None, "user_version", 5)
+            .expect("the version moves back");
+        drop(previous);
+
+        match LogStore::open(Backend::Sqlite { path }).err() {
+            Some(OpenError::ForeignSchema { found, expected, .. }) => {
+                assert_eq!((found, expected), (5, 6));
             }
             other => panic!("expected a schema refusal, got {other:?}"),
         }

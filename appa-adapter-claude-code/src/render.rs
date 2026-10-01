@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use appa_runtime_api::{HookDecision, HookEvent};
+use appa_runtime_api::{HookDecision, HookEvent, ToolOutcome};
 
 use crate::redact::{Replacement, replacement, restated};
 
@@ -85,9 +85,23 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             Some(replacement) => replaced(replacement, None),
             None => block(&echo(value)),
         },
-        // Context reaches an actor at its start only; every other event
-        // has no slot for it and is acknowledged.
+        // Context reaches an actor at its start, with a prompt, and beside a tool's
+        // result; a failed call's hook is acknowledged and the context waits for the next.
         HookDecision::Context { text } => match event {
+            HookEvent::Prompt { .. } => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": text,
+                }
+            }),
+            HookEvent::ToolResult { outcome, .. } if !matches!(outcome, ToolOutcome::Failure { .. }) => {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": text,
+                    }
+                })
+            }
             HookEvent::SessionStart { .. } => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
@@ -465,7 +479,9 @@ mod tests {
             render(
                 &HookEvent::SessionStart {
                     root: root(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 },
                 &HookDecision::Context {
                     text: "available file tools".into()
@@ -567,8 +583,8 @@ mod tests {
     /// Which channel every answer takes, over every event this codec produces crossed with
     /// every decision the runtime can answer it with. The four decisions that stand in for a
     /// result — block, replace, deliver, return — each render a replacement where the event
-    /// carries a body to restate and fall back to a bare block where it does not, and only a
-    /// start has a slot for context. The table is the whole map: a change that moves one
+    /// carries a body to restate and fall back to a bare block where it does not, and a start, a
+    /// prompt and a tool's result have a slot for context. The table is the whole map: a change that moves one
     /// answer onto another channel moves a cell here.
     #[test]
     fn every_event_and_decision_renders_on_one_channel() {
@@ -630,6 +646,8 @@ mod tests {
                 HookEvent::SessionStart {
                     root: root(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
@@ -644,9 +662,11 @@ mod tests {
                     },
                     text: "do the thing".to_string(),
                     settles: None,
+                    peer: None,
+                    title: None,
                 },
                 [
-                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
                 ],
             ),
             (
@@ -668,7 +688,7 @@ mod tests {
                     "replacement",
                     "replacement",
                     "replacement",
-                    "empty",
+                    "context",
                     "error+replacement",
                 ],
             ),
@@ -688,7 +708,7 @@ mod tests {
                     outcome: ToolOutcome::Indeterminate,
                 },
                 [
-                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
                 ],
             ),
             (

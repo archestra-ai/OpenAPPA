@@ -56,12 +56,20 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::SessionStart { root, .. } => {
             let _: TrajectoryId = root;
         }
-        HookEvent::Prompt { actor, text, settles } => {
+        HookEvent::Prompt {
+            actor,
+            text,
+            settles,
+            peer,
+            title,
+        } => {
             let Actor { root, child } = actor;
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;
             let _: String = text;
             let _: Option<String> = settles;
+            let _: Option<appa_runtime_api::PeerFrame> = peer;
+            let _: Option<appa_runtime_api::SessionTitle> = title;
         }
         HookEvent::TurnEnd { actor } => {
             let Actor { root, child } = actor;

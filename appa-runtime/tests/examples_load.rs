@@ -224,7 +224,9 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -381,7 +383,9 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -481,7 +485,9 @@ command = ["/bin/sh", "annotator.sh"]
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -540,7 +546,9 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,

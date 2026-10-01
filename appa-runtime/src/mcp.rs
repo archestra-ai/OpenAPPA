@@ -165,10 +165,14 @@ impl RuntimeTools {
     /// adapter's name, or the name an embedding host files its reports under. `yell` is
     /// dropped from the router where the deployment has not turned agent reporting on,
     /// which is both how it stops being advertised and how a call to it stops being routed.
+    /// Only Claude Code sessions message each other, so only they read held peer messages.
     pub fn new(runtime: Arc<Runtime>, harness: Harness) -> RuntimeTools {
         let mut tool_router = Self::tool_router();
         if !runtime.agent_yell() {
             tool_router.remove_route(YELL);
+        }
+        if harness != Harness::ClaudeCode {
+            tool_router.remove_route(crate::api::peer::READ_PEER_MESSAGE);
         }
         if !runtime.file_tracking_enabled() {
             for tool in FileTool::ALL {
@@ -250,6 +254,38 @@ impl RuntimeTools {
         Parameters(args): Parameters<crate::api::files::ProcessArgs>,
     ) -> CallToolResult {
         self.file_result(FileTool::Process, args).await
+    }
+
+    #[tool(
+        description = "Read a message another session sent that APPA held for this session, by \
+                       the id its notice gave. The content carries the label the notice named, so \
+                       reading it narrows this session to that label; read it inside a subagent to \
+                       keep this session's label. A message is read once."
+    )]
+    pub(crate) async fn read_peer_message(
+        &self,
+        Parameters(args): Parameters<crate::api::peer::ReadPeerArgs>,
+    ) -> CallToolResult {
+        let arguments = serde_json::to_value(&args).expect("peer read arguments are plain data");
+        let Ok((actor, _)) = self
+            .runtime
+            .take_vouched(&PermitKey::call(crate::api::peer::READ_PEER_MESSAGE, &arguments))
+        else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "[appa] This call was not seen by a hook, so no session holds the message for it.",
+            )]);
+        };
+        match self.runtime.take_held(&actor.root, &args.id) {
+            Ok(Some(body)) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Ok(None) => CallToolResult::error(vec![ContentBlock::text(format!(
+                "[appa] No peer message {} is held for this session: it was read or it expired.",
+                args.id
+            ))]),
+            Err(error) => {
+                tracing::warn!(%error, "a held peer message could not be read");
+                CallToolResult::error(vec![ContentBlock::text("[appa] The held message could not be read.")])
+            }
+        }
     }
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
@@ -759,7 +795,7 @@ mod tests {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        assert_eq!(remedy_tools, ["execute_remedy_plan"]);
+        assert_eq!(remedy_tools, ["execute_remedy_plan", "read_peer_message"]);
 
         let guide = RuntimeToolService::new(runtime);
         assert_eq!(guide.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
@@ -1782,5 +1818,54 @@ max_body_bytes = 4096
             prompt: None,
             ruling: None,
         }
+    }
+
+    /// A held message is read by the session holding it, once, and only through a call a
+    /// hook vouched for.
+    #[tokio::test]
+    async fn a_held_peer_message_is_read_once_by_its_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Arc::new(Runtime::open(config(), dir.path().join("appa.db"), None).expect("the runtime opens"));
+        let holder = acting("cc:held");
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: holder.root.clone(),
+                    principal: None,
+                    address: None,
+                    title: None,
+                },
+            )
+            .await,
+            HookDecision::Ack
+        );
+        let frame = appa_runtime_api::PeerFrame::Parsed {
+            body: "the plan".to_string(),
+        };
+        let crate::api::peer::Received::Held(notice) = runtime
+            .receive_peer(&holder.root, &frame, "ignored")
+            .expect("the message is taken in")
+        else {
+            panic!("an unattributed message is held");
+        };
+        let tools = RuntimeTools::new(Arc::clone(&runtime), Harness::ClaudeCode);
+        let read = || crate::api::peer::ReadPeerArgs {
+            id: notice.id.as_str().to_string(),
+        };
+        let key = PermitKey::call(
+            crate::api::peer::READ_PEER_MESSAGE,
+            &serde_json::to_value(read()).expect("the arguments serialize"),
+        );
+
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
+        runtime.vouch(&key, &acting("cc:other"), None);
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
+
+        runtime.vouch(&key, &holder, None);
+        let first = tools.read_peer_message(Parameters(read())).await;
+        assert_eq!(first.content, vec![ContentBlock::text("the plan")]);
+        runtime.vouch(&key, &holder, None);
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
     }
 }

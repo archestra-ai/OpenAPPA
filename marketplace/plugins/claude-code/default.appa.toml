@@ -23,9 +23,9 @@
 # A tool neither this policy nor a battery names gets a per-call contract from
 # the `*` Annotator at the end.
 #
-# `clappa` starts Claude Code with `SendMessage` denied: a message to a peer
-# session leaves this trajectory without its label. The agent starts a
-# subagent with `Agent` instead, whose final message is checked.
+# `clappa` gives each Claude Code session a messaging address. A
+# `SendMessage` to another protected session's address carries this
+# session's label; a send by name leaves for whoever holds the name.
 #
 # The built-in tool set varies by Claude Code version; regenerate the list from
 # a live session when it drifts.
@@ -297,9 +297,8 @@ name = "host/claude-code/WebSearch"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
-# Another session's message and a resource of any MCP server arrive without
-# the label of whoever wrote them. GitHub notifications carry comments anyone
-# can write.
+# An inbox message and a resource of any MCP server arrive without the label
+# of whoever wrote them. GitHub notifications carry comments anyone can write.
 [[policy.tool]]
 name = "host/claude-code/FetchInboxMessage"
 delta = { trust = "suspicious" }
@@ -340,6 +339,29 @@ delta = {}
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger"
 requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# A socket address reaches only a live protected session under this policy:
+# the runtime refuses any other, and the message arrives carrying this
+# session's label. A name may belong to any session, including one APPA does
+# not protect, so a send by name is a public sink.
+[[policy.tool]]
+name = "host/claude-code/SendMessage(to:uds:*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/SendMessage(to:pipe:*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/SendMessage"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# A peer message the runtime held. Its content carries the label the runtime
+# holds it at, which this result takes on.
+[[policy.tool]]
+name = "mcp/appa/read_peer_message"
 delta = {}
 
 # Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime

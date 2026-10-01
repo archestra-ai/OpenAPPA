@@ -288,7 +288,9 @@ pub async fn session_runtime(dir: &Path, config: &Path) -> Arc<Runtime> {
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,

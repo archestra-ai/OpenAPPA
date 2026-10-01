@@ -11,12 +11,13 @@
 //! opens another in its place.
 //!
 //! The host's migrations provide the schema: `openappa_events`, `openappa_policy_files`,
-//! `openappa_host_keys`, and the receipt tables `openappa_operations` and
-//! `openappa_processed_results`. `tests/fixtures/host_schema.sql` holds the full DDL.
+//! `openappa_host_keys`, the receipt tables `openappa_operations` and
+//! `openappa_processed_results`, and `openappa_held_peer_messages`.
+//! `tests/fixtures/host_schema.sql` holds the full DDL.
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ::postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
@@ -24,6 +25,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::encoding::{contiguous, decoded, opening_key};
+use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, SessionScope, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
     resolve_operation_completion, resolve_result_claim, resolve_result_completion,
@@ -96,6 +98,7 @@ impl Worker {
                         "SELECT root, seq, payload FROM openappa_events LIMIT 0;
                     SELECT hash, bytes FROM openappa_policy_files LIMIT 0;
                     SELECT key, root FROM openappa_host_keys LIMIT 0;
+                    SELECT seq, id, receiver, digest, label, body, expires_at, notified FROM openappa_held_peer_messages LIMIT 0;
                     SET lock_timeout = '30s'; SET statement_timeout = '60s'",
                     )?;
                     check_receipt_keys(&mut client)?;
@@ -515,6 +518,107 @@ impl PostgresStore {
         })
     }
 
+    pub(crate) fn hold_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        digest: PeerDigest,
+        body: &str,
+        held: &NewHeld,
+        now: SystemTime,
+        quota: usize,
+    ) -> Result<(), HeldError> {
+        let receiver = receiver.as_str().to_owned();
+        let (id, digest, label, body) = (
+            held.id.as_str().to_owned(),
+            digest.to_string(),
+            held.label.clone(),
+            body.to_owned(),
+        );
+        let (expires_at, now, quota) = (held.expires_at, millis(now), quota_limit(quota));
+        self.serialized(held_lock(&receiver), move |client| {
+            client.execute(
+                "INSERT INTO openappa_held_peer_messages (id, receiver, digest, label, body, expires_at, notified) \
+                 VALUES ($1, $2, $3, $4, $5, $6, false)",
+                &[&id, &receiver, &digest, &label, &body, &expires_at],
+            )?;
+            // Every receiver's expired rows go, so a session that ended unread leaves none.
+            client.execute(
+                "DELETE FROM openappa_held_peer_messages WHERE expires_at <= $1",
+                &[&now],
+            )?;
+            client.execute(
+                "DELETE FROM openappa_held_peer_messages WHERE receiver = $1 AND seq NOT IN ( \
+                     SELECT seq FROM openappa_held_peer_messages WHERE receiver = $1 ORDER BY seq DESC LIMIT $2)",
+                &[&receiver, &quota],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
+        let receiver = receiver.as_str().to_owned();
+        let now = millis(now);
+        self.serialized(held_lock(&receiver), move |client| {
+            client
+                .query(
+                    "UPDATE openappa_held_peer_messages SET notified = true \
+                     WHERE receiver = $1 AND NOT notified AND expires_at > $2 \
+                     RETURNING seq, id, digest, label, expires_at",
+                    &[&receiver, &now],
+                )?
+                .into_iter()
+                .map(|row| (row.get::<_, i64>(0), held_row(&row, 1)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .map(StoredNotice::decode)
+                .collect()
+        })
+    }
+
+    pub(crate) fn peek_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldNotice>, HeldError> {
+        let (receiver, id, now) = (receiver.as_str().to_owned(), id.as_str().to_owned(), millis(now));
+        self.query(move |client| {
+            Ok(client.query_opt(
+                "SELECT id, digest, label, expires_at FROM openappa_held_peer_messages \
+                 WHERE receiver = $1 AND id = $2 AND expires_at > $3",
+                &[&receiver, &id, &now],
+            )?)
+        })?
+        .map(|row| held_row(&row, 0).decode())
+        .transpose()
+    }
+
+    pub(crate) fn take_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldPeerMessage>, HeldError> {
+        let (receiver, id, now) = (receiver.as_str().to_owned(), id.as_str().to_owned(), millis(now));
+        self.serialized(held_lock(&receiver), move |client| {
+            client
+                .query_opt(
+                    "DELETE FROM openappa_held_peer_messages WHERE receiver = $1 AND id = $2 \
+                     RETURNING id, digest, label, expires_at, body",
+                    &[&receiver, &id],
+                )?
+                .map(|row| (held_row(&row, 0), row.get::<_, String>(4)))
+                .filter(|(stored, _)| stored.expires_at > now)
+                .map(|(stored, body)| {
+                    Ok(HeldPeerMessage {
+                        notice: stored.decode()?,
+                        body,
+                    })
+                })
+                .transpose()
+        })
+    }
+
     /// Run `operation` in a transaction, serialized against other writers of `lock`.
     fn serialized<T, E>(
         &self,
@@ -750,6 +854,32 @@ fn check_receipt_keys(client: &mut Client) -> Result<(), PostgresError> {
     Ok(())
 }
 
+/// A held row's notice columns, starting at column `from`: id, digest, label, expiry.
+fn held_row(row: &::postgres::Row, from: usize) -> StoredNotice {
+    StoredNotice {
+        id: row.get(from),
+        digest: row.get(from + 1),
+        label: row.get(from + 2),
+        expires_at: row.get(from + 3),
+    }
+}
+
+impl From<PostgresError> for HeldError {
+    fn from(error: PostgresError) -> Self {
+        Self::Storage(error.0)
+    }
+}
+
+impl From<::postgres::Error> for HeldError {
+    fn from(error: ::postgres::Error) -> Self {
+        PostgresError::from(error).into()
+    }
+}
+
+fn held_lock(receiver: &str) -> String {
+    format!("openappa-held:{receiver}")
+}
+
 fn operation_lock(key: &OperationKey) -> String {
     format!(
         "openappa-operation:{}:{}:{}",
@@ -790,5 +920,6 @@ mod tests {
             tool_call_id: "call".to_owned(),
         };
         assert_eq!(result_lock(&result), "openappa-result:org:session:call");
+        assert_eq!(held_lock("cc:root"), "openappa-held:cc:root");
     }
 }

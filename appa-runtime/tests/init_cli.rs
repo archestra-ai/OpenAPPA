@@ -246,10 +246,7 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     let clappa_settings: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.data.join("clappa.settings.json")).expect("clappa's settings"))
             .expect("clappa's settings are JSON");
-    assert_eq!(
-        clappa_settings["permissions"]["deny"],
-        serde_json::json!(["SendMessage"])
-    );
+    assert!(clappa_settings.get("permissions").is_none());
     assert!(fixture.settings_value().get("permissions").is_none());
     let statusline = clappa_settings["statusLine"]["command"]
         .as_str()

@@ -120,7 +120,16 @@ async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_
         child: None,
     };
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root, principal: None }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root,
+                principal: None,
+                address: None,
+                title: None,
+            }
+        )
+        .await,
         HookDecision::Ack
     );
 

@@ -458,6 +458,10 @@ impl Session {
         spawn: Option<SpawnKind>,
         prompt: Option<PromptKey>,
     ) -> Result<ToolCallDecision, EventError> {
+        if let Some(id) = super::peer::held_read(&call) {
+            let basis = super::peer::held_basis(&self.inner.store, &self.root, &id)?;
+            return self.propose_tool_call(call, call_id, spawn, prompt, Some(basis)).await;
+        }
         let Some(files) = &self.inner.shared.files else {
             return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
         };
