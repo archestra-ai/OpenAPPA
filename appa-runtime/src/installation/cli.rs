@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_package::generation::{ArtifactDigest, Commit, Generation, Platform};
-use appa_package::{Battery, Marketplace, Namespace, PackageKind, PackageName, Role};
+use appa_package::{Battery, Namespace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
 
-use super::{Acquired, InstallError, Installation, Requirements, Selection, discover, includes};
+use super::{Acquired, InstallError, Installation, Requirements, Selection, discover, includes, invalid, read_catalog};
 use crate::config::edit;
 use crate::style::{Mark, Style};
 
@@ -153,10 +153,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
             ));
         }
         let before = super::required_bytes(installation.config_path())?;
-        selection.deselect(
-            PackageKind::Plugin,
-            &PackageName::parse(&args.name).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        );
+        selection.deselect(PackageKind::Plugin, &PackageName::parse(&args.name).map_err(invalid)?);
         step(
             Mark::Doing,
             &format!("verifying ownership and removing {} support", args.name),
@@ -187,7 +184,7 @@ fn purge_plugin(args: PluginRemove) -> ExitCode {
             Mark::Doing,
             "removing claude-code support, stopping the runtime, deleting the deployment",
         );
-        let purge = crate::init::claude_code_purge().map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let purge = crate::init::claude_code_purge().map_err(invalid)?;
         let runtime = match purge.runtime {
             crate::init::PurgedRuntime::Nothing => serde_json::json!({"state": "absent"}),
             crate::init::PurgedRuntime::Stopped { pid } => serde_json::json!({"state": "stopped", "pid": pid}),
@@ -234,7 +231,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
@@ -247,8 +244,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         let acquired = args
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
-        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let catalog = read_catalog(acquired.marketplace())?;
         let mut batteries = Vec::new();
         for name in &args.names {
             batteries.push(super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?.1);
@@ -267,10 +263,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 }
                 imported.configuration(&installation)?
             }
-            None => (
-                current,
-                String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?,
-            ),
+            None => (current, String::from_utf8(before.clone()).map_err(invalid)?),
         };
         selection.set_generation(acquired.generation().clone());
         let mut text = text;
@@ -406,14 +399,14 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
         let mut selection = installation
             .selection()?
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
-        let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let text = String::from_utf8(before.clone()).map_err(invalid)?;
         let without = edit::remove_include(&text, &includes::battery_include(&args.name))?;
         // Another spelling of the include is the person's line; it stays,
         // and so does the battery until they take it out.
@@ -478,8 +471,7 @@ impl Source {
                     .join(appa_package::generation::DESCRIPTOR_FILE);
                 super::optional_bytes(&descriptor)?
                     .map(|bytes| {
-                        let generation = appa_package::generation::Generation::parse(&bytes)
-                            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+                        let generation = appa_package::generation::Generation::parse(&bytes).map_err(invalid)?;
                         if generation.commit() != &commit {
                             return Err(InstallError::Invalid(
                                 "the retained version names a different commit".into(),
@@ -644,7 +636,7 @@ pub fn install(args: Install) -> ExitCode {
         }
         let path = plugin_path(&args.target, &name)?;
         if path.exists() {
-            crate::config::Config::load_local(&path, &[]).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
         }
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
@@ -675,21 +667,19 @@ pub fn install(args: Install) -> ExitCode {
         };
         let acquired = args.source.acquire(&installation, current.as_ref(), requirements)?;
         installation.retain(&acquired)?;
-        let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let package = PackageName::parse(&name).map_err(invalid)?;
         // A bundle restores its own selection and a reinstall keeps the
         // person's battery choices; only the plugin's first install brings the
         // batteries its manifest requires and those whose program is on PATH.
         let mut included = Vec::new();
-        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let catalog = read_catalog(acquired.marketplace())?;
         let entry = catalog
             .packages
             .iter()
             .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
             .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
         let root = acquired.marketplace().join(entry.path.as_str());
-        let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE)).map_err(invalid)?;
         let Role::Plugin(plugin) = manifest.role else {
             return Err(InstallError::Invalid("selected package is not a plugin".into()));
         };
@@ -716,19 +706,10 @@ pub fn install(args: Install) -> ExitCode {
             }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
-                Some(bytes) => {
-                    String::from_utf8(bytes.to_vec()).map_err(|error| InstallError::Invalid(error.to_string()))?
-                }
+                Some(bytes) => String::from_utf8(bytes.to_vec()).map_err(invalid)?,
                 None => {
                     let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let text = if name == "claude-code" {
-                        crate::default_config::for_installed_policy(&text)
-                            .map_err(|reason| InstallError::Invalid(reason.into()))?
-                            .into_owned()
-                    } else {
-                        text
-                    };
+                        .map_err(invalid)?;
                     match (agent_yell, with_agent_yell_on(&text)) {
                         (Some(AgentYell::On), Some(on)) => on,
                         (Some(AgentYell::On), None) if args.agent_yell => {
@@ -882,8 +863,7 @@ pub(crate) fn render_server_coverage(
         return Ok(());
     };
     let marketplace = Installation::retained_marketplace(config, &selection)?;
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let catalog = read_catalog(&marketplace)?;
     let available = discover::batteries(&marketplace, &catalog, appa_package::Host::ClaudeCode)?;
     let text = super::optional_bytes(config)?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -1012,9 +992,7 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
     // A battery is included by the config's own include list, whoever wrote
     // the line, and stored when the store beside the config holds it.
     let included = match (kind, super::optional_bytes(&path)?) {
-        (PackageKind::Battery, Some(bytes)) => {
-            includes::included(std::str::from_utf8(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?)?
-        }
+        (PackageKind::Battery, Some(bytes)) => includes::included(std::str::from_utf8(&bytes).map_err(invalid)?)?,
         _ => Default::default(),
     };
     let store = crate::batteries::store_dir(&path);
@@ -1045,16 +1023,14 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
             (None, marketplace) => ("checkout", None, marketplace),
         },
     };
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let catalog = read_catalog(&marketplace)?;
     let packages = catalog
         .packages
         .iter()
         .filter(|entry| entry.kind == kind)
         .map(|entry| {
             let manifest = marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE);
-            let package =
-                appa_package::Package::read(&manifest).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let package = appa_package::Package::read(&manifest).map_err(invalid)?;
             Ok(match kind {
                 PackageKind::Plugin => serde_json::json!({
                     "name": entry.name.as_str(),
@@ -1643,17 +1619,23 @@ mod tests {
     /// policy has to carry exactly one of it. Two, or none, and a yes cannot be honored.
     #[test]
     fn the_shipped_policy_states_the_reporting_posture_exactly_once() {
-        let text = crate::default_config::text();
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../marketplace/plugins/claude-code/default.appa.toml"
+        ));
         assert_eq!(text.matches(AGENT_YELL_OFF).count(), 1);
         assert_eq!(text.matches(AGENT_YELL_ON).count(), 0);
     }
 
     #[test]
     fn a_yes_turns_reporting_on_and_changes_only_that_line() {
-        let before = crate::default_config::text();
-        let after = with_agent_yell_on(&before).expect("the shipped policy carries the line once");
-        assert_ne!(after, before.as_ref());
-        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before.as_ref());
+        let before = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../marketplace/plugins/claude-code/default.appa.toml"
+        ));
+        let after = with_agent_yell_on(before).expect("the shipped policy carries the line once");
+        assert_ne!(after, before);
+        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before);
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
         std::fs::write(&config, &after).expect("the answered policy is written");

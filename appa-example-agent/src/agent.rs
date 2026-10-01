@@ -7,8 +7,8 @@ use std::sync::Arc;
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef,
-    ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnKind,
+    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -212,6 +212,7 @@ impl Agent {
                 child: None,
             },
             text: task.clone(),
+            settles: None,
         };
         if let Err(stop) = run.expect_ack(prompt).await {
             return Outcome::Stopped(stop);
@@ -439,7 +440,7 @@ impl Run<'_> {
             },
         )
         .await;
-        if self.marks_spawn(&proposed) {
+        if self.marks_spawn(&proposed).is_some() {
             // A spawn this harness cannot open is refused here: the runtime's return
             // menu would only cost the model a round for a child that never starts.
             if let Err(unavailable) = self.budget.fork_availability(frame.depth) {
@@ -451,6 +452,7 @@ impl Run<'_> {
             call: proposed.clone(),
             call_id: Some(id.0.clone()),
             spawn: self.marks_spawn(&proposed),
+            prompt: None,
             ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
@@ -474,8 +476,12 @@ impl Run<'_> {
         }
     }
 
-    fn marks_spawn(&self, call: &ProposedCall) -> bool {
-        self.agent.spawn.as_ref().is_some_and(|spawn| spawn.name.0 == call.tool)
+    fn marks_spawn(&self, call: &ProposedCall) -> Option<SpawnKind> {
+        self.agent
+            .spawn
+            .as_ref()
+            .filter(|spawn| spawn.name.0 == call.tool)
+            .map(|_| SpawnKind::Single)
     }
 
     async fn refuse_call(&self, frame: &Frame, call: CallId, tool: &str, detail: String) -> Answered {

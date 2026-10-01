@@ -407,7 +407,24 @@ pub struct SpawnBinding(pub String);
 pub enum SpawnRef {
     Binding(SpawnBinding),
     InFlight,
+    /// The fan-out spawn released under this host prompt.
+    FanOut(PromptKey),
 }
+
+/// How many children one spawn call starts under its single return
+/// declaration: one bound to the spawn's fork, or any number, each on a
+/// member fork of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpawnKind {
+    Single,
+    FanOut,
+}
+
+/// The host's opaque identity for one user prompt. A fan-out spawn's
+/// children name no spawn call, only the prompt it was released under,
+/// so this is what binds them to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PromptKey(pub String);
 
 /// A person's ruling the harness obtained itself for the offer a
 /// control call quotes. A harness whose review channel is its own —
@@ -448,19 +465,23 @@ pub enum HookEvent {
     Prompt {
         actor: Actor,
         text: String,
+        /// The host call this prompt reports finished: a background
+        /// spawn's completion notice arrives as a prompt naming its call.
+        settles: Option<String>,
     },
     /// The actor finished a turn. Nothing it released is still running,
     /// so a dispatch still open names a call the harness never ran.
-    TurnEnd {
-        actor: Actor,
-    },
+    TurnEnd { actor: Actor },
     ToolCall {
         actor: Actor,
         call: ProposedCall,
         /// The host's opaque identity for this call occurrence. A host
         /// that supplies one can have several ordinary calls open at once.
         call_id: Option<String>,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
+        /// The host prompt this call serves. On a child's call it is set
+        /// only for a fan-out spawn's child, and names that spawn's prompt.
+        prompt: Option<PromptKey>,
         /// A ruling the harness already obtained for the offer this
         /// control call quotes; `None` on every ordinary call.
         ruling: Option<Ruling>,
@@ -489,6 +510,13 @@ pub enum HookEvent {
         root: TrajectoryId,
         child: TrajectoryId,
         value: Option<String>,
+    },
+    /// A child's return that does not end it: the value crosses exactly as
+    /// a stop's would, and the child keeps running.
+    ChildReturn {
+        root: TrajectoryId,
+        child: TrajectoryId,
+        value: String,
     },
     SpawnResult {
         actor: Actor,

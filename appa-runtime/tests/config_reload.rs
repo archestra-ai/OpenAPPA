@@ -102,7 +102,8 @@ async fn propose_notes(runtime: &Arc<Runtime>, root: &TrajectoryId) -> HookDecis
             actor: actor(root),
             call: notes(),
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         },
     )
@@ -212,9 +213,7 @@ async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload(
         |error| matches!(error, OpenError::BoundBuiltinAnnotator(name) if name == "classify");
     let no_profile: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::LlmNotConfigured(name) if name == "classify");
-    let no_platform: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::UnsupportedClaudeCodePlatform(name) if name == "classify");
-    let mut cases = vec![
+    let cases = vec![
         (
             "a builtin annotator that is also bound",
             declaring(
@@ -229,13 +228,6 @@ async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload(
             no_profile,
         ),
     ];
-    if !cfg!(unix) {
-        cases.push((
-            "a claude-code annotator off Unix",
-            declaring("claude-code", ""),
-            no_platform,
-        ));
-    }
 
     let deployment = Deployment::open(&with_notes()).expect("the fixture opens");
     let root = TrajectoryId("reload:unservable".to_string());

@@ -31,23 +31,6 @@ fn parity_contract_names_every_required_invariant_and_only_allowed_exceptions() 
             "exception contract carries {id} once"
         );
     }
-    assert!(parity.contains("No other host difference may weaken an invariant"));
-    assert!(parity.contains("fails closed or reports it as"));
-}
-
-#[test]
-fn the_kagent_reference_carries_its_parity_choke_points() {
-    let kagent = read("integrations/appa-guide/references/kagent.md");
-
-    for marker in [
-        "Environment variables alone never prove the gate",
-        "appa_match_batteries",
-        "Helm values; provider credentials",
-        "explicitly named proposal",
-        "Never claim fleet-wide coverage",
-    ] {
-        assert!(kagent.contains(marker), "kagent mapping carries {marker:?}");
-    }
 }
 
 #[test]

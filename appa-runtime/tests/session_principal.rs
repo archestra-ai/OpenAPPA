@@ -184,7 +184,8 @@ async fn a_root_fork_acts_for_its_parents_principal() {
                 },
                 call,
                 call_id: None,
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             },
         )

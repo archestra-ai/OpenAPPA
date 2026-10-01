@@ -58,7 +58,17 @@ pub struct RawBlock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CallRole {
     Ordinary,
-    MarkedSpawn,
+    MarkedSpawn(crate::transition::SpawnKind),
+}
+
+impl CallRole {
+    /// The role of the proposal at `position` in a batch its decision marked with `mark`.
+    pub(crate) fn of(mark: Option<crate::transition::SpawnMark>, position: usize) -> CallRole {
+        match mark {
+            Some(mark) if mark.index() == position => CallRole::MarkedSpawn(mark.kind()),
+            Some(_) | None => CallRole::Ordinary,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

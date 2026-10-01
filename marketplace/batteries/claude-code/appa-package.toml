@@ -1,6 +1,6 @@
 schema = 1
 name = "claude-code"
-description = "Static Claude Code tool rules: credential paths and commands narrow to self, writes into them require a trusted session, and Bash results remain confined for sanitization. The Unix default root supplies the Bash Annotator."
+description = "Claude Code tool rules: credential paths and commands narrow to self, writes into them require a trusted session, Bash and PowerShell results remain confined for sanitization, and every other Bash, PowerShell and Monitor call is labeled per call by the Claude Code Annotator."
 
 [battery]
 policy = "appa.toml"

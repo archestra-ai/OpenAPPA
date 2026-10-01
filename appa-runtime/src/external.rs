@@ -18,15 +18,17 @@ use crate::config::{
     AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
     Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
-use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
+use crate::process_tree::ProcessTree;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
+use appa_runtime_api::Ruling;
 
 const HITL: &str = "hitl";
 
@@ -114,7 +116,6 @@ impl Diagnostics {
 
     /// The last line of a command's stderr, as [`error_line`] bounds it; none where the
     /// command said nothing.
-    #[cfg(unix)]
     pub(crate) fn error_line(&self) -> Option<String> {
         Some(error_line(&String::from_utf8_lossy(&self.bytes))).filter(|line| !line.is_empty())
     }
@@ -199,7 +200,7 @@ impl Backend {
 
 fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
     match &consult.body {
-        ConsultBody::Authority { .. } => Ok(serde_json::json!({ "ruling": "approve" })),
+        ConsultBody::Authority { .. } => Ok(AuthorityAnswer::to_wire(Ruling::Approve)),
         ConsultBody::Sanitizer { artifact, .. } => Ok(serde_json::json!({ "body": artifact.body })),
         _ => Err(NoAnswerReason::Unregistered),
     }
@@ -476,7 +477,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
     ) -> ConsultOutcome {
         self.dispatch(consult, elicitation, ruling, None).await
     }
@@ -488,7 +489,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
     ) -> (ConsultOutcome, Option<Transcript>) {
         let mut transcript = self.backend(consult).and_then(Backend::recorded).map(Transcript::of);
         let outcome = self.dispatch(consult, elicitation, ruling, transcript.as_mut()).await;
@@ -505,7 +506,7 @@ impl ExternalServices {
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        ruling: Option<Ruling>,
         seen: Option<&mut Transcript>,
     ) -> ConsultOutcome {
         let kind = consult.kind();
@@ -531,12 +532,7 @@ impl ExternalServices {
             Backend::Hitl => match (ruling, elicitation, &consult.body) {
                 (Some(ruling), _, ConsultBody::Authority { .. }) => {
                     tracing::debug!(name, ?ruling, "the harness's own reviewer answered this hitl consult");
-                    Ok(serde_json::json!({
-                        "ruling": match ruling {
-                            appa_runtime_api::Ruling::Approve => "approve",
-                            appa_runtime_api::Ruling::Deny => "deny",
-                        }
-                    }))
+                    Ok(AuthorityAnswer::to_wire(ruling))
                 }
                 (None, Some(elicitation), ConsultBody::Authority { declaration, artifact }) => {
                     return elicitation.ask(name, declaration, artifact).await;
@@ -812,7 +808,6 @@ fn builtin_backend(
 /// A command consult's stdout on a successful exit, and the transcript a record asked for.
 type CommandRun = (Result<Vec<u8>, NoAnswerReason>, Option<Transcript>);
 
-#[cfg(unix)]
 async fn run_command(
     command: &ResolverCommand,
     input: Vec<u8>,
@@ -844,25 +839,11 @@ async fn run_command(
     .await
 }
 
-#[cfg(not(unix))]
-async fn run_command(
-    _command: &ResolverCommand,
-    _input: Vec<u8>,
-    _deadline: tokio::time::Instant,
-    _max_body_bytes: usize,
-    transcript: Option<Transcript>,
-    _credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
-) -> CommandRun {
-    (Err(NoAnswerReason::Unregistered), transcript)
-}
-
-#[cfg(unix)]
 struct CommandTask {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<CommandRun>,
 }
 
-#[cfg(unix)]
 impl CommandTask {
     async fn wait(mut self) -> CommandRun {
         let run = (&mut self.task).await.unwrap_or((Err(NoAnswerReason::Transport), None));
@@ -871,7 +852,6 @@ impl CommandTask {
     }
 }
 
-#[cfg(unix)]
 impl Drop for CommandTask {
     fn drop(&mut self) {
         if let Some(cancel) = self.cancel.take() {
@@ -880,51 +860,49 @@ impl Drop for CommandTask {
     }
 }
 
-/// A consult's subprocess, spawned into its own process group, and the promise that the
-/// group ends with the consult: every outcome, and a dropped future, terminate it.
-#[cfg(unix)]
+/// A consult's subprocess, adopted as a [`ProcessTree`], and the promise that the tree
+/// ends with the consult: every outcome, and a dropped future, terminate it.
 pub(crate) struct CommandProcess {
     child: Option<tokio::process::Child>,
-    process_group: Option<i32>,
+    tree: Option<ProcessTree>,
 }
 
-#[cfg(unix)]
 impl CommandProcess {
-    /// Adopt a child spawned into a fresh process group; its pid is the group id.
-    pub(crate) fn spawned(child: tokio::process::Child) -> Result<CommandProcess, NoAnswerReason> {
-        let process_group = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .ok_or(NoAnswerReason::Transport)?;
+    pub(crate) fn spawn(command: &mut tokio::process::Command) -> Result<CommandProcess, NoAnswerReason> {
+        let (child, tree) = crate::process_tree::spawn(command)?;
         Ok(CommandProcess {
             child: Some(child),
-            process_group: Some(process_group),
+            tree: Some(tree),
         })
     }
 
-    pub(crate) fn process_group(&self) -> i32 {
-        self.process_group.expect("a live command process owns its group")
+    /// The child to exchange with, and the tree that ends it.
+    pub(crate) fn parts(&mut self) -> (&mut tokio::process::Child, &ProcessTree) {
+        (
+            self.child.as_mut().expect("a live command process owns its child"),
+            self.tree.as_ref().expect("a live command process owns its tree"),
+        )
     }
 
     pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.child.as_mut().expect("a live command process owns its child")
     }
 
-    fn terminate_group(&mut self) {
-        if let Some(process_group) = self.process_group.take() {
-            kill_process_group(process_group);
+    fn terminate_tree(&mut self) {
+        if let Some(tree) = self.tree.take() {
+            tree.kill();
         }
     }
 
     pub(crate) async fn terminate_and_reap(&mut self) -> Result<std::process::ExitStatus, NoAnswerReason> {
-        self.terminate_group();
+        self.terminate_tree();
         self.child_mut().wait().await.map_err(|_| NoAnswerReason::Transport)
     }
 
     /// Do not let a child stuck in uninterruptible I/O extend the caller's deadline: the
-    /// group is ended now, and a detached task keeps the reaping responsibility.
+    /// tree is ended now, and a detached task keeps the reaping responsibility.
     pub(crate) fn terminate_and_reap_later(mut self) {
-        self.terminate_group();
+        self.terminate_tree();
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -934,36 +912,22 @@ impl CommandProcess {
     }
 }
 
-#[cfg(unix)]
 impl Drop for CommandProcess {
     fn drop(&mut self) {
         // Covers runtime shutdown or task abortion. `kill_on_drop` also targets the direct
         // child; Tokio's orphan queue reaps it when an async wait cannot run.
-        self.terminate_group();
-    }
-}
-
-/// A consult's subprocess starts a fresh process group whose id is the direct child's
-/// pid; a negative pid addresses that whole group. SIGKILL is deliberate: cleanup runs
-/// after every outcome, so a resolver cannot keep descendants alive after answering.
-#[cfg(unix)]
-pub(crate) fn kill_process_group(process_group: i32) {
-    unsafe {
-        libc::kill(-process_group, libc::SIGKILL);
+        self.terminate_tree();
     }
 }
 
 /// One subprocess exchange, shared by every transport that runs a local process: the
 /// input on stdin, the answer read off stdout under `max_body_bytes`, and the child seen
-/// out — unreaped — before returning. Exit is observed without reaping: the zombie keeps
-/// its pid and process-group id reserved until the caller's group cleanup runs, so the
-/// id cannot be recycled underneath it. A helper the child left behind may hold the pipe
-/// open after the child itself exited: seeing the exit first ends the group, so the
+/// out — unreaped — before returning. A helper the child left behind may hold the pipe
+/// open after the child itself exited: seeing the exit first ends the tree, so the
 /// answer already written is read out instead of lost to the timeout.
-#[cfg(unix)]
 pub(crate) async fn exchange_with_child(
     child: &mut tokio::process::Child,
-    process_group: i32,
+    tree: &ProcessTree,
     input: &[u8],
     max_body_bytes: usize,
 ) -> Result<Vec<u8>, NoAnswerReason> {
@@ -1021,15 +985,15 @@ pub(crate) async fn exchange_with_child(
         bytes = &mut output => {
             let bytes = bytes?;
             // The answer is already complete here, so an unobservable exit must not
-            // discard it: `waitid` reports `ECHILD` for a child something else reaped,
-            // and that says nothing about the answer. Whether the child exited well is
-            // still decided by the status `terminate_and_reap` returns to the caller.
-            let _ = wait_for_child_exit(process_group).await;
+            // discard it: a child something else reaped says nothing about the answer.
+            // Whether the child exited well is still decided by the status
+            // `terminate_and_reap` returns to the caller.
+            let _ = tree.root_exited().await;
             Ok(bytes)
         }
-        exited = wait_for_child_exit(process_group) => {
+        exited = tree.root_exited() => {
             exited?;
-            kill_process_group(process_group);
+            tree.kill();
             output.await
         }
     }
@@ -1037,13 +1001,11 @@ pub(crate) async fn exchange_with_child(
 
 /// The tail of what a child wrote to stderr, read to its end so the pipe never fills: the
 /// command's own error, whose last line goes to the log and the no-answer diagnostic.
-#[cfg(unix)]
 pub(crate) struct StderrTail {
     read: Arc<std::sync::Mutex<Diagnostics>>,
     task: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(unix)]
 pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
     let read = Arc::new(std::sync::Mutex::new(Diagnostics::default()));
     let task = tokio::spawn({
@@ -1069,7 +1031,6 @@ pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
     StderrTail { read, task }
 }
 
-#[cfg(unix)]
 impl StderrTail {
     /// What the child wrote once it closed the pipe, or once `wait` passed — a helper that
     /// kept the pipe open leaves the tail read so far. Nothing where it wrote nothing.
@@ -1089,7 +1050,6 @@ const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
-#[cfg(unix)]
 pub(crate) fn error_line(text: &str) -> String {
     const MAX_LINE: usize = 200;
     let line: String = text
@@ -1106,7 +1066,6 @@ pub(crate) fn error_line(text: &str) -> String {
 }
 
 /// The stderr tail of a child that failed, given a second to close the pipe.
-#[cfg(unix)]
 pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
 }
@@ -1123,7 +1082,6 @@ pub(crate) fn without_runtime_variables(
     })
 }
 
-#[cfg(unix)]
 async fn run_command_process(
     command: ResolverCommand,
     input: Vec<u8>,
@@ -1133,7 +1091,6 @@ async fn run_command_process(
     seen: Option<&mut Transcript>,
     credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<Vec<u8>, NoAnswerReason> {
-    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
     let Some((executable, arguments)) = command.argv.split_first() else {
@@ -1147,7 +1104,6 @@ async fn run_command_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configured.as_std_mut().process_group(0);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
     // variable, reaches the child. The binding's own provider credential is put back
     // afterwards, so a command inherits the one variable it reads and no other's.
@@ -1157,12 +1113,11 @@ async fn run_command_process(
         .envs(without_runtime_variables(parent))
         .envs(credential);
 
-    let mut child = crate::child_process::spawn_async(&mut configured).map_err(|_| NoAnswerReason::Unreachable)?;
-    let tail = child.stderr.take().map(stderr_tail);
-    let mut process = CommandProcess::spawned(child)?;
-    let process_group = process.process_group();
+    let mut process = CommandProcess::spawn(&mut configured)?;
+    let tail = process.child_mut().stderr.take().map(stderr_tail);
     let outcome = {
-        let exchange = exchange_with_child(process.child_mut(), process_group, &input, max_body_bytes);
+        let (child, tree) = process.parts();
+        let exchange = exchange_with_child(child, tree, &input, max_body_bytes);
         tokio::select! {
             biased;
             _ = &mut cancelled => Err(NoAnswerReason::Transport),
@@ -1199,37 +1154,6 @@ async fn run_command_process(
     let stderr = stderr.and_then(|stderr| stderr.error_line()).unwrap_or_default();
     tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
     Err(NoAnswerReason::Transport)
-}
-
-/// Observe a child's exit without reaping it: the zombie keeps its pid and process-group
-/// id reserved, so a group kill that follows cannot hit a recycled id.
-#[cfg(unix)]
-pub(crate) async fn wait_for_child_exit(pid: i32) -> Result<(), NoAnswerReason> {
-    loop {
-        let exited = {
-            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    info.as_mut_ptr(),
-                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-                )
-            };
-            if result == -1 {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(NoAnswerReason::Transport);
-            }
-            let info = unsafe { info.assume_init() };
-            (unsafe { info.si_pid() }) == pid
-        };
-        if exited {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
 }
 
 fn classify_transport(error: reqwest::Error) -> NoAnswerReason {

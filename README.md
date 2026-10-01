@@ -5,7 +5,7 @@
   <img alt="OpenAPPA" src="website/public/brand/openappa-lockup-light.svg" width="440">
 </picture>
 
-**Deterministic security for real-world agentic applications.**
+**Deterministic guardrails that don't break agents.**
 
 [Website](https://openappa.com) ·
 [How it works](https://openappa.com/how-it-works) ·
@@ -26,38 +26,35 @@
 OpenAPPA sits between an agent and its tools and answers one question before
 every action: **is this data allowed to go to this destination?**
 
-It is powered by APPA — Agentic Permissions Policy Algebra — which tracks the
-sensitivity and trust of everything an agent reads and checks every outbound
-call against it. Checks run *before* dispatch, so sensitive data never reaches
-an unauthorized tool. Classifiers and PII detectors are probabilistic; a
-declared flow decision here holds on every run, which is what it takes to trust
-an agent around medical or financial records.
+It is powered by APPA (Agentic Permissions Policy Algebra). OpenAPPA tracks the
+sensitivity and trust of everything an agent reads and checks each tool call
+against it *before* the call runs, so sensitive data never reaches an
+unauthorized tool. Classifiers and PII detectors are probabilistic, while this
+check is deterministic and returns the same decision on every run.
 
-Policy is declarative TOML, and the engine is a pure decision core — a function
-of the event log, no IO — so it embeds inside your own agent: in-process from
-Rust or Python, or as a sidecar every step is checked against. Broader coverage
-across those surfaces is the active work.
+Policy is declarative TOML. The engine decides from the event log alone and
+makes no network or file calls, so the same log always gets the same decision.
+Run it in-process, or as a sidecar process that checks each tool call before it
+runs.
 
 ## Benchmarks
 
-Agent security has to be measured on two axes at once: an agent that permits
-unauthorized flows is unsafe, and an agent that refuses valid work is useless.
-We measure **task completion** (utility on legitimate goals) and **attack
-success rate** (ASR, policy breaches under adversarial inputs).
+Agent security has two axes: an agent that permits unauthorized flows is
+unsafe, and an agent that refuses valid work is useless. We measure both on
+[Bench-Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp)
+(20 multi-step enterprise workflows) and
+[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
+(OWASP Top 10 for Agentic Applications), with standard and adversarial
+prompts. No scored attack succeeded against OpenAPPA in 1,320 evaluations,
+while it completed 88–90% of tasks; Microsoft FIDES let 28–35% of attacks
+through, and Claude Code auto mode let 10 through across the two suites.
 
-Across 20 multi-step enterprise workflows in Bench-Corp (200 episodes per model):
-
-| Model | Guarded OpenAPPA (Utility / ASR) | FIDES middleware (Utility / ASR) | FIDES native (Utility / ASR) |
+| | OpenAPPA | Claude Auto mode | FIDES (Microsoft) |
 |---|---:|---:|---:|
-| GPT-5.6 Luna | **88.0% / 0%** | 38.5% / 32.0% | 37.0% / 32.5% |
-| DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
-| Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
+| Task completion | **89%** | 90% | 41% |
+| Attacks that succeeded | **0%** | 10% | 31% |
 
-Across the complete 24-task [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
-suite (OWASP Top 10 for Agentic Applications), guarded OpenAPPA recorded **0/720 observed attacks**
-and led task completion under adversarial prompts across all three models.
-
-Full methodology, ablations, and paper: [Benchmarks](https://openappa.com/evaluation).
+[Read the full benchmark results](https://openappa.com/evaluation)
 
 ## Try it: Claude Code
 
@@ -69,84 +66,57 @@ curl -fsSL https://openappa.com/install.sh | sh &&
   ~/.local/bin/appa plugin install claude-code
 ```
 
-The installer verifies the checksum of the release binary for Linux or macOS
-and places it in `~/.local/bin`. Windows users unpack the zip from the
-[releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
-checkout, `cargo install --locked --path appa-runtime --force` builds the binary
-instead, and the same install command installs that build's own version.
+Then start a protected session and run the policy setup skill:
 
-A release binary installs the version published for its tag; a checkout build
-installs the commit it was built from.
+```sh
+clappa
+```
 
-The native `appa` command deploys the runtime and registers it in your Claude
-Code user settings as the session's hooks, together with the runtime's MCP
-server, the `appa-guide` skill, and the `clappa` launcher, which adds APPA's
-status line to the sessions it starts. Rerunning it rewrites only what it wrote
-and preserves an existing policy. Fresh policies use a fail-closed Claude annotator as a compatibility
-net for MCP tools they do not yet name. Start `clappa`, then run
-`/appa-guide` to replace that fallback with exact connector contracts; the
-same skill explains blocks and tunes the defaults.
-Plain `claude` sessions stay untouched. Resume a protected conversation with
-`clappa --resume`, because `claude --resume` starts an unprotected process.
-Exit and restart a conversation already resumed through plain `claude`.
+```text
+/appa-guide
+```
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 
-Setup, upgrade and uninstall: [Claude Code
-integration](https://openappa.com/claude-code) ·
-[`marketplace/plugins/claude-code`](marketplace/plugins/claude-code/README.md).
+## Other agents
 
-Plugin and battery installation, explicit version updates, offline bundles,
-and kagent deployment preparation: [marketplace guide](marketplace/README.md).
+<table>
+<tr>
+<td width="50%" valign="top">
 
-**Amp:** [amppa](integrations/amp/README.md) is the source-distributed Amp plugin.
-It checks tool calls and results through the same APPA runtime, locally or in an orb.
+### [Add to your agent →](https://openappa.com/add-to-agent)
+
+Embed the APPA runtime in your own agent from any language, or connect an agent through hooks.
+
+</td>
+<td width="50%" valign="top">
+
+### [Try at the LLM proxy level →](https://openappa.com/archestra)
+
+[Archestra](https://archestra.ai)'s 1.4 Release Candidate implements OpenAPPA
+for Claude Code, Claude Desktop, Cursor, Codex, OpenCode, Copilot CLI, n8n, and
+any other agent that talks to a model through its LLM proxy.
+
+</td>
+</tr>
+</table>
 
 ## Testing
 
-Install [mise](https://mise.jdx.dev/) and prepare the repository:
+The APPA CLI provides two commands to check policy decisions before you merge a
+change, without running your agent's tools:
+
+- `appa describe --check` checks that your configuration loads.
+- `appa replay` checks scripted tool calls against the decisions you expect.
 
 ```sh
-mise install
-mise run setup
+appa describe --config appa.toml --check
+appa replay --config appa.toml policy-tests/
 ```
 
-Mise supplies the locked Rust, Python, Go, and Node toolchains plus `uv`,
-`pnpm`, and the Claude Code CLI used by the harness tests. The setup task
-delegates package installation to Cargo, uv, Go, and pnpm, using their
-committed manifests and lockfiles.
-
-Run the repository-wide evaluation before handing off a change:
-
-```sh
-mise exec -- scripts/appa-eval.sh
-```
-
-It runs the Rust, Python, and Go suites, the deterministic kagent integration,
-the website checks, and the real Claude Code harness against local scripted
-inference. It does not need a model account. Use `--quick` for the shorter
-inner loop. Use `--live-model` only when you intend to consume the configured
-Claude account for an additional compatibility canary. Individual integration
-READMEs document narrower commands for focused iteration.
-
-## When APPA is in the way
-
-```sh
-appa yell "the hook blocked a Bash call I needed and the remedy went nowhere"
-```
-
-The report carries your message and what APPA decided — rulings, remedies, label
-changes, and the policy they were made under. It never carries a prompt, a tool
-argument, a tool output, or a path. You are asked twice: whether to replace the
-names your policy chose with tokens such as `tool-1`, and whether to send the
-finished file, which is named before you answer and kept either way.
-
-The agent can report on its own through the `yell` tool, on a deployment that
-turns it on. A first `appa plugin install claude-code` asks in a terminal, and
-`--agent-yell` or `--no-agent-yell` answers for a script; `[reporting]
-agent_yell` in the config is the answer either way. That call is checked by
-your policy like any other, so a session narrowed to `self` or `internal`
-reaches a human review instead of sending.
+Run them locally, or make them a required CI check to block merges when
+validation fails. [Validation](https://www.openappa.com/validation) has a
+GitHub Actions workflow and a worked example.
 
 ## Status & Paper
 

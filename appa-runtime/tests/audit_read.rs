@@ -116,7 +116,8 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
             actor: actor(within),
             call,
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         },
     )
@@ -161,7 +162,8 @@ async fn open_child(
                 actor: actor(None),
                 call,
                 call_id: None,
-                spawn: true,
+                spawn: Some(appa_runtime_api::SpawnKind::Single),
+                prompt: None,
                 ruling: None,
             },
         )

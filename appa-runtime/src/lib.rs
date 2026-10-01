@@ -10,8 +10,6 @@ pub mod batteries;
 pub mod claude_files;
 pub mod config;
 mod credentials;
-#[cfg(feature = "daemon")]
-mod default_config;
 pub mod describe;
 #[cfg(feature = "daemon")]
 pub mod hook_client;
@@ -22,7 +20,6 @@ pub mod init;
 pub mod installation;
 #[cfg(feature = "daemon")]
 mod loopback_http;
-pub mod managed_files;
 #[cfg(feature = "daemon")]
 mod management;
 #[cfg(feature = "daemon")]
@@ -63,6 +60,7 @@ mod events;
 mod external;
 mod label_guide;
 mod model;
+mod process_tree;
 mod recorder;
 mod secrets;
 mod telemetry;

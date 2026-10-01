@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
-use crate::consult::{Consult, ConsultBody};
+use crate::consult::{AuthorityAnswer, Consult, ConsultBody};
 use crate::secrets::redact_secrets;
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
+use appa_runtime_api::Ruling;
 
 /// The output-buffer bound for one module answer: the configured
 /// `max_body_bytes`, but never more than this. Applies to module calls
@@ -66,7 +67,7 @@ impl Stock {
     /// backends yields identical evidence. A consult of another kind yields no answer.
     pub(crate) fn answer(self, consult: &Consult) -> Option<serde_json::Value> {
         match (self, &consult.body) {
-            (Stock::Approve, ConsultBody::Authority { .. }) => Some(serde_json::json!({ "ruling": "approve" })),
+            (Stock::Approve, ConsultBody::Authority { .. }) => Some(AuthorityAnswer::to_wire(Ruling::Approve)),
             (Stock::RedactEmail, ConsultBody::Sanitizer { artifact, .. }) => {
                 Some(serde_json::json!({ "body": redact_email(&artifact.body) }))
             }

@@ -20,7 +20,8 @@ pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
 pub use crate::external::Diagnostics;
 pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
 pub use appa_runtime_api::{
-    Actor, OfferedRemedy, OutcomeBody, ProposedCall, Review, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
+    TrajectoryId,
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
@@ -127,7 +128,7 @@ impl PermitKey {
         hasher.update(tool.as_bytes());
         hasher.update([0]);
         hasher.update(appa_engine::params::canonical_bytes(arguments));
-        Self::Call(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+        Self::Call(crate::engine::hex(&hasher.finalize()))
     }
 
     /// How a record spells this key. The two variants can never mean each other, so the
@@ -458,10 +459,6 @@ pub enum OpenError {
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
     JevTrustRanks(String),
-    #[error(
-        "annotator {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
-    )]
-    UnsupportedClaudeCodePlatform(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
     #[error("storage failure: {0}")]
@@ -495,6 +492,10 @@ pub(crate) enum EventError {
     CallOutstanding,
     #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
     SpawnOutstanding,
+    #[error("a fan-out spawn released under this prompt still starts subagents; wait for it to finish")]
+    FanOutOutstanding,
+    #[error("a fan-out spawn needs the host's call id and prompt id: its subagents bind to it by prompt")]
+    FanOutUnkeyed,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -593,6 +594,8 @@ impl EventError {
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
+            | EventError::FanOutOutstanding
+            | EventError::FanOutUnkeyed
             | EventError::CallIdReused
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
@@ -1018,9 +1021,14 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
 }
 
 fn inventory_refused(error: appa_runtime_api::ParseRefusal) -> EventError {
-    let (appa_runtime_api::ParseRefusal::Malformed { detail } | appa_runtime_api::ParseRefusal::Unreadable { detail }) =
-        error;
-    EventError::InventoryRefused(detail)
+    EventError::InventoryRefused(refusal_detail(error))
+}
+
+/// What a refused parse says, whichever way it was refused.
+pub(crate) fn refusal_detail(refusal: appa_runtime_api::ParseRefusal) -> String {
+    let (appa_runtime_api::ParseRefusal::Unreadable { detail } | appa_runtime_api::ParseRefusal::Malformed { detail }) =
+        refusal;
+    detail
 }
 
 impl Runtime {
@@ -2005,7 +2013,13 @@ impl Runtime {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
             })?;
-        Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
+        Ok(Session::attach(
+            Arc::clone(&self.inner),
+            deployment,
+            root.clone(),
+            root,
+            EmbeddedPresentationOptions::default(),
+        ))
     }
 
     /// Reopens a persisted trajectory. There is no stored view: the next
@@ -2032,7 +2046,7 @@ impl Runtime {
         if !known {
             return Err(EventError::UnknownTrajectory);
         }
-        Ok(Session::attach_with_presentation(
+        Ok(Session::attach(
             Arc::clone(&self.inner),
             self.inner.deployment(),
             trajectory.clone(),
@@ -2288,7 +2302,15 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, RemedyArguments::default(), None, None).await
+        self.remedy(
+            acting,
+            offer,
+            RemedyArguments::default(),
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Execute one surfaced remedy offer with the arguments a plan declaring a subagent's
@@ -2299,7 +2321,15 @@ impl Runtime {
         offer: OfferId,
         arguments: RemedyArguments,
     ) -> RemedyOutcome {
-        self.remedy(acting, offer, arguments, None, None).await
+        self.remedy(
+            acting,
+            offer,
+            arguments,
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Executes an embedded remedy plan for an authenticated actor.
@@ -2316,7 +2346,7 @@ impl Runtime {
         args: ExecuteRemedyPlanArgs,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        self.execute_remedy_outcome(args, None, Some(actor), presentation, true)
+        self.execute_remedy_outcome(args, RemedyCaller::Embedded { actor, presentation })
             .await
     }
 
@@ -2331,24 +2361,30 @@ impl Runtime {
         self.render_remedy(
             self.execute_remedy_outcome(
                 args,
-                elicitation,
-                expected_actor,
-                EmbeddedPresentationOptions::default(),
-                false,
+                RemedyCaller::Daemon {
+                    elicitation,
+                    expected_actor,
+                },
             )
             .await,
         )
     }
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
-    async fn execute_remedy_outcome(
-        &self,
-        args: ExecuteRemedyPlanArgs,
-        elicitation: Option<&Elicitation>,
-        expected_actor: Option<&Actor>,
-        presentation: EmbeddedPresentationOptions,
-        strict_freshness: bool,
-    ) -> RemedyOutcome {
+    async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
+        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon {
+                elicitation,
+                expected_actor,
+            } => (
+                elicitation,
+                expected_actor,
+                EmbeddedPresentationOptions::default(),
+                false,
+            ),
+        };
         let quoted = match OfferId::parse(&args.offer_id) {
             Ok(quoted) => quoted,
             Err(reason) => {
@@ -2388,7 +2424,7 @@ impl Runtime {
                 reason: RemedyRefusal::UnknownOffer,
             }
         } else {
-            self.remedy_with_presentation(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
+            self.remedy(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
                 .await
         };
         // Recorded from the typed outcome, before rendering turns it into the text the
@@ -2430,6 +2466,21 @@ impl Runtime {
             },
         }
     }
+}
+
+/// Who executes a remedy. An embedded host names the actor it authenticated and how it
+/// renders; it is held to the offer being current. The daemon relays the peer's elicitation
+/// and the actor the connection vouches for, if any.
+enum RemedyCaller<'a> {
+    Embedded {
+        actor: &'a Actor,
+        presentation: EmbeddedPresentationOptions,
+    },
+    #[cfg(feature = "daemon")]
+    Daemon {
+        elicitation: Option<&'a Elicitation>,
+        expected_actor: Option<&'a Actor>,
+    },
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
@@ -2491,25 +2542,6 @@ impl Runtime {
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
     pub(crate) async fn remedy(
-        &self,
-        acting: &Actor,
-        quoted: OfferId,
-        arguments: RemedyArguments,
-        elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
-    ) -> RemedyOutcome {
-        self.remedy_with_presentation(
-            acting,
-            quoted,
-            arguments,
-            elicitation,
-            ruling,
-            EmbeddedPresentationOptions::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn remedy_with_presentation(
         &self,
         acting: &Actor,
         quoted: OfferId,
@@ -2828,6 +2860,27 @@ impl Runtime {
         )
     }
 
+    /// The host reported this actor's bound call finished. A fan-out spawn binds no new child
+    /// after it; recording a call the log never bound, or one already settled, adds nothing.
+    pub(crate) fn record_call_settled(&self, acting: &Actor, call_id: String) -> Result<(), EventError> {
+        let trajectory = acting_trajectory(acting);
+        let log = self.inner.log(&acting.root)?;
+        let open = !log.settled_calls().contains(&(trajectory, call_id.as_str()))
+            && log
+                .call_bindings()
+                .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id);
+        match open {
+            true => self.inner.append_host(
+                &acting.root,
+                &HostObservation::CallSettled {
+                    trajectory: trajectory.clone(),
+                    call_id,
+                },
+            ),
+            false => Ok(()),
+        }
+    }
+
     /// What the prompt left open is settled, and this actor's standing survives it.
     pub(crate) fn record_prompt_settled(&self, acting: &Actor) -> Result<(), EventError> {
         self.inner.append_host(
@@ -3106,9 +3159,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         match builtin {
             appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
                 return Err(OpenError::LlmNotConfigured(name.to_string()));
-            }
-            appa_policy::AnnotatorBuiltin::ClaudeCode if !cfg!(unix) => {
-                return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
             }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
@@ -3896,7 +3946,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         use appa_policy::AnnotatorBuiltin;
         use appa_runtime_api::inventory::ToolInventory;
 
-        let mut tables = vec![
+        let tables = vec![
             (
                 AnnotatorBuiltin::Llm,
                 "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
@@ -3905,10 +3955,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 AnnotatorBuiltin::Jev,
                 "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
             ),
+            (AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"),
         ];
-        if cfg!(unix) {
-            tables.push((AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"));
-        }
         // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
         const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\
                                [[policy.tool]]\nname = \"other\"\ndescription = \"Looks another record up.\"\nannotator = \"refused\"\n";
@@ -4247,7 +4295,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         cwd: None,
                     },
                     call_id: None,
-                    spawn: false,
+                    spawn: None,
+                    prompt: None,
                     ruling: None,
                 },
             )
@@ -5243,6 +5292,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::Prompt {
                 actor,
                 text: "go on".to_string(),
+                settles: None,
             },
         )
         .await;
@@ -5568,7 +5618,8 @@ url = "{url}"
                     cwd: None,
                 },
                 call_id: None,
-                spawn,
+                spawn: spawn.then_some(SpawnKind::Single),
+                prompt: None,
                 ruling: None,
             },
         )

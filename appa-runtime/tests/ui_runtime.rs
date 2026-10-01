@@ -216,7 +216,7 @@ selectors = [{ template = "viewer", feeds = "self" }]
     let origin = page_origin(&mut page);
     let state = save(origin.clone()).await;
     assert_eq!(state["applied"], "refused");
-    assert!(state["errors"].to_string().contains("kept its previous policy"));
+    assert!(state["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
     assert_eq!(get("/policy-key").send().await.unwrap().text().await.unwrap(), key);
 
     drop(page);

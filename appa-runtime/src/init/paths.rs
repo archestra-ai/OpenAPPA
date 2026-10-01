@@ -27,7 +27,7 @@ fn absolute_directory(path: PathBuf) -> Result<PathBuf, InitError> {
 
 /// The platform config file used by installed deployments and `appa describe`.
 pub fn installed_config_path() -> PathBuf {
-    match installed_config_dir() {
+    match installed_dir(Installed::Config) {
         Ok(Some(directory)) => directory.join("appa.toml"),
         Ok(None) => PathBuf::from("appa.toml"),
         Err(error) => {
@@ -39,7 +39,7 @@ pub fn installed_config_path() -> PathBuf {
 
 pub(super) fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     let home = user_home();
-    let config_dir = installed_config_dir()?.ok_or(InitError::MissingHome)?;
+    let config_dir = installed_dir(Installed::Config)?.ok_or(InitError::MissingHome)?;
     let data_dir = installed_data_dir()?.ok_or(InitError::MissingHome)?;
     let install_dir = if let Some(path) = env::var_os("APPA_INSTALL_DIR") {
         absolute_directory(PathBuf::from(path))?
@@ -89,51 +89,45 @@ pub(super) fn user_home() -> Option<PathBuf> {
     })
 }
 
-fn installed_config_dir() -> Result<Option<PathBuf>, InitError> {
-    if let Some(path) = env::var_os("APPA_CONFIG_DIR") {
+#[derive(Clone, Copy)]
+enum Installed {
+    Config,
+    Data,
+}
+
+fn installed_dir(kind: Installed) -> Result<Option<PathBuf>, InitError> {
+    let overridden = match kind {
+        Installed::Config => "APPA_CONFIG_DIR",
+        Installed::Data => "APPA_DATA_DIR",
+    };
+    if let Some(path) = env::var_os(overridden) {
         return absolute_directory(PathBuf::from(path)).map(Some);
     }
     #[cfg(target_os = "macos")]
-    return Ok(env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa")));
+    return Ok(user_home().map(|home| home.join("Library/Application Support/appa")));
     #[cfg(target_os = "windows")]
-    return Ok(env::var_os("APPDATA").map(PathBuf::from).map(|path| path.join("appa")));
+    return Ok(env::var_os(match kind {
+        Installed::Config => "APPDATA",
+        Installed::Data => "LOCALAPPDATA",
+    })
+    .map(|path| PathBuf::from(path).join("appa")));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Ok(env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("appa"))
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".config/appa"))
-        }))
+    {
+        let (xdg, under_home) = match kind {
+            Installed::Config => ("XDG_CONFIG_HOME", ".config/appa"),
+            Installed::Data => ("XDG_DATA_HOME", ".local/share/appa"),
+        };
+        Ok(env::var_os(xdg)
+            .map(|path| PathBuf::from(path).join("appa"))
+            .or_else(|| user_home().map(|home| home.join(under_home))))
+    }
 }
 
 pub(crate) fn installed_data_dir() -> Result<Option<PathBuf>, InitError> {
-    if let Some(path) = env::var_os("APPA_DATA_DIR") {
-        return absolute_directory(PathBuf::from(path)).map(Some);
-    }
-    #[cfg(target_os = "macos")]
-    return Ok(env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa")));
-    #[cfg(target_os = "windows")]
-    return Ok(env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|path| path.join("appa")));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Ok(env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("appa"))
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".local/share/appa"))
-        }))
+    installed_dir(Installed::Data)
 }
 
-pub(super) fn appa_filename() -> &'static str {
+pub(crate) fn appa_filename() -> &'static str {
     if cfg!(windows) { "appa.exe" } else { "appa" }
 }
 

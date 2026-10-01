@@ -155,7 +155,14 @@ pub enum HostObservation {
         trajectory: TrajectoryId,
         call_id: String,
         dispatch: DispatchId,
+        /// The host prompt a fan-out spawn was released under: its children name that prompt
+        /// and no call, so this is what binds them to the spawn's fork.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
+    /// The host reported this bound call finished. A fan-out spawn's fork binds no new child
+    /// after it.
+    CallSettled { trajectory: TrajectoryId, call_id: String },
     /// This actor stands behind this key, with the ruling its harness attached where it
     /// reviewed through a channel of its own.
     Vouched {
@@ -189,6 +196,7 @@ impl HostObservation {
             Self::Vouched { key, .. } | Self::Claimed { key, .. } | Self::Released { key, .. } => Some(key),
             Self::Inventory { .. }
             | Self::CallBound { .. }
+            | Self::CallSettled { .. }
             | Self::PromptSeen { .. }
             | Self::PromptSettled { .. }
             | Self::TurnEnded { .. } => None,
@@ -219,6 +227,7 @@ pub struct CallBinding<'a> {
     pub trajectory: &'a TrajectoryId,
     pub call_id: &'a str,
     pub dispatch: &'a DispatchId,
+    pub prompt: Option<&'a str>,
 }
 
 impl Log {
@@ -254,13 +263,26 @@ impl Log {
                 trajectory,
                 call_id,
                 dispatch,
+                prompt,
             } => Some(CallBinding {
                 trajectory,
                 call_id,
                 dispatch,
+                prompt: prompt.as_deref(),
             }),
             _ => None,
         })
+    }
+
+    /// The bound calls the host reported finished, as (trajectory, call id).
+    pub fn settled_calls(&self) -> std::collections::BTreeSet<(&TrajectoryId, &str)> {
+        self.host
+            .iter()
+            .filter_map(|record| match &record.observation {
+                HostObservation::CallSettled { trajectory, call_id } => Some((trajectory, call_id.as_str())),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -958,6 +980,7 @@ mod tests {
             trajectory: root(),
             call_id: "toolu_1".to_string(),
             dispatch: dispatch.clone(),
+            prompt: None,
         };
         store.append_host(&log, &punctuation(), &bound).unwrap();
 
@@ -1597,6 +1620,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!("00".repeat(32))).unwrap(),
                 0,
             ),
+            prompt: None,
         };
         let bindings = |log: &Log| {
             log.call_bindings()

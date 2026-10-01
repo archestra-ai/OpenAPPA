@@ -78,10 +78,11 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, HookEvent, OutcomeBody, ParseRefusal, PromptKey, ProposedCall, SpawnKind, SpawnRef, ToolOutcome,
+    TrajectoryId,
 };
 
-use crate::identity::is_spawn_tool;
+use crate::identity::spawn_kind;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireEvent {
@@ -111,7 +112,17 @@ pub(crate) struct WireEvent {
     /// annotator's inputs read it on a tool call.
     #[serde(default)]
     cwd: Option<String>,
+    /// Claude Code's id for the user prompt the event belongs to. A `Workflow` agent's hooks
+    /// carry the id of the prompt its `Workflow` call was made under.
+    #[serde(default)]
+    prompt_id: Option<String>,
 }
+
+/// The `agent_type` of an agent a `Workflow` script started.
+const WORKFLOW_AGENT: &str = "workflow-subagent";
+
+/// The tool an agent started with a return schema calls to return: its input is the return.
+const STRUCTURED_OUTPUT: &str = "StructuredOutput";
 
 pub(crate) fn non_empty(text: Option<&str>) -> Option<&str> {
     text.filter(|text| !text.is_empty())
@@ -130,6 +141,23 @@ impl WireEvent {
     /// id names nothing.
     fn agent(&self) -> Option<&str> {
         non_empty(self.agent_id.as_deref())
+    }
+
+    fn prompt_key(&self) -> Option<PromptKey> {
+        non_empty(self.prompt_id.as_deref()).map(|prompt| PromptKey(prompt.to_string()))
+    }
+
+    fn workflow_agent(&self) -> bool {
+        self.agent_type.as_deref() == Some(WORKFLOW_AGENT)
+    }
+
+    /// The prompt a call serves: the session's own calls name theirs, and a `Workflow`
+    /// agent's calls name the prompt its `Workflow` was released under.
+    fn call_prompt(&self) -> Option<PromptKey> {
+        match (self.agent(), self.workflow_agent()) {
+            (None, _) | (Some(_), true) => self.prompt_key(),
+            (Some(_), false) => None,
+        }
     }
 
     fn actor(&self) -> Actor {
@@ -226,25 +254,43 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         "UserPromptSubmit" => match event.prompt.clone() {
             Some(text) => Ok(Some(HookEvent::Prompt {
                 actor: event.actor(),
+                settles: settled_call(&text),
                 text,
             })),
             None => Err(malformed("UserPromptSubmit without a prompt")),
         },
-        "PreToolUse" => match event.call() {
-            Some(call) => {
-                let spawn = is_spawn_tool(&call.tool);
-                Ok(Some(HookEvent::ToolCall {
-                    actor: event.actor(),
-                    call,
-                    call_id: event.tool_use_id.clone(),
-                    spawn,
-                    ruling: None,
-                }))
+        "PreToolUse" => match (event.call(), event.agent()) {
+            (Some(call), Some(agent)) if call.tool == STRUCTURED_OUTPUT => {
+                match serde_json::from_str::<serde_json::Value>(call.arguments.get()) {
+                    Ok(input) => Ok(Some(HookEvent::ChildReturn {
+                        root: event.root(),
+                        child: event.child_id(agent),
+                        value: input.to_string(),
+                    })),
+                    Err(error) => Err(malformed(&format!(
+                        "a StructuredOutput input that is not JSON: {error}"
+                    ))),
+                }
             }
-            None => Err(malformed("PreToolUse without a tool call")),
+            (Some(call), _) => Ok(Some(HookEvent::ToolCall {
+                actor: event.actor(),
+                spawn: spawn_kind(&call.tool),
+                prompt: event.call_prompt(),
+                call,
+                call_id: event.tool_use_id.clone(),
+                ruling: None,
+            })),
+            (None, _) => Err(malformed("PreToolUse without a tool call")),
         },
+        // A subagent's structured return crossed at its `PreToolUse`; the tool's run reports
+        // nothing further.
+        "PostToolUse" | "PostToolUseFailure"
+            if event.agent().is_some() && event.tool_name.as_deref() == Some(STRUCTURED_OUTPUT) =>
+        {
+            Ok(None)
+        }
         "PostToolUse" => match event.call() {
-            Some(call) if is_spawn_tool(&call.tool) => {
+            Some(call) if spawn_kind(&call.tool) == Some(SpawnKind::Single) => {
                 let (child, value) = event.spawn_return();
                 Ok(Some(HookEvent::SpawnResult {
                     actor: event.actor(),
@@ -281,13 +327,19 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             })),
             None => Err(malformed("a tool outcome without its tool call")),
         },
-        "SubagentStart" => match event.agent() {
-            Some(agent) => Ok(Some(HookEvent::ChildStart {
+        "SubagentStart" => match (event.agent(), event.workflow_agent(), event.prompt_key()) {
+            (None, _, _) => Err(malformed("SubagentStart without an agent id")),
+            (Some(_), true, None) => Err(malformed("a Workflow agent's SubagentStart without its prompt_id")),
+            (Some(agent), true, Some(prompt)) => Ok(Some(HookEvent::ChildStart {
+                root: event.root(),
+                child: event.child_id(agent),
+                spawn: SpawnRef::FanOut(prompt),
+            })),
+            (Some(agent), false, _) => Ok(Some(HookEvent::ChildStart {
                 root: event.root(),
                 child: event.child_id(agent),
                 spawn: SpawnRef::InFlight,
             })),
-            None => Err(malformed("SubagentStart without an agent id")),
         },
         "Stop" | "StopFailure" => Ok(Some(HookEvent::TurnEnd { actor: event.actor() })),
         // Without the agent id this would name the root, whose one open
@@ -315,6 +367,15 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
     }
 }
 
+/// The call a background task's completion notice reports finished. Claude Code delivers it as a
+/// prompt opening with `<task-notification>` and naming the call in `<tool-use-id>`.
+fn settled_call(prompt: &str) -> Option<String> {
+    let notice = prompt.trim_start().strip_prefix("<task-notification>")?;
+    let (_, rest) = notice.split_once("<tool-use-id>")?;
+    let (call, _) = rest.split_once("</tool-use-id>")?;
+    non_empty(Some(call.trim())).map(str::to_string)
+}
+
 pub(crate) fn map_outcome(response: Option<&serde_json::Value>) -> ToolOutcome {
     match response {
         None => ToolOutcome::Indeterminate,
@@ -329,7 +390,8 @@ mod tests {
     use super::*;
     use crate::fixtures::*;
     use appa_runtime_api::{
-        Actor, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+        Actor, HookEvent, OutcomeBody, ParseRefusal, PromptKey, ProposedCall, SpawnKind, SpawnRef, ToolOutcome,
+        TrajectoryId,
     };
     #[test]
     fn an_unreadable_body_is_refused_with_the_wire_detail() {
@@ -489,7 +551,8 @@ mod tests {
                     cwd: None,
                 },
                 call_id: Some("toolu-1".to_string()),
-                spawn: false,
+                spawn: None,
+                prompt: None,
                 ruling: None,
             })),
         );
@@ -555,7 +618,7 @@ mod tests {
             });
             match parse_value(&event) {
                 Ok(Some(HookEvent::ToolCall { spawn, call, .. })) => {
-                    assert!(spawn, "{tool} is the spawn");
+                    assert_eq!(spawn, Some(SpawnKind::Single), "{tool} is the spawn");
                     assert_eq!(call.tool, tool);
                 }
                 other => panic!("expected a ToolCall event, got {other:?}"),
@@ -589,6 +652,7 @@ mod tests {
                     child: Some(TrajectoryId("cc:s1:a1".to_string())),
                 },
                 text: "work".to_string(),
+                settles: None,
             })),
         );
     }
@@ -897,8 +961,8 @@ mod tests {
             serde_json::json!({}),
             serde_json::Value::Null,
         ];
-        for tool in ["Agent", "Task", "Bash"] {
-            let spawn = identified(tool).expect("identifies").spawn;
+        for tool in ["Agent", "Task", "Workflow", "Bash"] {
+            let spawn = identified(tool).expect("identifies").spawn == Some(SpawnKind::Single);
             for response in &responses {
                 let mut event = agent_post_tool_use(response.clone());
                 event["tool_name"] = serde_json::Value::String(tool.to_string());
@@ -910,5 +974,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn workflow_hook(name: &str, fields: serde_json::Value) -> serde_json::Value {
+        let mut event = serde_json::json!({
+            "hook_event_name": name,
+            "session_id": "s1",
+            "agent_id": "a1",
+            "agent_type": "workflow-subagent",
+            "prompt_id": "p1",
+        });
+        for (key, value) in fields.as_object().expect("an object").clone() {
+            event[key] = value;
+        }
+        event
+    }
+
+    #[test]
+    fn a_workflow_agent_starts_under_the_prompt_its_workflow_was_released_in() {
+        match parse_value(&workflow_hook("SubagentStart", serde_json::json!({}))) {
+            Ok(Some(HookEvent::ChildStart { child, spawn, .. })) => {
+                assert_eq!(child.0, "cc:s1:a1");
+                assert_eq!(spawn, SpawnRef::FanOut(PromptKey("p1".to_string())));
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut unkeyed = workflow_hook("SubagentStart", serde_json::json!({}));
+        unkeyed["prompt_id"] = serde_json::Value::Null;
+        assert!(matches!(parse_value(&unkeyed), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    #[test]
+    fn only_the_session_and_its_workflow_agents_name_the_prompt_a_call_serves() {
+        let call = |agent_type: Option<&str>, agent_id: Option<&str>| {
+            let mut event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "prompt_id": "p1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+            });
+            if let Some(agent_id) = agent_id {
+                event["agent_id"] = serde_json::Value::String(agent_id.to_string());
+            }
+            if let Some(agent_type) = agent_type {
+                event["agent_type"] = serde_json::Value::String(agent_type.to_string());
+            }
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolCall { prompt, .. })) => prompt,
+                other => panic!("{other:?}"),
+            }
+        };
+        let keyed = Some(PromptKey("p1".to_string()));
+        assert_eq!(call(None, None), keyed);
+        assert_eq!(call(Some("workflow-subagent"), Some("a1")), keyed);
+        assert_eq!(call(Some("Explore"), Some("a1")), None);
+    }
+
+    #[test]
+    fn a_subagents_structured_output_is_its_return_and_its_run_reports_nothing() {
+        let input = serde_json::json!({"b": [1, 2], "a": "x"});
+        let pre = workflow_hook(
+            "PreToolUse",
+            serde_json::json!({"tool_name": "StructuredOutput", "tool_input": input, "tool_use_id": "t1"}),
+        );
+        match parse_value(&pre) {
+            Ok(Some(HookEvent::ChildReturn { child, value, .. })) => {
+                assert_eq!(child.0, "cc:s1:a1");
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&value).expect("JSON"), input);
+            }
+            other => panic!("{other:?}"),
+        }
+        let post = workflow_hook(
+            "PostToolUse",
+            serde_json::json!({"tool_name": "StructuredOutput", "tool_input": input, "tool_response": "ok"}),
+        );
+        assert!(matches!(parse_value(&post), Ok(None)));
+        let root_call = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "StructuredOutput",
+            "tool_input": input,
+        });
+        assert!(matches!(parse_value(&root_call), Ok(Some(HookEvent::ToolCall { .. }))));
+    }
+
+    #[test]
+    fn a_task_notification_settles_the_call_it_names() {
+        let prompt = |text: &str| {
+            let event = serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": text,
+            });
+            match parse_value(&event) {
+                Ok(Some(HookEvent::Prompt { settles, .. })) => settles,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            prompt(
+                "<task-notification>\n<task-id>w1</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n<status>completed</status>"
+            ),
+            Some("toolu_9".to_string())
+        );
+        assert_eq!(prompt("what does <tool-use-id>toolu_9</tool-use-id> mean?"), None);
+        assert_eq!(prompt("list the files"), None);
     }
 }

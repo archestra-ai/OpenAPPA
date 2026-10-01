@@ -204,6 +204,8 @@ jobs:
             expected_digest=$(shasum -a 256 "./${EXECUTABLE}" | cut -d' ' -f1)
           fi
 
+          # The runtime serves only a policy someone wrote; the smallest one opens.
+          printf '[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n' >appa.toml
           "./${EXECUTABLE}" runtime >runtime.stdout.log 2>runtime.stderr.log &
           runtime_pid=$!
           cleanup() {
@@ -214,7 +216,6 @@ jobs:
           for _ in {1..30}; do
             if health="$(curl --fail --silent --max-time 1 http://127.0.0.1:8787/health 2>/dev/null)"; then
               test "$health" = "ok"
-              test -s appa.toml
               # Health alone only proves something holds the port. The
               # fingerprint route answers with the running executable's own
               # digest, so it proves the responder is the binary just unpacked.
@@ -244,6 +245,8 @@ jobs:
           $package = $verify
           $stdout = Join-Path $package "runtime.stdout.log"
           $stderr = Join-Path $package "runtime.stderr.log"
+          # The runtime serves only a policy someone wrote; the smallest one opens.
+          Set-Content -Path (Join-Path $package "appa.toml") -Value "[policy]`nversion = 2`n`n[externals]`ntimeout_ms = 5000`nmax_body_bytes = 65536" -NoNewline
           $start = @{
             FilePath = Join-Path $package $env:EXECUTABLE
             ArgumentList = @("runtime")
@@ -271,9 +274,6 @@ jobs:
             if (-not $healthy) {
               if (Test-Path $stderr) { Get-Content $stderr }
               throw "Extracted runtime did not become healthy"
-            }
-            if (-not (Test-Path (Join-Path $package "appa.toml"))) {
-              throw "Extracted runtime did not create appa.toml"
             }
             $cli = Join-Path $package $env:EXECUTABLE
             if (-not (Test-Path $cli)) {

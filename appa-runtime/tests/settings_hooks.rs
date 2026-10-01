@@ -10,7 +10,7 @@
 //! landed.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -21,48 +21,6 @@ mod common;
 mod init_fixture;
 use common::http;
 use init_fixture::{Fixture, executable};
-
-/// A runtime stand-in on a free loopback port. Records the paths it is asked
-/// for and answers every hook, so the test can assert that the bytes a hook
-/// posted arrived at the deployment's own endpoint.
-fn recording_runtime() -> (String, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-    let url = format!("http://{}", listener.local_addr().expect("the bound address"));
-    let (record, recorded) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        for connection in listener.incoming() {
-            let Ok(mut connection) = connection else {
-                return;
-            };
-            let mut reader = BufReader::new(connection.try_clone().expect("the stream clones"));
-            let mut request = String::new();
-            if reader.read_line(&mut request).is_err() {
-                continue;
-            }
-            let request = request.trim_end().to_owned();
-            // A healthy answer, so the SessionStart entry finds the runtime up
-            // and goes straight on to its post rather than starting one; a
-            // hook is acknowledged on the wire.
-            let (content_type, body) = if request.starts_with("GET /health") {
-                ("text/plain", "ok")
-            } else {
-                ("application/json", r#"{"protocol":1,"decision":"ack"}"#)
-            };
-            if record.send(request).is_err() {
-                return;
-            }
-            let answer = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = connection.write_all(answer.as_bytes());
-            let _ = connection.flush();
-        }
-    });
-
-    (url, recorded)
-}
 
 /// An endpoint nothing is listening on: bound to learn a free port, then
 /// released. A start probing this one finds no runtime and proceeds to start
@@ -77,13 +35,12 @@ fn dead_endpoint() -> String {
 #[test]
 fn the_written_entries_run_the_deployed_binary_and_post_to_the_deployment_endpoint() {
     let fixture = Fixture::new();
-    let (url, recorded) = recording_runtime();
-    let output = fixture
-        .activate()
-        .env("APPA_ENDPOINT", &url)
-        .output()
-        .expect("appa activates");
+    let output = fixture.activate().output().expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    // From here on the stand-in at the deployment's endpoint records what the
+    // entries ask of it; activation's own probes are behind us.
+    let (record, recorded) = mpsc::channel();
+    fixture.answers().recorder = Some(record);
 
     // A hostile appa, first on PATH, that fails loudly and records the fact.
     let poison_dir = fixture.root.join("poison");

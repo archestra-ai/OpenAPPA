@@ -110,6 +110,7 @@ pub(crate) enum HookKind {
     ToolResult,
     ChildStart,
     ChildEnd,
+    ChildReturn,
     SpawnResult,
     /// The body did not parse.
     Unparsable,
@@ -542,10 +543,7 @@ fn clamp_name(name: String) -> String {
     if name.len() <= MAX_NAME_BYTES {
         return name;
     }
-    let mut cut = MAX_NAME_BYTES - ELISION.len();
-    while cut > 0 && !name.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = name.floor_char_boundary(MAX_NAME_BYTES - ELISION.len());
     let mut clamped = name[..cut].to_string();
     clamped.push_str(ELISION);
     clamped

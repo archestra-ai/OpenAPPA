@@ -61,12 +61,16 @@ pub(super) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_config;
     use std::path::PathBuf;
 
-    /// The policy version this build's default config declares.
+    const SHIPPED: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../marketplace/plugins/claude-code/default.appa.toml"
+    ));
+
+    /// The policy version the shipped Claude Code policy declares.
     fn template_policy_version() -> i64 {
-        toml::from_str::<toml::Value>(&default_config::text())
+        toml::from_str::<toml::Value>(SHIPPED)
             .expect("the bundled default config parses")
             .get("policy")
             .and_then(|policy| policy.get("version"))
@@ -78,7 +82,7 @@ mod tests {
     fn a_config_the_runtime_could_not_compose_stops_activation() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
-        fs::write(&config, default_config::text().as_bytes()).expect("the default config is written");
+        fs::write(&config, SHIPPED).expect("the shipped policy is written");
         verify_config(&config).expect("the shipped default composes");
 
         let ahead = template_policy_version() + 1;

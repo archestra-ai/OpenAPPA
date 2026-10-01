@@ -7,7 +7,8 @@ use appa_runtime_api::{Actor, ProposedCall, TrajectoryId};
 
 /// The family children a call's arguments name by Claude Code's own file spellings: a
 /// background subagent's output file (`tasks/<agent>.output`) and a persisted subagent
-/// transcript (`subagents/agent-<agent>.jsonl`). Every string leaf of the arguments is scanned,
+/// transcript (`subagents/agent-<agent>.jsonl`, or `subagents/workflows/wf_<run>/agent-<agent>.jsonl`
+/// for an agent a `Workflow` started). A workflow run's own `journal.jsonl` names no child. Every string leaf of the arguments is scanned,
 /// so a path inside a shell command is caught as a `Read` path is. The default spellings only:
 /// a renamed copy, a symlink, or a relative path the shell resolves is not.
 ///
@@ -32,6 +33,7 @@ pub(crate) fn collect_agent_files(value: &serde_json::Value, agents: &mut Vec<St
         serde_json::Value::String(text) => {
             agents.extend(agent_file_ids(text, "tasks/", ".output"));
             agents.extend(agent_file_ids(text, "subagents/agent-", ".jsonl"));
+            agents.extend(workflow_agent_ids(text));
         }
         serde_json::Value::Array(items) => items.iter().for_each(|item| collect_agent_files(item, agents)),
         serde_json::Value::Object(fields) => fields.values().for_each(|field| collect_agent_files(field, agents)),
@@ -45,21 +47,47 @@ pub(crate) fn collect_agent_files(value: &serde_json::Value, agents: &mut Vec<St
 /// neither documented file — while a path inside a shell command or a quoted argument still
 /// is one, because a separator, a quote or the end of the string ends the token.
 pub(crate) fn agent_file_ids(text: &str, prefix: &str, suffix: &str) -> Vec<String> {
-    let is_id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-    // A name character continues the file name a match would have to be all of. `.`
-    // separates one extension from the next, so it belongs to the name, not to its edge.
-    let is_name_char = move |c: char| is_id_char(c) || c == '.';
     text.match_indices(prefix)
         .filter_map(|(at, _)| {
             if text[..at].chars().next_back().is_some_and(is_name_char) {
                 return None;
             }
-            let rest = &text[at + prefix.len()..];
-            let id: String = rest.chars().take_while(|c| is_id_char(*c)).collect();
-            let tail = rest.strip_prefix(id.as_str())?.strip_prefix(suffix)?;
-            (!id.is_empty() && !tail.starts_with(is_name_char)).then_some(id)
+            file_id(&text[at + prefix.len()..], suffix)
         })
         .collect()
+}
+
+/// Every agent a `subagents/workflows/wf_<run>/agent-<agent>.jsonl` token in `text` names.
+fn workflow_agent_ids(text: &str) -> Vec<String> {
+    const RUNS: &str = "subagents/workflows/wf_";
+    text.match_indices(RUNS)
+        .filter_map(|(at, _)| {
+            if text[..at].chars().next_back().is_some_and(is_name_char) {
+                return None;
+            }
+            let rest = &text[at + RUNS.len()..];
+            let run: String = rest.chars().take_while(|c| is_id_char(*c)).collect();
+            let file = rest.strip_prefix(run.as_str())?.strip_prefix("/agent-")?;
+            file_id(file, ".jsonl").filter(|_| !run.is_empty())
+        })
+        .collect()
+}
+
+/// The id `rest` opens with when `<id><suffix>` is all of the file name.
+fn file_id(rest: &str, suffix: &str) -> Option<String> {
+    let id: String = rest.chars().take_while(|c| is_id_char(*c)).collect();
+    let tail = rest.strip_prefix(id.as_str())?.strip_prefix(suffix)?;
+    (!id.is_empty() && !tail.starts_with(is_name_char)).then_some(id)
+}
+
+fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// A name character continues the file name a match would have to be all of. `.` separates
+/// one extension from the next, so it belongs to the name, not to its edge.
+fn is_name_char(c: char) -> bool {
+    is_id_char(c) || c == '.'
 }
 
 #[cfg(test)]
@@ -139,5 +167,25 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn a_workflow_agents_transcript_names_it_and_the_runs_journal_names_no_one() {
+        let run = "/p/s1/subagents/workflows/wf_deeb27a3-328";
+        assert_eq!(
+            named_children(
+                "Read",
+                serde_json::json!({"file_path": format!("{run}/agent-a23f7608a7b6e4a0f.jsonl")})
+            ),
+            vec![TrajectoryId("cc:s1:a23f7608a7b6e4a0f".to_string())]
+        );
+        assert!(named_children("Read", serde_json::json!({"file_path": format!("{run}/journal.jsonl")})).is_empty());
+        assert!(
+            named_children(
+                "Read",
+                serde_json::json!({"file_path": format!("{run}/agent-a1.jsonl.bak")})
+            )
+            .is_empty()
+        );
     }
 }

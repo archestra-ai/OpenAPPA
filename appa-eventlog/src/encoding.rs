@@ -146,6 +146,11 @@ mod tests {
                     serde_json::from_value(serde_json::json!("ab".repeat(32))).expect("a digest decodes"),
                     7,
                 ),
+                prompt: Some("prompt-1".to_string()),
+            },
+            HostObservation::CallSettled {
+                trajectory: root(),
+                call_id: "toolu_1".to_string(),
             },
             HostObservation::Vouched {
                 actor: actor.clone(),
@@ -179,7 +184,8 @@ mod tests {
         let facts = r#"[{"Boundary":{"trajectory":"cc:root","kind":"VoidReturn"}}]"#;
         let hosts = [
             r#"{"kind":"inventory","actor":"cc:root","adapter":"kagent","inventory":{"tools":[{"name":"read","tool":"mcp:demo/read"}],"sources":[]}}"#,
-            r#"{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{"trajectory":"cc:root","digest":"abababababababababababababababababababababababababababababababab","occurrence":7}}"#,
+            r#"{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{"trajectory":"cc:root","digest":"abababababababababababababababababababababababababababababababab","occurrence":7},"prompt":"prompt-1"}"#,
+            r#"{"kind":"call_settled","trajectory":"cc:root","call_id":"toolu_1"}"#,
             r#"{"kind":"vouched","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","ruling":"approve"}"#,
             r#"{"kind":"claimed","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","until":{"secs_since_epoch":1700000000,"nanos_since_epoch":5}}"#,
             r#"{"kind":"released","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one"}"#,

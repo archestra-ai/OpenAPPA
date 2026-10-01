@@ -796,12 +796,6 @@ pub enum ConfigError {
     LlmNotConfigured { section: &'static str, name: String },
     #[error("the {section} entry {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { section: &'static str, name: String },
-    #[error("the {section} entry {name:?} uses a local command, which this platform does not support")]
-    UnsupportedCommandPlatform { section: &'static str, name: String },
-    #[error(
-        "the {section} entry {name:?} names the builtin \"claude-code\", which runs a local process this platform does not support"
-    )]
-    UnsupportedClaudeCodePlatform { section: &'static str, name: String },
     #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
     HostedKey { key: String },
     #[error("the hosted {section} entry {name:?} runs a local command, which a hosted document cannot declare")]
@@ -886,15 +880,6 @@ impl Section {
             }
             Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
         };
-        // The subscription transport is a local process under a process group, which only
-        // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
-        #[cfg(not(unix))]
-        if builtin == CLAUDE_CODE_BUILTIN {
-            return Err(ConfigError::UnsupportedClaudeCodePlatform {
-                section: self.name(),
-                name: name.to_string(),
-            });
-        }
         if !allowed {
             return Err(ConfigError::InvalidBuiltinName {
                 section: self.name(),
@@ -2241,25 +2226,14 @@ fn resolve_command(
             prefix: PROVIDER_CREDENTIAL_PREFIX,
         });
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (argv, origins, token_env);
-        return Err(ConfigError::UnsupportedCommandPlatform {
-            section: section.name(),
-            name: name.to_string(),
-        });
-    }
-    #[cfg(unix)]
-    {
-        Ok(ResolverCommand {
-            argv,
-            cwd: origins
-                .get(&section.origin_key(name))
-                .expect("every composed command binding records its source")
-                .clone(),
-            token_env,
-        })
-    }
+    Ok(ResolverCommand {
+        argv,
+        cwd: origins
+            .get(&section.origin_key(name))
+            .expect("every composed command binding records its source")
+            .clone(),
+        token_env,
+    })
 }
 
 /// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
@@ -2482,7 +2456,6 @@ mod tests {
 
     #[cfg(feature = "daemon")]
     #[test]
-    #[cfg(unix)]
     fn root_command_metadata_and_include_origins_compose() {
         let dir = tempfile::tempdir().unwrap();
         let root_dir = dir.path().canonicalize().unwrap();
@@ -2545,8 +2518,7 @@ mod tests {
     /// The transport one resolved entry selected, the same view over every section.
     enum Bound<'a> {
         Url,
-        // Config rejects command bindings on non-Unix hosts.
-        Command(#[cfg_attr(not(unix), allow(dead_code))] &'a ResolverCommand),
+        Command(&'a ResolverCommand),
         Builtin(&'a str),
         Readers,
     }
@@ -2669,7 +2641,6 @@ mod tests {
 
     /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
     /// forwarded to the child that reads it, and only from the passthrough namespace.
-    #[cfg(unix)]
     #[test]
     fn a_command_forwards_one_credential_and_only_from_the_passthrough_namespace() {
         let with = |token_env: &str| {
@@ -2770,12 +2741,9 @@ mod tests {
         for section in Section::ALL {
             let config = parse(&entry(section, "url = \"https://x.internal\"")).expect("a url binds everywhere");
             assert!(matches!(bound(section, &config, "x"), Some(Bound::Url)));
-            #[cfg(unix)]
-            {
-                let config =
-                    parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
-                assert!(matches!(bound(section, &config, "x"), Some(Bound::Command(_))));
-            }
+            let config =
+                parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
+            assert!(matches!(bound(section, &config, "x"), Some(Bound::Command(_))));
             assert!(
                 matches!(
                     parse(&entry(section, "command = [\"\"]")),
@@ -2817,7 +2785,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_audience_lookup_names_a_direct_target_and_a_roster_is_only_a_target() {
         let with = |audience: &str| format!("{MINIMAL}\n{audience}\n");
@@ -3026,26 +2993,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(unix))]
-    #[test]
-    fn a_command_binding_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.annotators.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
-        assert!(matches!(
-            parse(&text),
-            Err(ConfigError::UnsupportedCommandPlatform { name, .. }) if name == "classifier"
-        ));
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.sanitizers.classifier]\nbuiltin = \"claude-code\"\n");
-        assert!(matches!(
-            parse(&text),
-            Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
-        ));
-    }
-
     #[test]
     fn a_builtin_name_outside_the_grammar_is_refused() {
         for bad in ["Upper", "under_score", "-lead", ""] {
@@ -3234,7 +3181,6 @@ mod tests {
 
     /// A command's working directory is its declaring file's, in every section, and the
     /// composed bytes record it so a stored deployment reloads the same binding.
-    #[cfg(unix)]
     #[test]
     fn included_command_paths_are_relative_to_their_declaring_configs() {
         let dir = tempfile::tempdir().expect("temp directory");

@@ -2,14 +2,10 @@
 //! its readers may see, code run with the token needs a person, and nothing records an effect.
 mod common;
 
-use appa_runtime::{
-    api::{AuditEvent, RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
-};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -109,19 +105,7 @@ builtin = "approve"
 "#,
     )
     .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    session_runtime(dir.path(), &path).await
 }
 
 /// Runs the call, taking the remedy the runtime offers for a narrowing first.

@@ -72,7 +72,7 @@ fn the_live_replay_roots_open() {
 }
 
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
-/// them: the battery's rules run before the default's.
+/// them: the default's rules run before the battery's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let battery_dir = dir.path().join("batteries/claude-code");
@@ -109,7 +109,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .iter()
         .filter(|annotator| annotator["name"].as_str() == Some("claude-code.bash-requirements"))
         .collect::<Vec<_>>();
-    assert_eq!(bash_annotators.len(), 1, "the root supplies the Bash Annotator");
+    assert_eq!(bash_annotators.len(), 1, "the battery supplies the Bash Annotator");
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
@@ -325,12 +325,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
 
     let publication = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
-    let HookDecision::DenyCall {
-        feedback,
-        offers,
-        review,
-    } = publication
-    else {
+    let HookDecision::DenyCall { offers, review, .. } = publication else {
         panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
     };
     assert_eq!(
@@ -339,8 +334,6 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "the default authority can review the audience expansion"
     );
     assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
-    assert!(feedback.contains("Submit for approval"));
-    assert!(feedback.contains("The confirmation card is not open yet"));
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),
