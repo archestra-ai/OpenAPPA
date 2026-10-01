@@ -45,11 +45,21 @@ service:
   # Dedicated vouched MCP surface attached only to appa-guide.
   guidePort: 18788
 
-# Enable this policy with at least one NetworkPolicyPeer to restrict which
-# pods can reach the runtime Service.
+# Restricts which pods reach the runtime port. /hook is unauthenticated, so
+# this policy is its boundary. The default peer is kagent Agent pods in the
+# kagent namespace: kagent labels each with app=kagent and kagent=<agent name>.
 networkPolicy:
-  enabled: false
-  ingress: []
+  enabled: true
+  ingress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kagent
+      podSelector:
+        matchLabels:
+          app: kagent
+        matchExpressions:
+          - key: kagent
+            operator: Exists
 
 resources:
   requests:

@@ -151,30 +151,55 @@ the live key during template rendering; a concurrent later write wins.
 
 ## Network access
 
-Without the optional general NetworkPolicy, any pod that can reach the
-Service can call `/hook`, remedy-only `/mcp`, `/health`, and `/batteries`.
-When appa-guide is enabled, its dedicated NetworkPolicy restricts port
-`18788` to the guide pod. A one-shot vouch still refuses a direct
-`/guide-mcp` call that never passed a gated ToolCall. `/hook` is
-unauthenticated. A client that can reach both `/hook` and `/guide-mcp`
-can complete the gated approval path. Enable a CNI that enforces
-NetworkPolicy, or the optional general NetworkPolicy. The vouch is not a
-substitute for that network boundary. The runtime returns `403` on
-`/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
-network peer is loopback. Treat the Service as trusted internal
-infrastructure. Restrict callers by enabling the chart policy and listing
-Kubernetes `NetworkPolicyPeer` objects:
+`/hook` and remedy-only `/mcp` are unauthenticated. For kagent, `/hook`
+accepts the human ruling on a gated call, so any pod that reaches the
+runtime port can submit a ruling. The chart NetworkPolicy is the
+boundary for these routes. It is on by default and requires a CNI that
+enforces NetworkPolicy; without one, every pod that reaches the Service
+can call `/hook`.
+
+The default policy admits the runtime port only from these peers:
+
+- kagent Agent pods in the `kagent` namespace. kagent labels each Agent
+  pod `app: kagent` and `kagent: <agent name>`. Its controller and MCP
+  tool-server pods do not carry these labels.
+- pods of this release, for the chart's own connection test.
+- the appa-guide pod, on both ports, when `appaGuide` is enabled.
+
+Agents in other namespaces need a peer of their own.
+`networkPolicy.ingress` is a list of Kubernetes `NetworkPolicyPeer`
+objects. It replaces the default peer, so list every namespace whose
+agents call the runtime:
 
 ```yaml
 networkPolicy:
-  enabled: true
   ingress:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: kagent
+      podSelector:
+        matchLabels:
+          app: kagent
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: team-agents
+      podSelector:
+        matchLabels:
+          app: kagent
 ```
 
 The chart refuses an enabled policy with no peers.
+
+The runtime also enforces two checks of its own. It refuses every request
+that carries an `Origin` header, so a browser page cannot drive the
+listener. It returns `403` on `/reload`, `/status`, `/policy-key`, and
+`/binary-fingerprint` unless the network peer is loopback.
+
+When appa-guide is enabled, guide MCP port `18788` admits only the guide
+pod. A one-shot vouch still refuses a direct `/guide-mcp` call that never
+passed a gated ToolCall. A client that can reach both `/hook` and
+`/guide-mcp` can complete the gated approval path, so the vouch does not
+replace the NetworkPolicy.
 
 ## Batteries
 

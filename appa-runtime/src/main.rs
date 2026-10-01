@@ -607,6 +607,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             ),
         )
         .merge(management)
+        .layer(axum::middleware::from_fn(refuse_browser_origin))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
@@ -637,10 +638,12 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let app = axum::Router::new().nest_service(
-            "/guide-mcp",
-            mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
-        );
+        let app = axum::Router::new()
+            .nest_service(
+                "/guide-mcp",
+                mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
+            )
+            .layer(axum::middleware::from_fn(refuse_browser_origin));
         Some((address, listener, app))
     } else {
         None
@@ -683,8 +686,17 @@ async fn loopback_management_only(
     request: Request,
     next: Next,
 ) -> Response {
-    if !management_peer_is_allowed(peer) || request.headers().contains_key("origin") {
+    if !management_peer_is_allowed(peer) {
         return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
+    }
+    next.run(request).await
+}
+
+/// Browsers attach `Origin` to every POST and cross-origin fetch; harnesses and MCP
+/// clients send none. Refusing it keeps a web page from driving a reachable listener.
+async fn refuse_browser_origin(request: Request, next: Next) -> Response {
+    if request.headers().contains_key(axum::http::header::ORIGIN) {
+        return (StatusCode::FORBIDDEN, "the runtime refuses browser requests").into_response();
     }
     next.run(request).await
 }

@@ -80,7 +80,12 @@ must_not_contain '18789'
 must_not_contain '/var/lib/appa/batteries'
 must_not_contain '/var/lib/appa/release-batteries'
 must_not_contain 'kind: PersistentVolumeClaim'
-must_not_contain 'kind: NetworkPolicy'
+expect 1 '^kind: NetworkPolicy$'
+must_contain 'kubernetes.io/metadata.name: kagent'
+must_contain 'app: kagent'
+must_contain '- key: kagent'
+must_contain 'operator: Exists'
+must_not_contain 'guide-mcp'
 must_not_contain 'kind: Agent'
 must_not_contain 'kind: Role'
 must_not_contain 'kind: RoleBinding'
@@ -286,19 +291,24 @@ if ! grep -F -q 'env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME
   exit 1
 fi
 
-if render --set networkPolicy.enabled=true; then
-  echo "render accepted an enabled NetworkPolicy without peers" >&2
-  exit 1
-fi
-must_render --set networkPolicy.enabled=true \
-  --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
-must_contain 'kind: NetworkPolicy'
+must_refuse 'networkPolicy.ingress must name at least one peer' --set-json 'networkPolicy.ingress=[]'
+must_refuse '' --set 'networkPolicy.ingress[0].podSelectr.matchLabels.app=kagent'
+must_render --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
+expect 1 '^kind: NetworkPolicy$'
 must_contain 'app: kagent-agent'
+must_not_contain 'kubernetes.io/metadata.name: kagent'
 must_contain 'port: runtime'
 
-must_render --set appaGuide.enabled=true --set networkPolicy.enabled=true \
-  --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
+# With the general policy off, appa-guide keeps its own guide-port policy.
+must_render --set networkPolicy.enabled=false
+must_not_contain 'kind: NetworkPolicy'
+must_render --set networkPolicy.enabled=false --set appaGuide.enabled=true
 expect 1 '^kind: NetworkPolicy$'
+must_contain 'name: appa-runtime-guide-mcp'
+
+must_render --set appaGuide.enabled=true
+expect 1 '^kind: NetworkPolicy$'
+must_not_contain 'name: appa-runtime-guide-mcp'
 must_contain 'app.kubernetes.io/name: "appa-guide"'
 must_contain 'port: runtime'
 must_contain 'port: guide-mcp'

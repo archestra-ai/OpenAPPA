@@ -60,7 +60,16 @@
         "enabled": { "type": "boolean" },
         "ingress": {
           "type": "array",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "podSelector": { "type": "object" },
+              "namespaceSelector": { "type": "object" },
+              "ipBlock": { "type": "object" }
+            }
+          }
         }
       }
     },

@@ -201,6 +201,46 @@ fn the_hook_client_translates_both_ways_against_a_served_runtime() {
     assert_eq!(stdout, "{}", "an ungated hook answers without a round trip");
 }
 
+/// A web page the browser can point at the listener sends `Origin`; the runtime
+/// refuses it before any route runs, while a post without one reaches the hook route.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runtime_refuses_requests_carrying_a_browser_origin() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = dir.path().join("appa.toml");
+    std::fs::write(
+        &config,
+        "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"host/claude-code/Bash\"\n\n\
+         [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+    )
+    .expect("the config writes");
+    let db = dir.path().join("appa.db");
+    let runtime = tokio::task::spawn_blocking(move || serve_runtime(&config, &db))
+        .await
+        .expect("the blocking task joins");
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder().no_proxy().build().expect("the client builds");
+    let post = |path: &str, origin: Option<&str>| {
+        let request = client
+            .post(format!("{}{path}", runtime.url))
+            .header("content-type", "application/json")
+            .body(PRE_TOOL_USE);
+        match origin {
+            Some(origin) => request.header("Origin", origin),
+            None => request,
+        }
+        .send()
+    };
+
+    for path in ["/hook", "/validate", "/mcp"] {
+        let refused = post(path, Some("https://attacker.example")).await.expect("the runtime answers");
+        assert_eq!(refused.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
+    }
+    let answered = post("/hook", None).await.expect("the runtime answers");
+    assert_ne!(answered.status(), reqwest::StatusCode::FORBIDDEN);
+    let answer: serde_json::Value = answered.json().await.expect("the hook route answers in JSON");
+    assert!(answer.is_object(), "{answer}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_error_exits_2_instead_of_failing_open() {
     let url = serve(Router::new().route(
