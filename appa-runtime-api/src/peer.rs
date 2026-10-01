@@ -127,8 +127,8 @@ impl PeerDigest {
             return Err(refuse());
         }
         let mut digest = [0u8; 32];
-        for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
-            *slot = (digit(pair[0]).ok_or_else(refuse)? << 4) | digit(pair[1]).ok_or_else(refuse)?;
+        for (slot, [high, low]) in digest.iter_mut().zip(bytes.as_chunks::<2>().0) {
+            *slot = (digit(*high).ok_or_else(refuse)? << 4) | digit(*low).ok_or_else(refuse)?;
         }
         Ok(Self(digest))
     }
