@@ -4,8 +4,8 @@ use appa_engine::authority::{
     Attends, Authority, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
-    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
-    SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, ProducedAnnotation,
+    RecipientSpec, Requires, SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
 };
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, DeclaredAudience, Label, Trust};
@@ -125,6 +125,9 @@ impl RawTool {
             })?,
             None => ToolParameters::open(),
         };
+        if self.annotator.is_none() && self.on_no_answer.is_some() {
+            return Err(ConfigError::FallbackWithoutAnnotator { tool: self.name });
+        }
         if let Some(annotator) = self.annotator {
             let statics = match (&self.delta, &self.requires, self.effects.is_empty()) {
                 (Some(_), _, _) => Some("delta"),
@@ -139,12 +142,17 @@ impl RawTool {
                     field,
                 });
             }
+            let on_no_answer = self
+                .on_no_answer
+                .map(|fallback| fallback.convert(chain, &self.name))
+                .transpose()?;
             return Ok(ToolDeclaration::Annotated {
                 name: ToolName::new(self.name),
                 tags: self.tags.into_iter().map(TagName::new).collect(),
                 description: self.description,
                 parameters,
                 annotator: AnnotatorName::new(annotator),
+                on_no_answer,
             });
         }
         // Declaring the tool is the deployment saying it knows it, so an omitted `delta` and
@@ -173,6 +181,28 @@ impl RawTool {
             emits,
             requires,
         }))
+    }
+}
+
+impl crate::raw::RawAnnotationFallback {
+    fn convert(self, chain: &TrustChain, tool: &str) -> Result<ProducedAnnotation, ConfigError> {
+        let context = format!("tool {tool} on_no_answer");
+        let delta = self
+            .delta
+            .map(|delta| delta.convert(chain, &context))
+            .transpose()?
+            .unwrap_or_default();
+        let requires = self.requires.convert(chain, &context)?;
+        if requires.attention.is_empty() {
+            return Err(ConfigError::FallbackWithoutAttention { tool: tool.to_string() });
+        }
+        let emits = EffectSet::new(self.effects.into_iter().map(EffectKind::new)).map_err(|duplicate| {
+            ConfigError::DuplicateEffect {
+                tool: tool.to_string(),
+                kind: duplicate.0.as_str().to_string(),
+            }
+        })?;
+        Ok(ProducedAnnotation { delta, emits, requires })
     }
 }
 

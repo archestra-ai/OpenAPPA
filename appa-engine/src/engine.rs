@@ -3453,6 +3453,7 @@ mod tests {
             description: tool.description,
             parameters: tool.parameters,
             annotator: crate::names::AnnotatorName::new(annotator),
+            on_no_answer: None,
         }
     }
 
@@ -3464,6 +3465,7 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: crate::names::AnnotatorName::new(by),
+            on_no_answer: None,
         }
     }
 
