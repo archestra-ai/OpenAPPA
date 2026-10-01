@@ -618,6 +618,7 @@ mod tests {
         assert!(log.roots.contains_key(&format!("t{MAX_ROOTS}")));
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn an_explicit_recent_root_resolves_ambiguity_without_reaching_outside_the_recent_set() {
         let mut log = EventLog::default();
@@ -648,6 +649,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn repeated_activity_in_one_family_is_not_ambiguous() {
         let mut log = EventLog::default();
