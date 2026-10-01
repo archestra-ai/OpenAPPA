@@ -164,8 +164,10 @@ fn endpoint(token: &Uuid) -> Result<Messaging, String> {
 
 fn close(messaging: Option<&Messaging>) {
     #[cfg(unix)]
-    if let Some(messaging) = messaging {
-        cleanup(&messaging.socket);
+    if let Some(messaging) = messaging
+        && let Err(error) = remove_file(&messaging.socket)
+    {
+        eprintln!("clappa: cannot remove the session's messaging socket: {error}");
     }
     #[cfg(not(unix))]
     let _ = messaging;

@@ -378,6 +378,7 @@ impl Runtime {
     }
 
     /// Take a held message's body for the session that holds it; `None` when it is gone.
+    #[cfg(feature = "daemon")]
     pub(crate) fn take_held(&self, root: &TrajectoryId, id: &HeldPeerId) -> Result<Option<String>, EventError> {
         self.inner
             .store
