@@ -163,7 +163,10 @@ impl ToolInventory {
         Ok(())
     }
 
-    pub fn identities(&self, adapter: Adapter) -> Result<Vec<(String, CanonicalTool, bool)>, ParseRefusal> {
+    pub fn identities(
+        &self,
+        adapter: Adapter,
+    ) -> Result<Vec<(String, CanonicalTool, Option<crate::SpawnKind>)>, ParseRefusal> {
         self.validate(adapter)?;
         self.tools
             .iter()

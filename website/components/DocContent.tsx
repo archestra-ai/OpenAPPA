@@ -30,12 +30,13 @@ import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
+import { Oversimplified } from "@/components/Oversimplified";
 import { IntegrationPaths } from "@/components/IntegrationPaths";
 import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
-import { BATTERY_REVIEW_CHECKLIST } from "@/lib/directive-content";
+import { BATTERY_REVIEW_CHECKLIST, BENCHMARK_HIGHLIGHT } from "@/lib/directive-content";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
 
@@ -99,6 +100,11 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   ),
   "battery-rule-order": () => <BatteryRuleOrderFigure />,
   "benchmark-highlight": () => <BenchmarkHighlight />,
+  "benchmark-tldr": () => (
+    <Oversimplified text={BENCHMARK_HIGHLIGHT.tldr}>
+      <BenchmarkHighlight link={false} />
+    </Oversimplified>
+  ),
   "brand-assets": () => <BrandAssets />,
   "claude-policy-timing": () => <ClaudePolicyTiming />,
   "claude-session-choice": () => <ClaudeSessionChoice />,
@@ -116,6 +122,9 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "mascot-board": () => <MascotBoard />,
   "integration-paths": () => <IntegrationPaths />,
   "sponsor-note": () => <SponsorNote />,
+  "video-fireship": () => (
+    <YouTubeEmbed title="Fireship: Did a 50 year old military secret just solve agent prompt injection?" videoId="I_KVMFrUtPk" />
+  ),
   "video-how-it-works": () => (
     <YouTubeEmbed title="How OpenAPPA works" videoId="XKdN90IYy0Y" />
   ),

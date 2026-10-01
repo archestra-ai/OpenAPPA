@@ -93,19 +93,49 @@ pub struct ProviderResult {
     pub body: ValueBody,
 }
 
-/// The one proposal of a batch that spawns a child: its position among the
-/// batch's proposals. At most one exists, which is what makes it an `Option` rather than a flag
-/// per proposal.
+/// The one proposal of a batch that spawns children: its position among the
+/// batch's proposals, and how many children it starts. At most one exists, which is what makes it
+/// an `Option` rather than a flag per proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct SpawnMark(usize);
+pub struct SpawnMark {
+    index: usize,
+    kind: SpawnKind,
+}
+
+/// How many children one spawn starts under its single return declaration. A single spawn binds
+/// its fork to one child. A fan-out spawn binds none itself: each child it starts gets a member
+/// fork of its own, prepared when that child starts, under the same return policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SpawnKind {
+    Single,
+    FanOut,
+}
 
 impl SpawnMark {
     pub const fn at(index: usize) -> SpawnMark {
-        SpawnMark(index)
+        SpawnMark {
+            index,
+            kind: SpawnKind::Single,
+        }
+    }
+
+    pub const fn fan_out(index: usize) -> SpawnMark {
+        SpawnMark {
+            index,
+            kind: SpawnKind::FanOut,
+        }
     }
 
     pub const fn index(self) -> usize {
-        self.0
+        self.index
+    }
+
+    pub const fn kind(self) -> SpawnKind {
+        self.kind
+    }
+
+    pub fn marks(mark: Option<SpawnMark>, position: usize) -> bool {
+        mark.is_some_and(|mark| mark.index == position)
     }
 }
 
@@ -1356,8 +1386,11 @@ impl<'a> Sequence<'a> {
                 fork,
                 snapshot,
                 return_policy,
+                kind,
             } => {
-                if released == Obligation::Free {
+                // A member is backed by the fan-out fork its spawn's release prepared, not by a
+                // release of its own: it is prepared when its child starts.
+                if released == Obligation::Free && matches!(fork, ForkId::Spawn(_)) {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
                 if !self.engine.registry().profile().context_control() {
@@ -1376,9 +1409,26 @@ impl<'a> Sequence<'a> {
                 if &views.freeze_basis() != snapshot {
                     return Err(TransitionRefusal::ForkBasisMismatch);
                 }
-                // The policy is the one the release's spent approval declared, and nothing else.
-                if self.spawn_policies.remove(fork.dispatch()).as_ref() != Some(return_policy) {
-                    return Err(TransitionRefusal::UnbackedReturnPolicy);
+                match fork {
+                    // The policy is the one the release's spent approval declared, and nothing else.
+                    ForkId::Spawn(dispatch) => {
+                        if self.spawn_policies.remove(dispatch).as_ref() != Some(return_policy) {
+                            return Err(TransitionRefusal::UnbackedReturnPolicy);
+                        }
+                    }
+                    ForkId::Member { spawn, .. } => {
+                        let backed = self
+                            .projection
+                            .prepared_fork(&ForkId::of(spawn))
+                            .is_some_and(|fan_out| {
+                                fan_out.kind == SpawnKind::FanOut
+                                    && &fan_out.parent == trajectory
+                                    && &fan_out.return_policy == return_policy
+                            });
+                        if !backed || *kind != SpawnKind::Single {
+                            return Err(TransitionRefusal::UnbackedReturnPolicy);
+                        }
+                    }
                 }
             }
             Fact::ForkOpened { trajectory, fork } => {
@@ -1386,6 +1436,14 @@ impl<'a> Sequence<'a> {
                     .projection
                     .prepared_fork(fork)
                     .ok_or(TransitionRefusal::UnknownFork)?;
+                // A fan-out fork binds no child itself, and a member binds only the child it names.
+                let binds = match fork {
+                    ForkId::Spawn(_) => preparation.kind == SpawnKind::Single,
+                    ForkId::Member { child, .. } => child == trajectory,
+                };
+                if !binds {
+                    return Err(TransitionRefusal::UnknownFork);
+                }
                 let views = self.projection.view(trajectory);
                 if self.projection.bound_child(fork).is_some() {
                     return Err(TransitionRefusal::ForkAlreadyBound);
@@ -1398,6 +1456,13 @@ impl<'a> Sequence<'a> {
                 }
                 if views.dispatch_failed(fork.dispatch()) {
                     return Err(TransitionRefusal::SpawnFailed);
+                }
+                // A member is seeded at the parent's label as the child starts, so nothing may
+                // cross into the parent between its preparation and its binding.
+                if matches!(fork, ForkId::Member { .. })
+                    && self.projection.view(&preparation.parent).freeze_basis() != preparation.snapshot
+                {
+                    return Err(TransitionRefusal::ForkBasisMismatch);
                 }
             }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
@@ -2288,10 +2353,7 @@ impl<'a> Sequence<'a> {
                 continue;
             };
             let context = self.context(act.expansions());
-            let role = match spawn == Some(SpawnMark::at(position)) {
-                true => crate::check::CallRole::MarkedSpawn,
-                false => crate::check::CallRole::Ordinary,
-            };
+            let role = crate::check::CallRole::of(spawn, position);
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
@@ -3231,7 +3293,9 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
         (
             DecidedAct::Proposals(_),
             Fact::DispatchOpened { .. }
-            | Fact::ForkPrepared { .. }
+            | Fact::ForkPrepared {
+                fork: ForkId::Spawn(_), ..
+            }
             | Fact::CallApprovalConsumed { .. }
             | Fact::CandidateConsumed { .. },
         ) => true,
@@ -3277,6 +3341,13 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
             },
         ) => id == act,
         (DecidedAct::Binding(act), Fact::ForkOpened { fork, .. }) => fork == act,
+        (
+            DecidedAct::Binding(act),
+            Fact::ForkPrepared {
+                fork: fork @ ForkId::Member { .. },
+                ..
+            },
+        ) => fork == act,
         (
             DecidedAct::Binding(act),
             Fact::Boundary {

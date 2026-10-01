@@ -103,18 +103,19 @@ covers, what protection it adds, and any important assumption. Keep it under
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
-Name each credential variable `appa describe` reports. Inspect its effective
-source with `appa battery status --config <live-path> --battery <name>,<name> --json`.
-An environment value takes precedence over a saved database value. A missing
-variable can still work through a battery's declared CLI authentication fallback.
-Use `--check` to verify that fallback; executable presence alone is not login.
+Name each credential variable `appa describe` reports. Before the proposal,
+run `appa battery status --config <live-path> --battery <name>,<name> --json --check`
+for every suggested and every included battery. An environment value takes
+precedence over a saved database value. A missing variable can still work
+through a battery's declared CLI authentication fallback; only `--check`
+verifies that fallback, because executable presence alone is not login.
 Check what each battery's README expects the root config to provide, and record
 anything missing. Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
 
 ### Develop the Bash classifier hint
 
-During `init`, develop a concise `hint` for the root
+During `init`, develop a concise `hint` for the
 `claude-code.bash-requirements` Annotator from the contracts of every battery
 that the approved configuration will include. This lets Claude apply the same
 policy intent when a CLI command reaches a service covered by an MCP battery.
@@ -246,11 +247,16 @@ are included. Then group the proposal by server. Show:
 - every configured MCP server whose tools could not be inspected: "<server>
   is configured, but I could not inspect its tools in this session."
 
-At the end of the proposal, add **Needed for this to work** when any required
-support is missing. Group every missing requirement there and propose the
-concrete fix. For example: "Slack needs your approval before publishing, but
-approval is not set up yet. I'll add it." Do not merely report "no HITL
-authority," and do not mix missing requirements with unchanged rules.
+At the end of the proposal, add **Needed setup** when any required support is
+missing. Show a table with the columns Battery and Setup, one row per battery
+that `--check` does not report `ready`. Setup is the sign-in command, or "a
+token on a local page". Never list a battery that is ready or needs no setup,
+such as one ready through a CLI sign-in. Under the table, say that setup runs
+after approval and that the user can skip any one step. Also list there every
+other missing requirement with its concrete fix. For example: "Slack needs your
+approval before publishing, but approval is not set up yet. I'll add it." Do
+not merely report "no HITL authority," and do not mix missing requirements
+with unchanged rules.
 
 Close with one plain sentence: "You can ask later to change what requires
 approval or what gets blocked." Keep specific tuning options for when the
@@ -259,8 +265,7 @@ user asks for a change.
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
 When nothing is missing and every session tool has a rule, say so in one or
-two sentences, mention tuning in one line, and finish with **Review in the
-browser** below, without approval language.
+two sentences and mention tuning in one line, without approval language.
 
 After approval:
 
@@ -271,30 +276,60 @@ After approval:
    `claude-code.bash-requirements` declaration, including its `hint`, with the
    version used for the proposal. If it changed, preserve the new declaration,
    revise the proposal, and ask for approval again.
-2. Resolve all approved batteries' missing prerequisites together before including
-   them. Run `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
-   If credentials, CLI login, or required executables need configuration, open one
-   consolidated browser page:
+2. Resolve the missing prerequisites of every approved battery before including
+   it, and of every already-included battery that is not `ready`. Run
+   `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
+   First, in one short message, list the setup steps ahead as a numbered
+   list, one line each (for example "1. GitHub sign-in 2. Slack token"), and
+   say that the batteries are included after them. Then work through each
+   battery that is not `ready` in chat, one prerequisite per message. Start
+   the next only after the current one is ready or skipped. Open every step
+   message with its name and number, then one or two short sentences on why,
+   written from the battery's `benefit` in the status JSON: what APPA asks
+   the provider, and what that does for the user's data. For example:
 
-   ```sh
-   appa ui --config <live-path> --setup --battery <name>,<name>
-   ```
+   > **Slack token (2 of 2).** With this token, APPA asks Slack who can read
+   > each channel. Channel text then goes only to people who can already
+   > read it.
 
-   Pass every proposed battery in that one command; never open one page per token.
-   This opens Batteries with `?configure=true`, checking battery readiness and expanding only batteries that need configuration.
-   Ready batteries stay collapsed; do not ask the user to configure them again.
-   The user enters tokens directly into the browser and chooses **Save and check**.
+   Then give the step:
+   - A missing program (a `dependencies` entry with `installed: false`): tell
+     the user what to install. Check again after they reply.
+   - A CLI sign-in (an installed `alternatives` entry): offer only the
+     sign-in first. Ask the user to run its `login_hint` with the `!` prefix,
+     for example `! gh auth login -s user:email`, and to say "done". Do not
+     show token steps or start a token page in that message. Never run the
+     sign-in yourself. Also add "or say **skip** to set up <Battery>
+     later". Then check that battery again. Only when it is still
+     not ready, or the user says the sign-in does not work, continue with the
+     token below. A battery whose CLI is not installed goes to the token
+     directly.
+   - A token: give the battery's `setup` steps as a short numbered list, and
+     run this in the background:
+
+     ```sh
+     appa ui --config <live-path> --battery <name> --no-open
+     ```
+
+     Give the URL it prints as a link, and add "or say **skip** to set up
+     <Battery> later". The page shows only the token field. When the battery
+     is ready, the command prints the
+     battery's sanitized status as JSON and exits, and its exit brings you
+     back. Continue from that JSON; do not ask the user if they are done. If a
+     check fails, the page stays open and shows why. If the user says skip,
+     stop the command. A skip applies only to this battery; continue with
+     the next step. After 15 minutes the command exits with an error;
+     treat that as a skip. A skipped battery is still included, because its
+     rules need no token. Leave out only the parts that need the token: the
+     audience mapping in step 5, and any other part a reload refuses without
+     the token.
+
    Never ask for tokens in chat, read the credential database, or put token values
-   in shell commands or configuration files. Login hints are instructions for the
-   user, not commands to execute automatically. If browser opening fails, show
-   the URL printed by the command. The command serves the page until it is stopped,
-   so run it in the background and stop it after the user finishes. It works whether
-   or not the runtime is running. Saving reloads a running runtime; if none is
-   running, the next session starts it with the saved credentials.
-   After the user finishes, rerun the combined status command with `--check` and
-   use only its sanitized results. A `ready` result with reason `configured` means
-   the battery's executables exist and its tokens are set, but no provider check
-   ran; do not claim its provider access was tested.
+   in shell commands or configuration files. Saving reloads a running runtime; if
+   none is running, the next session starts it with the saved credentials.
+   A `ready` result with reason `configured` means the battery's executables
+   exist and its tokens are set, but no provider check ran; do not claim its
+   provider access was tested.
 3. Include each approved battery with the command `appa describe` printed:
    `appa battery install <name> --config <live-path>`, with
    `--server <connection-id>` when it names one. The command adds the
@@ -312,7 +347,8 @@ After approval:
    states; the helper receives it through its environment, supplied by the runtime's
    environment or local credential database, never the policy config.
    Map `self` and `internal` onto the source's collections under
-   `[policy.audience]` as the README shows.
+   `[policy.audience]` as the README shows. Skip the mapping for a battery
+   whose token was skipped.
 6. Add the approved rules for the remaining tools to the root config. Do not
    remove overlapping root rules; they intentionally override batteries. To
    treat a battery's tool differently, add a root rule for it; never edit the
@@ -351,8 +387,11 @@ not guess.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
    Authorities, audience sources, or named audiences changed since the
    proposal, revise the proposal and ask for approval again.
-8. Resolve all newly approved batteries' prerequisites using the consolidated
-   browser setup flow above, then include each newly approved battery with
+8. Resolve the prerequisites with the chat setup flow above, for each newly
+   approved battery and for each included battery the request names that is
+   not ready. When an included battery becomes ready, add what was left out
+   without its token, such as its audience mapping. Include each newly
+   approved battery with
    `appa battery install <name> --config <live-path>`, as in the checkup, and
    add the root support, credential variable, and audience mapping it
    requires. To take one out, use
@@ -366,11 +405,13 @@ argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
 
 For an exact Bash command pattern, add a narrow, ordered
-`host/claude-code/Bash(command:...)` root contract before the root's bare
-`host/claude-code/Bash` rule. For semantic command interpretation, add a
-`hint` to the root's `claude-code.bash-requirements` Annotator. Preserve its
-implementation, inputs, and mandate unless the approved behavior requires a
-change. Keep the root's Bash selectors above the bare Bash rule.
+`host/claude-code/Bash(command:...)` root contract: root rules precede the
+battery's Bash rules, including its credential rules. A command the root rule
+matches is not narrowed for the credential paths it names, so keep the pattern
+exact. For semantic command interpretation, declare
+`claude-code.bash-requirements` in the root with a `hint`; a root Annotator
+replaces the battery's of the same name. Preserve its implementation, inputs,
+and mandate unless the approved behavior requires a change.
 
 To make an audience mismatch reviewable, permit the intended Authority to
 review that audience expansion. Do not add attention only to route the review.
@@ -443,25 +484,17 @@ Briefly say what succeeded, what failed, and whether the file was restored.
 If the fix changes who may receive information, say how before asking for
 approval. Describe only behavior supported by the README or observed results.
 
+Keep the report to about five lines. Do not repeat what each battery
+does.
+
+For each battery whose setup was skipped, add one short group:
+"**<Battery> <token or sign-in> not set.** The <Battery> battery is
+included. Until you set it:" then one or two bullets from the battery's
+README on what does not work, then "To set it later:
+`/appa-guide set up the <Battery> <token or sign-in>`." The skip was the
+user's choice: do not call the setup unfinished.
+
 After a successful reload, add:
 
 > Start a new `clappa` session to use the updated policy; this session keeps
 > the policy it started with.
-
-## Review in the browser
-
-End every `init` and `adjust` run here, after a successful reload or a
-no-change result. Do not do this after a refused reload or in `explain`.
-
-Serve the policy overview in the background, without opening a browser:
-
-```sh
-appa ui --config <live-path> --no-open
-```
-
-The page shows each MCP server the policy covers, where each rule comes from
-(the root config or a battery), and each server's contracts. Tell the user in
-one sentence to review the policies there, and give the URL the command
-printed as a link. Never open a browser. If the port is busy, an earlier
-`appa ui` still serves this page: give its URL and do not start another. Stop the command when the user says
-they are done, or leave it running if they move on to other work.

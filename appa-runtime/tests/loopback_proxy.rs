@@ -134,7 +134,8 @@ async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_
                 cwd: None,
             },
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         },
     )

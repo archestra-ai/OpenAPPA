@@ -170,14 +170,64 @@ fn same_workspace(
     Ok(std::sync::Arc::clone(store))
 }
 
-pub(crate) const TOOLS: [&str; 6] = [
-    "appa_read_file",
-    "appa_write_file",
-    "appa_edit_file",
-    "appa_copy_file",
-    "appa_move_file",
-    "appa_process_files",
-];
+/// The runtime-owned file tools, each served under its own MCP name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileTool {
+    Read,
+    Write,
+    Edit,
+    Copy,
+    Move,
+    Process,
+}
+
+impl FileTool {
+    pub(crate) const ALL: [FileTool; 6] = [
+        FileTool::Read,
+        FileTool::Write,
+        FileTool::Edit,
+        FileTool::Copy,
+        FileTool::Move,
+        FileTool::Process,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            FileTool::Read => "appa_read_file",
+            FileTool::Write => "appa_write_file",
+            FileTool::Edit => "appa_edit_file",
+            FileTool::Copy => "appa_copy_file",
+            FileTool::Move => "appa_move_file",
+            FileTool::Process => "appa_process_files",
+        }
+    }
+
+    fn operation(self) -> FileOperation {
+        match self {
+            FileTool::Read => FileOperation::Read,
+            FileTool::Write => FileOperation::Replace,
+            FileTool::Edit => FileOperation::Edit,
+            FileTool::Copy => FileOperation::Copy,
+            FileTool::Move => FileOperation::Move,
+            FileTool::Process => FileOperation::Process,
+        }
+    }
+
+    fn of(call: &ProposedCall) -> Option<FileTool> {
+        let name = call.tool.strip_prefix(PREFIX)?;
+        FileTool::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    #[cfg(feature = "daemon")]
+    fn call(self, arguments: &serde_json::Value) -> Result<ProposedCall, EventError> {
+        Ok(ProposedCall {
+            tool: format!("{PREFIX}{}", self.name()),
+            arguments: serde_json::value::to_raw_value(arguments).map_err(refused)?,
+            cwd: None,
+        })
+    }
+}
+
 const PREFIX: &str = "mcp/appa/";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -224,21 +274,13 @@ pub(crate) enum FileReply {
 }
 
 pub(crate) fn owns(call: &ProposedCall) -> bool {
-    call.tool.strip_prefix(PREFIX).is_some_and(|name| TOOLS.contains(&name))
+    FileTool::of(call).is_some()
 }
 
 pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), EventError> {
-    let operation = match call.tool.as_str() {
-        "mcp/appa/appa_read_file" => FileOperation::Read,
-        "mcp/appa/appa_write_file" => FileOperation::Replace,
-        "mcp/appa/appa_edit_file" => FileOperation::Edit,
-        "mcp/appa/appa_copy_file" => FileOperation::Copy,
-        "mcp/appa/appa_move_file" => FileOperation::Move,
-        "mcp/appa/appa_process_files" => FileOperation::Process,
-        _ => {
-            return Err(refused("file tracking permits only runtime-owned file tools"));
-        }
-    };
+    let operation = FileTool::of(call)
+        .ok_or_else(|| refused("file tracking permits only runtime-owned file tools"))?
+        .operation();
     // Validate only argument shape here. In particular, never search old_string before
     // the engine has accepted observation of the predecessor's Label.
     let path = match operation {
@@ -367,31 +409,27 @@ impl super::Runtime {
     pub(crate) async fn execute_bound_file(
         &self,
         actor: &appa_runtime_api::Actor,
-        tool: &str,
+        tool: FileTool,
         arguments: serde_json::Value,
     ) -> Result<FileReply, EventError> {
-        let call = ProposedCall {
-            tool: format!("{PREFIX}{tool}"),
-            arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
-            cwd: None,
-        };
+        let call = tool.call(&arguments)?;
         let session = self.session(&actor.root, super::acting_trajectory(actor))?;
-        match session.on_tool_call_identified(call.clone(), None, false).await? {
+        match session.on_tool_call_identified(call.clone(), None, None, None).await? {
             super::ToolCallDecision::Deny { feedback, .. } => Ok(FileReply::Failure(feedback)),
             super::ToolCallDecision::Allow { .. } => session.execute_file(call).await,
         }
     }
 
     #[cfg(feature = "daemon")]
-    pub(crate) async fn execute_file(&self, tool: &str, arguments: serde_json::Value) -> Result<FileReply, EventError> {
+    pub(crate) async fn execute_file(
+        &self,
+        tool: FileTool,
+        arguments: serde_json::Value,
+    ) -> Result<FileReply, EventError> {
         let (actor, _) = self
-            .take_vouched(&super::PermitKey::call(tool, &arguments))
+            .take_vouched(&super::PermitKey::call(tool.name(), &arguments))
             .map_err(|_| refused("no unique one-shot host vouch for this file call"))?;
-        let call = ProposedCall {
-            tool: format!("{PREFIX}{tool}"),
-            arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
-            cwd: None,
-        };
+        let call = tool.call(&arguments)?;
         self.session(&actor.root, super::acting_trajectory(&actor))?
             .execute_file(call)
             .await
@@ -548,7 +586,7 @@ max_body_bytes = 65536
         runtime.vouch(&super::super::call_key(&call).unwrap(), &actor, None);
         runtime
             .execute_file(
-                call.tool.strip_prefix(PREFIX).unwrap(),
+                FileTool::of(&call).unwrap(),
                 serde_json::from_str(call.arguments.get()).unwrap(),
             )
             .await
@@ -639,12 +677,7 @@ max_body_bytes = 65536
         .await;
         assert!(matches!(start, HookDecision::Context { text } if text.contains("appa_read_file(file_path)")));
         let arguments = serde_json::json!({"file_path":"new.txt", "content":"trusted original"});
-        assert!(
-            runtime
-                .execute_file("appa_write_file", arguments.clone())
-                .await
-                .is_err()
-        );
+        assert!(runtime.execute_file(FileTool::Write, arguments.clone()).await.is_err());
         assert!(matches!(
             hook(
                 &runtime,
@@ -660,7 +693,7 @@ max_body_bytes = 65536
         assert!(
             runtime
                 .execute_file(
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"new.txt", "content":"substituted"})
                 )
                 .await
@@ -679,10 +712,7 @@ max_body_bytes = 65536
         .await;
         assert!(matches!(competing, HookDecision::AllowCall { .. }));
         assert_eq!(
-            runtime
-                .execute_file("appa_write_file", arguments.clone())
-                .await
-                .unwrap(),
+            runtime.execute_file(FileTool::Write, arguments.clone()).await.unwrap(),
             FileReply::Value("file written".into())
         );
         let version = runtime
@@ -710,7 +740,7 @@ max_body_bytes = 65536
                 HookDecision::Ack
             ));
         }
-        assert!(runtime.execute_file("appa_write_file", arguments).await.is_err());
+        assert!(runtime.execute_file(FileTool::Write, arguments).await.is_err());
         assert_eq!(
             runtime
                 .inner
@@ -746,7 +776,7 @@ max_body_bytes = 65536
             "file_path": "source.txt", "old_string": "absent", "new_string": "replacement"
         });
         let blocked = runtime
-            .execute_bound_file(&actor, "appa_edit_file", arguments.clone())
+            .execute_bound_file(&actor, FileTool::Edit, arguments.clone())
             .await
             .unwrap();
         assert!(matches!(blocked, FileReply::Failure(message) if message.contains("trusted -> suspicious")));
@@ -772,7 +802,7 @@ max_body_bytes = 65536
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"after-reconnect.txt", "content":"the string was absent"})
                 )
                 .await
@@ -788,7 +818,7 @@ max_body_bytes = 65536
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"forged.txt", "content":"x", "trajectory":"clean"})
                 )
                 .await
@@ -818,10 +848,7 @@ max_body_bytes = 65536
             ));
             assert!(
                 runtime
-                    .execute_file(
-                        "appa_edit_file",
-                        serde_json::from_str(proposal.arguments.get()).unwrap()
-                    )
+                    .execute_file(FileTool::Edit, serde_json::from_str(proposal.arguments.get()).unwrap())
                     .await
                     .is_err()
             );
@@ -848,7 +875,7 @@ max_body_bytes = 65536
             );
             assert!(
                 runtime
-                    .execute_file("appa_write_file", serde_json::from_str(output.arguments.get()).unwrap())
+                    .execute_file(FileTool::Write, serde_json::from_str(output.arguments.get()).unwrap())
                     .await
                     .is_err()
             );
@@ -995,8 +1022,8 @@ else:
         bind(&runtime, &actor.root, dir.path());
         runtime.create_session(actor.root.clone(), None).unwrap();
         for (tool, source, destination) in [
-            ("appa_copy_file", "source.txt", "copied.txt"),
-            ("appa_move_file", "copied.txt", "moved.txt"),
+            (FileTool::Copy, "source.txt", "copied.txt"),
+            (FileTool::Move, "copied.txt", "moved.txt"),
         ] {
             assert_eq!(
                 runtime
@@ -1035,7 +1062,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({
                         "file_path":"ack-only.txt", "content":"only observed acknowledgements"
                     })
@@ -1049,7 +1076,7 @@ else:
         let runtime = open(dir.path());
         bind(&runtime, &actor.root, dir.path());
         assert!(
-            matches!(runtime.execute_bound_file(&actor, "appa_read_file", serde_json::json!({
+            matches!(runtime.execute_bound_file(&actor, FileTool::Read, serde_json::json!({
             "file_path":"moved.txt"
         })).await.unwrap(), FileReply::Failure(message) if message.contains("trusted -> suspicious"))
         );
@@ -1057,7 +1084,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_move_file",
+                    FileTool::Move,
                     serde_json::json!({
                         "source_path":"moved.txt", "destination_path":"CLAUDE.md"
                     })
@@ -1070,7 +1097,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_move_file",
+                    FileTool::Move,
                     serde_json::json!({
                         "source_path":"CLAUDE.md", "destination_path":"stolen-instructions.txt"
                     })

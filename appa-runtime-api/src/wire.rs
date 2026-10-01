@@ -45,8 +45,8 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedInputSanitizer, OfferedRemedy, OfferedReturn,
-    OutcomeBody, ParseRefusal, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnRef, ToolOutcome,
-    TrajectoryId,
+    OutcomeBody, ParseRefusal, PromptKey, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnKind,
+    SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -59,9 +59,9 @@ pub const PROTOCOL: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifiedTool {
     pub canonical: CanonicalTool,
-    /// The call starts a child trajectory (Claude Code's `Agent`, a
-    /// kagent agent called as a tool).
-    pub spawn: bool,
+    /// The call starts child trajectories (Claude Code's `Agent` one, its
+    /// `Workflow` any number; a kagent agent called as a tool one).
+    pub spawn: Option<SpawnKind>,
 }
 
 /// The server-side identification for one raw tool spelling: total over the
@@ -129,6 +129,7 @@ pub enum EventName {
     SpawnResult,
     ChildStart,
     ChildEnd,
+    ChildReturn,
 }
 
 /// One optional field of the flat envelope, as a value the reading
@@ -147,10 +148,12 @@ enum Field {
     Value,
     SpawnBinding,
     Cwd,
+    PromptId,
+    Settles,
 }
 
 impl Field {
-    const ALL: [Field; 12] = [
+    const ALL: [Field; 14] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -163,6 +166,8 @@ impl Field {
         Field::Value,
         Field::SpawnBinding,
         Field::Cwd,
+        Field::PromptId,
+        Field::Settles,
     ];
 
     fn spelling(self) -> &'static str {
@@ -179,6 +184,8 @@ impl Field {
             Field::Value => "value",
             Field::SpawnBinding => "spawn_binding",
             Field::Cwd => "cwd",
+            Field::PromptId => "prompt_id",
+            Field::Settles => "settles",
         }
     }
 }
@@ -197,7 +204,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
         // dispatch — no call, no result, no ruling.
         EventName::Ping => &[Field::RootId, Field::ChildId],
         EventName::SessionStart => &[Field::RootId],
-        EventName::Prompt => &[Field::RootId, Field::ChildId, Field::Text],
+        EventName::Prompt => &[Field::RootId, Field::ChildId, Field::Text, Field::Settles],
         EventName::TurnEnd => &[Field::RootId, Field::ChildId],
         EventName::ToolCall => &[
             Field::RootId,
@@ -207,6 +214,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::CallId,
             Field::Ruling,
             Field::Cwd,
+            Field::PromptId,
         ],
         EventName::SpawnResume => &[
             Field::RootId,
@@ -225,8 +233,8 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::SpawnedId,
             Field::Value,
         ],
-        EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding],
-        EventName::ChildEnd => &[Field::RootId, Field::ChildId, Field::Value],
+        EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding, Field::PromptId],
+        EventName::ChildEnd | EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value],
     }
 }
 
@@ -425,6 +433,13 @@ pub struct WireEvent {
     /// one. A tool call alone reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The host's identity for the prompt a call serves or a fan-out
+    /// child was started under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
+    /// The host call a prompt reports finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settles: Option<String>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -460,6 +475,8 @@ impl WireEvent {
             spawn_binding: None,
             inventory: None,
             cwd: None,
+            prompt_id: None,
+            settles: None,
         }
     }
 
@@ -479,6 +496,8 @@ impl WireEvent {
             Field::Value => self.value.is_some(),
             Field::SpawnBinding => self.spawn_binding.is_some(),
             Field::Cwd => self.cwd.is_some(),
+            Field::PromptId => self.prompt_id.is_some(),
+            Field::Settles => self.settles.is_some(),
         }
     }
 
@@ -516,12 +535,13 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
-            HookEvent::Prompt { actor, text } => {
+            HookEvent::Prompt { actor, text, settles } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
                     root_id: Some(root_id),
                     child_id,
                     text: Some(text.clone()),
+                    settles: settles.clone(),
                     ..Self::bare(adapter, EventName::Prompt)
                 }
             }
@@ -537,6 +557,7 @@ impl WireEvent {
                 actor,
                 call,
                 call_id,
+                prompt,
                 ruling,
                 ..
             } => {
@@ -549,6 +570,7 @@ impl WireEvent {
                     call_id: call_id.clone(),
                     ruling: checked_ruling(adapter, *ruling)?,
                     cwd: call.cwd.clone(),
+                    prompt_id: prompt.as_ref().map(|prompt| prompt.0.clone()),
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
@@ -610,13 +632,16 @@ impl WireEvent {
                     root: root.clone(),
                     child: None,
                 })?;
+                let (spawn_binding, prompt_id) = match spawn {
+                    SpawnRef::Binding(binding) => (Some(binding.0.clone()), None),
+                    SpawnRef::InFlight => (None, None),
+                    SpawnRef::FanOut(prompt) => (None, Some(prompt.0.clone())),
+                };
                 Self {
                     root_id: Some(root_id),
                     child_id: Some(child_host_id(root, child)?),
-                    spawn_binding: match spawn {
-                        SpawnRef::Binding(binding) => Some(binding.0.clone()),
-                        SpawnRef::InFlight => None,
-                    },
+                    spawn_binding,
+                    prompt_id,
                     ..Self::bare(adapter, EventName::ChildStart)
                 }
             }
@@ -630,6 +655,18 @@ impl WireEvent {
                     child_id: Some(child_host_id(root, child)?),
                     value: value.clone(),
                     ..Self::bare(adapter, EventName::ChildEnd)
+                }
+            }
+            HookEvent::ChildReturn { root, child, value } => {
+                let (root_id, _) = ids(&Actor {
+                    root: root.clone(),
+                    child: None,
+                })?;
+                Self {
+                    root_id: Some(root_id),
+                    child_id: Some(child_host_id(root, child)?),
+                    value: Some(value.clone()),
+                    ..Self::bare(adapter, EventName::ChildReturn)
                 }
             }
         };
@@ -696,6 +733,8 @@ impl WireEvent {
             spawn_binding,
             inventory,
             cwd,
+            prompt_id,
+            settles,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -740,6 +779,7 @@ impl WireEvent {
             Ok((raw, identified))
         };
         let value = value.filter(|value| !value.is_empty());
+        let prompt = prompt_id.filter(|prompt| !prompt.is_empty()).map(PromptKey);
 
         let accepted = |event: HookEvent| {
             Ok(Some(Accepted {
@@ -755,14 +795,18 @@ impl WireEvent {
                 principal: None,
             }),
             EventName::Prompt => match text {
-                Some(text) => accepted(HookEvent::Prompt { actor: actor()?, text }),
+                Some(text) => accepted(HookEvent::Prompt {
+                    actor: actor()?,
+                    text,
+                    settles: settles.filter(|settles| !settles.is_empty()),
+                }),
                 None => Err(malformed("prompt without its text")),
             },
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
             EventName::SpawnResume => {
                 let actor = actor()?;
                 let (raw, identified) = identified_call(tool, arguments)?;
-                if !identified.spawn {
+                if identified.spawn != Some(SpawnKind::Single) {
                     return Err(malformed("spawn_resume requires an agent tool"));
                 }
                 let id = spawned_id
@@ -811,6 +855,7 @@ impl WireEvent {
                         },
                         call_id,
                         spawn,
+                        prompt,
                         ruling,
                     },
                     names_children,
@@ -840,8 +885,11 @@ impl WireEvent {
                     .as_deref()
                     .filter(|id| !id.is_empty())
                     .map(|id| child_of(&actor.root, id));
+                // A fan-out spawn's own result names no child: its children
+                // start and return on their own, so its call closes as an
+                // ordinary one.
                 match spawn {
-                    true => accepted(HookEvent::SpawnResult {
+                    Some(SpawnKind::Single) => accepted(HookEvent::SpawnResult {
                         actor,
                         call,
                         call_id,
@@ -849,7 +897,7 @@ impl WireEvent {
                         child,
                         value,
                     }),
-                    false => match (child, value) {
+                    Some(SpawnKind::FanOut) | None => match (child, value) {
                         (Some(_), _) => Err(malformed(format!(
                             "a result carrying spawned_id for {}, which this adapter identifies as an ordinary call",
                             call.tool
@@ -875,18 +923,31 @@ impl WireEvent {
                 // family has in flight — a different spawn than the one
                 // the envelope claims. A claim the wire cannot honour is
                 // refused rather than answered with another.
-                let spawn = match spawn_binding {
-                    Some(binding) if binding.is_empty() => {
+                let spawn = match (spawn_binding, prompt) {
+                    (Some(binding), _) if binding.is_empty() => {
                         return Err(malformed(format!("{name:?} carrying an empty spawn_binding")));
                     }
-                    Some(binding) => SpawnRef::Binding(SpawnBinding(binding)),
-                    None => SpawnRef::InFlight,
+                    (Some(_), Some(_)) => {
+                        return Err(malformed(format!(
+                            "{name:?} naming both a spawn_binding and a prompt_id"
+                        )));
+                    }
+                    (Some(binding), None) => SpawnRef::Binding(SpawnBinding(binding)),
+                    (None, Some(prompt)) => SpawnRef::FanOut(prompt),
+                    (None, None) => SpawnRef::InFlight,
                 };
                 accepted(HookEvent::ChildStart { root, child, spawn })
             }
             EventName::ChildEnd => {
                 let (root, child) = named_child()?;
                 accepted(HookEvent::ChildEnd { root, child, value })
+            }
+            EventName::ChildReturn => {
+                let (root, child) = named_child()?;
+                match value {
+                    Some(value) => accepted(HookEvent::ChildReturn { root, child, value }),
+                    None => Err(malformed("child_return without its value")),
+                }
             }
         }
     }
@@ -1176,14 +1237,18 @@ mod tests {
         if raw == CONTROL_RAW {
             return Ok(IdentifiedTool {
                 canonical: CanonicalTool::control(),
-                spawn: false,
+                spawn: None,
             });
         }
         let canonical =
             CanonicalTool::parse(&format!("host/test/{raw}")).map_err(|error| malformed(error.to_string()))?;
         Ok(IdentifiedTool {
             canonical,
-            spawn: matches!(raw, "spawn" | "Agent"),
+            spawn: match raw {
+                "spawn" | "Agent" => Some(SpawnKind::Single),
+                "Workflow" => Some(SpawnKind::FanOut),
+                _ => None,
+            },
         })
     }
 
@@ -1319,12 +1384,18 @@ mod tests {
                 call,
                 call_id,
                 spawn,
+                prompt,
                 ruling,
             } => {
                 assert_eq!(actor.root.0, "kagent:r1");
+                assert_eq!(prompt, None);
                 assert_eq!(call.tool, "host/test/spawn");
                 assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#, "arguments cross unparsed");
-                assert!(spawn, "spawn is identified, never read from the wire");
+                assert_eq!(
+                    spawn,
+                    Some(SpawnKind::Single),
+                    "spawn is identified, never read from the wire"
+                );
                 assert_eq!(ruling, None);
                 assert_eq!(call_id, None);
             }
@@ -1342,7 +1413,7 @@ mod tests {
             .expect("parses")
             .expect("event");
         match accepted.event {
-            HookEvent::ToolCall { spawn, .. } => assert!(!spawn),
+            HookEvent::ToolCall { spawn, .. } => assert_eq!(spawn, None),
             other => panic!("{other:?}"),
         }
         assert_eq!(
@@ -1483,6 +1554,91 @@ mod tests {
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
 
+    /// A fan-out spawn's prompt key, a notice's settled call, and a return that does not end
+    /// its child cross the wire and back unchanged.
+    #[test]
+    fn fan_out_fields_round_trip_through_the_wire() {
+        let root = TrajectoryId("cc:s1".to_string());
+        let child = TrajectoryId("cc:s1:a1".to_string());
+        let through = |event: &HookEvent| {
+            let wire = WireEvent::from_event(AdapterName::ClaudeCode, event).expect("translates");
+            let bytes = serde_json::to_vec(&wire).expect("serializes");
+            WireEvent::read(&bytes)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE)
+                .expect("parses")
+                .expect("event")
+                .event
+        };
+
+        let call = HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Workflow".to_string(),
+                arguments: raw(r#"{"script":"x"}"#),
+                cwd: None,
+            },
+            call_id: Some("toolu-1".to_string()),
+            spawn: None,
+            prompt: Some(PromptKey("p1".to_string())),
+            ruling: None,
+        };
+        match through(&call) {
+            HookEvent::ToolCall { spawn, prompt, .. } => {
+                assert_eq!(spawn, Some(SpawnKind::FanOut), "the kind is identified, never sent");
+                assert_eq!(prompt, Some(PromptKey("p1".to_string())));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let start = HookEvent::ChildStart {
+            root: root.clone(),
+            child: child.clone(),
+            spawn: SpawnRef::FanOut(PromptKey("p1".to_string())),
+        };
+        match through(&start) {
+            HookEvent::ChildStart { spawn, child: back, .. } => {
+                assert_eq!(spawn, SpawnRef::FanOut(PromptKey("p1".to_string())));
+                assert_eq!(back, child);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let notice = HookEvent::Prompt {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            text: "<task-notification>".to_string(),
+            settles: Some("toolu-1".to_string()),
+        };
+        match through(&notice) {
+            HookEvent::Prompt { settles, .. } => assert_eq!(settles.as_deref(), Some("toolu-1")),
+            other => panic!("{other:?}"),
+        }
+
+        let returned = HookEvent::ChildReturn {
+            root: root.clone(),
+            child: child.clone(),
+            value: r#"{"rows":3}"#.to_string(),
+        };
+        match through(&returned) {
+            HookEvent::ChildReturn { child: back, value, .. } => {
+                assert_eq!(back, child);
+                assert_eq!(value, r#"{"rows":3}"#);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let both = br#"{"protocol":1,"adapter":"claude-code","event":"child_start","root_id":"s1","child_id":"a1","spawn_binding":"b","prompt_id":"p1"}"#;
+        assert!(WireEvent::read(both).expect("reads").into_event(&CLAUDE_CODE).is_err());
+        let bare = br#"{"protocol":1,"adapter":"claude-code","event":"child_return","root_id":"s1","child_id":"a1"}"#;
+        assert!(WireEvent::read(bare).expect("reads").into_event(&CLAUDE_CODE).is_err());
+    }
+
     /// A tool call's working directory rides the wire with it; no other event reads one.
     #[test]
     fn a_tool_call_carries_its_working_directory_and_nothing_else_does() {
@@ -1497,7 +1653,8 @@ mod tests {
                 cwd: Some("/work/checkout".to_string()),
             },
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling: None,
         };
         let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("translates");
@@ -1716,7 +1873,8 @@ mod tests {
                 cwd: None,
             },
             call_id: None,
-            spawn: false,
+            spawn: None,
+            prompt: None,
             ruling,
         };
         let wire = WireEvent::from_event(AdapterName::Kagent, &call(Some(Ruling::Deny))).expect("translates");

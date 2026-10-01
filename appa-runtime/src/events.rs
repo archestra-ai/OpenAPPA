@@ -110,6 +110,7 @@ pub(crate) enum HookKind {
     ToolResult,
     ChildStart,
     ChildEnd,
+    ChildReturn,
     SpawnResult,
     /// The body did not parse.
     Unparsable,
@@ -480,15 +481,16 @@ impl EventLog {
         }
     }
 
-    /// The trajectory a caller who named none most likely means: the one that was active in
-    /// the window, when there is exactly one.
+    /// The selected trajectory when it is inside the window, or the only trajectory inside
+    /// the window when the caller named none. A selector narrows this same recent set; it
+    /// cannot retrieve an older trajectory merely because the event log still holds it.
     #[cfg(feature = "daemon")]
-    pub(crate) fn recent_root(&self, window: std::time::Duration) -> Recent {
+    pub(crate) fn recent_root(&self, window: std::time::Duration, selected: Option<&TrajectoryId>) -> Recent {
         let now = SystemTime::now();
         let mut inside = self.roots.iter().filter_map(|(root, events)| {
             let last = events.entries.back()?;
             let age = now.duration_since(last.at).ok()?;
-            (age <= window).then(|| (root.clone(), age))
+            (age <= window && selected.is_none_or(|selected| selected.as_str() == root)).then(|| (root.clone(), age))
         });
         match (inside.next(), inside.next()) {
             (Some((root, age)), None) => Recent::One { root, age },
@@ -541,10 +543,7 @@ fn clamp_name(name: String) -> String {
     if name.len() <= MAX_NAME_BYTES {
         return name;
     }
-    let mut cut = MAX_NAME_BYTES - ELISION.len();
-    while cut > 0 && !name.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = name.floor_char_boundary(MAX_NAME_BYTES - ELISION.len());
     let mut clamped = name[..cut].to_string();
     clamped.push_str(ELISION);
     clamped
@@ -615,6 +614,51 @@ mod tests {
         assert_eq!(log.roots.len(), MAX_ROOTS);
         assert!(!log.roots.contains_key(&key("t0")), "the coldest root is gone");
         assert!(log.roots.contains_key(&format!("t{MAX_ROOTS}")));
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn an_explicit_recent_root_resolves_ambiguity_without_reaching_outside_the_recent_set() {
+        let mut log = EventLog::default();
+        log.record(Some(&root("first")), hook("Read"));
+        log.record(Some(&root("second")), hook("Read"));
+
+        assert_eq!(log.recent_root(std::time::Duration::MAX, None), Recent::Ambiguous);
+        assert!(matches!(
+            log.recent_root(std::time::Duration::MAX, Some(&root("second"))),
+            Recent::One { root, .. } if root == "second"
+        ));
+        log.roots
+            .get_mut(&key("second"))
+            .expect("the selected root exists")
+            .entries
+            .back_mut()
+            .expect("the selected root has an event")
+            .at = SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            log.recent_root(std::time::Duration::from_secs(1), Some(&root("second"))),
+            Recent::None,
+            "naming a trajectory does not bypass the recency boundary"
+        );
+        assert_eq!(
+            log.recent_root(std::time::Duration::MAX, Some(&root("missing"))),
+            Recent::None,
+            "naming a trajectory does not bypass the retained event boundary"
+        );
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn repeated_activity_in_one_family_is_not_ambiguous() {
+        let mut log = EventLog::default();
+        log.record(Some(&root("family")), hook("Read"));
+        // Child events are filed under their family root before they reach this log.
+        log.record(Some(&root("family")), hook("Bash"));
+
+        assert!(matches!(
+            log.recent_root(std::time::Duration::MAX, None),
+            Recent::One { root, .. } if root == "family"
+        ));
     }
 
     #[test]

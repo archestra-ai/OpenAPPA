@@ -14,7 +14,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open the local dashboard and consolidated battery setup.
+    /// Ask for one battery's token on a local page; exit when the battery is ready.
     Ui(appa_runtime::ui::Args),
     /// Run headless Claude with runtime-owned file tools and native tools removed.
     ClaudeFiles(appa_runtime::claude_files::Args),
@@ -111,6 +111,11 @@ enum Command {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
+        /// Select the intended recently active family on this machine by its root ID. For
+        /// Claude Code, use `cc:<session-id>`. Confirm the ID belongs to the intended session.
+        #[arg(long)]
+        trajectory: Option<String>,
+
         /// What went wrong. Read from stdin when absent.
         message: Vec<String>,
     },
@@ -128,6 +133,26 @@ enum Command {
         /// Print it in the shape a SubagentStart hook is heard through.
         #[arg(long)]
         subagent: bool,
+    },
+
+    /// Internal host for a protected Claude Code process.
+    #[command(hide = true)]
+    ProtectedLaunch {
+        #[arg(long)]
+        settings: PathBuf,
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(last = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
+
+    /// Internal SessionStart and SessionEnd launch recorder.
+    #[command(hide = true)]
+    RecordLaunch {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(value_enum)]
+        event: appa_runtime::protected_launch::Event,
     },
 
     /// Post one harness hook event to the running runtime.
@@ -176,6 +201,19 @@ enum PluginCommand {
     Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
+fn claude_exit<T>(outcome: Result<T, appa_runtime::init::InitError>) -> ExitCode {
+    match outcome {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("appa: {error}");
+            match error {
+                appa_runtime::init::InitError::Recovery { .. } => ExitCode::from(3),
+                _ => ExitCode::FAILURE,
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("runtime")) {
         let args = iter::once(OsString::from("appa runtime")).chain(env::args_os().skip(2));
@@ -208,17 +246,7 @@ fn main() -> ExitCode {
             command: PackageCommand::Status(args),
         } => appa_runtime::ui::status(args),
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
-        Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                if matches!(error, appa_runtime::init::InitError::Recovery { .. }) {
-                    ExitCode::from(3)
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
-        },
+        Command::ActivateClaude { config } => claude_exit(appa_runtime::init::activate_claude_code(&config)),
         Command::Plugin {
             command: PluginCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),
@@ -228,13 +256,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::RemoveClaude { config: _ } => claude_exit(appa_runtime::init::claude_code_remove()),
         Command::Battery {
             command: PackageCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Battery, args),
@@ -272,7 +294,18 @@ fn main() -> ExitCode {
         } else {
             appa_runtime::session_context::Delivery::SessionStdout
         }),
-        Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
+        Command::ProtectedLaunch {
+            settings,
+            data_dir,
+            arguments,
+        } => appa_runtime::protected_launch::launch(&settings, &data_dir, &arguments),
+        Command::RecordLaunch { data_dir, event } => appa_runtime::protected_launch::record(&data_dir, event),
+        Command::Yell {
+            url,
+            yes,
+            trajectory,
+            message,
+        } => appa_runtime::yell::cli::run(&url, yes, trajectory, message),
         Command::Replay {
             config,
             modules_dir,
@@ -295,7 +328,7 @@ fn main() -> ExitCode {
             } else {
                 batteries_dir
             };
-            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str(), &session_tools);
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter, &session_tools);
             print!("{}", description.text);
             match appa_runtime::ui::describe_readiness(&config, &batteries_dir) {
                 Ok(readiness) => print!("{readiness}"),

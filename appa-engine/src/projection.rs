@@ -29,6 +29,7 @@ pub(crate) struct PreparedFork {
     pub(crate) parent: TrajectoryId,
     pub(crate) snapshot: ForkSnapshot,
     pub(crate) return_policy: ReturnPolicy,
+    pub(crate) kind: crate::transition::SpawnKind,
     denials: BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>,
 }
 
@@ -567,6 +568,7 @@ impl Projection {
                     fork,
                     snapshot,
                     return_policy,
+                    kind,
                 } => {
                     prepared.insert(
                         fork.clone(),
@@ -574,6 +576,7 @@ impl Projection {
                             parent: trajectory.clone(),
                             snapshot: snapshot.clone(),
                             return_policy: return_policy.clone(),
+                            kind: *kind,
                             denials: denials.get(trajectory).cloned().unwrap_or_default(),
                         },
                     );
@@ -1249,17 +1252,13 @@ impl Views<'_> {
     /// of no decided batch — a stage that is not a call's — is ordinary.
     pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::check::CallRole {
         match subject {
-            SubjectKey::Call { batch, position, .. }
-                if self.decided_batch(batch).is_some_and(|decided| {
-                    decided.spawn == Some(crate::transition::SpawnMark::at(*position as usize))
-                }) =>
-            {
-                crate::check::CallRole::MarkedSpawn
+            SubjectKey::Call { batch, position, .. } => match self.decided_batch(batch) {
+                Some(decided) => crate::check::CallRole::of(decided.spawn, *position as usize),
+                None => crate::check::CallRole::Ordinary,
+            },
+            SubjectKey::Approval(_) | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_) => {
+                crate::check::CallRole::Ordinary
             }
-            SubjectKey::Call { .. }
-            | SubjectKey::Approval(_)
-            | SubjectKey::ConfinedResult(_)
-            | SubjectKey::Return(_) => crate::check::CallRole::Ordinary,
         }
     }
 
@@ -1505,6 +1504,7 @@ mod tests {
                     floor: Label::top(),
                     sanitizer: None,
                 },
+                kind: crate::transition::SpawnKind::Single,
             },
             Fact::ForkOpened {
                 trajectory: traj(child),

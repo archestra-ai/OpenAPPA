@@ -8,7 +8,7 @@ mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
 use common::{RefusingPort, http, repo_root, serve_runtime};
-use init_fixture::{Fixture, Installed, runtime_fingerprint, shipped_default_config};
+use init_fixture::{Fixture, Installed, PolicyRoute, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
 /// running activation against a config that does not exist: the endpoint is
@@ -146,12 +146,9 @@ fn a_failure_at_the_start_puts_the_previous_profile_back() {
 #[test]
 fn a_policy_key_timeout_fails_activation() {
     let fixture = Fixture::new();
+    fixture.answers().policy = PolicyRoute::Stalls;
 
-    let failed = fixture
-        .activate()
-        .env("FAKE_POLICY_KEY_TIMEOUT", "1")
-        .output()
-        .expect("appa activates");
+    let failed = fixture.activate().output().expect("appa activates");
 
     assert!(!failed.status.success());
     assert_eq!(Installed::of(&fixture), Installed::nothing());
@@ -164,13 +161,10 @@ fn a_policy_key_timeout_fails_activation() {
 fn a_failure_after_the_start_stops_the_runtime_activation_started() {
     let fixture = Fixture::new();
     let stand_in = fixture.root.join("stand-in");
+    fixture.answers().stand_in = Some(stand_in.clone());
+    fixture.answers().policy = PolicyRoute::Missing;
 
-    let failed = fixture
-        .activate()
-        .env("FAKE_RUNTIME_STAND_IN", &stand_in)
-        .env_remove("FAKE_POLICY_KEY")
-        .output()
-        .expect("appa activates");
+    let failed = fixture.activate().output().expect("appa activates");
 
     assert!(!failed.status.success());
     let pid: i32 = fs::read_to_string(stand_in.join("pid"))
@@ -193,12 +187,7 @@ fn a_failure_after_the_start_stops_the_runtime_activation_started() {
 #[test]
 fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     let fixture = Fixture::new();
-    let reloads = fixture.root.join("reloads");
-    let output = fixture
-        .activate()
-        .env("FAKE_RELOADS", &reloads)
-        .output()
-        .expect("appa activates");
+    let output = fixture.activate().output().expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     // The harness binary lands on an appa-private path, not on PATH, and the
@@ -222,6 +211,8 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             "PostToolUse",
             "PostToolUseFailure",
             "PreToolUse",
+            "SessionEnd",
+            "SessionStart",
             "SessionStart",
             "SessionStart",
             "Stop",
@@ -232,7 +223,7 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             "UserPromptSubmit",
         ]
     );
-    let deployment_url = "http://127.0.0.1:8787";
+    let deployment_url = fixture.url.as_str();
     let session_start = entries
         .iter()
         .find(|(event, hook)| event == "SessionStart" && hook["args"][0] == "hook")
@@ -287,8 +278,9 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     );
     // The runtime reports serving the key the fixture computed for the shipped
     // default, and activation found nothing to reconcile: that key is the real one.
-    assert!(
-        !reloads.exists(),
+    assert_eq!(
+        fixture.answers().reloads,
+        0,
         "a first install reloaded a runtime already serving its policy"
     );
 }
@@ -324,8 +316,13 @@ fn reinstall_migrates_a_legacy_plugin_install_to_native_hooks() {
     );
     assert_eq!(
         entries.iter().filter(|(event, _)| event == "SessionStart").count(),
-        2,
-        "the native post and context hooks are each registered once"
+        3,
+        "the native post, context, and launch recorder are each registered once"
+    );
+    assert_eq!(
+        entries.iter().filter(|(event, _)| event == "SessionEnd").count(),
+        1,
+        "the launch recorder is registered once"
     );
 }
 
@@ -383,7 +380,7 @@ fn a_registration_reported_without_its_default_is_the_installs_own() {
 /// installation it would have replaced is still the one that is registered
 /// and running. Another build is one way to be foreign; this build serving
 /// another deployment's configuration is the other, and it is the one a
-/// digest alone cannot see. The fake's pid is its own exited shell.
+/// digest alone cannot see. The stand-in's pid is that of an exited process.
 #[test]
 fn a_foreign_runtime_is_refused_before_the_profile_is_touched() {
     let fixture = Fixture::new();
@@ -397,12 +394,12 @@ fn a_foreign_runtime_is_refused_before_the_profile_is_touched() {
         (fingerprint.as_str(), Path::new("/somewhere/else/appa.toml")),
     ] {
         let calls_before = fixture.claude_calls().lines().count();
-        let refused = fixture
-            .activate()
-            .env("FAKE_RUNTIME_FINGERPRINT", build)
-            .env("FAKE_RUNTIME_CONFIG", serving)
-            .output()
-            .expect("appa activates");
+        {
+            let mut answers = fixture.answers();
+            answers.fingerprint = build.to_owned();
+            answers.config = serving.to_path_buf();
+        }
+        let refused = fixture.activate().output().expect("appa activates");
         assert!(
             !refused.status.success(),
             "a runtime claiming build {build} at {} must be refused",
@@ -435,6 +432,7 @@ fn a_foreign_runtime_is_refused_before_the_profile_is_touched() {
 fn an_earlier_deployments_runtime_of_the_users_own_is_stopped_by_the_activation() {
     let fixture = Fixture::new();
     let stand_in = fixture.root.join("stand-in");
+    fixture.answers().stand_in = Some(stand_in.clone());
     let started = Command::new(fixture.root.join("fake-starter.sh"))
         .env("FAKE_RUNTIME_STAND_IN", &stand_in)
         .status()
@@ -447,14 +445,12 @@ fn an_earlier_deployments_runtime_of_the_users_own_is_stopped_by_the_activation(
         .expect("the recorded pid parses");
     assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the stand-in runs");
 
-    let output = fixture
-        .activate()
-        .env("FAKE_RUNTIME_STAND_IN", &stand_in)
-        .env("FAKE_CURL_CALLS", fixture.root.join("curl-calls"))
-        .env("FAKE_RUNTIME_FINGERPRINT", "an-earlier-build")
-        .env("FAKE_RUNTIME_FINGERPRINT_LATER", runtime_fingerprint(&fixture.appa))
-        .output()
-        .expect("appa activates");
+    {
+        let mut answers = fixture.answers();
+        answers.fingerprint = "an-earlier-build".to_owned();
+        answers.fingerprint_later = Some(runtime_fingerprint(&fixture.appa));
+    }
+    let output = fixture.activate().output().expect("appa activates");
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_ne!(
@@ -549,20 +545,18 @@ fn a_failed_rollback_disarms_the_launcher_until_an_activation_completes() {
 #[test]
 fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
     let fixture = Fixture::new();
-    let reloads = fixture.root.join("reloads");
-    let output = fixture
-        .activate()
+    {
+        let mut answers = fixture.answers();
         // This deployment's own runtime, serving a policy that is not the file the
         // marketplace wrote: the one state a reload is for.
-        .env("FAKE_POLICY_KEY", "a-policy-this-activation-did-not-compose")
-        .env("FAKE_POLICY_KEY_AFTER_RELOAD", fixture.policy_key())
-        .env("FAKE_RELOADS", &reloads)
-        .output()
-        .expect("appa activates");
+        answers.policy = PolicyRoute::Serves("a-policy-this-activation-did-not-compose".to_owned());
+        answers.policy_after_reload = Some(fixture.policy_key());
+    }
+    let output = fixture.activate().output().expect("appa activates");
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(
-        reloads.exists(),
+        fixture.answers().reloads > 0,
         "a diverged runtime of this deployment must be reloaded, not left serving its older policy",
     );
 }
@@ -579,17 +573,15 @@ fn activation_leaves_a_secret_it_cannot_see_to_the_runtime() {
         "\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\ntoken_env = \"APPA_UNSET_IN_THIS_PROCESS\"\n",
     );
     fs::write(&config, text).expect("the config is written");
-    let reloads = fixture.root.join("reloads");
     let output = fixture
         .activate()
         .env_remove("APPA_UNSET_IN_THIS_PROCESS")
-        .env("FAKE_RELOADS", &reloads)
         .output()
         .expect("appa activates");
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(
-        reloads.exists(),
+        fixture.answers().reloads > 0,
         "a policy activation cannot compose is settled by a reload"
     );
 }
@@ -721,14 +713,14 @@ fn a_foreign_mcp_server_under_appas_name_is_refused_before_anything_is_written()
 fn relative_directory_overrides_are_rendered_absolute() {
     let fixture = Fixture::new();
     let root = &fixture.root;
+    // The deployment the answering runtime claims: this init's own config.
+    fixture.answers().config = root.join("config/appa.toml");
     let output = fixture
         .activate()
         // Relative, resolved against the fixture's working directory and no other.
         .env("APPA_INSTALL_DIR", "bin")
         .env("APPA_CONFIG_DIR", "config")
         .env("APPA_DATA_DIR", "state")
-        // The deployment the answering runtime claims: this init's own config.
-        .env("FAKE_RUNTIME_CONFIG", root.join("config/appa.toml"))
         .output()
         .expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -770,13 +762,9 @@ fn relative_directory_overrides_are_rendered_absolute() {
 #[test]
 fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
     let fixture = Fixture::new();
-    let output = fixture
-        .activate()
-        // The preflight sees this build; everything after it sees a stranger.
-        .env("FAKE_CURL_CALLS", fixture.root.join("curl-calls"))
-        .env("FAKE_RUNTIME_FINGERPRINT_LATER", "not-this-build")
-        .output()
-        .expect("appa activates");
+    // The preflight sees this build; everything after it sees a stranger.
+    fixture.answers().fingerprint_later = Some("not-this-build".to_owned());
+    let output = fixture.activate().output().expect("appa activates");
 
     assert!(
         !output.status.success(),

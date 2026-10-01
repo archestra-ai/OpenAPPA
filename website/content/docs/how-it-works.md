@@ -147,6 +147,7 @@ A `trajectory family` contains one root and its spawned subagents in the same ev
 |---|---|---|
 | Resume or compact a conversation while keeping its session ID | The existing root reopens. | Its existing policy state and history remain in place. No fork is needed. |
 | Spawn a subagent, such as Claude Code's `Agent` tool | A child trajectory binds to an approved spawn in the same family. | The family shares effect history, and a child answer crosses a checked return path. |
+| Run a `fan-out spawn`, such as Claude Code's `Workflow` tool | Each subagent the spawn starts binds its own fork under the spawn's one approval, starting at the parent's label at that moment. | The same as a single spawn, for each subagent: every answer crosses the checked return path on its own. |
 | Open an independent conversation from copied context | The embedding integration can open a new root family from an identified source trajectory. | Only the source state frozen at opening is inherited. There is no subagent return path or continuing synchronization. |
 
 A root fork keeps the source family's opening policy, the source trajectory's label and authority denials, and the family's committed effects and unsettled effect reservations. Parent and fork then evolve independently. A reservation inherited while a parent call was unfinished remains conservative in the fork; a later parent result does not settle it there. Active dispatches and remedy offers are not copied.

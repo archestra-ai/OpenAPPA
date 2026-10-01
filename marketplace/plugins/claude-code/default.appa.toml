@@ -1,8 +1,8 @@
 # The policy `appa plugin install claude-code` writes for a Claude Code session.
 #
 # It names Claude Code's built-in tools, and it includes the Claude Code
-# battery, which carries the Read, Grep, Write and Edit rules and the Bash
-# credential selectors. A named tool without a `delta` restricts nothing: the
+# battery, which carries the Bash, Monitor, PowerShell, Read, Grep, Write and Edit rules
+# and their Annotators. A named tool without a `delta` restricts nothing: the
 # result's label is the combination of its sources, unchanged.
 #
 # Two questions decide each tool's rule. As a source: can someone other than
@@ -19,10 +19,9 @@
 # end of this file).
 #
 # Rules match in order and the first match wins, and the root's rules precede
-# an included battery's. The Bash credential selectors are repeated here, above
-# this file's bare Bash rule, so that they narrow the session before the Bash
-# Annotator is asked. On Unix, a tool this policy does not name gets a per-call
-# contract from the `*` Annotator at the end; off Unix, it is refused.
+# an included battery's: a root rule for a tool the battery names overrides it.
+# A tool neither this policy nor a battery names gets a per-call contract from
+# the `*` Annotator at the end.
 #
 # `clappa` starts Claude Code with `SendMessage` denied: a message to a peer
 # session leaves this trajectory without its label. The agent starts a
@@ -46,6 +45,14 @@ version = 2
 # it stops with one that may.
 [[policy.tool]]
 name = "host/claude-code/Agent"
+delta = {}
+
+# A workflow is a fan-out spawn: its script starts any number of subagents
+# under the one return declaration made at the `Workflow` call, which offers
+# every route above except `attest-schema`. Each subagent's return is checked
+# on its own, whether it arrives in its `StructuredOutput` call or at its stop.
+[[policy.tool]]
+name = "host/claude-code/Workflow"
 delta = {}
 
 [[policy.tool]]
@@ -142,6 +149,11 @@ delta = {}
 name = "host/claude-code/ScheduleWakeup"
 delta = {}
 
+# A feedback draft is queued locally and sent only after this user approves it.
+[[policy.tool]]
+name = "host/claude-code/SendFeedback"
+delta = {}
+
 [[policy.tool]]
 name = "host/claude-code/SendUserFile"
 delta = {}
@@ -189,10 +201,6 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/ToolSearch"
-delta = {}
-
-[[policy.tool]]
-name = "host/claude-code/Workflow"
 delta = {}
 
 # --- tools that bring outside content into the session ---
@@ -304,6 +312,36 @@ delta = { trust = "suspicious" }
 name = "host/claude-code/ReadNotifications"
 delta = { trust = "suspicious" }
 
+# A claude.ai design-system project is shared with this user's organization.
+[[policy.tool]]
+name = "host/claude-code/DesignSync"
+requires = { audience = { contains = ["internal"] } }
+delta = {}
+
+# A routine runs in a cloud session this policy does not protect, so its
+# prompt may reach anyone. Run titles and logs quote what that session read
+# from repositories, issues and web pages.
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list_runs)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get_run_log)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
 # Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime
 # itself, and gated by the same algebra as any other sink that leaves this
 # machine: the report carries this session's APPA decisions, so a session
@@ -318,211 +356,12 @@ name = "mcp/appa/yell"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
-# Root rules precede included batteries. Mirror the battery's credential
-# selectors here so they narrow to `self` before the root's bare Bash rule.
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.env*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.claude.json*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.credentials.json*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.ssh/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.aws/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.netrc*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.config/gh/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*id_rsa*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*id_ed25519*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*/proc/*environ*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*/Library/Keychains/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.docker/config.json*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.git-credentials*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.kube/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.npmrc*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.pypirc*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.azure/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.gnupg/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.config/gcloud/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.password-store/*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.vault-token*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*.databrickscfg*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*databricks*auth token*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*databricks*auth env*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*databricks*secrets get-secret*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*databricks*configure*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-# On Unix, a compatibility net covers tools installed after this policy. Exact
+# A compatibility net covers tools installed after this policy. Exact
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
 # two trust ranks, HITL, and no effects. `audiences` is left omitted, so an
 # annotation may narrow a result to `self` or `internal`, or require a reader
 # this policy names, exactly as a static rule above would.
-# APPA-UNIX-FALLBACK-BEGIN
-# The Bash Annotators run a Claude subprocess, which is available only on Unix.
-# The root supplies the Bash rules absent from the portable battery. The GitHub
-# battery's context provider, when installed, tells the repository Annotator
-# which repository a command reaches and who wrote what it reads.
-[[policy.annotator]]
-name = "claude-code.bash-repository-requirements"
-builtin = "claude-code"
-hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository, or a bot."
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*git push*)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-# Options between `git` and `push`, such as `git -C sub push`.
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*git -* push*)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh pr *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh issue *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh release *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh api *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:*gh repo *)"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-repository-requirements"
-
-# How a model Annotator classifies — trust by who wrote the returned text,
-# audience by the visible destination — is the runtime's. Add a `hint` with
-# what only this deployment knows: which hosts are its own and which paths hold
-# whose data. The mandate leaves `audiences` omitted, so it may name readers.
-[[policy.annotator]]
-name = "claude-code.bash-requirements"
-builtin = "claude-code"
-
-[[policy.tool]]
-name = "host/claude-code/Bash"
-description = "Runs one shell command and returns its output."
-annotator = "claude-code.bash-requirements"
-
-# Monitor runs a shell command, or opens a WebSocket, and its output reaches
-# the model as later notifications that no tool result carries. Its Annotator
-# labels the call before it runs.
-[[policy.tool]]
-name = "host/claude-code/Monitor"
-description = "Runs a shell command or opens a WebSocket and streams each output line to the agent."
-annotator = "claude-code.bash-requirements"
-
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"
@@ -533,7 +372,6 @@ effects = []
 [[policy.tool]]
 name = "*"
 annotator = "claude-code.undeclared-tool"
-# APPA-UNIX-FALLBACK-END
 
 # The reserved builtin sanitizer of a structured subagent return. The
 # session declares a JSON schema of bounded fields when it starts the

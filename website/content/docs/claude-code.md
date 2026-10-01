@@ -89,6 +89,18 @@ Protection belongs to the Claude Code process, not the saved conversation. Resum
 Plain `claude` starts an unprotected process.
 Exit and restart a conversation already resumed through plain `claude`. It cannot become protected in place.
 
+Claude Code prints an unprotected `claude --resume` command when an interactive session exits. After that hint, `clappa` prints the complete protected command for the same session:
+
+```text
+Resume this session with:
+claude --resume 01234567-89ab-4cde-8012-3456789abcde
+
+Resume with OpenAPPA protection:
+clappa --resume 01234567-89ab-4cde-8012-3456789abcde
+```
+
+The OpenAPPA block appears only when Claude Code saved a transcript that can be resumed.
+
 :::claude-session-choice:::
 
 Projects configured with `disableAllHooks: true` disable all hooks, preventing `clappa` from enforcing policy in that session.

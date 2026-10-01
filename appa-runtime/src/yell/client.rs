@@ -256,9 +256,7 @@ fn signature(plain: &[u8]) -> String {
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(SALT.trim().as_bytes())
         .expect("HMAC-SHA256 accepts a key of any length");
     mac.update(plain);
-    let tag = mac.finalize().into_bytes();
-    let hex: String = tag.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("v1={hex}")
+    format!("v1={}", crate::engine::hex(&mac.finalize().into_bytes()))
 }
 
 #[cfg(test)]

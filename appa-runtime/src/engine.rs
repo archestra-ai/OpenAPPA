@@ -80,9 +80,9 @@ use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, Remedy
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
-    HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -267,7 +267,7 @@ pub enum EngineEvent {
         call: ProposedCall,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
     },
     ToolOutcome {
         dispatch: EngineDispatchId,
@@ -768,9 +768,6 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
-    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
-    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
-    /// the name written.
     /// Every tool name the policy writes exactly — the spellings the deployment chose, and
     /// so the only ones a report may carry as spelled.
     ///
@@ -793,6 +790,9 @@ impl RuntimeEngine {
             .collect()
     }
 
+    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
+    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
+    /// the name written.
     pub(crate) fn names_tool(&self, tool: &str) -> bool {
         let name = appa_engine::value::ToolName::new(tool);
         self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)
@@ -899,7 +899,6 @@ impl RuntimeEngine {
         open.len() > 1
     }
 
-    /// Which trajectory pursues this offer.
     /// The compiled policy this engine decides under.
     pub(crate) fn registry(&self) -> &appa_engine::registry::Registry {
         self.engine.registry()
@@ -941,6 +940,7 @@ impl RuntimeEngine {
         }
     }
 
+    /// Which trajectory pursues this offer.
     pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
@@ -1267,7 +1267,7 @@ impl RuntimeEngine {
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
-        spawn: bool,
+        spawn: Option<SpawnKind>,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let resolved = match self
@@ -1302,13 +1302,16 @@ impl RuntimeEngine {
             evidence,
             UnresolvedAudience::Denied { tool: &call.tool },
             |audience| {
-                let decide = |marked: bool| {
+                let decide = |spawn: Option<SpawnKind>| {
                     let batch = ProposalBatch {
                         id: batch_id(entropy),
                         trajectory: trajectory.clone(),
                         provider_results: Vec::new(),
                         proposals: vec![proposed.clone()],
-                        spawn: marked.then(|| SpawnMark::at(0)),
+                        spawn: spawn.map(|kind| match kind {
+                            SpawnKind::Single => SpawnMark::at(0),
+                            SpawnKind::FanOut => SpawnMark::fan_out(0),
+                        }),
                         offer_nonce: engine_nonce(entropy),
                         evidence: evidence
                             .iter()
@@ -1325,7 +1328,7 @@ impl RuntimeEngine {
                     self.engine.handle(view, CoreEvent::Proposals(batch))
                 };
                 match decide(spawn) {
-                    Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                    Err(TransitionError::SpawnUncontrolled) if spawn.is_some() => decide(None),
                     decided => decided,
                 }
             },
@@ -1389,22 +1392,6 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> Feedback {
-        let (text, offers, review, display) = self.rendered_block(block, bounds, presentation);
-        let offers = self.offered_remedies(block, offers);
-        Feedback {
-            text,
-            offers,
-            display,
-            review,
-        }
-    }
-
-    fn rendered_block(
-        &self,
-        block: &CoreBlocked,
-        bounds: &ReturnBounds,
-        presentation: &EmbeddedPresentationOptions,
-    ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
         // Export gap classes, never recipient sets, review text, or call values.
         let gaps: BTreeSet<&str> = block
             .block
@@ -1441,12 +1428,12 @@ impl RuntimeEngine {
             presentation,
         );
         let review = self.pending_reviews(block, &offers);
-        (
-            rendered.text,
-            offers.into_iter().map(|(offer, _)| offer).collect(),
+        Feedback {
+            text: rendered.text,
+            offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
+            display: rendered.display,
             review,
-            rendered.display,
-        )
+        }
     }
 
     fn offered_remedies(&self, block: &CoreBlocked, offers: Vec<OfferId>) -> Vec<OfferedRemedy> {
@@ -1766,10 +1753,7 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
-            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
-            }
-            FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
+            FollowUp::Offer(OfferFollowUp::Denied { block } | OfferFollowUp::Substituted { block }) => {
                 Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
@@ -1860,10 +1844,15 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
-        let (feedback, offers, review, display) = self.rendered_block(block, bounds, presentation);
+        let Feedback {
+            text,
+            offers,
+            display,
+            review,
+        } = self.block_delivery(block, bounds, presentation);
         Presentation::Blocked {
-            feedback,
-            offers: self.offered_remedies(block, offers),
+            feedback: text,
+            offers,
             review,
             display,
         }
@@ -2072,12 +2061,9 @@ impl RuntimeEngine {
         };
         let withheld = UnresolvedAudience::Withheld { subject: "return" };
         let blocked = |feedback: String| {
-            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+            Ok(EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                 feedback,
-                offers: Vec::new(),
-                review: Vec::new(),
-                display: None,
-            })))
+            ))))
         };
         let judged = self.judge_under_audience(view.principal(), evidence, withheld, |audience| {
             let report = ChildReport {
@@ -2398,14 +2384,7 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         withheld: &str,
     ) -> Result<Next, EngineRefusal> {
-        let blocked = || {
-            Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-                review: Vec::new(),
-                display: None,
-            }))
-        };
+        let blocked = || Ok(Next::PresentToModel(blocked_without_offers(withheld.to_string())));
         match request {
             EvidenceRequest::Sanitizer {
                 sanitizer,
@@ -2572,16 +2551,7 @@ impl RuntimeEngine {
             }
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
-            let answering = audience
-                .lookup_target(&owed.provider)
-                .unwrap_or(&owed.provider)
-                .to_string();
-            requests.push(ExternalRequest::MemberLookup {
-                provider: owed.provider,
-                member: owed.member,
-                answering,
-                templates,
-            });
+            requests.push(member_lookup(audience, owed.provider, owed.member, templates));
         }
         if !requests.is_empty() {
             return Err(AudienceFailure::Consult(requests));
@@ -2642,16 +2612,12 @@ impl RuntimeEngine {
                     *reason,
                 )));
             }
-            let audience = self.engine.registry().audience();
-            requests.push(ExternalRequest::MemberLookup {
-                provider: spec.provider.clone(),
-                member: spec.member.clone(),
-                answering: audience
-                    .lookup_target(&spec.provider)
-                    .unwrap_or(&spec.provider)
-                    .to_string(),
-                templates: self.templates_of(&spec.provider)?,
-            });
+            requests.push(member_lookup(
+                audience,
+                spec.provider.clone(),
+                spec.member.clone(),
+                self.templates_of(&spec.provider)?,
+            ));
         }
         if requests.is_empty() {
             // Every primitive is answered and pre-validated, yet the act still asked.
@@ -2860,14 +2826,9 @@ impl UnresolvedAudience<'_> {
     fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
         match self {
             UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
-            UnresolvedAudience::Withheld { subject } => {
-                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: format!("[appa] {detail}; the {subject} is withheld"),
-                    offers: Vec::new(),
-                    review: Vec::new(),
-                    display: None,
-                }))
-            }
+            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
+            )),
             UnresolvedAudience::OfferStands => no_answer(format!("[appa] {detail}; the offer stands")),
         }
     }
@@ -2881,14 +2842,9 @@ impl UnresolvedAudience<'_> {
                 "[appa] {}: {detail}; the call is denied",
                 naming.model_spelling(tool)
             )),
-            UnresolvedAudience::Withheld { subject } => {
-                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: format!("[appa] {detail}; the {subject} is withheld"),
-                    offers: Vec::new(),
-                    review: Vec::new(),
-                    display: None,
-                }))
-            }
+            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
+            )),
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
@@ -2930,6 +2886,21 @@ pub(crate) fn selector_templates(
     })
 }
 
+fn member_lookup(
+    audience: &appa_engine::audience::AudienceRegistry,
+    provider: String,
+    member: String,
+    templates: Vec<String>,
+) -> ExternalRequest {
+    let answering = audience.lookup_target(&provider).unwrap_or(&provider).to_string();
+    ExternalRequest::MemberLookup {
+        provider,
+        member,
+        answering,
+        templates,
+    }
+}
+
 #[derive(Debug, Default)]
 struct Unanswered {
     selectors: BTreeMap<SelectorSpec, crate::events::NoAnswerClass>,
@@ -2950,6 +2921,15 @@ fn deny_next(text: String) -> Next {
             display: None,
             review: Vec::new(),
         }],
+    }
+}
+
+fn blocked_without_offers(feedback: String) -> Presentation {
+    Presentation::Blocked {
+        feedback,
+        offers: Vec::new(),
+        review: Vec::new(),
+        display: None,
     }
 }
 
@@ -4094,7 +4074,7 @@ mod tests {
                         call: call.clone(),
                         evidence,
                         entropy: OfferNonce([7u8; 32]),
-                        spawn: false,
+                        spawn: None,
                     },
                     &EmbeddedPresentationOptions::default(),
                 )

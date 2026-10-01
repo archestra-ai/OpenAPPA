@@ -125,8 +125,7 @@ static DECIDED_ACT: Table = Table {
         ("Proposals", DIGEST),
         ("Outcome", Rule::Table(&DISPATCH_ID)),
         ("ChildReturn", Rule::Table(&CHILD_RETURN_ID)),
-        // `ForkId` is a newtype over `DispatchId`, so it serializes as one.
-        ("Binding", Rule::Table(&DISPATCH_ID)),
+        ("Binding", Rule::Table(&FORK_ID)),
         ("Offer", DIGEST),
     ],
 };
@@ -691,7 +690,7 @@ static PROPOSAL_BATCH_DECIDED: Table = Table {
         ("batch", DIGEST),
         ("proposals", Rule::Each(&Rule::Table(&RESOLVED_CALL))),
         // `SpawnMark` is the position of the marked proposal.
-        ("spawn", NUMBER),
+        ("spawn", Rule::Table(&SPAWN_MARK)),
         ("released", Rule::Each(&Rule::Table(&DISPATCH_ID))),
         ("evidence", Rule::Table(&EVIDENCE)),
     ],
@@ -772,20 +771,38 @@ static BASIS_ADVANCED: Table = Table {
     ],
 };
 
+static SPAWN_MARK: Table = Table {
+    name: "SpawnMark",
+    entries: &[("index", NUMBER), ("kind", Rule::Keep)],
+};
+
+static FORK_ID: Table = Table {
+    name: "ForkId",
+    entries: &[
+        ("Spawn", Rule::Table(&DISPATCH_ID)),
+        ("Member", Rule::Table(&FORK_MEMBER)),
+    ],
+};
+
+static FORK_MEMBER: Table = Table {
+    name: "ForkId::Member",
+    entries: &[("spawn", Rule::Table(&DISPATCH_ID)), ("child", TRAJECTORY)],
+};
+
 static FORK_PREPARED: Table = Table {
     name: "ForkPrepared",
     entries: &[
         ("trajectory", TRAJECTORY),
-        // `ForkId` is a newtype over `DispatchId`.
-        ("fork", Rule::Table(&DISPATCH_ID)),
+        ("fork", Rule::Table(&FORK_ID)),
         ("snapshot", Rule::Table(&FORK_SNAPSHOT)),
         ("return_policy", Rule::Table(&RETURN_POLICY)),
+        ("kind", Rule::Keep),
     ],
 };
 
 static FORK_OPENED: Table = Table {
     name: "ForkOpened",
-    entries: &[("trajectory", TRAJECTORY), ("fork", Rule::Table(&DISPATCH_ID))],
+    entries: &[("trajectory", TRAJECTORY), ("fork", Rule::Table(&FORK_ID))],
 };
 
 static BOUNDARY: Table = Table {

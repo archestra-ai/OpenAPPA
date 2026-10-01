@@ -1,11 +1,11 @@
 //! Internal `appa runtime` command: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
-//! parses flags, initializes a missing deployment config, opens the
-//! runtime, picks the adapter codec, and serves.
+//! parses flags, opens the runtime over an existing deployment config, picks the
+//! adapter codec, and serves.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -23,25 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
 use crate::config::{Config, InitialFileAudience};
-use crate::default_config;
 use crate::{hooks, mcp};
-
-fn ensure_default_config(path: &Path) -> io::Result<bool> {
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if let Err(error) = file
-        .write_all(default_config::text().as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error);
-    }
-    Ok(true)
-}
 
 #[derive(Parser)]
 #[command(name = "appa runtime", version)]
@@ -170,18 +152,6 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
     }
 }
 
-/// The tool identification the runtime applies to every call of the host it serves. The one
-/// place this crate names the adapter crates. `--adapter` parses served names only
-/// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
-fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
-    match adapter {
-        AdapterName::Amp => appa_adapter_amp::adapter(),
-        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
-        AdapterName::Kagent => appa_adapter_kagent::adapter(),
-        AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
-    }
-}
-
 fn log_level(verbose: u8) -> &'static str {
     match verbose {
         0 => "info",
@@ -246,8 +216,7 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
 /// two sides must render the digest identically, so they share this one definition.
 pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(crate::engine::hex(&Sha256::digest(bytes)))
 }
 
 #[derive(Clone)]
@@ -337,13 +306,15 @@ async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries
     axum::Json(catalog)
 }
 
-/// What `appa ui` shows while this runtime serves: the policy it runs, and which tokens and
-/// programs this process itself can reach. Loopback management only.
-async fn dashboard(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    let mut data = state.runtime.dashboard(state.adapter);
-    data["config"] = serde_json::json!(state.config);
-    data["prerequisites"] = crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default();
-    axum::Json(data)
+/// What `appa ui` reads while this runtime serves: its configuration, the batteries it
+/// includes, and which tokens and programs this process itself can reach. Loopback
+/// management only.
+async fn prerequisites(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "config": state.config,
+        "included": state.runtime.included_batteries(),
+        "prerequisites": crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default(),
+    }))
 }
 
 /// Battery checks run in this process's environment, which is the one enforcement uses.
@@ -420,6 +391,9 @@ struct ReportRequestBody {
     /// Required, with no default: this is the question a person was asked, and a request that
     /// does not carry their answer has no business getting either kind of report.
     pseudonymize: bool,
+    /// A family root the caller identifies from its harness session. The runtime accepts it
+    /// only when that root is in the same recent set used by an unnamed request.
+    trajectory: Option<String>,
 }
 
 /// One finished `openappa.yell.v1` document.
@@ -446,11 +420,11 @@ async fn report(
             true => crate::yell::Mode::Pseudonymized,
             false => crate::yell::Mode::Baseline,
         },
-        // A caller here names no trajectory: it gets whichever one was recently active, or
-        // nothing. That narrows the endpoint — no session can be asked for by name — without
-        // making it a per-caller boundary. The recently active trajectory may well belong to
-        // someone else's session on this machine, and loopback is the only thing between them.
-        selection: crate::yell::Selection::Recent,
+        // A caller gets the only recently active trajectory, or can narrow that same recent
+        // set by root. It cannot ask for an older trajectory by name. This is still not a
+        // per-caller boundary: a recent trajectory may belong to another session on this
+        // machine, and loopback is the only thing between them.
+        selection: crate::yell::Selection::Recent(body.trajectory.map(crate::api::TrajectoryId)),
         harness: crate::yell::report::Harness::served(state.adapter.name),
         hostname: None,
     };
@@ -520,13 +494,9 @@ async fn serve(args: Args) -> ExitCode {
 async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
-    match ensure_default_config(&config_path) {
-        Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
-            return ExitCode::FAILURE;
-        }
+    if let Err(error) = crate::runtime_start::require_policy(&config_path) {
+        eprintln!("appa runtime: {error}");
+        return ExitCode::FAILURE;
     }
     let (config, battery_dirs) = match load_config(&config_path, &args.batteries_dir) {
         Ok(loaded) => loaded,
@@ -539,7 +509,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
-    let adapter = served(args.adapter);
+    let adapter = crate::describe::served(args.adapter);
     let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
         catalog: crate::batteries::snapshot(&battery_dirs),
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
@@ -615,7 +585,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         .route("/status", get(status))
         .route("/report", post(report))
         .route("/reload", post(reload))
-        .route("/dashboard", get(dashboard))
+        .route("/prerequisites", get(prerequisites))
         .route("/battery-check", post(battery_check))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()
@@ -726,26 +696,6 @@ fn management_peer_is_allowed(peer: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_missing_config_is_created_without_replacing_an_existing_file() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("appa.toml");
-
-        assert!(ensure_default_config(&path).expect("default config is created"));
-        assert_eq!(
-            fs::read_to_string(&path).expect("default config is readable"),
-            default_config::text()
-        );
-        Config::load(&path).expect("the embedded default config validates");
-
-        fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
-        assert!(!ensure_default_config(&path).expect("existing config is preserved"));
-        assert_eq!(
-            fs::read_to_string(path).expect("existing config is readable"),
-            "existing deployment"
-        );
-    }
 
     #[test]
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {

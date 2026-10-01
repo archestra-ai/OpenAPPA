@@ -32,10 +32,6 @@ pub(super) struct Snapshot {
     _stage: Option<tempfile::TempDir>,
 }
 
-fn invalid(message: impl ToString) -> InstallError {
-    InstallError::Invalid(message.to_string())
-}
-
 fn document(text: &str) -> Result<toml_edit::DocumentMut, InstallError> {
     text.parse().map_err(invalid)
 }

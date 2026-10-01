@@ -77,15 +77,14 @@ setup = [
   the prefix it starts with, and any other variable to set. Name the
   scopes the helpers' API calls need, not more. Do not describe a CLI
   sign-in here: declare it as a CLI alternative (see below), and `appa ui`
-  shows it as a separate choice beside the token field.
+  shows it as a separate choice below the token field.
 
 A step may contain `code spans` in backticks and bare `https://` URLs.
-`appa ui` shows code spans as code and URLs as links. No other Markdown
-is rendered. `appa battery install` prints the benefit and the numbered
-steps after the battery is included, beside every `token_env` variable
-the policy's bindings name, and `appa ui` labels the token field with the
-variable. Thus a step does not tell the person to set the credential
-variable. A blank or multi-line `benefit` or step makes
+No other Markdown is rendered. `appa battery install` prints the benefit
+and the numbered steps after the battery is included, beside every
+`token_env` variable the policy's bindings name, and the token page saves
+the token under that variable. Thus a step does not tell the person to set
+the credential variable. A blank or multi-line `benefit` or step makes
 the manifest invalid.
 
 Run `bash scripts/appa-marketplace.sh` to generate the catalog entry and
@@ -102,7 +101,7 @@ The test suite composes every battery into each host it declares to make sure th
 
 ## Declare local setup checks
 
-The existing `appa-package.toml` also describes prerequisites for `appa ui`.
+The existing `appa-package.toml` also describes the prerequisites that the readiness check tests.
 Credential names remain derived from the policy's `token_env` bindings.
 
 ```toml

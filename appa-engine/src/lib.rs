@@ -43,6 +43,14 @@
 //! crosses back to its parent only through the checked return path. Family-wide effect
 //! history remains shared.
 //!
+//! A **fan-out spawn** ([`transition::SpawnKind::FanOut`]) starts any number of children under
+//! the one return declaration its release consumed. Its own fork binds no child. Each child it
+//! starts gets a member fork ([`value::ForkId::Member`]), prepared by the engine's binding
+//! decision under that declaration and seeded at the parent's label as it stands at the child's
+//! start, so a child started after a sibling's return crossed starts at the label that return
+//! left on the parent. Every member's return crosses separately, exactly as a single spawn's
+//! does.
+//!
 //! A **root fork** opens an independent family from an existing trajectory. Its
 //! [`fact::RootForkOrigin`] is recorded on the new root's [`fact::Fact::TrajectoryOpened`],
 //! not on a `ForkOpened` child binding. It freezes the source label, family effects and

@@ -17,6 +17,8 @@ uses
 to check each action. These benchmarks test the complete integration and show
 whether its policies stop the intended threats without making the agent useless.
 
+:::benchmark-tldr:::
+
 ## Security: no observed attacks in 1,320 evaluations
 
 No scored attack succeeded against guarded OpenAPPA in **1,320 evaluations**:

@@ -61,6 +61,27 @@ pub enum StartError {
     },
     #[error("the runtime did not become healthy at {url}. Its own error is the last line of {log}")]
     NotHealthy { url: String, log: PathBuf },
+    #[error(transparent)]
+    MissingPolicy(#[from] MissingPolicy),
+}
+
+/// A deployment serves only a policy someone wrote: a plugin install, or the
+/// operator.
+#[derive(Debug, Error)]
+#[error("no policy at {}; run: appa plugin install <host>, or pass --config with your own policy", path.display())]
+pub struct MissingPolicy {
+    pub path: PathBuf,
+}
+
+/// Refuse a policy path that does not exist; any other failure to read it is
+/// the config loader's to report.
+pub fn require_policy(path: &Path) -> Result<(), MissingPolicy> {
+    match path.try_exists() {
+        Ok(false) => Err(MissingPolicy {
+            path: path.to_path_buf(),
+        }),
+        Ok(true) | Err(_) => Ok(()),
+    }
 }
 
 /// Why the runtime answering an endpoint was not stopped.
@@ -110,10 +131,7 @@ fn probe(endpoint: &Endpoint) -> Health {
     let body = String::from_utf8_lossy(&answer.body).trim().to_owned();
     match body.as_str() {
         "ok" => Health::Ok,
-        _ => match body
-            .strip_prefix("stale ")
-            .and_then(crate::init::endpoint::positive_pid)
-        {
+        _ => match crate::init::endpoint::stale_pid(&body) {
             Some(pid) => Health::Stale(pid),
             None => Health::Other(body),
         },
@@ -166,6 +184,9 @@ pub fn ensure(
         Health::Ok => return Ok(()),
         Health::Stale(_) if target.user_owned => return Ok(()),
         Health::Stale(pid) => {
+            // A stale runtime still serves; without a policy to start its
+            // replacement over, it is left serving.
+            require_policy(&deployment.config)?;
             if stop_stale(&endpoint, &target.url, pid)? {
                 return Ok(());
             }
@@ -330,18 +351,13 @@ fn start(
     executable: &Path,
     withheld: &[OsString],
 ) -> Result<(), StartError> {
-    // The runtime writes the default policy on its first start and refuses to
-    // start when it cannot.
-    let directory = |path: &Path| {
-        std::fs::create_dir_all(path).map_err(|source| StartError::Directory {
-            path: path.to_path_buf(),
-            source,
-        })
-    };
-    if let Some(parent) = deployment.config.parent() {
-        directory(parent)?;
-    }
-    directory(&deployment.data_dir)?;
+    // Checked here, not left to the runtime: a runtime that refuses at once
+    // would otherwise cost the hook its whole health budget.
+    require_policy(&deployment.config)?;
+    std::fs::create_dir_all(&deployment.data_dir).map_err(|source| StartError::Directory {
+        path: deployment.data_dir.clone(),
+        source,
+    })?;
     let stderr_log = deployment.data_dir.join("runtime.stderr.log");
     let log = |name: &str| {
         std::fs::OpenOptions::new()
@@ -433,6 +449,36 @@ mod tests {
         ensure(&target, &deployment, Path::new("unused"), &[]).expect("the session's own runtime is left as it is");
     }
 
+    /// A stale runtime of the deployment is not stopped when no policy is on
+    /// disk to start its replacement over: the hook fails, and the stale one
+    /// keeps serving.
+    #[test]
+    fn a_stale_runtime_keeps_serving_when_the_policy_is_missing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let url = format!("http://{}", listener.local_addr().expect("the bound address"));
+        let served = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut socket, _) = listener.accept().expect("the probe connects");
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request);
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nstale 99");
+            listener.set_nonblocking(true).expect("the listener turns non-blocking");
+            listener.accept().is_err()
+        });
+        let root = tempfile::tempdir().expect("temporary directory");
+        let deployment = Deployment {
+            config: root.path().join("appa.toml"),
+            data_dir: root.path().join("data"),
+        };
+        let target = RuntimeTarget { url, user_owned: false };
+        let error = ensure(&target, &deployment, Path::new("unused"), &[]).expect_err("no policy");
+        assert!(matches!(error, StartError::MissingPolicy(_)), "{error}");
+        assert!(
+            served.join().expect("the fake runtime joins"),
+            "nothing but the one probe reached the stale runtime"
+        );
+    }
+
     /// Nothing answering at a URL the session named is the user's to start:
     /// the deployment's binary is never bound to their port, and nothing of
     /// the deployment is written.
@@ -454,22 +500,51 @@ mod tests {
         assert!(!root.path().join("data").exists());
     }
 
-    /// Nothing listening and no executable to start: the start fails with the
-    /// spawn error, after creating the directories the runtime would write.
-    #[test]
-    fn a_missing_executable_fails_the_start_after_the_directories_exist() {
+    fn vacated_url() -> String {
         let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
         let url = format!("http://{}", vacated.local_addr().expect("the bound address"));
         drop(vacated);
+        url
+    }
+
+    /// Nothing listening and no executable to start: the start fails with the
+    /// spawn error, after creating the data directory the runtime would write.
+    #[test]
+    fn a_missing_executable_fails_the_start_after_the_data_directory_exists() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let deployment = Deployment {
+            config: root.path().join("appa.toml"),
+            data_dir: root.path().join("data"),
+        };
+        std::fs::write(&deployment.config, "[policy]\nversion = 2\n").expect("the policy is written");
+        let target = RuntimeTarget {
+            url: vacated_url(),
+            user_owned: false,
+        };
+        let error = ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("nothing to start");
+        assert!(matches!(error, StartError::Spawn { .. }), "{error}");
+        assert!(root.path().join("data").is_dir());
+    }
+
+    /// No policy on disk: nothing is spawned and nothing of the deployment is
+    /// written, so the hook fails at once instead of waiting out the health budget.
+    #[test]
+    fn a_missing_policy_fails_the_start_before_anything_is_written() {
         let root = tempfile::tempdir().expect("temporary directory");
         let deployment = Deployment {
             config: root.path().join("config/appa.toml"),
             data_dir: root.path().join("data"),
         };
-        let target = RuntimeTarget { url, user_owned: false };
-        let error = ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("nothing to start");
-        assert!(matches!(error, StartError::Spawn { .. }), "{error}");
-        assert!(root.path().join("config").is_dir());
-        assert!(root.path().join("data").is_dir());
+        let target = RuntimeTarget {
+            url: vacated_url(),
+            user_owned: false,
+        };
+        let error = ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("no policy");
+        assert!(
+            matches!(&error, StartError::MissingPolicy(missing) if missing.path == deployment.config),
+            "{error}"
+        );
+        assert!(!root.path().join("config").exists());
+        assert!(!root.path().join("data").exists());
     }
 }

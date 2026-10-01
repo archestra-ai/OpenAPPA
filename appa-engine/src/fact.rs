@@ -494,6 +494,7 @@ pub enum Fact {
         fork: crate::value::ForkId,
         snapshot: ForkSnapshot,
         return_policy: ReturnPolicy,
+        kind: crate::transition::SpawnKind,
     },
     ForkOpened {
         trajectory: TrajectoryId,

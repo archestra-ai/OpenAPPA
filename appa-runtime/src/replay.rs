@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId,
+    Actor, CanonicalTool, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId,
 };
 use serde_json::value::RawValue;
 
@@ -450,8 +450,8 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
             Ok(()) => (Got::Allowed, None, Vec::new()),
             Err(detail) => return StepOutcome::CannotRun(detail),
         },
-        Proposed::Denied { feedback } => {
-            let offers = offers_in(runtime, actor, &feedback);
+        Proposed::Denied { feedback, offers } => {
+            let offers = recognized(runtime, actor, offers);
             let kinds: BTreeSet<OfferKind> = offers.iter().map(|(kind, _)| kind.clone()).collect();
             (Got::Blocked(kinds), Some(feedback), offers)
         }
@@ -480,7 +480,10 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
 
 enum Proposed {
     Allowed(ProposedCall),
-    Denied { feedback: String },
+    Denied {
+        feedback: String,
+        offers: Vec<OfferedRemedy>,
+    },
     CannotRun(String),
 }
 
@@ -489,12 +492,13 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
         actor: actor.clone(),
         call: call.clone(),
         call_id: None,
-        spawn: false,
+        spawn: None,
+        prompt: None,
         ruling: None,
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
-        HookDecision::DenyCall { feedback, .. } => Proposed::Denied { feedback },
+        HookDecision::DenyCall { feedback, offers, .. } => Proposed::Denied { feedback, offers },
         HookDecision::Refuse { detail } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }
@@ -519,16 +523,12 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
     }
 }
 
-/// The offers a block's feedback names, each with whom taking it involves. An id the
-/// runtime no longer recognizes is dropped.
-fn offers_in(runtime: &Runtime, actor: &Actor, feedback: &str) -> Vec<(OfferKind, OfferId)> {
-    feedback
-        .lines()
-        .filter_map(|line| {
-            let after = line.split("offer_id:").nth(1)?;
-            let rest = after.trim_start().strip_prefix('"')?;
-            Some(OfferId(rest[..rest.find('"')?].to_string()))
-        })
+/// The offers a block makes, each with whom taking it involves. An id the runtime no longer
+/// recognizes is dropped.
+fn recognized(runtime: &Runtime, actor: &Actor, offers: Vec<OfferedRemedy>) -> Vec<(OfferKind, OfferId)> {
+    offers
+        .into_iter()
+        .map(|offered| OfferId(offered.id))
         .filter_map(|offer| runtime.offer_kind(&actor.root, &offer).map(|kind| (kind, offer)))
         .collect()
 }
@@ -552,7 +552,9 @@ async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<
     };
     match propose(runtime, actor, call).await {
         Proposed::Allowed(call) => report_empty_output(runtime, actor, call).await,
-        Proposed::Denied { feedback } => Err(format!("the released call was proposed again and denied: {feedback}")),
+        Proposed::Denied { feedback, .. } => {
+            Err(format!("the released call was proposed again and denied: {feedback}"))
+        }
         Proposed::CannotRun(detail) => Err(detail),
     }
 }

@@ -1,6 +1,6 @@
-//! Local management UI, served by `appa ui` itself, never by the runtime. Setup works
-//! while the runtime is stopped; when a runtime serves this configuration, the page shows
-//! what that process reaches and reloads it after a save.
+//! The token page, served by `appa ui` itself, never by the runtime. It asks for one
+//! battery's token and exits once that battery is ready. It works while the runtime is
+//! stopped; when a runtime serves this configuration, a save reloads it.
 mod readiness;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,6 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::config::Config;
 use crate::credentials::CredentialStore;
 use crate::loopback_http::{Deadline, Endpoint};
 
@@ -28,18 +27,15 @@ pub struct Args {
     config: Option<PathBuf>,
     #[arg(skip)]
     batteries_dir: Vec<PathBuf>,
-    /// Configure several proposed batteries together, before including them.
-    #[arg(long, value_delimiter = ',')]
+    /// The one battery whose token the page asks for.
+    #[arg(long, required = true)]
     battery: Vec<String>,
-    /// Open the consolidated prerequisites screen.
-    #[arg(long)]
-    setup: bool,
     #[arg(long, env = "APPA_RUNTIME_URL", default_value = crate::runtime_url::DEFAULT_RUNTIME_URL)]
     runtime_url: String,
     /// Print the browser URL without opening the browser.
     #[arg(long)]
     no_open: bool,
-    /// Loopback port for the page; the runtime's port + 1 when absent.
+    /// Loopback port for the page; a free port when absent.
     #[arg(long)]
     port: Option<u16>,
 }
@@ -170,7 +166,8 @@ impl Local {
         let data = tokio::task::spawn_blocking(move || {
             let endpoint = Endpoint::parse(&url).ok()?;
             let answer =
-                crate::loopback_http::get(&endpoint, "/dashboard", &Deadline::spanning(Duration::from_secs(2))).ok()?;
+                crate::loopback_http::get(&endpoint, "/prerequisites", &Deadline::spanning(Duration::from_secs(2)))
+                    .ok()?;
             if !answer.is_success() {
                 return None;
             }
@@ -227,15 +224,6 @@ impl Local {
                 "check": checks.get(&entry.name), "has_check": battery.readiness.is_some()})
         }).collect()
         };
-        let config = match Config::inspect_local(&self.config, &self.dirs) {
-            Ok(config) => Some(config),
-            Err(error) => {
-                errors.push(format!(
-                    "APPA cannot read the configuration: {error}. The overview is empty until it is fixed; you can still add tokens."
-                ));
-                None
-            }
-        };
         for name in &configured {
             // An unreadable installed battery already has its own message.
             let reported = errors.iter().any(|error| error.starts_with(&format!("{name}: ")));
@@ -245,42 +233,7 @@ impl Local {
                 ));
             }
         }
-        // The overview reads the configuration on disk: the composed policy, and each
-        // rule's origin from the root file or the included battery that names it first.
-        let policy = config
-            .as_ref()
-            .map(|c| json!(c.policy_file().value()))
-            .unwrap_or(json!({}));
-        let mut origins = BTreeMap::new();
-        if config.is_some() {
-            let paths = std::iter::once(("root configuration".to_string(), self.config.clone())).chain(
-                entries
-                    .iter()
-                    .filter(|e| configured.contains(&e.name))
-                    .map(|e| (e.name.clone(), e.dir.join("appa.toml"))),
-            );
-            for (origin, path) in paths {
-                if let Some(doc) = std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
-                {
-                    for rule in doc
-                        .get("policy")
-                        .and_then(|p| p.get("tool"))
-                        .and_then(toml::Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
-                        if let Some(name) = rule.get("name").and_then(toml::Value::as_str) {
-                            origins.entry(name.to_owned()).or_insert_with(|| origin.clone());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(
-            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "policy": policy, "origins": origins}),
-        )
+        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime_info}))
     }
 
     async fn check(&self, names: &[String]) -> Result<(), String> {
@@ -349,7 +302,6 @@ fn runtime_local(config: &Path, dirs: &[PathBuf]) -> Result<Local, String> {
         config: Some(config.to_path_buf()),
         batteries_dir: dirs.to_vec(),
         battery: vec![],
-        setup: false,
         runtime_url: String::new(),
         no_open: true,
         port: None,
@@ -413,6 +365,34 @@ struct Web {
     local: Arc<Local>,
     authority: String,
     origin: String,
+    setup: Arc<Setup>,
+}
+/// The one battery the page asks a token for, and the signal that ends the command once a
+/// save or a check finds it ready.
+struct Setup {
+    battery: String,
+    ready: tokio::sync::Notify,
+}
+/// How long `appa ui` waits for the battery to become ready.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+enum Ending {
+    Ready,
+    TimedOut,
+    Interrupted,
+}
+/// Ends the command when the latest check of its battery is ready.
+fn settle(web: &Web) {
+    let setup = &web.setup;
+    let ready = web
+        .local
+        .checks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&setup.battery)
+        .is_some_and(|check| check.status == readiness::Status::Ready);
+    if ready {
+        setup.ready.notify_one();
+    }
 }
 type ApiResult = Result<axum::Json<Value>, (StatusCode, &'static str)>;
 
@@ -527,6 +507,7 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
             .expect("errors array")
             .push(json!(format!("Saved. The runtime kept its previous policy: {error}")));
     }
+    settle(&web);
     Ok(axum::Json(snapshot))
 }
 #[derive(Deserialize)]
@@ -541,11 +522,13 @@ async fn check(State(web): State<Web>, axum::Json(check): axum::Json<Check>) -> 
         .check(&check.batteries)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Unknown battery"))?;
-    web.local
+    let snapshot = web
+        .local
         .snapshot()
         .await
-        .map(axum::Json)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Cannot inspect local setup"))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Cannot inspect local setup"))?;
+    settle(&web);
+    Ok(axum::Json(snapshot))
 }
 pub fn run(args: Args) -> ExitCode {
     match launch(args) {
@@ -557,57 +540,68 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 fn launch(args: Args) -> Result<(), String> {
+    let [name] = args.battery.as_slice() else {
+        return Err("--battery takes exactly one battery".into());
+    };
     let local = Arc::new(Local::new(&args)?);
+    let setup = Arc::new(Setup {
+        battery: name.clone(),
+        ready: tokio::sync::Notify::new(),
+    });
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let port = page_port(&args)?;
+        // A free port by default, so a page left open never blocks the next one.
+        let port = args.port.unwrap_or(0);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::AddrInUse => {
-                    format!("port {port} is in use; is appa ui already running? Use --port to choose another.")
-                }
-                _ => format!("cannot listen on 127.0.0.1:{port}: {e}"),
-            })?;
+            .map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;
         let authority = listener.local_addr().map_err(|e| e.to_string())?.to_string();
         let origin = format!("http://{authority}");
         let mut url = url::Url::parse(&origin).expect("loopback origin");
-        url.query_pairs_mut()
-            .append_pair("configure", if args.setup { "true" } else { "false" });
-        if !args.battery.is_empty() {
-            url.query_pairs_mut().append_pair("batteries", &args.battery.join(","));
-        }
+        url.set_path("/connect");
+        url.query_pairs_mut().append_pair("battery", name);
+        eprintln!("Waiting for the token. The command exits when the battery is ready.");
         println!("{url}");
-        eprintln!("Serving the page until you press Ctrl-C.");
         if !args.no_open {
             open_browser(url.as_str());
         }
         let web = Web {
-            local,
+            local: local.clone(),
             authority,
             origin,
+            setup: setup.clone(),
         };
+        let (ended, ending) = tokio::sync::oneshot::channel();
         axum::serve(
             listener,
             router(web).into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            let reason = tokio::select! {
+                () = setup.ready.notified() => Ending::Ready,
+                () = tokio::time::sleep(SETUP_TIMEOUT) => Ending::TimedOut,
+                _ = tokio::signal::ctrl_c() => Ending::Interrupted,
+            };
+            let _ = ended.send(reason);
         })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        // The same sanitized shape as `appa battery status --json`, for this battery only.
+        let snapshot = local.snapshot().await?;
+        let batteries: Vec<_> = snapshot["batteries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|battery| battery["name"] == name.as_str())
+            .collect();
+        let status = json!({"batteries": batteries, "errors": snapshot["errors"]});
+        println!("{}", serde_json::to_string_pretty(&status).expect("status JSON"));
+        match ending.await {
+            Ok(Ending::Ready) => Ok(()),
+            Ok(Ending::TimedOut) => Err(format!("{name} is not ready after 15 minutes")),
+            Ok(Ending::Interrupted) | Err(_) => Err(format!("stopped before {name} was ready")),
+        }
     })
-}
-/// The page sits one port above the runtime it manages, so its address stays the same.
-fn page_port(args: &Args) -> Result<u16, String> {
-    if let Some(port) = args.port {
-        return Ok(port);
-    }
-    url::Url::parse(&args.runtime_url)
-        .ok()
-        .and_then(|url| url.port_or_known_default())
-        .and_then(|port| port.checked_add(1))
-        .ok_or_else(|| format!("cannot derive a page port from {}; use --port", args.runtime_url))
 }
 enum Applied {
     Reloaded,
@@ -650,7 +644,7 @@ fn open_browser(url: &str) {
 }
 fn router(web: Web) -> axum::Router {
     axum::Router::new()
-        .route("/", get(|| async { Html(include_str!("ui/index.html")) }))
+        .route("/connect", get(|| async { Html(include_str!("ui/index.html")) }))
         .route(
             "/app.js",
             get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], include_str!("ui/app.js")) }),
@@ -713,7 +707,6 @@ pub fn describe_readiness(config: &Path, dirs: &[PathBuf]) -> Result<String, Str
         config: Some(config.to_path_buf()),
         batteries_dir: dirs.to_vec(),
         battery: vec![],
-        setup: false,
         no_open: true,
         port: None,
         runtime_url: std::env::var("APPA_RUNTIME_URL")
@@ -745,7 +738,6 @@ pub fn status(args: StatusArgs) -> ExitCode {
         config: args.config,
         batteries_dir: args.batteries_dir,
         battery: args.battery,
-        setup: true,
         runtime_url: std::env::var("APPA_RUNTIME_URL")
             .unwrap_or_else(|_| crate::runtime_url::DEFAULT_RUNTIME_URL.into()),
         no_open: true,
@@ -799,7 +791,6 @@ mod tests {
             config: Some(dir.join("appa.toml")),
             batteries_dir: vec![],
             battery: vec!["demo".into()],
-            setup: true,
             runtime_url: "http://127.0.0.1:1".into(),
             no_open: true,
             port: None,
@@ -819,6 +810,10 @@ mod tests {
             local: local.clone(),
             authority,
             origin: origin.clone(),
+            setup: Arc::new(Setup {
+                battery: "demo".into(),
+                ready: tokio::sync::Notify::new(),
+            }),
         };
         let task = tokio::spawn(async move {
             axum::serve(
@@ -897,18 +892,6 @@ mod tests {
         );
         assert!(local.store.values().unwrap().is_empty());
         task.abort();
-    }
-
-    #[test]
-    fn the_page_sits_one_port_above_the_runtime_unless_a_port_is_given() {
-        let mut args = fixture(tempfile::tempdir().unwrap().path());
-        args.runtime_url = "http://127.0.0.1:8787".into();
-        assert_eq!(page_port(&args), Ok(8788));
-        args.port = Some(9000);
-        assert_eq!(page_port(&args), Ok(9000));
-        args.port = None;
-        args.runtime_url = "http://127.0.0.1:65535".into();
-        assert!(page_port(&args).is_err());
     }
 
     #[tokio::test]

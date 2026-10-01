@@ -26,7 +26,41 @@ pub(crate) fn echo(value: &str) -> String {
     )
 }
 
+/// The feedback that carries the exact input a subagent's `StructuredOutput` must carry for its
+/// return to cross.
+pub(crate) fn structured_echo(value: &str) -> String {
+    format!(
+        "[appa] what crosses to the parent is not this input as written. Call StructuredOutput again with \
+         exactly this input, verbatim:\n{value}"
+    )
+}
+
+/// What crosses in place of a `StructuredOutput` input is not JSON, so no input carries it.
+const UNSTRUCTURED: &str = "[appa] what crosses to the parent in place of this input is not JSON, so no \
+                            StructuredOutput input can carry it; this return cannot cross";
+
 pub(crate) fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
+    match event {
+        HookEvent::ChildReturn { .. } => structured_return(event, decision),
+        _ => render_decision(event, decision),
+    }
+}
+
+/// A subagent's `StructuredOutput` call is its return: the call runs when the return crosses as
+/// given, and is denied with the reason, or with the exact input that crosses, when it does not.
+fn structured_return(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
+    match decision {
+        HookDecision::Ack => allow("appa: the return crosses to the parent"),
+        HookDecision::Block { reason } => deny(reason),
+        HookDecision::ChildReturn { value } => match serde_json::from_str::<serde_json::Value>(value) {
+            Ok(_) => deny(&structured_echo(value)),
+            Err(_) => deny(UNSTRUCTURED),
+        },
+        other => render_decision(event, other),
+    }
+}
+
+fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
     match decision {
         HookDecision::Ack => serde_json::json!({}),
         HookDecision::AllowCall { .. } => allow("appa: the call is released"),
@@ -609,6 +643,7 @@ mod tests {
                         child: None,
                     },
                     text: "do the thing".to_string(),
+                    settles: None,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
@@ -718,5 +753,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_structured_return_runs_or_is_denied_with_what_crosses() {
+        let event = HookEvent::ChildReturn {
+            root: root(),
+            child: TrajectoryId("cc:s1:a1".to_string()),
+            value: r#"{"rows":3}"#.to_string(),
+        };
+        assert_eq!(
+            render(&event, &HookDecision::Ack),
+            allow("appa: the return crosses to the parent")
+        );
+        assert_eq!(
+            render(
+                &event,
+                &HookDecision::Block {
+                    reason: "below the floor".to_string()
+                }
+            ),
+            deny("below the floor")
+        );
+        assert_eq!(
+            render(
+                &event,
+                &HookDecision::ChildReturn {
+                    value: r#"{"rows":"[redacted]"}"#.to_string()
+                }
+            ),
+            deny(&structured_echo(r#"{"rows":"[redacted]"}"#))
+        );
+        assert_eq!(
+            render(
+                &event,
+                &HookDecision::ChildReturn {
+                    value: r#"{"rows":"[redacted"#.to_string()
+                }
+            ),
+            deny(UNSTRUCTURED),
+            "a derivation no input can carry is not echoed as one"
+        );
     }
 }

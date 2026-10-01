@@ -93,11 +93,11 @@ toml_edit = "0.25"
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
-opentelemetry-appender-tracing = { version = "0.32", optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["logs", "metrics", "trace"], optional = true }
-tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics"] }
+opentelemetry-appender-tracing = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
 url = "2"
 # The report id: a v4 UUID the receiver stores one object under. A consult record's id is
 # a v7, so a host's dataset sorts by time.
@@ -111,7 +111,7 @@ rustls = { workspace = true }
 regex = "1.13.1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # `build.rs` includes `src/plugin_layout.rs`, which re-exports the canonical
 # tree digest from the marketplace crate.

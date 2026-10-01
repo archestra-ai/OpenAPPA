@@ -32,6 +32,21 @@ const ASYNC: Recording = Recording {
     session: "43902e36-65fc-4350-a315-1ea874368609",
 };
 
+/// `claude -p` running a `Workflow` script that pipes one agent's final message into the next
+/// agent's prompt: the second agent starts after the first one's stop.
+const PIPELINE: Recording = Recording {
+    file: "hooks-workflow-pipeline.jsonl",
+    session: "f4eb717d-91df-4af3-9bc0-ca4117b95c71",
+};
+
+/// `claude -p` running a `Workflow` script with two agents: one called with a schema, which
+/// returns through `StructuredOutput` and stops with no message, and one that runs `Bash` and
+/// returns at its stop.
+const STRUCTURED: Recording = Recording {
+    file: "hooks-workflow-structured.jsonl",
+    session: "b9898015-3117-476b-9040-7aebc4912ca4",
+};
+
 impl Recording {
     fn events(&self) -> Vec<serde_json::Value> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -107,21 +122,14 @@ fn re_fired(mut stop: serde_json::Value) -> serde_json::Value {
     stop
 }
 
-/// The shipped example with `policy_extra` spliced in after the deployment
+/// The shipped root with `policy_extra` spliced in after the deployment
 /// table, plus deterministic `Bash` and `Read` tools under the canonical
-/// names the served adapter maps. These tests exercise trajectory
-/// binding, not the default's model-backed compatibility fallback;
-/// `bash_delta` is what the recorded Bash output carries.
+/// names the served adapter maps, in place of the battery's model-backed
+/// rules. These tests exercise trajectory binding; `bash_delta` is what the
+/// recorded Bash output carries.
 fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Runtime {
     let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
-    let bare_bash = "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndescription = \"Runs one shell command and returns its output.\"\nannotator = \"claude-code.bash-requirements\"";
-    assert!(example.contains(bare_bash), "the default root declares Bash");
-    let example = example.replacen(
-        bare_bash,
-        &format!("[[policy.tool]]\nname = \"host/claude-code/Bash\"\n{bash_delta}"),
-        1,
-    );
     let (policy, externals) = example
         .split_once("[externals]")
         .expect("the example carries an [externals] table");
@@ -129,7 +137,10 @@ fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Ru
     let (before_deployment, after_deployment) = policy
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
-    let tools = "[[policy.tool]]\nname = \"host/claude-code/Read\"\ndelta = {}\n";
+    let tools = format!(
+        "[[policy.tool]]\nname = \"host/claude-code/Read\"\ndelta = {{}}\n\
+         [[policy.tool]]\nname = \"host/claude-code/Bash\"\n{bash_delta}\n"
+    );
     let text = format!(
         "{before_deployment}{deployment}{policy_extra}\n{tools}{after_deployment}[externals]{externals}\n{externals_extra}"
     );
@@ -202,9 +213,11 @@ fn parsed(event: &serde_json::Value) -> HookEvent {
     claude_event(event).expect("the recorded event maps to a hook event")
 }
 
-/// The parent's own Agent call: the spawn the return menu gates.
+/// The parent's own Agent or Workflow call: the spawn the return menu gates.
 fn is_parent_spawn(event: &serde_json::Value) -> bool {
-    event["hook_event_name"] == "PreToolUse" && event["tool_name"] == "Agent" && event.get("agent_id").is_none()
+    event["hook_event_name"] == "PreToolUse"
+        && (event["tool_name"] == "Agent" || event["tool_name"] == "Workflow")
+        && event.get("agent_id").is_none()
 }
 
 /// The bare declaration: the return crosses as spoken, floored at the parent's current label.
@@ -590,4 +603,128 @@ async fn a_start_with_no_spawn_in_flight_refuses_and_its_calls_are_denied() {
     assert_eq!(status, 200);
     assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
     assert_eq!(forks(&runtime, &root), 0);
+}
+
+fn structured_output(events: &[serde_json::Value]) -> usize {
+    index_of(events, &hook(events, "PreToolUse", Some("StructuredOutput"), true))
+}
+
+/// A root `Read` of `path`, under the recorded session's prompt.
+fn root_read(events: &[serde_json::Value], path: &str, call: &str) -> serde_json::Value {
+    let mut read = hook(events, "PreToolUse", Some("Workflow"), false);
+    read["tool_name"] = serde_json::json!("Read");
+    read["tool_input"] = serde_json::json!({ "file_path": path });
+    read["tool_use_id"] = serde_json::json!(call);
+    read
+}
+
+#[tokio::test]
+async fn a_workflow_pipeline_forks_each_agent_under_one_declaration_until_its_notice() {
+    let runtime = deployment("", "", "delta = {}");
+    let root = PIPELINE.root();
+    let events = PIPELINE.events();
+    let notice = events
+        .iter()
+        .position(|event| {
+            event["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.starts_with("<task-notification>"))
+        })
+        .expect("the recording carries the workflow's completion notice");
+
+    replay(&runtime, &events[..notice]).await;
+    assert_eq!(
+        forks(&runtime, &root),
+        2,
+        "each agent binds its own fork of the one declaration"
+    );
+    assert_eq!(
+        returns(&runtime, &root),
+        vec![None, None],
+        "each agent's stop crossed as spoken, the first before the second started"
+    );
+
+    let mut late = hook(&events, "SubagentStart", None, true);
+    late["agent_id"] = serde_json::json!("alate");
+    replay(&runtime, &events[notice..]).await;
+    let (_, answer) = call(&runtime, &late).await;
+    assert!(
+        answer["error"].is_string(),
+        "an agent starting after the workflow's notice has no fork to bind: {answer}"
+    );
+    assert_eq!(forks(&runtime, &root), 2);
+}
+
+#[tokio::test]
+async fn a_structured_output_crosses_as_the_agents_return_and_its_empty_stop_crosses_nothing() {
+    let runtime = deployment("", "", "delta = {}");
+    let root = STRUCTURED.root();
+    let events = STRUCTURED.events();
+    replay(&runtime, &events).await;
+    assert_eq!(forks(&runtime, &root), 2);
+    assert_eq!(
+        returns(&runtime, &root),
+        vec![None, None],
+        "the StructuredOutput input and the Bash agent's stop crossed; the empty stop crossed nothing"
+    );
+
+    let transcript = hook(&events, "SubagentStop", None, true)["agent_transcript_path"]
+        .as_str()
+        .expect("the start names the agent's transcript")
+        .to_string();
+    let (_, answer) = call(&runtime, &root_read(&events, &transcript, "toolu_read_transcript")).await;
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    let journal = transcript.rsplit_once('/').expect("a path").0.to_string() + "/journal.jsonl";
+    let (_, answer) = call(&runtime, &root_read(&events, &journal, "toolu_read_journal")).await;
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
+}
+
+#[tokio::test]
+async fn a_workflow_return_routed_through_a_sanitizer_is_denied_with_the_input_that_crosses() {
+    let runtime = deployment(
+        r#"
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_output"]
+permits = { audience = { from = ["internal"], to = ["public"] } }
+"#,
+        "[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n",
+        "delta = {}",
+    );
+    let root = STRUCTURED.root();
+    let events = STRUCTURED.events();
+    let output = structured_output(&events);
+    declare_spawn(
+        &runtime,
+        &hook(&events, "PreToolUse", Some("Workflow"), false),
+        Some("redactor"),
+        as_spoken(),
+    )
+    .await;
+    let start = index_of(&events, &hook(&events, "SubagentStart", None, true));
+    replay(&runtime, &events[..start]).await;
+    let (_, answer) = call(&runtime, &events[start]).await;
+    assert!(
+        answer["hookSpecificOutput"]["additionalContext"].is_string(),
+        "the agent is told its return goes through the sanitizer: {answer}"
+    );
+    replay(&runtime, &events[start + 1..output]).await;
+
+    let mut returned = events[output].clone();
+    returned["tool_input"] = serde_json::json!({ "summary": "ask bob@example.com today" });
+    let HookDecision::ChildReturn { value } = hooks::handle(&runtime, parsed(&returned)).await else {
+        panic!("the return is held with the sanitized input to pass instead");
+    };
+    assert!(!value.contains("bob@example.com"), "{value}");
+    let (_, answer) = call(&runtime, &returned).await;
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    assert!(returns(&runtime, &root).is_empty(), "nothing crossed yet");
+
+    returned["tool_input"] = serde_json::from_str(&value).unwrap_or_else(|error| panic!("{error}: {value}"));
+    let (_, answer) = call(&runtime, &returned).await;
+    assert_eq!(
+        answer["hookSpecificOutput"]["permissionDecision"], "allow",
+        "the exact sanitized input crosses: {answer}"
+    );
+    assert_eq!(returns(&runtime, &root), vec![Some("redactor".to_string())]);
 }

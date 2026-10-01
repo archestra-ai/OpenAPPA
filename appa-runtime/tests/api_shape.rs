@@ -9,8 +9,8 @@ use appa_runtime::api::{
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, SpawnRef,
-    ToolOutcome, TrajectoryId,
+    Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PromptKey, ProposedCall, SpawnBinding,
+    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 fn the_reexported_vocabulary(
@@ -56,11 +56,12 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::SessionStart { root, .. } => {
             let _: TrajectoryId = root;
         }
-        HookEvent::Prompt { actor, text } => {
+        HookEvent::Prompt { actor, text, settles } => {
             let Actor { root, child } = actor;
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;
             let _: String = text;
+            let _: Option<String> = settles;
         }
         HookEvent::TurnEnd { actor } => {
             let Actor { root, child } = actor;
@@ -72,13 +73,15 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             call,
             call_id,
             spawn,
+            prompt,
             ..
         } => {
             let ProposedCall { tool, arguments, cwd } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
             let _: Option<String> = cwd;
-            let _: bool = spawn;
+            let _: Option<SpawnKind> = spawn;
+            let _: Option<PromptKey> = prompt;
             let _: Option<String> = call_id;
         }
         HookEvent::SpawnResume { actor, call, child } => {
@@ -103,6 +106,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
                     let _: SpawnBinding = binding;
                 }
                 SpawnRef::InFlight => {}
+                SpawnRef::FanOut(prompt) => {
+                    let _: PromptKey = prompt;
+                }
             }
         }
         HookEvent::ChildEnd {
@@ -111,6 +117,13 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             value,
         } => {
             let _: Option<String> = value;
+        }
+        HookEvent::ChildReturn {
+            root: _,
+            child: _,
+            value,
+        } => {
+            let _: String = value;
         }
         HookEvent::SpawnResult {
             actor: _,

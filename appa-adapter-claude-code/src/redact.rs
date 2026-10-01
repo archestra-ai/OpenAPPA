@@ -31,15 +31,17 @@
 //! result. Verified live on Claude Code 2.1.233 for `Agent`, `Bash`,
 //! `Read`, `Glob`, `Grep`, `Write`, `Edit`, `WebFetch`, and honored on a
 //! non-2xx answer too — so a runtime refusal at `PostToolUse` also
-//! withholds. A tool whose output shape validates another fixed-value
+//! withholds. `PowerShell`'s response, captured on Claude Code 2.1.285 for
+//! Windows, has Bash's shape (`stdout`, `stderr`, `interrupted`); a
+//! restatement there is not yet verified live. A tool whose output shape validates another fixed-value
 //! string field would keep the original; the fixed-value list is the
 //! codec's to extend. A `PostToolUse` this codec cannot read at all is
 //! withheld too, from the tool and response its bytes still carry: the
 //! result has run either way, and a hook that only exits non-zero leaves
 //! that output in front of the model.
-use appa_runtime_api::{HookEvent, OutcomeBody, ToolOutcome};
+use appa_runtime_api::{HookEvent, OutcomeBody, SpawnKind, ToolOutcome};
 
-use crate::identity::{is_mcp_tool, is_spawn_tool};
+use crate::identity::{is_mcp_tool, spawn_kind};
 
 pub(crate) const REDACTED: &str = "[appa] redacted";
 
@@ -64,10 +66,10 @@ enum Restatement {
 
 impl Restatement {
     fn of(tool: &str) -> Self {
-        match (is_spawn_tool(tool), is_mcp_tool(tool)) {
-            (true, _) => Self::Spawn,
-            (false, true) => Self::TextBlock,
-            (false, false) => Self::Leaves,
+        match (spawn_kind(tool), is_mcp_tool(tool)) {
+            (Some(SpawnKind::Single), _) => Self::Spawn,
+            (Some(SpawnKind::FanOut) | None, true) => Self::TextBlock,
+            (Some(SpawnKind::FanOut) | None, false) => Self::Leaves,
         }
     }
 }
@@ -166,7 +168,7 @@ fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
 /// is where a restatement puts the text that stands in for it.
 fn content_slot(tool: &str) -> Option<&'static str> {
     match tool {
-        "Bash" => Some("/stdout"),
+        "Bash" | "PowerShell" => Some("/stdout"),
         "Read" => Some("/file/content"),
         "Grep" => Some("/content"),
         "WebFetch" => Some("/result"),
@@ -544,6 +546,11 @@ mod tests {
         for (tool, response, slot) in [
             ("WebFetch", serde_json::json!({"result": "the page body"}), "/result"),
             ("Write", serde_json::json!({"content": "the file body"}), "/content"),
+            (
+                "PowerShell",
+                serde_json::json!({"stdout": "", "stderr": "a warning longer than the output", "interrupted": false}),
+                "/stdout",
+            ),
         ] {
             let replacement = swap_leaves(tool, response, "[appa] withheld");
             assert_eq!(

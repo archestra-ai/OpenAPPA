@@ -35,10 +35,7 @@ fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
     } else {
         CanonicalTool::of("host", "amp", raw).map_err(|error| malformed(error.to_string()))?
     };
-    Ok(IdentifiedTool {
-        canonical,
-        spawn: false,
-    })
+    Ok(IdentifiedTool { canonical, spawn: None })
 }
 
 fn spell(tool: &CanonicalTool) -> Option<String> {
@@ -73,7 +70,7 @@ mod tests {
         ] {
             let identified = identify_tool(raw).unwrap();
             assert_eq!(identified.canonical.as_str(), canonical);
-            assert!(!identified.spawn);
+            assert_eq!(identified.spawn, None);
             assert_eq!(spell(&identified.canonical).as_deref(), Some(raw));
         }
         for raw in ["", "mcp__", "mcp__server", "mcp____tool", "mcp__x__", "a/b", "a b"] {

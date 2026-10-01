@@ -736,7 +736,7 @@ The optional `hint` tells the annotator what the deployment knows about its call
 
 ### Implementing an annotator
 
-An annotator can be an HTTP service or a local program on a Unix system. Configure its `url` or `command` under `[externals.annotators.<name>]`, where `<name>` matches the annotator's declaration.
+An annotator can be an HTTP service or a local program. Configure its `url` or `command` under `[externals.annotators.<name>]`, where `<name>` matches the annotator's declaration.
 
 Alternatively, use a built-in annotator. The available options are:
 
@@ -746,7 +746,7 @@ Alternatively, use a built-in annotator. The available options are:
 
 Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, an implementation unavailable on that system, or a model implementation whose key is not set.
+`claude-code` runs the local `claude` command and requires Claude Code on the machine running OpenAPPA. On Windows, `claude` must resolve to `claude.exe`: OpenAPPA cannot start the `claude.cmd` shim that npm installs. `llm` requires model settings under `[externals.llm]` and the key they name. `jev` requires `[externals.jev]` and its key, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or a model implementation whose key is not set.
 
 ### Annotator protocol
 
@@ -1062,6 +1062,19 @@ The parent selects this sanitizer's plan by its `offer_id`. This request keeps t
 
 The chosen limits also restrict what the child can read: it must still be able to return an answer that meets them, with the selected sanitizer if needed. The child receives its answer requirements when it starts and submits its answer when it finishes its turn. If the answer does not meet those requirements, OpenAPPA explains the problem so the child can revise it.
 
+### Fan-out spawns
+
+A `fan-out spawn` starts any number of subagents under one return declaration. Claude Code's `Workflow` tool is one: its script starts agents that the parent never addresses one at a time. The parent declares the return once, at the spawn, and the declaration applies to every agent the spawn starts.
+
+- Each agent binds its own fork when it starts. It starts at the parent's label at that moment, so an agent started after another agent's answer crossed starts at the label that answer left on the parent.
+- Each agent's answer is checked separately under the declaration. An agent called with a schema answers through its `StructuredOutput` call; OpenAPPA checks that input as the answer and denies the call when it cannot cross. Its later stop is checked as another answer.
+- The offered plans are the plain check and the untagged `tool_output` sanitizers. `attest-schema` is not offered: it requires the parent to be trusted when the child starts, and later agents do not have to meet that.
+- Claude Code identifies the agents by the prompt the `Workflow` call ran in. A second `Workflow` in the same prompt is refused until the first one reports that it finished. After that report, no new agent binds to the spawn.
+
+The workflow's own result needs no check of its own. The script performs no I/O, so its result is built from the script, its arguments, and the agents' answers that crossed. An agent whose answer never crosses ends without a result. The same rule covers the result of a background `Agent`.
+
+An agent's transcript is a child file, and a call that names it is refused. A workflow run's `journal.jsonl` is not: OpenAPPA labels no files, so reading it, or resuming a run with `resumeFromRunId`, which replays the answers the journal recorded, stays outside the checked return path.
+
 ### Structured child returns
 
 Use the reserved sanitizer `attest-schema` when the child must return structured data, such as a number of days, rather than free text. It checks the answer against the parent's JSON Schema without changing it. It can raise trust from `suspicious` to `trusted` only when all these conditions hold:
@@ -1265,7 +1278,7 @@ If the service requires authentication, set `token_env` to an environment variab
 
 ### Local programs
 
-Set `command` to a list containing the executable and its arguments, such as `command = ["python3", "./sanitize.py"]`. OpenAPPA runs the program on the same Unix machine, without a shell. It starts the program in the directory containing the configuration file.
+Set `command` to a list containing the executable and its arguments, such as `command = ["python3", "./sanitize.py"]`. OpenAPPA runs the program on the same machine, without a shell, and ends every process it started when the request completes. The shipped batteries run `python3`, which Windows does not always provide. It starts the program in the directory containing the configuration file.
 
 The program reads one JSON consult request from standard input and writes one JSON response to standard output. It must respond within `timeout_ms`, and its response must fit within `max_body_bytes`. Each OpenAPPA instance runs at most eight such programs at once.
 

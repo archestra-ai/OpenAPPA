@@ -38,7 +38,7 @@
 //! [`names_children`] is always empty.
 
 use appa_runtime_api::{
-    Actor, Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, TrajectoryId,
+    Actor, Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, SpawnKind, TrajectoryId,
 };
 
 /// The server-side identification the runtime applies to every kagent call. kagent's spawns
@@ -105,16 +105,16 @@ fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
         ("appa", _) if rest == CONTROL_TOOL_NAME => {
             return Ok(IdentifiedTool {
                 canonical: CanonicalTool::control(),
-                spawn: false,
+                spawn: None,
             });
         }
         ("appa", _) => return Err(refused(format!("appa: names one tool, {CONTROL_TOOL_NAME}"))),
-        ("mcp", Some((toolset, tool))) => ("mcp", toolset, tool, false),
+        ("mcp", Some((toolset, tool))) => ("mcp", toolset, tool, None),
         ("mcp", None) => return Err(refused("mcp: takes <toolset>/<tool>".to_string())),
-        ("agent", Some((namespace, agent))) => ("agent", namespace, agent, true),
+        ("agent", Some((namespace, agent))) => ("agent", namespace, agent, Some(SpawnKind::Single)),
         ("agent", None) => return Err(refused("agent: takes <namespace>/<agent>".to_string())),
-        ("builtin", _) => ("host", "kagent", rest, false),
-        ("gate", _) => ("host", "kagent-gate", rest, false),
+        ("builtin", _) => ("host", "kagent", rest, None),
+        ("gate", _) => ("host", "kagent-gate", rest, None),
         (other, _) => {
             return Err(refused(format!(
                 "{other:?} is not a prefix: mcp, agent, builtin, gate, or appa"
@@ -164,13 +164,17 @@ mod tests {
     #[test]
     fn each_raw_spelling_maps_onto_its_canonical_identity() {
         for (raw, expected, spawn) in [
-            (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL, false),
-            ("mcp:k8s/get_pods", "mcp/k8s/get_pods", false),
-            ("mcp:a.b-c/T.o-o_l", "mcp/a.b-c/T.o-o_l", false),
-            ("mcp:k8s/a__b", "mcp/k8s/a__b", false),
-            ("agent:kagent/log-analyst", "agent/kagent/log-analyst", true),
-            ("builtin:memory_persist", "host/kagent/memory_persist", false),
-            ("gate:outer", "host/kagent-gate/outer", false),
+            (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL, None),
+            ("mcp:k8s/get_pods", "mcp/k8s/get_pods", None),
+            ("mcp:a.b-c/T.o-o_l", "mcp/a.b-c/T.o-o_l", None),
+            ("mcp:k8s/a__b", "mcp/k8s/a__b", None),
+            (
+                "agent:kagent/log-analyst",
+                "agent/kagent/log-analyst",
+                Some(SpawnKind::Single),
+            ),
+            ("builtin:memory_persist", "host/kagent/memory_persist", None),
+            ("gate:outer", "host/kagent-gate/outer", None),
         ] {
             let identified = identified(raw).unwrap_or_else(|refusal| panic!("{raw} identifies: {refusal:?}"));
             assert_eq!(identified.canonical.as_str(), expected, "{raw}");
@@ -294,7 +298,7 @@ mod tests {
                     let canonical = identified.canonical;
                     prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
                     prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
-                    prop_assert_eq!(identified.spawn, canonical.as_str().starts_with("agent/"), "{}", canonical);
+                    prop_assert_eq!(identified.spawn.is_some(), canonical.as_str().starts_with("agent/"), "{}", canonical);
                     if let Some(namespace) = canonical.as_str().split('/').nth(1) {
                         prop_assert!(!namespace.contains("__"), "{}", canonical);
                     }

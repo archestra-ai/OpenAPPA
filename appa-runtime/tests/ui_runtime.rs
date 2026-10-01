@@ -88,11 +88,8 @@ selectors = [{ template = "viewer", feeds = "self" }]
             .args([
                 "ui",
                 "--no-open",
-                "--setup",
                 "--battery",
                 "demo",
-                "--port",
-                "0",
                 "--runtime-url",
                 runtime_url,
                 "--config",
@@ -134,10 +131,14 @@ selectors = [{ template = "viewer", feeds = "self" }]
         "a refused runtime announces no address"
     );
 
-    // Setup needs no runtime: `appa ui` serves the page and saves the token.
+    // Setup needs no runtime: `appa ui` serves the token page and saves the token.
     let mut page = ui("http://127.0.0.1:1");
-    let link = url::Url::parse(&first_line(&mut page)).unwrap();
-    assert!(link.query().unwrap().contains("batteries=demo"));
+    let mut stdout = std::io::BufReader::new(page.0.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let link = url::Url::parse(line.trim()).unwrap();
+    assert_eq!(link.path(), "/connect");
+    assert_eq!(link.query(), Some("battery=demo"));
     assert!(link.fragment().is_none(), "UI URLs need no authentication token");
     let origin = link.origin().ascii_serialization();
     assert!(
@@ -153,6 +154,15 @@ selectors = [{ template = "viewer", feeds = "self" }]
     assert_eq!(state["batteries"][0]["check"]["status"], "ready");
     assert!(state["runtime"].is_null());
     assert_eq!(state["applied"], "not_running");
+    // A ready battery ends the command, which prints its sanitized status.
+    let exit = page.0.wait().unwrap();
+    assert!(exit.success(), "setup exits cleanly once the battery is ready");
+    let mut printed = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut printed).unwrap();
+    assert!(!printed.contains("fixture-only-token"));
+    let status: Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(status["batteries"][0]["name"], "demo");
+    assert_eq!(status["batteries"][0]["check"]["status"], "ready");
     drop(page);
 
     // The next start reads the saved token and serves.
@@ -167,11 +177,26 @@ selectors = [{ template = "viewer", feeds = "self" }]
     assert_eq!(get("/health").send().await.unwrap().text().await.unwrap(), "ok");
 
     // With a runtime serving this configuration, the page reports it and a save reloads it.
+    let page_origin = |page: &mut Process| {
+        url::Url::parse(&first_line(page))
+            .unwrap()
+            .origin()
+            .ascii_serialization()
+    };
     let mut page = ui(&url);
-    let origin = url::Url::parse(&first_line(&mut page))
-        .unwrap()
-        .origin()
-        .ascii_serialization();
+    let origin = page_origin(&mut page);
+    // The page refuses a request from another site.
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/credentials"))
+            .header("Origin", "https://attacker.example")
+            .json(&json!({"credentials":{}}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     let state = save(origin.clone()).await;
     assert!(!state["runtime"].is_null());
     assert_eq!(state["applied"], "reloaded");
@@ -187,26 +212,17 @@ selectors = [{ template = "viewer", feeds = "self" }]
     // A bad edit refuses the reload and keeps the running policy.
     let key = get("/policy-key").send().await.unwrap().text().await.unwrap();
     std::fs::write(&config, "not valid TOML {{{").unwrap();
+    let mut page = ui(&url);
+    let origin = page_origin(&mut page);
     let state = save(origin.clone()).await;
     assert_eq!(state["applied"], "refused");
-    assert!(state["errors"].to_string().contains("kept its previous policy"));
+    assert!(state["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
     assert_eq!(get("/policy-key").send().await.unwrap().text().await.unwrap(), key);
 
-    // The page refuses a request from another site.
-    assert_eq!(
-        client
-            .post(format!("{origin}/api/credentials"))
-            .header("Origin", "https://attacker.example")
-            .json(&json!({"credentials":{}}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
+    drop(page);
     // The runtime's management routes refuse browser requests.
     assert_eq!(
-        get("/dashboard")
+        get("/prerequisites")
             .header("Origin", &origin)
             .send()
             .await
