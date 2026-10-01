@@ -91,7 +91,8 @@ impl Worker {
                         config.connect_timeout(wait);
                     }
                     let mut client = config.connect(MakeTlsConnector::new(tls))?;
-                    // Deliberately no DDL: an incompatible/missing host migration refuses startup.
+                    // Deliberately no DDL. Core host migrations are required at startup;
+                    // optional file-event migrations are checked only when file tracking uses them.
                     client.batch_execute(
                         "SELECT root, seq, payload FROM openappa_events LIMIT 0;
                     SELECT hash, bytes FROM openappa_policy_files LIMIT 0;
@@ -600,6 +601,98 @@ impl PostgresStore {
             })?
             .ok_or(ReadError::PolicyFileMissing { key: hash })?;
         decoded(root, batches, policy)
+    }
+
+    pub(super) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
+        let workspace = workspace.to_owned();
+        self.query(move |client| {
+            let rows = client.query(
+                "SELECT seq,payload FROM openappa_file_events WHERE workspace=$1 ORDER BY seq",
+                &[&workspace],
+            )?;
+            contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+                .map_err(|error| PostgresError(error.to_string()))
+        })
+        .map_err(Into::into)
+    }
+
+    pub(super) fn create_workspace(
+        &self,
+        workspace: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), crate::files::FileStoreError> {
+        let workspace = workspace.to_owned();
+        self.serialized(format!("openappa-file-workspace:{workspace}"), move |client| {
+            client.execute(
+                "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,0,$2) ON CONFLICT DO NOTHING",
+                &[&workspace, &payload],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(super) fn append_workspace(
+        &self,
+        workspace: &str,
+        basis: u64,
+        payload: Vec<u8>,
+        root: Option<TrajectoryId>,
+    ) -> Result<(), crate::files::FileStoreError> {
+        let workspace = workspace.to_owned();
+        self.serialized(format!("openappa-file-workspace:{workspace}"), move |client| {
+            let current = client
+                .query_one(
+                    "SELECT COALESCE(MAX(seq)+1,0) FROM openappa_file_events WHERE workspace=$1",
+                    &[&workspace],
+                )?
+                .get::<_, i64>(0) as u64;
+            if current != basis {
+                return Err(crate::files::FileStoreError::Conflict {
+                    expected: basis,
+                    actual: current,
+                });
+            }
+            if let Some(root) = root {
+                let root = root.as_str().to_owned();
+                client.query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&format!("openappa-file-root:{root}")],
+                )?;
+                if let Some(row) =
+                    client.query_opt("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
+                {
+                    let existing: String = row.get(0);
+                    if existing != workspace {
+                        return Err(crate::files::FileStoreError::Configuration(
+                            "a root cannot change its tracked workspace".into(),
+                        ));
+                    }
+                } else {
+                    client.execute(
+                        "INSERT INTO openappa_file_roots(root,workspace,seq) VALUES ($1,$2,$3)",
+                        &[&root, &workspace, &(current as i64)],
+                    )?;
+                }
+            }
+            client.execute(
+                "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,$2,$3)",
+                &[&workspace, &(current as i64), &payload],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(super) fn workspace_for_root(
+        &self,
+        root: &TrajectoryId,
+    ) -> Result<Option<String>, crate::files::FileStoreError> {
+        let root = root.as_str().to_owned();
+        self.query(move |client| {
+            Ok(client
+                .query_opt("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
+                .map(|row| row.get(0)))
+        })
+        .map_err(Into::into)
     }
 
     /// See [`LogStore::roots_mentioning`].

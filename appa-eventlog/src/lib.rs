@@ -1,11 +1,13 @@
-//! # appa-eventlog — the trajectory log, and where it is kept
+//! # appa-eventlog — authoritative trajectory and workspace event streams
 //!
-//! A root trajectory and its branches append to one shared log. That log holds two streams at
-//! one position: the engine's lasting facts, and the host's own observations — what a harness
-//! saw of its inventory, its calls, its turns and the standing it recorded for them. The stored
-//! policy files are the only other durable state, and
-//! everything else — a branch's parent, whether it has ended, which dispatch is open, whether an
-//! offer still stands — is read back from the log by the engine's projection.
+//! This crate stores append-only histories and enforces compare-and-swap ordering for every
+//! state transition they own. A root trajectory and its branches append to one shared log. It
+//! holds two streams at one position: the engine's lasting facts, and the host's own observations —
+//! what a harness saw of its inventory, its calls, its turns and the standing it recorded for them. The stored
+//! policy files are immutable, content-addressed inputs. A canonical file workspace has its own
+//! event stream because independent root families can share it. Everything else — a branch's
+//! parent, whether it has ended, which dispatch is open, whether an offer still stands, file
+//! versions, Labels, receipts and reservations — is projected by replaying the owning stream.
 //!
 //! This crate is where the log is written and read. The record encoding, the database, and the
 //! conditional append are private to it: a caller hands it [`Fact`]s and gets [`Log`]s back, and
@@ -13,15 +15,18 @@
 //! dispatched by `match`: SQLite for standalone use and optional PostgreSQL for
 //! embedded hosts that install the schema through their own migrations.
 //!
-//! Five tables:
+//! The durable structures are:
 //!
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
+//! - workspace file events, one row per appended transition, keyed by canonical workspace;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
 //!   and shared by every root that opened under them;
 //! - the host keys, one row per (key, root) pair a host record ever named, written in the
 //!   same transaction as the record that names it. This is the one derived table: it answers
 //!   which families stand behind a key without a pass over every family's rows, and it cannot
 //!   disagree with the log because a record and its key row commit or roll back together;
+//! - file roots, a derived root-to-workspace lookup written in the same transaction as the
+//!   authoritative `RootBound` workspace event;
 //! - operations and processed results — typed receipts for idempotent claims. They are not
 //!   engine facts. SQLite and Memory keep them beside the log; PostgreSQL hosts install the
 //!   equivalent `openappa_*` tables through their own migrations.
@@ -521,6 +526,116 @@ impl LogStore {
         }
     }
 
+    /// Open a canonical workspace's append-only file history. Concurrent creators may race;
+    /// the winning opening remains authoritative and callers validate its policy and Label.
+    pub(crate) fn open_workspace(
+        &self,
+        workspace: &str,
+        policy: &str,
+        initial: &appa_engine::label::Label,
+    ) -> Result<(), files::FileStoreError> {
+        let event = files::WorkspaceEvent::Opened {
+            policy: policy.to_owned(),
+            initial: initial.clone(),
+        };
+        let payload = serde_json::to_vec(&event)?;
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.create_workspace(workspace, &payload),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.create_workspace(workspace, payload),
+        }
+    }
+
+    /// Read and strictly decode one canonical workspace's complete event history.
+    pub(crate) fn workspace_log(&self, workspace: &str) -> Result<files::WorkspaceLog, files::FileStoreError> {
+        let batches = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.workspace_batches(workspace)?,
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.workspace_batches(workspace)?,
+        };
+        if batches.is_empty() {
+            return Err(files::FileStoreError::Corrupt(
+                "the workspace event log is missing".into(),
+            ));
+        }
+        let events = batches
+            .iter()
+            .map(|batch| serde_json::from_slice(batch))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(files::WorkspaceLog {
+            workspace: workspace.to_owned(),
+            basis: events.len() as u64,
+            events,
+        })
+    }
+
+    /// Append one transition if the workspace history still stands at the read position.
+    pub(crate) fn append_workspace(
+        &self,
+        based_on: &files::WorkspaceLog,
+        event: &files::WorkspaceEvent,
+    ) -> Result<(), files::FileStoreError> {
+        let payload = serde_json::to_vec(event)?;
+        let root = match event {
+            files::WorkspaceEvent::RootBound { root } => Some(root),
+            _ => None,
+        };
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.append_workspace(&based_on.workspace, based_on.basis, &payload, root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.append_workspace(&based_on.workspace, based_on.basis, payload, root.cloned()),
+        }
+    }
+
+    /// Bind a root to a workspace by appending the binding event and its rebuildable index row
+    /// in one transaction. An identical existing binding is idempotent.
+    pub(crate) fn bind_workspace_root(
+        &self,
+        workspace: &str,
+        root: &TrajectoryId,
+    ) -> Result<(), files::FileStoreError> {
+        loop {
+            let log = self.workspace_log(workspace)?;
+            let event_exists = log
+                .events
+                .iter()
+                .any(|event| matches!(event, files::WorkspaceEvent::RootBound { root: bound } if bound == root));
+            if let Some(bound) = self.workspace_for_root(root)? {
+                if bound != workspace {
+                    return Err(files::FileStoreError::Configuration(
+                        "a root cannot change its tracked workspace".into(),
+                    ));
+                }
+                return if event_exists {
+                    Ok(())
+                } else {
+                    Err(files::FileStoreError::Corrupt(
+                        "the derived root index has no authoritative binding event".into(),
+                    ))
+                };
+            }
+            if event_exists {
+                return Err(files::FileStoreError::Corrupt(
+                    "an authoritative root binding is missing from its derived index".into(),
+                ));
+            }
+            match self.append_workspace(&log, &files::WorkspaceEvent::RootBound { root: root.clone() }) {
+                Ok(()) => return Ok(()),
+                Err(files::FileStoreError::Conflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Resolve the derived root-binding index. The binding event remains the authority.
+    pub(crate) fn workspace_for_root(&self, root: &TrajectoryId) -> Result<Option<String>, files::FileStoreError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.workspace_for_root(root),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.workspace_for_root(root),
+        }
+    }
+
     /// Append records to the log `based_on` was read from, only if it still stands where that
     /// read left it. A conflict writes nothing; the caller reads again and replays.
     pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
@@ -910,6 +1025,37 @@ mod tests {
             other => panic!("expected a conflict, got {other:?}"),
         }
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
+    }
+
+    #[test]
+    fn workspace_events_share_the_log_compare_and_swap_contract() {
+        let dir = tempfile::tempdir().expect("a database directory exists");
+        let path = dir.path().join("events.db");
+        let first = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("the first store opens");
+        let second = LogStore::open(Backend::Sqlite { path }).expect("the second store opens");
+        first
+            .open_workspace("/workspace", "policy", &appa_engine::label::Label::top())
+            .expect("the workspace opens");
+        let first_read = first.workspace_log("/workspace").expect("the first read succeeds");
+        let stale = second.workspace_log("/workspace").expect("the second read succeeds");
+        first
+            .append_workspace(
+                &first_read,
+                &files::WorkspaceEvent::RootBound {
+                    root: TrajectoryId::new("first"),
+                },
+            )
+            .expect("the first event lands");
+        assert!(matches!(
+            second.append_workspace(
+                &stale,
+                &files::WorkspaceEvent::RootBound {
+                    root: TrajectoryId::new("second"),
+                },
+            ),
+            Err(files::FileStoreError::Conflict { actual: 2, .. })
+        ));
+        assert_eq!(second.workspace_log("/workspace").unwrap().basis, 2);
     }
 
     pub(crate) fn observed(actor: &str, server: &str) -> HostObservation {

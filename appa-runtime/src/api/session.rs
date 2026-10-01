@@ -71,11 +71,9 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
     call.tool == open.tool && canonical().as_deref() == Some(open.bytes.as_slice())
 }
 
-/// Run one ledger operation on the blocking pool.
-///
-/// Every one of them can hash whole files while holding the session ledger lock, and
-/// this executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
-/// `abandon` stay inline when they do not read files.
+/// Execute one workspace-event projection operation on the blocking pool. These operations can
+/// hash entire files and replay the full workspace stream. The executor also serves the harness's
+/// hooks and MCP requests. `bind`, `cancel` and `abandon` stay inline when they do not read files.
 async fn ledger<T: Send + 'static>(
     inner: std::sync::Arc<super::Inner>,
     root: super::TrajectoryId,
@@ -87,7 +85,7 @@ async fn ledger<T: Send + 'static>(
             .files
             .as_ref()
             .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
-        let store = files.store(&root)?;
+        let store = files.store(&inner.store, &root)?;
         work(&store)
     })
     .await
@@ -471,10 +469,14 @@ impl Session {
         }
         match call.cwd.as_deref() {
             Some(cwd) => {
-                files.bind(&self.root, cwd).map_err(super::files::refused)?;
+                files
+                    .bind(&self.inner.store, &self.root, cwd)
+                    .map_err(super::files::refused)?;
             }
             None => {
-                files.store(&self.root).map_err(super::files::refused)?;
+                files
+                    .store(&self.inner.store, &self.root)
+                    .map_err(super::files::refused)?;
             }
         }
         let (operation, path) = super::files::operation(&call)?;
@@ -540,7 +542,7 @@ impl Session {
                 })
         {
             files
-                .store(&self.root)
+                .store(&self.inner.store, &self.root)
                 .map_err(super::files::refused)?
                 .cancel(&self.trajectory.0, &key)
                 .map_err(super::files::refused)?;
@@ -559,14 +561,14 @@ impl Session {
                 let view = policy.engine().rebuild_view(&log)?;
                 let label = policy.engine().file_output_label(&view, dispatch)?;
                 files
-                    .store(&self.root)
+                    .store(&self.inner.store, &self.root)
                     .map_err(super::files::refused)?
                     .bind(&self.trajectory.0, &key, dispatch, &label)
                     .map_err(super::files::refused)?;
             }
             _ => {
                 files
-                    .store(&self.root)
+                    .store(&self.inner.store, &self.root)
                     .map_err(super::files::refused)?
                     .cancel(&self.trajectory.0, &key)
                     .map_err(super::files::refused)?;
@@ -714,7 +716,7 @@ impl Session {
             let (root, call, pin) = (self.root.clone(), call.clone(), pin.clone());
             tokio::task::spawn_blocking(move || match inner.shared.files.as_ref() {
                 Some(files) => files
-                    .store(&root)
+                    .store(&inner.store, &root)
                     .map_err(|error| error.to_string())
                     .and_then(|store| super::files::perform(files, store.workspace(), &call, &pin)),
                 None => Err("file tools are not enabled".to_string()),
@@ -785,9 +787,9 @@ impl Session {
                 other => other,
             };
             if matches!(o, ToolOutcome::Success { .. }) {
-                // Verify the physical version before admitting a successful result. The
-                // dispatch was released; an append failure afterward cannot erase this
-                // already-published file's Label from the live session ledger.
+                // Verify the physical version before admitting a successful result. A later
+                // trajectory append failure cannot erase this already-published file's Label
+                // from the authoritative workspace event stream.
                 ledger(self.inner.clone(), self.root.clone(), {
                     let (actor, key) = (self.trajectory.0.clone(), key.clone());
                     move |store| store.finish(&actor, &key, true)

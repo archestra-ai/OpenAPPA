@@ -63,6 +63,18 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          PRIMARY KEY (organization_id, session_id, tool_call_id)
                      );";
 
+const FILE_SCHEMA: &str = "CREATE TABLE file_events (
+                               workspace TEXT NOT NULL,
+                               seq INTEGER NOT NULL,
+                               payload BLOB NOT NULL,
+                               PRIMARY KEY (workspace, seq)
+                           );
+                           CREATE TABLE file_roots (
+                               root TEXT PRIMARY KEY,
+                               workspace TEXT NOT NULL,
+                               seq INTEGER NOT NULL
+                           );";
+
 pub(crate) struct Sqlite(Mutex<Connection>);
 
 impl Sqlite {
@@ -198,6 +210,103 @@ impl Sqlite {
             (batches, policy_file)
         };
         decoded(root, batches, policy_file)
+    }
+
+    pub(crate) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare("SELECT seq,payload FROM file_events WHERE workspace=?1 ORDER BY seq")
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        let rows = statement
+            .query_map(params![workspace], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?
+            .collect::<Result<Vec<(i64, Vec<u8>)>, _>>()
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        contiguous(rows).map_err(|error| crate::files::FileStoreError::Corrupt(error.to_string()))
+    }
+
+    pub(crate) fn create_workspace(&self, workspace: &str, payload: &[u8]) -> Result<(), crate::files::FileStoreError> {
+        let mut connection = self.connection();
+        immediate::<_, rusqlite::Error>(&mut connection, |transaction| {
+            install_file_schema(transaction)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO file_events(workspace,seq,payload) VALUES (?1,0,?2)",
+                params![workspace, payload],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))
+    }
+
+    pub(crate) fn append_workspace(
+        &self,
+        workspace: &str,
+        basis: u64,
+        payload: &[u8],
+        root: Option<&TrajectoryId>,
+    ) -> Result<(), crate::files::FileStoreError> {
+        let mut connection = self.connection();
+        immediate(&mut connection, |transaction| {
+            let current: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(seq)+1,0) FROM file_events WHERE workspace=?1",
+                params![workspace],
+                |row| row.get(0),
+            )?;
+            if current as u64 != basis {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    crate::files::FileStoreError::Conflict {
+                        expected: basis,
+                        actual: current as u64,
+                    },
+                )));
+            }
+            if let Some(root) = root {
+                let existing: Option<String> = transaction
+                    .query_row(
+                        "SELECT workspace FROM file_roots WHERE root=?1",
+                        params![root.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if existing.as_deref().is_some_and(|existing| existing != workspace) {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        crate::files::FileStoreError::Configuration(
+                            "a root cannot change its tracked workspace".into(),
+                        ),
+                    )));
+                }
+                transaction.execute(
+                    "INSERT OR IGNORE INTO file_roots(root,workspace,seq) VALUES (?1,?2,?3)",
+                    params![root.as_str(), workspace, current],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO file_events(workspace,seq,payload) VALUES (?1,?2,?3)",
+                params![workspace, current, payload],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            rusqlite::Error::ToSqlConversionFailure(error) => error
+                .downcast::<crate::files::FileStoreError>()
+                .map(|error| *error)
+                .unwrap_or_else(|error| crate::files::FileStoreError::Storage(error.to_string())),
+            error => crate::files::FileStoreError::Storage(error.to_string()),
+        })
+    }
+
+    pub(crate) fn workspace_for_root(
+        &self,
+        root: &TrajectoryId,
+    ) -> Result<Option<String>, crate::files::FileStoreError> {
+        self.connection()
+            .query_row(
+                "SELECT workspace FROM file_roots WHERE root=?1",
+                params![root.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))
     }
 
     pub(crate) fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
@@ -451,6 +560,42 @@ fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     Ok(found == 5)
 }
 
+fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT name,sql FROM sqlite_master
+         WHERE type='table' AND name IN ('file_events','file_roots') ORDER BY name",
+    )?;
+    let found = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if found.is_empty() {
+        return connection.execute_batch(FILE_SCHEMA);
+    }
+    let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let expected = [
+        (
+            "file_events",
+            "CREATE TABLE file_events ( workspace TEXT NOT NULL, seq INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (workspace, seq) )",
+        ),
+        (
+            "file_roots",
+            "CREATE TABLE file_roots ( root TEXT PRIMARY KEY, workspace TEXT NOT NULL, seq INTEGER NOT NULL )",
+        ),
+    ];
+    if found.len() == expected.len()
+        && found
+            .iter()
+            .zip(expected)
+            .all(|((name, sql), (expected_name, expected_sql))| name == expected_name && normalize(sql) == expected_sql)
+    {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some("the optional file-event schema is partial or incompatible".into()),
+    ))
+}
+
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let tables: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -583,6 +728,48 @@ mod tests {
                 .expect("every schema row reads");
             assert_eq!(found, expected);
         }
+    }
+
+    #[test]
+    fn file_tracking_installs_only_its_optional_schema_without_moving_the_core_version() {
+        let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+        let connection = store.lock();
+        install_file_schema(&connection).expect("the optional schema installs");
+        install_file_schema(&connection).expect("the exact optional schema is accepted again");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the core version reads");
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name IN ('file_events','file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the optional tables read");
+        assert_eq!(version, 5);
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn a_partial_optional_schema_refuses_file_access_but_not_core_startup() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("the core store opens"));
+        Connection::open(&path)
+            .expect("the database reopens for damage")
+            .execute_batch(
+                "CREATE TABLE file_events (
+                     workspace TEXT NOT NULL,
+                     seq INTEGER NOT NULL,
+                     payload BLOB NOT NULL,
+                     PRIMARY KEY (workspace, seq)
+                 );",
+            )
+            .expect("one optional table is installed");
+
+        let store = LogStore::open(Backend::Sqlite { path }).expect("optional damage does not block core startup");
+        assert!(install_file_schema(&store.lock()).is_err());
     }
 
     #[test]

@@ -30,8 +30,8 @@
 //! Success validates bytes and publishes immutable version metadata before admitting the
 //! result. No file-derived result reaches MCP before admission. An unchanged failure admits
 //! its error text but publishes no version. A changed failure, missing outcome,
-//! or unmatched digest leaves the session's in-memory reservation in place. Further file
-//! calls in that session stop. A released call the harness never ran gives its reservation
+//! or unmatched digest leaves the workspace's durable reservation in place. Further file
+//! calls in that workspace stop. A released call the harness never ran gives its reservation
 //! back at the turn end, and only while the workspace still shows the pinned state.
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
@@ -50,7 +50,7 @@
 //! configuration. The table's presence enables file tracking. Each root session binds to
 //! its first file call's working directory and checks it for links without reading content.
 //! Each file gets the initial Label when a call first touches it. Its subagents share that workspace
-//! and ledger; another root session can bind to a different workspace.
+//! event stream; roots bound to the same canonical workspace share its one reservation.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
@@ -67,8 +67,8 @@
 //! The constrained launcher exposes only file tools and the remedy control tool. Bash, other
 //! MCP tools, subagents, general rename/delete, links and known execution-control writes are unsupported.
 //! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
-//! Sanitizer/rewrite policies are unsupported. File ledger state does not survive a runtime
-//! restart. Historical bytes are not retained.
+//! Sanitizer/rewrite policies are unsupported. Workspace events survive a runtime
+//! restart; historical bytes are not retained.
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
@@ -77,7 +77,6 @@ use appa_eventlog::files::PinnedBasis;
 #[cfg(feature = "daemon")]
 use appa_eventlog::files::beneath::{self, Entry};
 use appa_eventlog::files::{FileOperation, FileStore};
-use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -89,7 +88,6 @@ use super::{EventError, ProposedCall};
 mod process;
 
 pub(super) struct FileTracking {
-    pub(super) stores: std::sync::Mutex<HashMap<String, std::sync::Arc<FileStore>>>,
     pub(super) initial: appa_engine::label::Label,
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
@@ -102,13 +100,11 @@ impl FileTracking {
     /// A later call cannot move the root to another workspace.
     pub(super) fn bind(
         &self,
+        authority: &std::sync::Arc<appa_eventlog::LogStore>,
         root: &super::TrajectoryId,
         workspace: &str,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
         let workspace = std::fs::canonicalize(workspace)?;
-        if let Some(store) = self.bound(root, &workspace)? {
-            return Ok(store);
-        }
         if self.protected_paths.iter().any(|path| path.starts_with(&workspace))
             || self
                 .process_backend
@@ -119,55 +115,28 @@ impl FileTracking {
                 "runtime state, configuration, and process backends must be outside the tracked workspace".into(),
             ));
         }
-        let store = std::sync::Arc::new(FileStore::new(&workspace, &self.initial)?);
-        let mut stores = self.lock_stores()?;
-        same_workspace(stores.entry(root.0.clone()).or_insert(store), &workspace)
-    }
-
-    fn bound(
-        &self,
-        root: &super::TrajectoryId,
-        workspace: &std::path::Path,
-    ) -> Result<Option<std::sync::Arc<FileStore>>, appa_eventlog::files::FileStoreError> {
-        self.lock_stores()?
-            .get(&root.0)
-            .map(|store| same_workspace(store, workspace))
-            .transpose()
-    }
-
-    fn lock_stores(
-        &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>,
-        appa_eventlog::files::FileStoreError,
-    > {
-        self.stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))
+        let store = std::sync::Arc::new(FileStore::open(
+            std::sync::Arc::clone(authority),
+            &workspace,
+            &self.policy_key,
+            &self.initial,
+        )?);
+        store.bind_root(root)?;
+        Ok(store)
     }
 
     pub(super) fn store(
         &self,
+        authority: &std::sync::Arc<appa_eventlog::LogStore>,
         root: &super::TrajectoryId,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-        self.lock_stores()?.get(&root.0).cloned().ok_or_else(|| {
-            appa_eventlog::files::FileStoreError::Configuration(
-                "the session has not supplied a working directory for file tracking".into(),
-            )
-        })
+        Ok(std::sync::Arc::new(FileStore::for_root(
+            std::sync::Arc::clone(authority),
+            root,
+            &self.policy_key,
+            &self.initial,
+        )?))
     }
-}
-
-fn same_workspace(
-    store: &std::sync::Arc<FileStore>,
-    workspace: &std::path::Path,
-) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-    if store.workspace() != workspace {
-        return Err(appa_eventlog::files::FileStoreError::Configuration(
-            "a session cannot change its tracked workspace".into(),
-        ));
-    }
-    Ok(std::sync::Arc::clone(store))
 }
 
 /// The runtime-owned file tools, each served under its own MCP name.
@@ -512,7 +481,7 @@ max_body_bytes = 65536
     }
 
     #[test]
-    fn file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces() {
+    fn file_event_streams_are_shared_by_workspace_and_isolated_across_workspaces() {
         let dir = fixture();
         let other_workspace = dir.path().join("other-work");
         std::fs::create_dir(&other_workspace).unwrap();
@@ -521,15 +490,30 @@ max_body_bytes = 65536
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let root = TrajectoryId("cc:session".into());
         let same_root_for_child = TrajectoryId("cc:session".into());
+        let same_workspace_root = TrajectoryId("cc:same-workspace".into());
         let other_root = TrajectoryId("cc:other-session".into());
+        let authority = &runtime.inner.store;
 
-        files.bind(&root, dir.path().join("work").to_str().unwrap()).unwrap();
-        files.bind(&other_root, other_workspace.to_str().unwrap()).unwrap();
-        let parent = files.store(&root).unwrap();
-        let child = files.store(&same_root_for_child).unwrap();
-        let other = files.store(&other_root).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&parent, &child));
-        assert!(!std::sync::Arc::ptr_eq(&parent, &other));
+        files
+            .bind(authority, &root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
+        files
+            .bind(
+                authority,
+                &same_workspace_root,
+                dir.path().join("work").to_str().unwrap(),
+            )
+            .unwrap();
+        files
+            .bind(authority, &other_root, other_workspace.to_str().unwrap())
+            .unwrap();
+        let parent = files.store(authority, &root).unwrap();
+        let child = files.store(authority, &same_root_for_child).unwrap();
+        let same_workspace = files.store(authority, &same_workspace_root).unwrap();
+        let other = files.store(authority, &other_root).unwrap();
+        assert_eq!(parent.workspace(), child.workspace());
+        assert_eq!(parent.workspace(), same_workspace.workspace());
+        assert_ne!(parent.workspace(), other.workspace());
         assert_eq!(
             parent.workspace(),
             std::fs::canonicalize(dir.path().join("work")).unwrap()
@@ -537,10 +521,14 @@ max_body_bytes = 65536
         assert_eq!(other.workspace(), std::fs::canonicalize(&other_workspace).unwrap());
         assert!(parent.current("other.txt").unwrap().is_none());
         assert!(other.current("source.txt").unwrap().is_none());
-        assert!(files.bind(&root, other_workspace.to_str().unwrap()).is_err());
+        assert!(files.bind(authority, &root, other_workspace.to_str().unwrap()).is_err());
         assert!(
             files
-                .bind(&TrajectoryId("cc:unsafe".into()), dir.path().to_str().unwrap())
+                .bind(
+                    authority,
+                    &TrajectoryId("cc:unsafe".into()),
+                    dir.path().to_str().unwrap()
+                )
                 .is_err(),
             "the runtime database and policy cannot be inside a root's workspace"
         );
@@ -549,7 +537,27 @@ max_body_bytes = 65536
             .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
             .unwrap();
         assert!(parent.pin_for("cc:session:child", "call").unwrap().is_some());
+        assert!(same_workspace.pin_for("cc:session:child", "call").unwrap().is_some());
         assert!(other.pin_for("cc:session:child", "call").unwrap().is_none());
+    }
+
+    #[test]
+    fn root_workspace_binding_survives_restart() {
+        let dir = fixture();
+        let other = dir.path().join("other-work");
+        std::fs::create_dir(&other).unwrap();
+        let root = TrajectoryId("durably-bound-root".into());
+        let runtime = open(dir.path());
+        runtime
+            .bind_file_workspace(&root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
+        drop(runtime);
+
+        let runtime = open(dir.path());
+        assert!(runtime.bind_file_workspace(&root, other.to_str().unwrap()).is_err());
+        runtime
+            .bind_file_workspace(&root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
     }
 
     fn bind(runtime: &Runtime, root: &TrajectoryId, dir: &Path) {
@@ -699,7 +707,7 @@ max_body_bytes = 65536
                 .await
                 .is_err()
         );
-        // Another root has an independent session-local ledger and reservation.
+        // Another workspace has an independent event stream and reservation.
         let competing = hook(
             &runtime,
             serde_json::json!({
@@ -721,7 +729,7 @@ max_body_bytes = 65536
             .files
             .as_ref()
             .unwrap()
-            .store(&TrajectoryId("cc:plugin-test".into()))
+            .store(&runtime.inner.store, &TrajectoryId("cc:plugin-test".into()))
             .unwrap()
             .current("new.txt")
             .unwrap()
@@ -748,7 +756,7 @@ max_body_bytes = 65536
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&TrajectoryId("cc:plugin-test".into()))
+                .store(&runtime.inner.store, &TrajectoryId("cc:plugin-test".into()))
                 .unwrap()
                 .current("new.txt")
                 .unwrap()
@@ -1002,7 +1010,7 @@ else:
             .files
             .as_ref()
             .unwrap()
-            .store(root)
+            .store(&runtime.inner.store, root)
             .unwrap()
             .current(path)
             .unwrap()
@@ -1052,7 +1060,7 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&actor.root)
+                .store(&runtime.inner.store, &actor.root)
                 .unwrap()
                 .current("copied.txt")
                 .unwrap()
@@ -1134,6 +1142,8 @@ else:
 
         let runtime = open(dir.path());
         bind(&runtime, &id, dir.path());
+        assert_eq!(label(&runtime, &id, "clean.txt").trust, Trust::new(1));
+        assert_eq!(label(&runtime, &id, "derived.txt").trust, Trust::new(0));
         allow(&runtime, &id, call("Edit", "clean.txt")).await;
         std::fs::write(
             dir.path().join("work/clean.txt"),
@@ -1148,7 +1158,7 @@ else:
             .files
             .as_ref()
             .unwrap()
-            .store(&id)
+            .store(&runtime.inner.store, &id)
             .unwrap()
             .current("clean.txt")
             .unwrap()
@@ -1161,7 +1171,7 @@ else:
     }
 
     #[tokio::test]
-    async fn managed_files_failures_quarantine_only_the_live_session_ledger() {
+    async fn managed_file_quarantine_survives_restart() {
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
@@ -1203,15 +1213,50 @@ else:
         drop(runtime);
         let runtime = open(dir.path());
         bind(&runtime, &id, dir.path());
+        let error = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_call(call("Read", "after-error.txt"), false)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
-            runtime
-                .session(&id, &id)
-                .unwrap()
-                .on_tool_call(call("Read", "after-error.txt"), false)
-                .await
-                .is_ok(),
-            "a process restart creates a fresh session-local ledger"
+            error.contains("pending"),
+            "durable quarantine must refuse the workspace: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn published_file_label_survives_an_outcome_append_failure_and_restart() {
+        let dir = fixture();
+        let id = TrajectoryId("append-failure-session".into());
+        let write = call("Write", "published.txt");
+        let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, write.clone()).await;
+        std::fs::write(dir.path().join("work/published.txt"), "durable publication").unwrap();
+
+        runtime.store().fail_commit_after(0);
+        let result = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_result(
+                write.clone(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("native output".into()),
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(EventError::Storage(_))));
+        assert_eq!(label(&runtime, &id, "published.txt").trust, Trust::new(1));
+        drop(runtime);
+
+        let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
+        assert_eq!(label(&runtime, &id, "published.txt").trust, Trust::new(1));
+        success(&runtime, &id, write).await;
+        assert!(runtime.open_dispatches(&id, &id).is_empty());
     }
 
     #[test]
@@ -1302,7 +1347,11 @@ else:
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
         files
-            .bind(&TrajectoryId("direct-perform".into()), workspace.to_str().unwrap())
+            .bind(
+                &runtime.inner.store,
+                &TrajectoryId("direct-perform".into()),
+                workspace.to_str().unwrap(),
+            )
             .unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
@@ -1326,7 +1375,11 @@ else:
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
         files
-            .bind(&TrajectoryId("parent-swap".into()), workspace.to_str().unwrap())
+            .bind(
+                &runtime.inner.store,
+                &TrajectoryId("parent-swap".into()),
+                workspace.to_str().unwrap(),
+            )
             .unwrap();
         let outside = dir.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -1390,7 +1443,7 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&id)
+                .store(&runtime.inner.store, &id)
                 .unwrap()
                 .current("later.txt")
                 .unwrap()

@@ -1433,7 +1433,8 @@ impl Runtime {
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
     /// Configure this before sharing the runtime. Each root session binds its first file call's
     /// harness working directory and checks it for links. Each file gets the operator's source
-    /// Label when a call first touches it. Child trajectories share their root's workspace and ledger.
+    /// Label when a call first touches it. Child trajectories inherit their root's workspace
+    /// event stream. All roots bound to the same canonical workspace share that stream.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
@@ -1478,7 +1479,6 @@ impl Runtime {
             ));
         }
         inner.files = Some(files::FileTracking {
-            stores: std::sync::Mutex::new(std::collections::HashMap::new()),
             initial,
             policy_key,
             protected_paths,
@@ -1518,7 +1518,7 @@ impl Runtime {
             .files
             .as_ref()
             .ok_or_else(|| files::refused("file tools are not enabled"))?
-            .bind(root, workspace)
+            .bind(&self.inner.store, root, workspace)
             .map(|_| ())
             .map_err(files::refused)
     }
