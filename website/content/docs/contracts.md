@@ -1369,13 +1369,24 @@ max_concurrent = 4
 # url = "https://gateway.corp/v1"
 ```
 
-Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` follows the rules of [HTTP services](#http-services). An optional `url` selects a custom endpoint and follows the same URL rules. `timeout_ms` defaults to 60,000 and includes the wait for a free slot. `max_concurrent` defaults to 4.
+Supported providers are `anthropic`, `openai`, `gemini`, `ollama`, and `orcarouter`. `token_env` follows the rules of [HTTP services](#http-services). An optional `url` selects a custom endpoint and follows the same URL rules. `timeout_ms` defaults to 60,000 and includes the wait for a free slot. `max_concurrent` defaults to 4.
 
 A deployment in which any component uses `builtin = "llm"` opens only when the section's key is available: `token_env` names a variable that is set, or the provider is `ollama` and the section names no `token_env`. A section that no component uses loads without its key.
 
 An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. Each attempt takes a free slot, and the wait before a retry holds none.
 
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
+
+`orcarouter` uses the OrcaRouter gateway, an OpenAI-compatible AI gateway that routes many providers behind one endpoint. Its inference host is `https://api.orcarouter.ai/v1` unless the section names a `url` or the environment sets `APPA_ORCAROUTER_BASE_URL`, `APPA_ORCAROUTER_API_URL`, or `APPA_ORCAROUTER_AUTH_URL`. A value set in the environment takes precedence over the built-in default; an explicit value always takes precedence over the shared base. Only the loopback addresses `http://127.0.0.1`, `http://[::1]`, and `http://localhost` may use plain HTTP; every other origin must use HTTPS.
+
+The key comes from `token_env`, which must start with `APPA_` and must not start with `APPA_PROVIDER_`. The default variable is `APPA_ORCAROUTER_API_KEY`. The credential is one ordinary OrcaRouter API key. Two entries produce it:
+
+- **API key.** The user pastes an existing `sk-orca-…` key into `appa ui` or exports `APPA_ORCAROUTER_API_KEY`. The key is stored by the credential store under the variable the profile names.
+- **Connect with OrcaRouter.** An OAuth 2.0 authorization-code flow with PKCE (S256) issues a key for the account. `appa login orcarouter` runs the flow; `--api-key` selects the pasted-key path instead. The flow requests no client secret and registers no redirect URI. The default is the out-of-band code (Flow B): the consent screen shows a code the user pastes back. `--loopback` selects the loopback redirect (Flow A) when the browser reaches `127.0.0.1`. `appa ui` offers both.
+
+Authentication and inference use separate origins. Authentication uses `https://www.orcarouter.ai`, with `/auth` for authorization and `/api/v1/auth/keys` for the code exchange. Inference and model discovery use `https://api.orcarouter.ai/v1`. The exchange path is never composed by appending to the inference origin.
+
+A connect flow exchanges the code once. The exchange result is a durable API key, not a refresh token: OpenAPPA stores it and reuses it until the account revokes it. OpenAPPA never refreshes it and never authorizes again on start. A `401` or `403` from the gateway marks the exact account and credential generation that sent the request as needing reauthentication; a late failure from a superseded credential does not mark a newer one.
 
 ### Jev
 

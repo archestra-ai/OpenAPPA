@@ -16,6 +16,11 @@ struct Args {
 enum Command {
     /// Ask for one battery's token on a local page; exit when the battery is ready.
     Ui(appa_runtime::ui::Args),
+    /// Sign in to OrcaRouter: connect with PKCE, or paste an existing API key.
+    Login {
+        #[command(subcommand)]
+        command: LoginCommand,
+    },
     /// Run headless Claude with runtime-owned file tools and native tools removed.
     ClaudeFiles(appa_runtime::claude_files::Args),
     /// Internal trajectory-bound MCP server launched by claude-files.
@@ -175,6 +180,14 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum LoginCommand {
+    /// Connect an OrcaRouter account, or store a pasted key, for this deployment.
+    Orcarouter(appa_runtime::orcarouter_login::Args),
+    /// List the models the configured OrcaRouter deployment can call, by capability.
+    Models(appa_runtime::orcarouter_models::Args),
+}
+
+#[derive(Subcommand)]
 enum PackageCommand {
     /// Inspect credentials, dependencies, and optional read-only provider checks.
     Status(appa_runtime::ui::StatusArgs),
@@ -224,6 +237,12 @@ fn main() -> ExitCode {
     };
     match parsed.command {
         Command::Ui(args) => appa_runtime::ui::run(args),
+        Command::Login {
+            command: LoginCommand::Orcarouter(args),
+        } => appa_runtime::orcarouter_login::run(args),
+        Command::Login {
+            command: LoginCommand::Models(args),
+        } => appa_runtime::orcarouter_models::run(args),
         Command::Battery {
             command: PackageCommand::Status(args),
         } => appa_runtime::ui::status(args),

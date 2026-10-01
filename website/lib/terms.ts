@@ -150,7 +150,7 @@ const TERMS = {
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":
-    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all builtin = \"llm\" components. This section and its key are required when any component uses that implementation.",
+    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all builtin = \"llm\" components. This section and its key are required when any component uses that implementation. The providers are anthropic, openai, gemini, ollama, and orcarouter. An orcarouter profile reaches the OrcaRouter gateway at https://api.orcarouter.ai/v1, and takes its ordinary API key either from the variable token_env names or from a PKCE connect flow (appa login orcarouter).",
   'builtin = "jev"':
     "Asks TypeSafe's Jev classifier to label an annotator's call with audience and trust. Sends the tool name and the redacted description and arguments to the TypeSafe API. Requires [externals.jev].",
   "[externals.jev]":
