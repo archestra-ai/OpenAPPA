@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	a2atype "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -31,18 +32,25 @@ type remoteFunctionTool interface {
 // ADK's functiontool.Run rejects Confirmed=false before kagent's handler can
 // forward it. Forward that ruling explicitly, without changing it to approval.
 // The normal plugin gates still check the resume and the returned child value.
+//
+// A first call also forwards the spawn binding the plugin released for it,
+// as SpawnBindingHeader, so the child binds to this spawn and no other.
 type remoteApprovalTool struct {
 	remoteFunctionTool
 	config         adk.RemoteAgentConfig
 	client         *http.Client
 	propagateToken bool
+
+	mu       sync.Mutex
+	released map[string]string // spawn binding by function call id
 }
 
 func newRemoteApprovalTool(config adk.RemoteAgentConfig, propagateToken bool) (*remoteApprovalTool, error) {
 	client := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
 	// The stock constructor adds its own tracing transport. Keep the rejection
 	// client separate so ordinary calls do not get instrumented twice.
-	stock, err := tools.NewKAgentRemoteA2ATool(config.Name, config.Description, config.Url, nil, config.Headers, propagateToken, true)
+	stamping := &http.Client{Transport: spawnBindingTransport{http.DefaultTransport}}
+	stock, err := tools.NewKAgentRemoteA2ATool(config.Name, config.Description, config.Url, stamping, config.Headers, propagateToken, true)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +58,51 @@ func newRemoteApprovalTool(config adk.RemoteAgentConfig, propagateToken bool) (*
 	if !ok {
 		return nil, fmt.Errorf("remote agent tool does not implement the expected function contract")
 	}
-	return &remoteApprovalTool{function, config, client, propagateToken}, nil
+	return &remoteApprovalTool{remoteFunctionTool: function, config: config, client: client, propagateToken: propagateToken,
+		released: map[string]string{}}, nil
+}
+
+// release hands the call its spawn binding; the call's Run takes it.
+func (t *remoteApprovalTool) release(callID, binding string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.released[callID] = binding
+}
+
+func (t *remoteApprovalTool) take(callID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	binding := t.released[callID]
+	delete(t.released, callID)
+	return binding
+}
+
+type spawnBindingKey struct{}
+
+// boundCall is the call's context carrying its spawn binding down to
+// spawnBindingTransport through the stock tool's A2A client.
+type boundCall struct {
+	agent.Context
+	binding string
+}
+
+func (c boundCall) Value(key any) any {
+	if key == (spawnBindingKey{}) {
+		return c.binding
+	}
+	return c.Context.Value(key)
+}
+
+type spawnBindingTransport struct{ base http.RoundTripper }
+
+func (s spawnBindingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	binding, _ := request.Context().Value(spawnBindingKey{}).(string)
+	if binding == "" {
+		return s.base.RoundTrip(request)
+	}
+	stamped := request.Clone(request.Context())
+	stamped.Header.Set(SpawnBindingHeader, binding)
+	return s.base.RoundTrip(stamped)
 }
 
 func (t *remoteApprovalTool) ProcessRequest(_ agent.Context, request *model.LLMRequest) error {
@@ -59,7 +111,10 @@ func (t *remoteApprovalTool) ProcessRequest(_ agent.Context, request *model.LLMR
 
 func (t *remoteApprovalTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	confirmation := ctx.ToolConfirmation()
-	if confirmation == nil || confirmation.Confirmed {
+	if confirmation == nil {
+		return t.remoteFunctionTool.Run(boundCall{ctx, t.take(ctx.FunctionCallID())}, args)
+	}
+	if confirmation.Confirmed {
 		return t.remoteFunctionTool.Run(ctx, args)
 	}
 	payloadMap, _ := confirmation.Payload.(map[string]any)

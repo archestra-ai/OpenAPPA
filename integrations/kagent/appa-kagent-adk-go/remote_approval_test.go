@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -202,5 +203,58 @@ func TestRemoteRejectionResponseAndAuthenticationBoundaries(t *testing.T) {
 				t.Fatalf("status-message fallback or usage lost: %v", result)
 			}
 		})
+	}
+}
+
+func TestTheReleasedSpawnBindingRidesItsOwnDelegationOnly(t *testing.T) {
+	var endpoint string
+	var bindings []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{
+				"protocolVersion": "0.3.0", "name": "child", "description": "test child", "version": "1",
+				"url": endpoint, "preferredTransport": "JSONRPC", "capabilities": map[string]any{}, "defaultInputModes": []string{"text"},
+				"defaultOutputModes": []string{"text"}, "skills": []any{},
+			})
+			return
+		}
+		var sent map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Error(err)
+		}
+		bindings = append(bindings, r.Header.Get(SpawnBindingHeader))
+		message := sent["params"].(map[string]any)["message"].(map[string]any)
+		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": sent["id"], "result": map[string]any{
+			"kind": "task", "id": "child-task", "contextId": message["contextId"], "status": map[string]any{"state": "completed"},
+			"artifacts": []any{map[string]any{"artifactId": "reply", "parts": []any{map[string]any{"kind": "text", "text": "done"}}}},
+		}})
+	}))
+	defer server.Close()
+	endpoint = server.URL
+	remote, err := newRemoteApprovalTool(adk.RemoteAgentConfig{Name: "kagent__NS__billing_agent", Url: endpoint}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "allow_call", "spawn_binding": "fork-1"})
+	p := pluginOver(t, h)
+	args := map[string]any{"request": "total the invoices"}
+	released := remoteApprovalContext{newFakeContext(newFakeSession("parent-context"))}
+	if answer, err := p.beforeTool(released, remote, args); err != nil || answer != nil {
+		t.Fatalf("the released spawn runs: %v, %v", answer, err)
+	}
+	if _, err := remote.Run(released, args); err != nil {
+		t.Fatal(err)
+	}
+	// A call the plugin released no binding for, and a second run of the
+	// released call, carry none: the binding is taken once.
+	if _, err := remote.Run(remoteApprovalContext{newFakeContext(newFakeSession("parent-context")).forCall("fc-2")}, args); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Run(released, args); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"fork-1", "", ""}; !reflect.DeepEqual(bindings, want) {
+		t.Fatalf("the spawn binding rides its own delegation only: got %q, want %q", bindings, want)
 	}
 }

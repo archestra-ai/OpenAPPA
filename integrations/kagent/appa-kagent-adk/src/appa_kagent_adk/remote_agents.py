@@ -6,14 +6,22 @@ import uuid
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 
+from .identity import SPAWN_BINDING_HEADER
+
 
 class IsolatedRemoteTool(BaseTool):
     def __init__(self, delegate):
         super().__init__(name=delegate.name, description=delegate.description)
         self._delegate = delegate
+        # The spawn binding the plugin released, by function call id.
+        self._released: dict[str | None, str] = {}
 
     def _get_declaration(self):
         return self._delegate._get_declaration()
+
+    def release(self, call_id: str | None, binding: str) -> None:
+        """Hand the call its spawn binding; the call's first run forwards it to the child."""
+        self._released[call_id] = binding
 
     async def run_async(self, *, args, tool_context):
         # A separate object keeps concurrent calls from changing each other's
@@ -21,6 +29,16 @@ class IsolatedRemoteTool(BaseTool):
         call = copy.copy(self._delegate)
         if tool_context.tool_confirmation is None:
             call._last_context_id = str(uuid.uuid4())
+            binding = self._released.pop(tool_context.function_call_id, None)
+            if binding is not None:
+                inherited = call._header_provider
+
+                def with_binding(context):
+                    headers = dict(inherited(context) or {}) if inherited else {}
+                    headers[SPAWN_BINDING_HEADER] = binding
+                    return headers
+
+                call._header_provider = with_binding
         else:
             # Resumes belong to the original paused child, not a new errand.
             payload = tool_context.tool_confirmation.payload

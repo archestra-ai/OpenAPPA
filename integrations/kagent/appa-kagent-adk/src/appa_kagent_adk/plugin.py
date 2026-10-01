@@ -79,6 +79,7 @@ from google.genai import types
 from . import wire
 from .identity import SessionIdentity
 from .inventory import ToolInventory, is_spawn
+from .remote_agents import IsolatedRemoteTool
 from .wire import RETURN_TOOL
 
 logger = logging.getLogger("appa_kagent_adk.plugin")
@@ -372,7 +373,10 @@ class AppaPluginKagent(BasePlugin):
         crossed it. A delegated entry opens with ``child_start`` while this
         plugin instance has not opened its (root, child) pair: the child
         session id can be shared by every parent that delegates into this
-        pod, so the pair, not the session, decides.
+        pod, so the pair, not the session, decides. The ``child_start``
+        carries the spawn binding the parent forwarded, so the child binds
+        to the spawn its parent released and no other; an entry without
+        one fails closed.
 
         A re-entry of an opened pair sends no ``child_start``. That
         re-entry is a second delegation from the same parent into the
@@ -394,8 +398,11 @@ class AppaPluginKagent(BasePlugin):
                     root_id,
                 )
                 return None
+            binding = self._identity.spawn_binding(session)
+            if binding is None:
+                raise AppaFailClosed(f"the delegated entry under root {root_id} carries no spawn binding")
             logger.info("child %s opens under root %s", child_id, root_id)
-            return wire.child_start(root_id, child_id)
+            return wire.child_start(root_id, child_id, spawn_binding=binding)
         if self._is_fresh(session):
             logger.info("trajectory %s opens as a root", root_id)
             return wire.session_start(root_id)
@@ -687,6 +694,8 @@ class AppaPluginKagent(BasePlugin):
             self._release_tool_dispatch(tool_context)
             raise
         if decision.kind in ("allow_call", "pass_control"):
+            if isinstance(tool, IsolatedRemoteTool) and decision.spawn_binding is not None:
+                tool.release(tool_context.function_call_id, decision.spawn_binding)
             return None
         if decision.kind == "deny_call":
             for offer_id, text in decision.review:
