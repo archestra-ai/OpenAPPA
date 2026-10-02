@@ -181,9 +181,9 @@ pub(super) fn remove_hooks(paths: &DeploymentPaths, binary: &Path) -> Result<(),
     })
 }
 
-/// The settings `clappa` loads for its sessions alone: APPA's status line and the
-/// `SendMessage` deny. The user's settings stay theirs in every session `clappa`
-/// does not start.
+/// The settings `clappa` loads for its sessions alone: APPA's status line, the
+/// `SendMessage` deny, and the disabled competing auto permission mode. The
+/// user's settings stay theirs in every session `clappa` does not start.
 pub(super) fn clappa_settings_path(paths: &DeploymentPaths) -> PathBuf {
     paths.data_dir.join("clappa.settings.json")
 }
@@ -198,7 +198,10 @@ pub(super) fn install_clappa_settings(
     // is the branch whose return the runtime checks.
     let settings = json!({
         "statusLine": {"type": "command", "command": statusline_command(target.binary, target.url)},
-        "permissions": {"deny": ["SendMessage"]},
+        "permissions": {
+            "deny": ["SendMessage"],
+            "disableAutoMode": "disable",
+        },
     });
     let bytes = serde_json::to_vec_pretty(&settings).expect("a JSON value serializes");
     let before = file_before(&path)?;
@@ -594,8 +597,8 @@ mod tests {
         assert_eq!(fs::read(path(&paths)).unwrap(), original);
     }
 
-    /// The status line reaches `clappa` sessions only: the user's own
-    /// `statusLine` is never touched, and removal takes the file away.
+    /// The status line and permission settings reach `clappa` sessions only:
+    /// the user's own settings are never touched, and removal takes the file away.
     #[test]
     fn the_status_line_lives_in_clappas_settings_not_the_users() {
         let root = tempfile::tempdir().unwrap();
@@ -619,7 +622,10 @@ mod tests {
             written,
             json!({
                 "statusLine": {"type": "command", "command": statusline_command(&binary, "http://127.0.0.1:1")},
-                "permissions": {"deny": ["SendMessage"]},
+                "permissions": {
+                    "deny": ["SendMessage"],
+                    "disableAutoMode": "disable",
+                },
             })
         );
         assert_eq!(fs::read(path(&paths)).unwrap(), user);

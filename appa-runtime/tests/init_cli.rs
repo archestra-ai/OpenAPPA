@@ -251,6 +251,7 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
         clappa_settings["permissions"]["deny"],
         serde_json::json!(["SendMessage"])
     );
+    assert_eq!(clappa_settings["permissions"]["disableAutoMode"], "disable");
     assert!(fixture.settings_value().get("permissions").is_none());
     let statusline = clappa_settings["statusLine"]["command"]
         .as_str()

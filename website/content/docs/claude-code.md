@@ -84,13 +84,20 @@ OpenAPPA intercepts Claude Code events through native lifecycle hooks:
 
 ## Choose protection per session
 
-Installing OpenAPPA does not force every Claude Code session through it. Use `clappa` when you want policy enforcement. Use `claude` when you do not.
+Installing OpenAPPA does not change ordinary `claude` sessions. Choose the launcher that provides the permission boundary you want:
 
-Protection belongs to the Claude Code process, not the saved conversation. Resume a protected conversation with `clappa --resume`, not `claude --resume`.
-Plain `claude` starts an unprotected process.
-Exit and restart a conversation already resumed through plain `claude`. It cannot become protected in place.
+| Command | Permission boundary |
+|---|---|
+| `clappa` | OpenAPPA tracks information flows and enforces policy. Claude Code auto mode is unavailable. |
+| `claude --permission-mode auto` | Claude Code uses auto mode without OpenAPPA protection. |
 
-Claude Code prints an unprotected `claude --resume` command when an interactive session exits. After that hint, `clappa` prints the complete protected command for the same session:
+`clappa` supports Manual (`default`), `acceptEdits`, `plan`, and `dontAsk` modes. It refuses `--permission-mode auto` and explains how to switch modes.
+
+`clappa --resume` resumes a protected session. Protection belongs to the active process, not the saved conversation.
+
+A session resumed through plain `claude` is unprotected. Exit it, then resume with `clappa`. It cannot become protected in place.
+
+When an interactive session ends, Claude Code prints an unprotected resume command. `clappa` then prints the protected equivalent:
 
 ```text
 Resume this session with:
@@ -100,11 +107,11 @@ Resume with OpenAPPA protection:
 clappa --resume 01234567-89ab-4cde-8012-3456789abcde
 ```
 
-The OpenAPPA block appears only when Claude Code saved a transcript that can be resumed.
+The OpenAPPA command appears only when Claude Code saved a resumable transcript.
 
 :::claude-session-choice:::
 
-Projects configured with `disableAllHooks: true` disable all hooks, preventing `clappa` from enforcing policy in that session.
+Setting `disableAllHooks: true` prevents `clappa` from enforcing policy for that project.
 
 ## Uninstall
 

@@ -90,6 +90,8 @@ pub(crate) struct WireEvent {
     hook_event_name: String,
     session_id: String,
     #[serde(default)]
+    permission_mode: Option<String>,
+    #[serde(default)]
     agent_id: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
@@ -247,6 +249,11 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         detail: format!("unreadable hook event: {error}"),
     })?;
     tracing::debug!(hook = %event.hook_event_name, session = %event.session_id, "hook event");
+    if event.permission_mode.as_deref() == Some("auto") {
+        return Err(malformed(
+            "OpenAPPA cannot run with Claude Code auto mode. Press Shift+Tab to switch to Manual (default) mode.",
+        ));
+    }
     match event.hook_event_name.as_str() {
         "SessionStart" => Ok(Some(HookEvent::SessionStart {
             root: event.root(),
@@ -416,6 +423,40 @@ mod tests {
                 );
             }
             other => panic!("expected an Unreadable refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_mode_is_refused_before_the_event_crosses() {
+        let event = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "permission_mode": "auto",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        assert_eq!(
+            parse_value(&event),
+            Err(ParseRefusal::Malformed {
+                detail:
+                    "OpenAPPA cannot run with Claude Code auto mode. Press Shift+Tab to switch to Manual (default) mode."
+                        .to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn supported_permission_modes_cross_unchanged() {
+        for permission_mode in ["default", "acceptEdits", "plan", "dontAsk"] {
+            let event = serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "s1",
+                "permission_mode": permission_mode,
+            });
+            assert!(
+                matches!(parse_value(&event), Ok(Some(HookEvent::SessionStart { .. }))),
+                "{permission_mode} must remain supported",
+            );
         }
     }
 

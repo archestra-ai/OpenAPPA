@@ -55,7 +55,16 @@ impl Recording {
         let events: Vec<serde_json::Value> = std::fs::read_to_string(path)
             .expect("the recorded hook fixture is readable")
             .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("each fixture line is JSON"))
+            .map(|line| {
+                let mut event = serde_json::from_str::<serde_json::Value>(line).expect("each fixture line is JSON");
+                // These lifecycle recordings predate clappa's auto-mode exclusion.
+                // Their event shapes are mode-independent, so replay them in a
+                // supported mode while preserving the recorded fixture itself.
+                if event.get("permission_mode").is_some() {
+                    event["permission_mode"] = serde_json::json!("default");
+                }
+                event
+            })
             .collect();
         assert!(
             events.iter().all(|event| event["session_id"] == self.session),
