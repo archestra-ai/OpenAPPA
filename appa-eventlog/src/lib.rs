@@ -1149,6 +1149,50 @@ mod tests {
         assert_eq!(archives, 1);
     }
 
+    #[test]
+    fn concurrent_archivers_leave_one_archive_and_keep_its_roots_closed() {
+        let (dir, path) = written_at(4);
+        let opened: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| LogStore::open_archiving(&path).expect("the database opens")))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("the worker finishes"))
+                .collect()
+        });
+        assert_eq!(opened.iter().filter(|(_, archive)| archive.is_some()).count(), 1);
+        for (store, _) in &opened {
+            assert!(matches!(
+                store.create_root(opening(&root()), POLICY.as_bytes()),
+                Err(CreateError::Archived { .. })
+            ));
+        }
+        let archives = std::fs::read_dir(dir.path())
+            .expect("the directory lists")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.file_name().to_string_lossy().contains(".archived-"))
+            })
+            .count();
+        assert_eq!(archives, 1);
+    }
+
+    #[test]
+    fn a_database_another_connection_holds_is_not_archived() {
+        let (_dir, path) = written_at(4);
+        let holder = rusqlite::Connection::open(&path).expect("another connection opens");
+        holder
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM logs;")
+            .expect("the other connection reads");
+
+        assert!(matches!(
+            LogStore::open_archiving(&path).err(),
+            Some(OpenError::Incompatible { found: 4, .. })
+        ));
+    }
+
     fn memory() -> LogStore {
         LogStore::open(Backend::Memory).expect("an in-memory store opens")
     }

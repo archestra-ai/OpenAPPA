@@ -134,16 +134,24 @@ impl Sqlite {
     /// root it held is recorded in the fresh one, so [`Sqlite::create`] refuses to reopen any of
     /// them at the starting label.
     pub(crate) fn open_archiving(path: &Path) -> Result<(Self, Option<PathBuf>), OpenError> {
+        if !matches!(Self::open(path), Err(OpenError::Incompatible { .. })) {
+            return Self::open(path).map(|store| (store, None));
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        // Two processes archiving one file would each read roots from whatever sits at the
+        // path. The lock makes one finish first; the other then finds the replacement.
+        let lock_path = path.with_file_name(format!("{name}.upgrade-lock"));
+        let lock = std::fs::File::create(&lock_path).map_err(|error| moving(&lock_path, error))?;
+        lock.lock().map_err(|error| moving(&lock_path, error))?;
         let refusal = match Self::open(path) {
             Err(refusal @ OpenError::Incompatible { .. }) => refusal,
             opened => return opened.map(|store| (store, None)),
         };
-        // A file whose roots cannot be listed is not one this store wrote, so it is left for
-        // the operator rather than moved.
-        let Ok(roots) = checkpointed_roots(path) else {
+        // A file whose roots cannot be listed, or that another process still holds, is left
+        // for the operator rather than moved.
+        let Ok((held, roots)) = checkpointed_roots(path) else {
             return Err(refusal);
         };
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
         let fresh = path.with_file_name(format!("{name}.upgrading"));
         let archive = path.with_file_name(format!("{name}.archived-{}", millis(SystemTime::now())));
         for stale in [fresh.clone()].iter().chain(&sidecars(&fresh)) {
@@ -171,6 +179,7 @@ impl Sqlite {
             remove_if_present(stale)?;
         }
         std::fs::rename(&fresh, path).map_err(|error| moving(path, error))?;
+        drop(held);
         Ok((Self::open(path)?, Some(archive)))
     }
 
@@ -779,13 +788,23 @@ fn is_taken(error: &rusqlite::Error) -> bool {
     )
 }
 
+const TABLES: [&str; 7] = [
+    "logs",
+    "policy_files",
+    "host_keys",
+    "operations",
+    "processed_results",
+    "held_peer_messages",
+    "archived_roots",
+];
+
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results', 'held_peer_messages', 'archived_roots')",
-        [],
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (SELECT value FROM json_each(?1))",
+        params![serde_json::to_string(&TABLES).expect("table names serialize")],
         |row| row.get(0),
     )?;
-    Ok(found == 7)
+    Ok(usize::try_from(found) == Ok(TABLES.len()))
 }
 
 fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -825,10 +844,12 @@ fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 /// Every root the database at `path` holds, read after folding its write-ahead log into the
-/// main file, so the file alone is the whole database. A checkpoint another connection blocks
-/// fails rather than leave log pages behind.
-fn checkpointed_roots(path: &Path) -> Result<Vec<String>, rusqlite::Error> {
+/// main file, so the file alone is the whole database. The returned connection holds the
+/// database exclusively, so no other process writes to it while it is moved; a database
+/// another process has open fails here instead.
+fn checkpointed_roots(path: &Path) -> Result<(Connection, Vec<String>), rusqlite::Error> {
     let connection = Connection::open(path)?;
+    connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
     let blocked: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
     if blocked != 0 {
         return Err(rusqlite::Error::SqliteFailure(
@@ -836,8 +857,11 @@ fn checkpointed_roots(path: &Path) -> Result<Vec<String>, rusqlite::Error> {
             Some("another connection holds the write-ahead log".to_string()),
         ));
     }
-    let mut statement = connection.prepare("SELECT DISTINCT root FROM logs")?;
-    statement.query_map([], |row| row.get(0))?.collect()
+    let roots = connection
+        .prepare("SELECT DISTINCT root FROM logs")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok((connection, roots))
 }
 
 fn sidecars(path: &Path) -> [PathBuf; 2] {

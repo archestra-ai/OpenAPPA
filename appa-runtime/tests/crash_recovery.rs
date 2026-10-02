@@ -171,6 +171,53 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
 }
 
 #[test]
+fn a_session_in_a_database_too_old_to_upgrade_stays_refused_after_archiving() {
+    let _scenario = serialize_server_scenarios();
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = write_config(dir.path(), CONFIG);
+    let db = dir.path().join("appa.db");
+    let server = serve_runtime(&config, &db);
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"startup"}"#,
+    )
+    .expect("SessionStart answers");
+    drop(server);
+    rusqlite::Connection::open(&db)
+        .expect("the database reopens")
+        .pragma_update(None, "user_version", 4)
+        .expect("the version moves back past the upgrade chain");
+
+    let server = serve_runtime(&config, &db);
+    assert!(
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"resume"}"#,
+        )
+        .is_none(),
+        "the archived session's start is refused"
+    );
+    let denied = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert_eq!(denied["decision"], "deny_call", "{denied}");
+
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
+    )
+    .expect("a new session starts");
+    let allow = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert!(allowed(&allow), "{allow}");
+}
+
+#[test]
 fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
     let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
