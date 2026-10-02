@@ -1278,6 +1278,7 @@ mod tests {
             model: "m".to_string(),
             url: Some(url),
             key: Some(crate::config::ProfileKey::Set(Token::new("sekret".to_string()))),
+            orcarouter: None,
             limits: MODEL_LIMITS,
         }
     }

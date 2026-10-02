@@ -26,6 +26,12 @@ mod management;
 mod mascot;
 #[cfg(feature = "daemon")]
 pub mod mcp;
+pub mod orcarouter;
+mod orcarouter_catalog;
+#[cfg(feature = "daemon")]
+pub mod orcarouter_login;
+#[cfg(feature = "daemon")]
+pub mod orcarouter_models;
 #[cfg(feature = "daemon")]
 pub mod protected_launch;
 #[cfg(feature = "daemon")]

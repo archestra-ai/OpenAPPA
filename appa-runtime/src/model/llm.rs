@@ -58,6 +58,9 @@ enum LlmClient {
     OpenAi(openai::CompletionsClient),
     Gemini(gemini::Client),
     Ollama(ollama::Client),
+    /// OrcaRouter speaks the OpenAI chat-completions wire, so it reuses the
+    /// OpenAI-compatible client and differs only in its key source and status handling.
+    OrcaRouter(openai::CompletionsClient),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,10 +81,20 @@ impl LlmBackend {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
         crate::tls::install_crypto_provider();
-        let token = match &profile.key {
-            Some(ProfileKey::Deferred) => None,
-            Some(key) => Some(key.token().map(Token::reveal).unwrap_or_default()),
-            None => Some(""),
+        // OrcaRouter's key comes from the credential seam, so a pasted key and a PKCE
+        // connect both reach inference through here and nothing downstream sees which.
+        let orcarouter_key = profile
+            .orcarouter
+            .as_ref()
+            .and_then(|account| account.key())
+            .map(Token::reveal);
+        let token = match profile.provider {
+            LlmProvider::OrcaRouter => orcarouter_key,
+            _ => match &profile.key {
+                Some(ProfileKey::Deferred) => None,
+                Some(key) => Some(key.token().map(Token::reveal).unwrap_or_default()),
+                None => Some(""),
+            },
         };
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
@@ -103,6 +116,7 @@ impl LlmBackend {
                 LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai, token).completions_api()),
                 LlmProvider::Gemini => LlmClient::Gemini(client!(gemini, token)),
                 LlmProvider::Ollama => LlmClient::Ollama(client!(ollama, token)),
+                LlmProvider::OrcaRouter => LlmClient::OrcaRouter(client!(openai, token).completions_api()),
             }),
         };
         Ok(LlmBackend {
@@ -195,6 +209,7 @@ impl LlmBackend {
             LlmClient::OpenAi(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
             LlmClient::Gemini(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
             LlmClient::Ollama(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
+            LlmClient::OrcaRouter(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
         }
     }
 }
@@ -345,6 +360,7 @@ mod tests {
             model: "test-model".to_string(),
             url,
             key: token.map(|token| ProfileKey::Set(Token::new(token.to_string()))),
+            orcarouter: None,
             limits: crate::config::ModelLimits {
                 timeout: Duration::from_millis(1500),
                 max_concurrent,
@@ -446,6 +462,57 @@ mod tests {
             body.get("tools")
                 .is_none_or(|tools| tools.as_array().is_none_or(Vec::is_empty))
         );
+    }
+
+    /// OrcaRouter reaches its own gateway on the chat-completions wire and sends the key
+    /// the credential seam produced — the same request an OpenAI profile makes, to a
+    /// different host, which is what makes it first-class rather than a special case.
+    #[tokio::test]
+    async fn an_orcarouter_consult_uses_its_gateway_and_its_connected_key() {
+        let (addr, stub) = serve("/v1/chat/completions", openai_reply, Duration::ZERO).await;
+        stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
+        let mut profile = profile(LlmProvider::OrcaRouter, Some(format!("http://{addr}/v1")), None, 4);
+        // The key comes from the account, exactly as a connect flow or a pasted key
+        // leaves it; the profile names no `token_env` of its own here.
+        profile.orcarouter = Some(crate::config::OrcaRouterAccount::connected(
+            "APPA_ORCAROUTER_API_KEY",
+            1,
+            "sk-orca-fixture".to_string(),
+        ));
+        let backend = LlmBackend::new(&profile, 65_536, &ConsultGates::per_runtime()).expect("the backend builds");
+
+        let answer = backend.consult(&prompt(), "judge", None).await;
+        assert_eq!(answer, Ok(serde_json::json!({ "ruling": "approve" })));
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        assert_eq!(headers["authorization"], "Bearer sk-orca-fixture");
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+    }
+
+    /// A refused OrcaRouter credential is terminal: the consult is not retried and no
+    /// refresh is attempted. `401` is `NonSuccess`, never a transient failure.
+    #[tokio::test]
+    async fn a_refused_orcarouter_key_is_terminal_and_never_refreshed() {
+        let (addr, stub) = serve("/v1/chat/completions", openai_reply, Duration::ZERO).await;
+        stub.answering(StubAnswer::Status(401));
+        let mut profile = profile(LlmProvider::OrcaRouter, Some(format!("http://{addr}/v1")), None, 4);
+        profile.orcarouter = Some(crate::config::OrcaRouterAccount::connected(
+            "APPA_ORCAROUTER_API_KEY",
+            1,
+            "sk-orca-revoked".to_string(),
+        ));
+        let backend = LlmBackend::new(&profile, 65_536, &ConsultGates::per_runtime()).expect("the backend builds");
+
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 401,
+                detail: None
+            })
+        );
+        assert_eq!(stub.requests().len(), 1, "a refused credential is not retried");
     }
 
     #[tokio::test]

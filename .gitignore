@@ -39,3 +39,7 @@ __pycache__/
 
 # Local APPA credentials are never source artifacts.
 credentials.db*
+
+# OrcaRouter delivery-validation screenshots: the harness regenerates these from
+# the real `appa ui` page, so they are a run artifact and never a source file.
+/orca-evidence/

@@ -44,6 +44,15 @@ impl KeySource<'_> {
             KeySource::Deferred => Keys::Deferred,
         }
     }
+
+    /// One variable's value, from the source this document's secrets come from. A
+    /// deferred parse resolves nothing: its profile never serves.
+    fn lookup(self, variable: &str) -> Option<String> {
+        match self {
+            KeySource::Lookup(lookup) => lookup(variable),
+            KeySource::Deferred => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +184,12 @@ pub enum LlmProvider {
     OpenAi,
     Gemini,
     Ollama,
+    /// OrcaRouter: an OpenAI-compatible gateway that routes many providers behind one
+    /// endpoint. It speaks the chat-completions wire through the OpenAI-compatible
+    /// client, and it is the one provider whose inference host and credential can be
+    /// supplied either by a `token_env` key or by a PKCE connect flow
+    /// (`crate::orcarouter`).
+    OrcaRouter,
 }
 
 impl LlmProvider {
@@ -184,6 +199,7 @@ impl LlmProvider {
             LlmProvider::OpenAi => "openai",
             LlmProvider::Gemini => "gemini",
             LlmProvider::Ollama => "ollama",
+            LlmProvider::OrcaRouter => "orcarouter",
         }
     }
 
@@ -193,6 +209,16 @@ impl LlmProvider {
             "openai" => Some(LlmProvider::OpenAi),
             "gemini" => Some(LlmProvider::Gemini),
             "ollama" => Some(LlmProvider::Ollama),
+            "orcarouter" => Some(LlmProvider::OrcaRouter),
+            _ => None,
+        }
+    }
+
+    /// The inference host a profile of this provider reaches when its table names no
+    /// `url`. OrcaRouter's is its own gateway; every other provider keeps rig's host.
+    pub fn default_url(self) -> Option<&'static str> {
+        match self {
+            LlmProvider::OrcaRouter => Some(crate::orcarouter::DEFAULT_API_BASE),
             _ => None,
         }
     }
@@ -448,6 +474,67 @@ pub struct LlmProfile {
     pub url: Option<String>,
     pub key: Option<ProfileKey>,
     pub limits: ModelLimits,
+    /// A connected OrcaRouter account: the credential a PKCE connect flow stored, and
+    /// the generation it belongs to. `None` for every other provider and for an
+    /// OrcaRouter profile that only carries a pasted key.
+    pub orcarouter: Option<OrcaRouterAccount>,
+}
+
+/// The OrcaRouter account a profile serves, as the credential store resolved it. The
+/// key is the same ordinary `sk-orca-…` credential both connect paths produce, so the
+/// inference path never learns which one it was.
+#[derive(Debug, Clone)]
+pub struct OrcaRouterAccount {
+    /// The variable the key is stored under, so a `401` marks exactly this account.
+    pub variable: String,
+    /// Which stored credential the rejected request used. A later login increments it,
+    /// and a late failure from the old generation never marks the new one broken.
+    pub generation: u64,
+    /// Whether the last request this account made was refused. A reauthentication is
+    /// required before it is used again; no refresh is attempted.
+    pub needs_reauth: bool,
+    key: Option<Token>,
+}
+
+impl OrcaRouterAccount {
+    /// An account holding the key a connect flow or a pasted `token_env` produced. The
+    /// key is the same ordinary `sk-orca-…` value on both paths.
+    pub(crate) fn connected(variable: impl Into<String>, generation: u64, key: String) -> OrcaRouterAccount {
+        OrcaRouterAccount {
+            variable: variable.into(),
+            generation,
+            needs_reauth: false,
+            key: Some(Token::new(key)),
+        }
+    }
+
+    /// The key to send, where this account still holds one. A `needs_reauth` account
+    /// keeps its key but must not serve: the runtime refuses before sending, so a
+    /// revoked credential is never retried.
+    pub fn key(&self) -> Option<&Token> {
+        match self.needs_reauth {
+            true => None,
+            false => self.key.as_ref(),
+        }
+    }
+
+    /// Whether a resolved key is usable right now.
+    pub fn serves(&self) -> bool {
+        self.key().is_some()
+    }
+
+    /// The account after the runtime observed `status` from one of its requests. Only a
+    /// `401` or `403` is terminal: the credential is refused, so reauthentication is
+    /// required and no refresh follows. Any other status leaves the account as it was.
+    pub fn observe(&self, status: u16) -> OrcaRouterAccount {
+        if !matches!(status, 401 | 403) {
+            return self.clone();
+        }
+        OrcaRouterAccount {
+            needs_reauth: true,
+            ..self.clone()
+        }
+    }
 }
 
 impl LlmProfile {
@@ -462,6 +549,17 @@ impl LlmProfile {
             }),
         }
     }
+
+    /// Why this profile cannot serve right now, where a connected account is the reason:
+    /// its key was refused and must be replaced by a new connect flow.
+    pub fn reauthentication(&self) -> Option<MissingKey> {
+        match &self.orcarouter {
+            Some(account) if !account.serves() => Some(MissingKey::ReauthenticationRequired {
+                provider: self.provider.as_str(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Why a model profile cannot serve a consult.
@@ -471,6 +569,8 @@ pub enum MissingKey {
     Unset { var: String },
     #[error("the {provider} provider needs a token_env, and only ollama runs without a key")]
     Undeclared { provider: &'static str },
+    #[error("the {provider} credential was refused; reconnect the account")]
+    ReauthenticationRequired { provider: &'static str },
 }
 
 /// The `[externals.jev]` profile, validated. The key goes only to the TypeSafe API, or to
@@ -766,7 +866,7 @@ pub enum ConfigError {
         field: &'static str,
         min: u128,
     },
-    #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama")]
+    #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama, orcarouter")]
     InvalidLlmProvider { provider: String },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
@@ -2295,18 +2395,36 @@ fn resolve_llm(raw: RawLlm, keys: KeySource<'_>) -> Result<LlmProfile, ConfigErr
         provider: raw.provider.clone(),
     })?;
     let limits = ModelLimits::declared(SECTION, raw.timeout_ms, raw.max_concurrent, ModelLimits::MODEL_CALL)?;
-    let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
+    let url = match raw.url {
+        Some(url) => Some(validated_url(SECTION, SECTION, url)?),
+        // An OrcaRouter table may name no `url`; its gateway host is the default, and the
+        // environment's shared self-hosted base overrides that.
+        None => provider.default_url().map(str::to_owned),
+    };
     let key = raw
         .token_env
         .map(|var| endpoint_token_variable(SECTION, SECTION, var))
         .transpose()?
         .map(|var| ProfileKey::read(var, keys));
+    // OrcaRouter holds an account only where a credential resolves from the same source
+    // every `token_env` does — the process environment, then the credential store a
+    // PKCE connect flow wrote to. The table's own `token_env` stays the pasted-key path.
+    let orcarouter = match provider {
+        LlmProvider::OrcaRouter => match keys.lookup(crate::orcarouter::KEY_VARIABLE) {
+            Some(value) if !value.is_empty() => {
+                Some(OrcaRouterAccount::connected(crate::orcarouter::KEY_VARIABLE, 1, value))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     Ok(LlmProfile {
         provider,
         model: raw.model,
         url,
         key,
         limits,
+        orcarouter,
     })
 }
 
@@ -2862,7 +2980,7 @@ mod tests {
         let with = |body: &str| format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n{body}\n");
         let bare = format!("{MINIMAL}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n");
         let config = parse(&bare).expect("an ollama profile validates without a key");
-        let llm = config.externals.llm.expect("the profile is set");
+        let llm = config.externals.llm.as_ref().expect("the profile is set");
         assert_eq!(llm.provider, LlmProvider::Ollama);
         assert_eq!(llm.model, "llama");
         assert!(llm.url.is_none() && llm.key.is_none() && llm.missing_key().is_none());
@@ -2873,7 +2991,7 @@ mod tests {
             |var| (var == "APPA_LLM_TOKEN").then(|| "sekret".to_string()),
         )
         .expect("a full profile validates");
-        let llm = config.externals.llm.expect("the profile is set");
+        let llm = config.externals.llm.as_ref().expect("the profile is set");
         assert_eq!(llm.url.as_deref(), Some("http://127.0.0.1:11434"));
         assert_eq!(
             llm.key.as_ref().and_then(|key| key.token()).map(Token::reveal),
@@ -2910,6 +3028,72 @@ mod tests {
         ));
         let typo = format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"m\"\napi_key = \"x\"\n");
         assert!(toml::from_str::<RawConfig>(&typo).is_err());
+    }
+
+    /// OrcaRouter is a first-class provider: its name parses, it carries its own gateway
+    /// host when the table names none, and its account resolves from the credential seam
+    /// the connect flow writes to — never from a hardcoded key.
+    #[test]
+    fn orcarouter_is_a_first_class_provider_with_its_own_host_and_account() {
+        let bare = format!("{MINIMAL}\n[externals.llm]\nprovider = \"orcarouter\"\nmodel = \"orcarouter/auto\"\n");
+        let config = parse(&bare).expect("an orcarouter profile validates without a key");
+        let llm = config.externals.llm.as_ref().expect("the profile is set");
+        assert_eq!(llm.provider, LlmProvider::OrcaRouter);
+        assert_eq!(llm.provider.as_str(), "orcarouter");
+        assert_eq!(
+            llm.url.as_deref(),
+            Some("https://api.orcarouter.ai/v1"),
+            "the profile reaches the gateway's own inference host, not the other providers'"
+        );
+        assert!(llm.key.is_none());
+        assert!(llm.orcarouter.is_none(), "no credential is stored yet");
+        assert!(matches!(
+            llm.missing_key(),
+            Some(MissingKey::Undeclared { provider: "orcarouter" })
+        ));
+
+        // A key from the credential seam is the account; the same seam the connect flow
+        // and a pasted `token_env` both fill.
+        let with_account = format!("{bare}token_env = \"APPA_ORCAROUTER_API_KEY\"\n");
+        let config = parse_with(&with_account, |var| {
+            (var == "APPA_ORCAROUTER_API_KEY").then(|| "sk-orca-fixture".to_string())
+        })
+        .expect("a profile with a stored key validates");
+        let llm = config.externals.llm.as_ref().expect("the profile is set");
+        let account = llm.orcarouter.as_ref().expect("the account resolves from the seam");
+        assert_eq!(account.variable, "APPA_ORCAROUTER_API_KEY");
+        assert!(account.serves());
+        assert_eq!(account.key().map(Token::reveal), Some("sk-orca-fixture"));
+        assert!(llm.missing_key().is_none());
+        assert!(llm.reauthentication().is_none());
+
+        // A refusal is terminal: the account must reconnect, and no refresh is issued.
+        let revoked = account.observe(401);
+        assert!(revoked.needs_reauth);
+        assert!(!revoked.serves(), "a refused key does not serve");
+        assert_eq!(
+            revoked.observe(401).generation,
+            account.generation,
+            "a failure never bumps the generation"
+        );
+        assert!(!account.observe(429).needs_reauth, "a rate limit is not a refusal");
+        // The refused account is reported as needing reauthentication, not as undeclared.
+        let refused = LlmProfile {
+            orcarouter: Some(revoked),
+            ..config.externals.llm.clone().expect("the profile is set")
+        };
+        assert!(matches!(
+            refused.reauthentication(),
+            Some(MissingKey::ReauthenticationRequired { provider: "orcarouter" })
+        ));
+
+        // A table that names another host still reaches that host: the override wins.
+        let pinned = format!("{bare}url = \"https://gateway.internal/v1\"\n");
+        let config = parse(&pinned).expect("an orcarouter override validates");
+        assert_eq!(
+            config.externals.llm.unwrap().url.as_deref(),
+            Some("https://gateway.internal/v1")
+        );
     }
 
     /// Every model table takes `timeout_ms` and `max_concurrent` over its own defaults, and

@@ -161,6 +161,43 @@ impl Local {
         self.selected.contains(name) || self.configured().contains(name)
     }
 
+    /// The `token_env` a connect flow stores an OrcaRouter key under: the profile's own,
+    /// or the default. A login writes the one variable a reload will read.
+    fn orcarouter_variable(&self) -> String {
+        std::fs::read_to_string(&self.config)
+            .ok()
+            .and_then(|text| crate::orcarouter_login::profile_token_env(&text))
+            .unwrap_or_else(|| crate::orcarouter::KEY_VARIABLE.to_string())
+    }
+
+    /// What the page shows about OrcaRouter: whether a profile names it, whether a key is
+    /// already stored (never the key), and where the console lists and revokes keys.
+    fn orcarouter_status(&self) -> Value {
+        let configured = std::fs::read_to_string(&self.config)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .and_then(|document| {
+                document
+                    .get("externals")?
+                    .get("llm")?
+                    .get("provider")?
+                    .as_str()
+                    .map(|provider| provider == "orcarouter")
+            })
+            .unwrap_or(false);
+        let variable = self.orcarouter_variable();
+        let saved = self.store.values().unwrap_or_default().contains_key(&variable);
+        let from_env = std::env::var_os(&variable).is_some_and(|value| !value.is_empty());
+        json!({
+            "configured": configured,
+            "variable": variable,
+            "stored": saved || from_env,
+            "source": if from_env { "environment" } else if saved { "database" } else { "missing" },
+            "key_url": "https://www.orcarouter.ai/console/api-keys",
+            "authorized_apps_url": "https://www.orcarouter.ai/console/authorized-apps",
+        })
+    }
+
     async fn runtime(&self) -> Option<Value> {
         let url = self.runtime_url.clone();
         let data = tokio::task::spawn_blocking(move || {
@@ -233,7 +270,9 @@ impl Local {
                 ));
             }
         }
-        Ok(json!({"batteries": batteries, "errors": errors, "runtime": runtime_info}))
+        Ok(
+            json!({"batteries": batteries, "errors": errors, "runtime": runtime_info, "orcarouter": self.orcarouter_status()}),
+        )
     }
 
     async fn check(&self, names: &[String]) -> Result<(), String> {
@@ -366,6 +405,8 @@ struct Web {
     authority: String,
     origin: String,
     setup: Arc<Setup>,
+    /// The OrcaRouter connect state and model catalog. Present whenever the page serves.
+    orca: Option<Arc<OrcaWeb>>,
 }
 /// The one battery the page asks a token for, and the signal that ends the command once a
 /// save or a check finds it ready.
@@ -421,8 +462,37 @@ async fn guard(
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
-    response.headers_mut().insert("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
+    // `connect-src` admits the OrcaRouter origins so the OrcaRouter form can offer a
+    // one-click connect and model discovery; every other request stays on this origin.
+    // The origins are not hardcoded: a self-hosted deployment's own are read from the
+    // same environment the provider reads.
+    let (connect_src, img_src) = match orcarouter_connect_src() {
+        // The official OrcaRouter mark is served from the auth origin; nothing else
+        // external is admitted.
+        Some(origins) => (
+            format!("connect-src 'self' {origins}"),
+            format!("img-src 'self' {origins}"),
+        ),
+        None => ("connect-src 'self'".to_string(), "img-src 'self'".to_string()),
+    };
+    response.headers_mut().insert(
+        "content-security-policy",
+        format!(
+            "default-src 'none'; script-src 'self'; style-src 'self'; {connect_src}; {img_src}; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
+        .parse()
+        .unwrap(),
+    );
     response
+}
+
+/// The origins the OrcaRouter form may reach: the auth origin (the connect flow) and the
+/// inference origin (model discovery). The browser only ever opens the auth origin; the
+/// inference origin is listed so the form's discovery call is allowed, and the key stays
+/// on this server either way.
+fn orcarouter_connect_src() -> Option<String> {
+    let origins = crate::orcarouter::Origins::resolve(None).ok()?;
+    Some(format!("{} {}", origins.auth.as_str(), origins.api.as_str()))
 }
 async fn snapshot(State(web): State<Web>) -> ApiResult {
     web.local
@@ -530,6 +600,262 @@ async fn check(State(web): State<Web>, axum::Json(check): axum::Json<Check>) -> 
     settle(&web);
     Ok(axum::Json(snapshot))
 }
+// ---- OrcaRouter connect and model catalog ----------------------------------
+
+/// The OrcaRouter side of the page: one entry holding the connect attempt and the model
+/// catalog. The attempt is guarded by a generation, so a response from a superseded
+/// login can never overwrite a newer one, and every terminal path clears the busy flag.
+struct OrcaWeb {
+    origins: crate::orcarouter::Origins,
+    provider: crate::orcarouter::CatalogProvider,
+    attempt: tokio::sync::Mutex<Option<Attempt>>,
+    /// Monotonic. Every async answer checks it still belongs to the current attempt, so
+    /// a superseded login can never install its credential or its UI state.
+    generation: std::sync::atomic::AtomicU64,
+}
+
+struct Attempt {
+    generation: u64,
+    /// The verifier stays here until the exchange: never in the URL, never logged.
+    verifier: String,
+}
+
+impl OrcaWeb {
+    fn new() -> Result<OrcaWeb, crate::orcarouter::OriginError> {
+        let origins = crate::orcarouter::Origins::resolve(None)?;
+        Ok(OrcaWeb {
+            provider: crate::orcarouter::CatalogProvider::new(origins.clone()),
+            origins,
+            attempt: tokio::sync::Mutex::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// The key a catalog request uses: a stored one, never the browser's.
+    fn key(&self, store: &CredentialStore, variable: &str) -> Option<String> {
+        let from_env = std::env::var(variable).ok().filter(|value| !value.is_empty());
+        from_env.or_else(|| store.values().ok().and_then(|values| values.get(variable).cloned()))
+    }
+}
+
+/// Start a login. Out-of-band by default: this is a localhost page on a machine that may
+/// not be reachable from the browser, so the code is shown and pasted back. `loopback`
+/// asks for the redirect flow instead, and the callback is on this page's own port.
+async fn orca_begin(State(web): State<Web>, axum::Json(request): axum::Json<OrcaBegin>) -> ApiResult {
+    let orca = web
+        .orca
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "OrcaRouter is unavailable"))?;
+    let generation = orca.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    // Any attempt already in flight is superseded: its response must not land.
+    {
+        let mut attempt = orca.attempt.lock().await;
+        *attempt = None;
+    }
+    let pkce = crate::orcarouter_login::Pkce::fresh();
+    let mut callback = "oob".to_string();
+    if request.loopback {
+        // The page's own origin is the loopback callback; the port is already bound.
+        callback = format!("{}/orca/callback", web.origin);
+    }
+    let url = crate::orcarouter_login::authorize_url(&orca.origins, &pkce, &callback);
+    *orca.attempt.lock().await = Some(Attempt {
+        generation,
+        verifier: pkce.verifier().to_string(),
+    });
+    Ok(axum::Json(json!({
+        "generation": generation,
+        "url": url,
+        "out_of_band": !request.loopback,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrcaBegin {
+    #[serde(default)]
+    loopback: bool,
+}
+
+/// Submit a code. Only the attempt whose generation is current may exchange it, so a
+/// code typed after a restart or a cancelled attempt cannot mint a key for a stale state.
+async fn orca_complete(State(web): State<Web>, axum::Json(request): axum::Json<OrcaComplete>) -> ApiResult {
+    let orca = web
+        .orca
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "OrcaRouter is unavailable"))?;
+    let attempt = {
+        let attempt = orca.attempt.lock().await;
+        attempt
+            .as_ref()
+            .map(|attempt| (attempt.generation, attempt.verifier.clone()))
+    };
+    let Some((generation, verifier)) = attempt else {
+        return Err((StatusCode::CONFLICT, "no OrcaRouter login is in progress"));
+    };
+    if request.generation != generation {
+        return Err((StatusCode::CONFLICT, "this login was superseded; start again"));
+    }
+    let response = crate::orcarouter_login::exchange(&orca.origins, request.code.trim(), &verifier)
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, orca_error(&error)))?;
+    let scope = crate::orcarouter_login::check_scope(response.scope.as_deref())
+        .map_err(|error| (StatusCode::BAD_REQUEST, orca_error(&error)))?;
+    let variable = {
+        let local = web.local.clone();
+        let variable = local.orcarouter_variable();
+        crate::orcarouter_login::store_key(&web.local.config, &variable, &response.key)
+            .map_err(|error| (StatusCode::BAD_REQUEST, orca_error(&error)))?;
+        variable
+    };
+    // The attempt is consumed; a second submit of the same code cannot re-exchange it.
+    *orca.attempt.lock().await = None;
+    let snapshot = refresh_orca_snapshot(&web, &variable).await;
+    Ok(axum::Json(json!({
+        "scope": scope,
+        "variable": variable,
+        "snapshot": snapshot,
+    })))
+}
+
+/// Store a pasted OrcaRouter key. This is the API-key path: it starts no authorization
+/// and reaches the same credential store the connect flow writes to, under the same
+/// variable, so inference cannot tell the two apart. An empty key clears the stored one.
+async fn orca_key(State(web): State<Web>, axum::Json(request): axum::Json<OrcaKey>) -> ApiResult {
+    let variable = web.local.orcarouter_variable();
+    let value = match request.key.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(key) => Some(key.to_string()),
+    };
+    web.local
+        .store
+        .update(&std::collections::BTreeMap::from([(variable.clone(), value)]))
+        .map_err(|_| (StatusCode::BAD_REQUEST, "the key could not be stored"))?;
+    let snapshot = web
+        .local
+        .snapshot()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "saved; cannot refresh"))?;
+    // A saved key is the whole answer; the response carries the state, never the key.
+    Ok(axum::Json(json!({"variable": variable, "snapshot": snapshot})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrcaKey {
+    /// The pasted `sk-orca-…` key. `null` or empty clears the stored credential.
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Cancel an in-flight login. Explicit cancel and every page-hide path reach this; it
+/// bumps the generation first, so a response already on its way is discarded.
+async fn orca_cancel(State(web): State<Web>) -> ApiResult {
+    let Some(orca) = web.orca.as_ref() else {
+        return Ok(axum::Json(json!({"cancelled": false})));
+    };
+    orca.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *orca.attempt.lock().await = None;
+    Ok(axum::Json(json!({"cancelled": true})))
+}
+
+/// The model catalog the page offers for OrcaRouter, filtered to the requested
+/// capability. The key stays here; the browser sees only ids and metadata.
+async fn orca_models(
+    State(web): State<Web>,
+    axum::extract::Query(query): axum::extract::Query<OrcaModels>,
+) -> ApiResult {
+    let orca = web
+        .orca
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "OrcaRouter is unavailable"))?;
+    let capability = query.capability.unwrap_or(crate::orcarouter::Capability::Chat);
+    let variable = web.local.orcarouter_variable();
+    let key = orca.key(&web.local.store, &variable);
+    let catalog = orca.provider.refresh(key.as_deref(), Some(capability)).await;
+    let modalities = query.modalities();
+    let items: Vec<Value> = catalog
+        .select(capability, &modalities)
+        .into_iter()
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "label": item.label(),
+                "context_length": item.context_length,
+                "input_modalities": item.input_modalities,
+                "reasoning_efforts": item.reasoning.as_ref().map(|reasoning| reasoning.efforts.clone()),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({
+        "source": catalog.source,
+        "degraded": catalog.source.is_degraded(),
+        "capability": capability,
+        "modalities": modalities,
+        "models": items,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrcaComplete {
+    code: String,
+    /// The generation the browser is answering, from `/orca/begin`. A mismatch means a
+    /// newer attempt started and this code must not be exchanged.
+    generation: u64,
+}
+
+#[derive(Deserialize)]
+struct OrcaModels {
+    capability: Option<crate::orcarouter::Capability>,
+    /// Comma-separated modalities the entry point actually uploads.
+    modalities: Option<String>,
+}
+
+impl OrcaModels {
+    fn modalities(&self) -> Vec<crate::orcarouter::Modality> {
+        self.modalities
+            .as_deref()
+            .unwrap_or("text")
+            .split(',')
+            .filter_map(|name| match name.trim() {
+                "text" => Some(crate::orcarouter::Modality::Text),
+                "image" => Some(crate::orcarouter::Modality::Image),
+                "audio" => Some(crate::orcarouter::Modality::Audio),
+                "video" => Some(crate::orcarouter::Modality::Video),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+async fn refresh_orca_snapshot(web: &Web, _variable: &str) -> Value {
+    web.local
+        .snapshot()
+        .await
+        .unwrap_or_else(|_| json!({"orcarouter": web.local.orcarouter_status()}))
+}
+
+/// One sentence a user can act on. The provider's own error text never reaches here, and
+/// neither does the key, the verifier, or the code.
+fn orca_error(error: &crate::orcarouter_login::LoginError) -> &'static str {
+    use crate::orcarouter_login::LoginError as E;
+    match error {
+        E::Denied => "The authorization was denied. Nothing was saved.",
+        E::StateMismatch => "The answer did not match this login attempt. Start again.",
+        E::CodeRejected => "That code was already used or has expired. Start again.",
+        E::Refused { status: 429 } => "Too many authorizations. Try again later, or paste a key.",
+        E::Refused { .. } => "OrcaRouter refused the exchange. Try again, or paste a key.",
+        E::ScopeDowngrade { .. } => {
+            "The granted access is not enough for this deployment. Ask the account owner, or paste a key."
+        }
+        E::Transport(_) | E::Origin(_) => "OrcaRouter could not be reached. Check the network, then try again.",
+        E::Timeout(_) => "The authorization timed out. Start again.",
+        E::EmptyKey => "The key was empty.",
+        E::Store(_) | E::Config(_) => "The key could not be stored. Check the configuration directory.",
+    }
+}
+
 pub fn run(args: Args) -> ExitCode {
     match launch(args) {
         Ok(()) => ExitCode::SUCCESS,
@@ -570,6 +896,7 @@ fn launch(args: Args) -> Result<(), String> {
             authority,
             origin,
             setup: setup.clone(),
+            orca: OrcaWeb::new().ok().map(Arc::new),
         };
         let (ended, ending) = tokio::sync::oneshot::channel();
         axum::serve(
@@ -629,7 +956,7 @@ async fn reload_runtime(url: String) -> Applied {
     .await
     .unwrap_or_else(|_| Applied::Refused("reload task failed".into()))
 }
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url).status();
     #[cfg(target_os = "windows")]
@@ -692,6 +1019,13 @@ fn router(web: Web) -> axum::Router {
         .route("/api/state", get(snapshot))
         .route("/api/credentials", post(save))
         .route("/api/check", post(check))
+        // OrcaRouter: the two authenticate paths and the model catalog. A PKCE code that
+        // the consent screen shows out-of-band is pasted into `/orca/complete`.
+        .route("/api/orcarouter/begin", post(orca_begin))
+        .route("/api/orcarouter/complete", post(orca_complete))
+        .route("/api/orcarouter/cancel", post(orca_cancel))
+        .route("/api/orcarouter/key", post(orca_key))
+        .route("/api/orcarouter/models", get(orca_models))
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .layer(axum::middleware::from_fn_with_state(web.clone(), guard))
         .with_state(web)
@@ -814,6 +1148,7 @@ mod tests {
                 battery: "demo".into(),
                 ready: tokio::sync::Notify::new(),
             }),
+            orca: OrcaWeb::new().ok().map(Arc::new),
         };
         let task = tokio::spawn(async move {
             axum::serve(
