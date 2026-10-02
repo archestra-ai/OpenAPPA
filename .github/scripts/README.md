@@ -1,4 +1,42 @@
-# OpenAPPA release updates in Archestra
+# OpenAPPA release automation
+
+## Release Please PR authentication
+
+`Release OpenAPPA` creates and updates release PRs as `archestra-ci[bot]`, the
+same organization-owned **Archestra CI** App used by Archestra's Release Please
+workflow. Its installation already includes `archestra-ai/OpenAPPA`.
+
+The `release-pr` job requests a token for **OpenAPPA only**, with Contents,
+Issues, and Pull requests write permissions. Both Release Please and the
+lockfile/marketplace synchronization push use that token. App-authenticated PR
+events start CI without the workflow approval required for PR events generated
+with `GITHUB_TOKEN`. The job's `GITHUB_TOKEN` has Contents read access, checkout
+does not persist credentials, and the token action revokes its token on completion.
+Release creation and asset publication keep their separate credentials.
+
+An organization owner configures these **OpenAPPA Actions repository secrets**:
+
+| Secret | Value |
+| --- | --- |
+| `ARCHESTRA_RELEASER_GITHUB_APP_ID` | `1667068` |
+| `ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY` | The complete PEM key for Archestra CI |
+
+App settings: `https://github.com/organizations/archestra-ai/settings/apps/archestra-ci`.
+Keep the existing selected-repository installation and App permissions. The
+workflow does not request Actions or Workflows write access, or any ruleset bypass.
+
+An App private key can mint tokens for every repository in its installation;
+the workflow's token restriction does not restrict the key itself. The owner must
+approve making this credential available to OpenAPPA and enter it directly in
+GitHub's secure secret UI. GitHub cannot reveal Archestra's existing secret value.
+Do not paste private keys into chat, files, logs, or PRs.
+
+After configuration and merge, verify the next release PR update starts CI as
+`archestra-ci[bot]`. Existing runs awaiting approval still need maintainer
+approval or a subsequent App-authenticated PR update. This change does not
+approve or merge release PRs.
+
+## Runtime update automation
 
 After `Release OpenAPPA` publishes a complete GitHub release, it calls
 `Update OpenAPPA in Archestra`. The `release: published` event also handles
