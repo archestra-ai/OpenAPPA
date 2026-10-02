@@ -766,7 +766,7 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
-        if self.inner.shared.files.is_some() {
+        if self.inner.shared.files.is_some() && super::files::owns(&call) {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
             let policy = self.policy(&log)?;

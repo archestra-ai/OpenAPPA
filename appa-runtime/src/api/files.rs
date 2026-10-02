@@ -487,6 +487,9 @@ delta = {}
 name = "host/claude-code/Read"
 delta = {}
 [[policy.tool]]
+name = "host/claude-code/Bash"
+delta = {}
+[[policy.tool]]
 name = "mcp/github/get_issue"
 delta = {}
 [policy.deployment]
@@ -818,6 +821,29 @@ max_body_bytes = 65536
         )
         .await;
         assert_eq!(unbound_read, HookDecision::AllowCall { spawn: None });
+
+        let unbound_bash = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"bash-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"}
+            }),
+        )
+        .await;
+        assert_eq!(unbound_bash, HookDecision::AllowCall { spawn: None });
+        let bash_result = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PostToolUse", "session_id":"bash-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"},
+                "tool_response":{"stdout":"Policy: policy.toml", "stderr":"", "interrupted":false}
+            }),
+        )
+        .await;
+        assert_eq!(bash_result, HookDecision::Ack);
+
         let connection = rusqlite::Connection::open(dir.path().join("runtime.db")).unwrap();
         let file_tables: i64 = connection
             .query_row(
@@ -849,6 +875,20 @@ max_body_bytes = 65536
             "a native filesystem tool must not bypass the bound workspace stream: {native:?}"
         );
 
+        let bash = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"}
+            }),
+        )
+        .await;
+        assert!(
+            matches!(bash, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("bound workspace refuses native filesystem and shell tools")),
+            "Bash must not bypass the bound workspace stream: {bash:?}"
+        );
+
         let github = hook(
             &runtime,
             serde_json::json!({
@@ -859,6 +899,18 @@ max_body_bytes = 65536
         )
         .await;
         assert_eq!(github, HookDecision::AllowCall { spawn: None });
+        let github_result = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PostToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"mcp__github__get_issue",
+                "tool_input":{"owner":"o", "repo":"r", "issue_number":1},
+                "tool_response":{"title":"Ordinary policy result"}
+            }),
+        )
+        .await;
+        assert_eq!(github_result, HookDecision::Ack);
     }
 
     #[tokio::test]
