@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.31.0...v0.31.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **eventlog:** upgrade older databases; archive ones too old to upgrade ([#588](https://github.com/archestra-ai/OpenAPPA/issues/588)) ([3cc5203](https://github.com/archestra-ai/OpenAPPA/commit/3cc520365ff901ad974cde6097d78682c23cfcd0))
+
 ## [0.31.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.30.0...v0.31.0) (2026-10-02)
 
 
