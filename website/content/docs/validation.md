@@ -119,7 +119,8 @@ Config: /path/to/appa.toml (loadable)
 Batteries: claude-code, slack, github, ...
 Policy tools: *, Agent, ..., host/claude-code/Read, ...
 ...
-Session integrations/tools/accounts: unavailable to this command
+Session tools: unavailable to this command; pass the names this session sees with --session-tools
+Connector accounts: unavailable to this command
 Validation: tools: 0 valid, 0 invalid, 522 unknown; inventory: partial or unavailable; new tools: possible; wildcard: present (ordinary tools only)
 ```
 

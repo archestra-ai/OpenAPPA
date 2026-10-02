@@ -38,7 +38,7 @@ If you manage agents through a shared gateway, use **[Archestra](/archestra)**. 
 
 ## Connect to your observability stack
 
-See what your agent was allowed to do, what was blocked, and why. OpenTelemetry export is in development so you can investigate decisions and policy-check times in your existing monitoring tools. See [Observability](/observability) for the planned metrics, logs, and setup.
+See what your agent was allowed to do, what was blocked, and why. The runtime exports traces, logs, and metrics over OpenTelemetry, so you can investigate decisions and policy-check times in your existing monitoring tools. See [Observability](/observability) for the metrics, logs, and setup.
 
 ## Validate policies in CI
 

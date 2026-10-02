@@ -11,7 +11,7 @@ These reports can feed a [policy-improvement workflow](/self-improving-policies)
 
 ## Enable agent reporting
 
-Agent reporting is off by default. `appa init` asks whether to enable it. To enable it directly, set this in `appa.toml`:
+Agent reporting is off by default. `appa plugin install claude-code` asks whether to enable it at a terminal. Pass `--agent-yell` or `--no-agent-yell` to answer without the question. To enable it directly, set this in `appa.toml`:
 
 ```toml
 [reporting]

@@ -187,6 +187,7 @@ jobs:
               - 'scripts/lint_batteries.py'
               - 'scripts/test_lint_batteries.py'
               - 'scripts/lint_battery_toml.py'
+              - 'scripts/test_battery_readiness.py'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
@@ -397,6 +398,13 @@ jobs:
           while IFS= read -r dir; do
             python3 -m unittest discover -s "$dir" -p 'test_*.py'
           done < <(find marketplace -type f -name 'test_*.py' -exec dirname {} + | sort -u)
+
+      # A battery ships a readiness check that reaches its provider with the
+      # deployment's credential, so what it reports and what it keeps out of
+      # the result is asserted here. These checks live beside the batteries
+      # rather than in them, so discovery above never reaches them.
+      - name: Battery readiness checks
+        run: python3 -m unittest scripts/test_battery_readiness.py
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
