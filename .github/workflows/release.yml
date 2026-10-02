@@ -515,3 +515,16 @@ jobs:
         run: |
           gh release edit "$TAG_NAME" --draft=false
           echo "Published release $TAG_NAME."
+
+  update-archestra:
+    name: Propose Archestra runtime update
+    needs: [release-please, publish-release]
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/update-archestra.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.tag_name }}
+      source_commit: ${{ needs.release-please.outputs.source_commit }}
+    secrets:
+      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
