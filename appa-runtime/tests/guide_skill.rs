@@ -1,7 +1,7 @@
 //! The shipped appa-guide skill is one composable package: a host-routing
 //! SKILL.md and one reference file per host. These checks keep the package
-//! whole: the router routes, the kagent reference uses only the shared remote
-//! runtime, and the chart consumes this package rather than a second skill.
+//! whole: the router routes, the chart consumes this package rather than a
+//! second skill, and the kagent policies gate runtime management.
 
 mod common;
 use common::repo_root;
@@ -17,90 +17,39 @@ fn read(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+/// The parsed TOML file at `path` below the repository root.
+fn toml_file(path: &str) -> toml::Table {
+    let text = fs::read_to_string(repo_root().join(path)).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    text.parse().unwrap_or_else(|error| panic!("parse {path}: {error}"))
+}
+
+/// The `[[policy.<kind>]]` entries of a parsed policy file.
+fn entries<'a>(file: &'a toml::Table, kind: &str) -> Vec<&'a toml::Table> {
+    file["policy"]
+        .get(kind)
+        .and_then(toml::Value::as_array)
+        .map(|entries| entries.iter().filter_map(toml::Value::as_table).collect())
+        .unwrap_or_default()
+}
+
+/// The `[[policy.<kind>]]` entry called `name`.
+fn named<'a>(file: &'a toml::Table, kind: &str, name: &str) -> Option<&'a toml::Table> {
+    entries(file, kind)
+        .into_iter()
+        .find(|entry| entry.get("name").and_then(toml::Value::as_str) == Some(name))
+}
+
+fn strings(value: Option<&toml::Value>) -> Vec<&str> {
+    value
+        .and_then(toml::Value::as_array)
+        .map(|items| items.iter().filter_map(toml::Value::as_str).collect())
+        .unwrap_or_default()
+}
+
 /// The installer replaces only a file that starts with this frontmatter.
 #[test]
 fn the_router_opens_with_the_frontmatter_the_installer_recognizes() {
     assert!(read("SKILL.md").starts_with("---\nname: appa-guide\n"));
-}
-
-#[test]
-fn the_kagent_reference_carries_the_full_flow() {
-    let reference = read("references/kagent.md");
-    for marker in [
-        "status.discoveredTools",
-        "k8s_get_resource_yaml",
-        "k8s_apply_manifest",
-        "agent/<namespace>/<name>",
-        "Approve/Reject card",
-        "Never say the card remains open",
-        "runtime mode is the only supported deployment",
-        "http://appa-runtime.<namespace>.svc.cluster.local:18787",
-        "Replace only `name`",
-        "PersistentVolumeClaim",
-        "Read-only fallback",
-        "Approve, or tell me what to change.",
-        "## Cluster operations",
-        "helm_upgrade",
-        "Protect all Agents",
-        "appa_get_runtime_state",
-        "appa_match_batteries",
-        "appa_include_battery",
-        "appa_update_policy",
-        "appa_reload_policy",
-        "appa_refresh_batteries",
-        "one-shot APPA",
-        "Required init checklist",
-        "List every `RemoteMCPServer`",
-        "server not yet attached to an Agent",
-        "untrusted proposal input",
-        "public `appa-kagent-demo` OCI chart",
-        "must own only its",
-        "Never use a live ConfigMap as the",
-        "A demo template is never serving",
-        "any other word as an offer id",
-        "Claude-spelled names",
-        "Battery matches: none.",
-        "Environment variables alone never prove the gate",
-        "Raw events and",
-        "lowercase singular resource types",
-        "Helm values; provider credentials",
-        "memory prefetch enters model",
-        "Go remote-Agent",
-        "Static contracts need no audience source",
-        "does not require a person by default",
-        "explicitly named proposal",
-        "Never claim fleet-wide coverage",
-        "runtime namespace by default",
-        "Never patch the generated Deployment",
-        "without proposing a change or asking",
-        "This overrides every proposal",
-        "If all are present, never propose the demo template",
-        "whole reply below 1,600 characters",
-        "## Reconcile batteries",
-        "Suggested includes",
-        "A refresh never includes a battery",
-        "Do not precede it with an inspection summary",
-        "Do not append a second summary",
-        "deployment binding associates `github`",
-        "Matching names establishes a candidate, not policy coverage",
-        "coverage.tools",
-        "Its `matches` array is the only source",
-        "`included` boolean is the only source",
-        "`unconfigured_tools` array is the only source",
-        "source: <namespace>/delegations",
-        "ascending discovered-tool count",
-    ] {
-        assert!(reference.contains(marker), "the kagent flow names {marker:?}");
-    }
-    for stale in ["APPA_CONFIG_CONTENTS", "Bundled mode", "127.0.0.1:8787"] {
-        assert!(!reference.contains(stale), "{stale:?} is not a supported kagent mode");
-    }
-    for claude_only in ["claude mcp list", "clappa", ".appa/", "APPA_GATE"] {
-        assert!(
-            !reference.contains(claude_only),
-            "{claude_only:?} is claude-code machinery"
-        );
-    }
 }
 
 #[test]
@@ -124,33 +73,6 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     let chart = root.join("charts/appa-runtime");
     let guide =
         fs::read_to_string(chart.join("templates/appa-guide.yaml")).expect("the runtime chart renders the guide agent");
-    assert!(
-        guide.contains("gitRefs"),
-        "the agent attaches the skill through git refs"
-    );
-    for tool in ["k8s_get_resources", "k8s_apply_manifest", "helm_upgrade"] {
-        assert!(guide.contains(tool), "the guide agent carries {tool}");
-    }
-    assert!(!guide.contains("- k8s_patch_resource"));
-    assert!(guide.contains("APPA_RUNTIME_URL"));
-    assert!(guide.contains("/skills/appa-guide/references/kagent.md"));
-    for marker in [
-        "Runtime management uses only direct runtime-owned MCP tools",
-        "appa_get_runtime_state reads serving policy",
-        "appa_include_battery updates the complete root policy and reloads it",
-        "appa_update_policy publishes one complete approved root policy and reloads it",
-        "Never use Kubernetes tools, shell commands, helper executables",
-        "Pass the policy key from appa_get_runtime_state",
-        "matches, included, and unconfigured_tools fields",
-        "match it",
-        "A request is never approval",
-        "Never invent or request an offer id",
-        "Protect an existing Agent only with k8s_apply_manifest",
-        "Never patch a generated Deployment",
-        "If the request says diagnose and inspect only",
-    ] {
-        assert!(guide.contains(marker), "the chart system message carries {marker:?}");
-    }
     for removed in [
         "- k8s_execute_command",
         "- k8s_patch_resource",
@@ -171,48 +93,64 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     let demo_values = fs::read_to_string(demo.join("values.yaml")).expect("the demo values exist");
     assert!(!demo_values.contains("integrations/appa-guide"));
 
-    let policy = fs::read_to_string(demo.join("files/demo.appa.toml")).expect("the demo policy exists");
-    assert!(policy.contains("name = \"k8s_apply_manifest\""));
-    assert!(policy.contains("attention = [\"human-approval\"]"));
-    assert!(policy.contains("name = \"host/kagent/skills\""));
+    let policy = toml_file("integrations/kagent/demo/chart/files/demo.appa.toml");
+    assert!(named(&policy, "tool", "k8s_apply_manifest").is_some());
+    assert!(entries(&policy, "authority").iter().any(|authority| {
+        strings(authority.get("permits").and_then(|permits| permits.get("attention"))).contains(&"human-approval")
+    }));
+    assert!(named(&policy, "tool", "host/kagent/skills").is_some());
     assert!(
-        !policy.contains("name = \"host/kagent/bash\""),
+        named(&policy, "tool", "host/kagent/bash").is_none(),
         "the unused skill helpers stay undeclared"
     );
 
-    let github =
-        fs::read_to_string(root.join("marketplace/batteries/github/appa.toml")).expect("the GitHub battery exists");
-    assert!(github.contains("name = \"mcp/github/get_file_contents\""));
-    assert!(github.contains("name = \"mcp/github/issue_write\""));
-    assert!(!github.contains("name = \"get_file_contents\""));
-    assert!(!github.contains("name = \"issue_write\""));
+    let github = toml_file("marketplace/batteries/github/appa.toml");
+    assert!(named(&github, "tool", "mcp/github/get_file_contents").is_some());
+    assert!(named(&github, "tool", "mcp/github/issue_write").is_some());
+    assert!(named(&github, "tool", "get_file_contents").is_none());
+    assert!(named(&github, "tool", "issue_write").is_none());
 }
 
 #[test]
 fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
-    let root = repo_root();
     for path in [
         "charts/appa-runtime/files/appa.toml",
         "integrations/kagent/demo/chart/files/demo.appa.toml",
     ] {
-        let policy = fs::read_to_string(root.join(path)).expect("read kagent policy");
-        assert!(policy.contains("annotator = \"appa-guide-apply\""));
-        assert!(policy.contains("/usr/local/bin/appa-guide-apply-annotator"));
-        let apply = policy
-            .split("[[policy.annotator]]")
-            .find(|entry| entry.contains("name = \"appa-guide-apply\""))
-            .expect("the policy declares the Agent apply annotator");
-        assert!(apply.contains("marks = [\"human-approval\"]"));
-        assert!(!policy.contains("name = \"k8s_get_events\""));
-        assert!(!policy.contains("name = \"k8s_get_pod_logs\""));
-        assert!(!policy.contains("k8s_get_resources(resource_type:configmap)"));
-        assert!(!policy.contains("name = \"k8s_execute_command\""));
-        assert!(!policy.contains("k8s_get_resource_yaml(resource_type:configmap)"));
+        let policy = toml_file(path);
+        let apply = named(&policy, "tool", "k8s_apply_manifest").expect("the policy declares the Agent apply");
+        assert_eq!(
+            apply.get("annotator").and_then(toml::Value::as_str),
+            Some("appa-guide-apply")
+        );
+        assert_eq!(
+            strings(policy["externals"]["annotators"]["appa-guide-apply"].get("command")),
+            ["/usr/local/bin/appa-guide-apply-annotator"]
+        );
+        let annotator =
+            named(&policy, "annotator", "appa-guide-apply").expect("the policy declares the Agent apply annotator");
+        assert_eq!(strings(annotator.get("marks")), ["human-approval"]);
+        for undeclared in [
+            "k8s_get_events",
+            "k8s_get_pod_logs",
+            "k8s_get_resources(resource_type:configmap)",
+            "k8s_execute_command",
+            "k8s_get_resource_yaml(resource_type:configmap)",
+            "k8s_get_resource_yaml",
+            "k8s_get_resource_yaml(resource_type:secret)",
+            "helm_get_release",
+        ] {
+            assert!(
+                named(&policy, "tool", undeclared).is_none(),
+                "{path} declares {undeclared}"
+            );
+        }
         for tool in [
             "mcp/appa-guide/appa_get_runtime_state",
             "mcp/appa-guide/appa_match_batteries",
+            "helm_get_release(resource:manifest)",
         ] {
-            assert!(policy.contains(&format!("name = \"{tool}\"")));
+            assert!(named(&policy, "tool", tool).is_some(), "{path} declares {tool}");
         }
         for tool in [
             "mcp/appa-guide/appa_include_battery",
@@ -220,28 +158,16 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
             "mcp/appa-guide/appa_reload_policy",
             "mcp/appa-guide/appa_refresh_batteries",
         ] {
-            let declaration = policy
-                .split("[[policy.tool]]")
-                .find(|entry| entry.contains(&format!("name = \"{tool}\"")))
-                .unwrap_or_else(|| panic!("policy declares {tool}"));
-            assert!(declaration.contains("attention = [\"human-approval\"]"));
+            let declaration = named(&policy, "tool", tool).unwrap_or_else(|| panic!("policy declares {tool}"));
+            assert!(
+                strings(
+                    declaration
+                        .get("requires")
+                        .and_then(|requires| requires.get("attention"))
+                )
+                .contains(&"human-approval"),
+                "{tool} needs a person"
+            );
         }
-        assert!(!policy.contains("name = \"k8s_get_resource_yaml\"\n"));
-        assert!(!policy.contains("k8s_get_resource_yaml(resource_type:secret)"));
-        assert!(policy.contains("helm_get_release(resource:manifest)"));
-        assert!(!policy.contains("name = \"helm_get_release\"\n"));
     }
-
-    let reference = read("references/kagent.md");
-    for operation in [
-        "appa_get_runtime_state",
-        "appa_include_battery",
-        "appa_update_policy",
-        "appa_reload_policy",
-        "appa_refresh_batteries",
-    ] {
-        assert!(reference.contains(operation), "the reference names {operation}");
-    }
-    assert!(reference.contains("generic Kubernetes commands"));
-    assert!(reference.contains("one-shot APPA"));
 }

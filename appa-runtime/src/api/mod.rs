@@ -3,6 +3,7 @@
 
 pub(crate) mod files;
 mod host;
+pub(crate) mod peer;
 mod session;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
@@ -128,7 +129,7 @@ impl PermitKey {
         hasher.update(tool.as_bytes());
         hasher.update([0]);
         hasher.update(appa_engine::params::canonical_bytes(arguments));
-        Self::Call(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+        Self::Call(crate::engine::hex(&hasher.finalize()))
     }
 
     /// How a record spells this key. The two variants can never mean each other, so the
@@ -176,7 +177,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
     if bare == "yell" {
         return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
     }
-    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) {
+    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) && bare != peer::READ_PEER_MESSAGE {
         return None;
     }
     let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
@@ -461,6 +462,8 @@ pub enum OpenError {
     JevTrustRanks(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
+    #[error("{0}")]
+    Schema(String),
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -506,6 +509,10 @@ pub(crate) enum EventError {
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
     TrajectoryExists,
+    #[error(
+        "this session started under an APPA version whose database could not be upgraded, so its label is unknown; start a new session"
+    )]
+    RootArchived,
     #[error("the session principal {0:?} is not an address")]
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
@@ -554,6 +561,8 @@ pub(crate) enum EventError {
         "delegation to {tool} is not declared by the policy: an agent runs as a child only under a contract that names it, and the wildcard covers no spawn"
     )]
     UndeclaredSpawn { tool: String },
+    #[error("a peer message of {bytes} bytes exceeds the {limit} bytes a session takes in")]
+    PeerMessageTooLarge { bytes: usize, limit: usize },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -602,6 +611,7 @@ impl EventError {
             | EventError::RemedyArguments { .. }
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
+            | EventError::RootArchived
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
@@ -609,6 +619,7 @@ impl EventError {
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
             | EventError::UndeclaredSpawn { .. }
+            | EventError::PeerMessageTooLarge { .. }
             | EventError::BindingMismatch => false,
         }
     }
@@ -951,11 +962,23 @@ impl Prepared {
         } else {
             None
         };
-        let store = LogStore::open(backend).map_err(|error| match error {
+        let opened = match backend {
+            Backend::Sqlite { path } => LogStore::open_archiving(&path),
+            backend => LogStore::open(backend).map(|store| (store, None)),
+        };
+        let (store, archive) = opened.map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
-            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
+            error @ (appa_eventlog::OpenError::Newer { .. } | appa_eventlog::OpenError::Incompatible { .. }) => {
+                OpenError::Schema(error.to_string())
+            }
             error => OpenError::Storage(error.to_string()),
         })?;
+        if let Some(archive) = archive {
+            tracing::warn!(
+                archive = %archive.display(),
+                "the database was too old to upgrade; it was moved aside and its sessions cannot resume"
+            );
+        }
         Ok(self.with_store(Arc::new(store), state_path))
     }
 
@@ -1021,9 +1044,14 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
 }
 
 fn inventory_refused(error: appa_runtime_api::ParseRefusal) -> EventError {
-    let (appa_runtime_api::ParseRefusal::Malformed { detail } | appa_runtime_api::ParseRefusal::Unreadable { detail }) =
-        error;
-    EventError::InventoryRefused(detail)
+    EventError::InventoryRefused(refusal_detail(error))
+}
+
+/// What a refused parse says, whichever way it was refused.
+pub(crate) fn refusal_detail(refusal: appa_runtime_api::ParseRefusal) -> String {
+    let (appa_runtime_api::ParseRefusal::Unreadable { detail } | appa_runtime_api::ParseRefusal::Malformed { detail }) =
+        refusal;
+    detail
 }
 
 impl Runtime {
@@ -1225,12 +1253,16 @@ impl Inner {
 
     /// See [`crate::events::EventLog::recent_root`].
     #[cfg(feature = "daemon")]
-    pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
+    pub(crate) fn recent_root(
+        &self,
+        window: std::time::Duration,
+        selected: Option<&TrajectoryId>,
+    ) -> crate::events::Recent {
         self.shared
             .events
             .lock()
             .expect("the event mutex is never poisoned: no panic runs while it is held")
-            .recent_root(window)
+            .recent_root(window, selected)
     }
 
     fn deployment(&self) -> Arc<Deployment> {
@@ -1424,7 +1456,8 @@ impl Runtime {
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
     /// Configure this before sharing the runtime. Each root session binds its first file call's
     /// harness working directory and checks it for links. Each file gets the operator's source
-    /// Label when a call first touches it. Child trajectories share their root's workspace and ledger.
+    /// Label when a call first touches it. Child trajectories inherit their root's workspace
+    /// event stream. All roots bound to the same canonical workspace share that stream.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
@@ -1451,9 +1484,25 @@ impl Runtime {
                 .get_mut()
                 .expect("the deployment lock is never poisoned: no panic runs while it is held"),
         );
-        if deployment.resident.registry().sanitizers().next().is_some() {
+        if deployment
+            .resident
+            .registry()
+            .sanitizers()
+            .any(|sanitizer| sanitizer.on.input)
+        {
             return Err(OpenError::Storage(
-                "file tracking does not support sanitizer or rewrite routes".into(),
+                "file tracking does not support tool-input sanitizer or rewrite routes".into(),
+            ));
+        }
+        if files::FileTool::ALL.into_iter().any(|tool| {
+            deployment
+                .resident
+                .registry()
+                .profile()
+                .confines_result(&appa_engine::value::ToolName::new(format!("mcp/appa/{}", tool.name())))
+        }) {
+            return Err(OpenError::Storage(
+                "file tracking cannot confine the result of a runtime-owned file tool".into(),
             ));
         }
         let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
@@ -1469,7 +1518,6 @@ impl Runtime {
             ));
         }
         inner.files = Some(files::FileTracking {
-            stores: std::sync::Mutex::new(std::collections::HashMap::new()),
             initial,
             policy_key,
             protected_paths,
@@ -1509,7 +1557,7 @@ impl Runtime {
             .files
             .as_ref()
             .ok_or_else(|| files::refused("file tools are not enabled"))?
-            .bind(root, workspace)
+            .bind(&self.inner.store, root, workspace)
             .map(|_| ())
             .map_err(files::refused)
     }
@@ -2002,9 +2050,16 @@ impl Runtime {
             })
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
+                appa_eventlog::CreateError::Archived { .. } => EventError::RootArchived,
                 error => EventError::Storage(error.to_string()),
             })?;
-        Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
+        Ok(Session::attach(
+            Arc::clone(&self.inner),
+            deployment,
+            root.clone(),
+            root,
+            EmbeddedPresentationOptions::default(),
+        ))
     }
 
     /// Reopens a persisted trajectory. There is no stored view: the next
@@ -2031,7 +2086,7 @@ impl Runtime {
         if !known {
             return Err(EventError::UnknownTrajectory);
         }
-        Ok(Session::attach_with_presentation(
+        Ok(Session::attach(
             Arc::clone(&self.inner),
             self.inner.deployment(),
             trajectory.clone(),
@@ -2232,10 +2287,12 @@ impl Runtime {
                 return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::NotRequested);
             }
             yell::Selection::Vouched(root) => root,
-            yell::Selection::Recent => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
-                Ok(root) => root,
-                Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
-            },
+            yell::Selection::Recent(selected) => {
+                match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW, selected.as_ref())) {
+                    Ok(root) => root,
+                    Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
+                }
+            }
         };
         let yelling = Some(root.clone());
         let Ok(log) = self.inner.log(&root) else {
@@ -2285,7 +2342,15 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, RemedyArguments::default(), None, None).await
+        self.remedy(
+            acting,
+            offer,
+            RemedyArguments::default(),
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Execute one surfaced remedy offer with the arguments a plan declaring a subagent's
@@ -2296,7 +2361,15 @@ impl Runtime {
         offer: OfferId,
         arguments: RemedyArguments,
     ) -> RemedyOutcome {
-        self.remedy(acting, offer, arguments, None, None).await
+        self.remedy(
+            acting,
+            offer,
+            arguments,
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
     }
 
     /// Executes an embedded remedy plan for an authenticated actor.
@@ -2313,7 +2386,7 @@ impl Runtime {
         args: ExecuteRemedyPlanArgs,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        self.execute_remedy_outcome(args, None, Some(actor), presentation, true)
+        self.execute_remedy_outcome(args, RemedyCaller::Embedded { actor, presentation })
             .await
     }
 
@@ -2328,24 +2401,30 @@ impl Runtime {
         self.render_remedy(
             self.execute_remedy_outcome(
                 args,
-                elicitation,
-                expected_actor,
-                EmbeddedPresentationOptions::default(),
-                false,
+                RemedyCaller::Daemon {
+                    elicitation,
+                    expected_actor,
+                },
             )
             .await,
         )
     }
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
-    async fn execute_remedy_outcome(
-        &self,
-        args: ExecuteRemedyPlanArgs,
-        elicitation: Option<&Elicitation>,
-        expected_actor: Option<&Actor>,
-        presentation: EmbeddedPresentationOptions,
-        strict_freshness: bool,
-    ) -> RemedyOutcome {
+    async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
+        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon {
+                elicitation,
+                expected_actor,
+            } => (
+                elicitation,
+                expected_actor,
+                EmbeddedPresentationOptions::default(),
+                false,
+            ),
+        };
         let quoted = match OfferId::parse(&args.offer_id) {
             Ok(quoted) => quoted,
             Err(reason) => {
@@ -2385,7 +2464,7 @@ impl Runtime {
                 reason: RemedyRefusal::UnknownOffer,
             }
         } else {
-            self.remedy_with_presentation(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
+            self.remedy(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
                 .await
         };
         // Recorded from the typed outcome, before rendering turns it into the text the
@@ -2427,6 +2506,21 @@ impl Runtime {
             },
         }
     }
+}
+
+/// Who executes a remedy. An embedded host names the actor it authenticated and how it
+/// renders; it is held to the offer being current. The daemon relays the peer's elicitation
+/// and the actor the connection vouches for, if any.
+enum RemedyCaller<'a> {
+    Embedded {
+        actor: &'a Actor,
+        presentation: EmbeddedPresentationOptions,
+    },
+    #[cfg(feature = "daemon")]
+    Daemon {
+        elicitation: Option<&'a Elicitation>,
+        expected_actor: Option<&'a Actor>,
+    },
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
@@ -2488,25 +2582,6 @@ impl Runtime {
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
     pub(crate) async fn remedy(
-        &self,
-        acting: &Actor,
-        quoted: OfferId,
-        arguments: RemedyArguments,
-        elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
-    ) -> RemedyOutcome {
-        self.remedy_with_presentation(
-            acting,
-            quoted,
-            arguments,
-            elicitation,
-            ruling,
-            EmbeddedPresentationOptions::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn remedy_with_presentation(
         &self,
         acting: &Actor,
         quoted: OfferId,
@@ -3374,8 +3449,7 @@ name = \"Bash\"
     }
 
     pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
-        let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
-        super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
+        crate::engine::sealed_binding(&appa_engine::value::ForkId::of(&engine_dispatch(label)), &[0; 32])
     }
 }
 
@@ -4022,7 +4096,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &view,
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -4043,6 +4119,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::SessionStart {
                 root: later.clone(),
                 principal: None,
+                address: None,
+                title: None,
             },
         )
         .await;
@@ -4103,7 +4181,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &runtime.on(Arc::clone(&lease)),
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -4146,7 +4226,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &runtime,
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -4236,7 +4318,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     &recorded,
                     appa_runtime_api::HookEvent::SessionStart {
                         root: root.clone(),
-                        principal: None
+                        principal: None,
+                        address: None,
+                        title: None,
                     }
                 )
                 .await,
@@ -4855,7 +4939,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &runtime,
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -4908,7 +4994,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &runtime,
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -4954,6 +5042,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
             )
             .await;
@@ -4997,6 +5087,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
             )
             .await;
@@ -5040,6 +5132,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::SessionStart {
                 root: root.clone(),
                 principal: None,
+                address: None,
+                title: None,
             },
         )
         .await;
@@ -5088,6 +5182,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
             )
             .await;
@@ -5153,6 +5249,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::SessionStart {
                 root: root.clone(),
                 principal: None,
+                address: None,
+                title: None,
             },
         )
         .await;
@@ -5204,6 +5302,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::SessionStart {
                 root: root.clone(),
                 principal: None,
+                address: None,
+                title: None,
             },
         )
         .await;
@@ -5239,6 +5339,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
             )
             .await;
@@ -5258,6 +5360,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 actor,
                 text: "go on".to_string(),
                 settles: None,
+                peer: None,
+                title: None,
             },
         )
         .await;
@@ -5312,6 +5416,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
                     principal: None,
+                    address: None,
+                    title: None,
                 },
             )
             .await;
@@ -5388,6 +5494,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::SessionStart {
                 root: root.clone(),
                 principal: None,
+                address: None,
+                title: None,
             },
         )
         .await;
@@ -5442,7 +5550,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 &runtime,
                 appa_runtime_api::HookEvent::SessionStart {
                     root: root.clone(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,
@@ -5563,7 +5673,9 @@ url = "{url}"
                 &runtime,
                 HookEvent::SessionStart {
                     root: root(),
-                    principal: None
+                    principal: None,
+                    address: None,
+                    title: None,
                 }
             )
             .await,

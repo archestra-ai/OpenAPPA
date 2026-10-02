@@ -10,12 +10,14 @@
 //! the wire carries the host's raw tool spelling and the runtime identifies the
 //! rest itself, so nothing this client says about a call is trusted.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, WireDecision, WireEvent};
+use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, PeerAddress, WireDecision, WireEvent};
 
+use crate::api::refusal_detail;
 use crate::loopback_http::{Answer, Deadline, Endpoint, request};
 use crate::runtime_start::{self, Deployment};
 use crate::runtime_url::RuntimeTarget;
@@ -102,9 +104,7 @@ pub(crate) const TURN_END_BUDGET: Duration = Duration::from_secs(30);
 fn decision_of(body: &[u8]) -> Result<HookDecision, String> {
     let wire: WireDecision = serde_json::from_slice(body)
         .map_err(|error| format!("the runtime's answer is not a wire decision: {error}"))?;
-    wire.into_decision().map_err(|refusal| match refusal {
-        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
-    })
+    wire.into_decision().map_err(refusal_detail)
 }
 
 /// Put one answer where the harness reads it. Whether a failed write matters is the
@@ -129,19 +129,14 @@ fn deliver(answer: &serde_json::Value) -> ExitCode {
 /// The host event read as the typed event it reports: `None` for a hook the adapter does
 /// not gate, whose answer is the empty opinion without a round trip.
 fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent>, String> {
-    match (codec.parse)(host_event) {
-        Ok(event) => Ok(event),
-        Err(ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail }) => Err(detail),
-    }
+    (codec.parse)(host_event).map_err(refusal_detail)
 }
 
 /// One parsed event on the canonical wire. Crossing is a step of its own because the event
 /// outlives its failure: an event that cannot cross still reports what the host did, so a
 /// result the tool already produced is withheld rather than left in front of the model.
 fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
-    let wire = WireEvent::from_event(HOST, event).map_err(|refusal| match refusal {
-        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
-    })?;
+    let wire = WireEvent::from_event(HOST, event).map_err(refusal_detail)?;
     serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
 }
 
@@ -151,6 +146,40 @@ fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
 /// every client this binary runs as says nothing and exits 0.
 pub(crate) fn session_is_gated() -> bool {
     std::env::var_os("APPA_GATE").is_some_and(|value| value == "1")
+}
+
+/// Where the protected launcher bound this session's peer messages, inherited by every hook
+/// process. It stays out of the session's tool environment.
+pub(crate) const PEER_ADDRESS_VAR: &str = "APPA_PEER_ADDRESS";
+
+/// A session start names the address its launcher bound. A value that is no peer address
+/// leaves the session unaddressed, and the hook says so on stderr rather than refusing the
+/// start.
+fn with_peer_address(event: HookEvent, bound: Option<OsString>) -> HookEvent {
+    match event {
+        HookEvent::SessionStart {
+            root,
+            principal,
+            address: None,
+            title,
+        } => HookEvent::SessionStart {
+            root,
+            principal,
+            address: bound.and_then(peer_address),
+            title,
+        },
+        other => other,
+    }
+}
+
+fn peer_address(bound: OsString) -> Option<PeerAddress> {
+    let parsed = match bound.to_str() {
+        Some(text) => PeerAddress::parse(text).map_err(|error| error.to_string()),
+        None => Err("the value is not UTF-8".to_string()),
+    };
+    parsed
+        .inspect_err(|error| eprintln!("OpenAPPA hook ignored {PEER_ADDRESS_VAR}: {error}"))
+        .ok()
 }
 
 /// Post the hook event on stdin to `target`. With `ensure` the deployed runtime
@@ -192,7 +221,7 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
             }
             return ExitCode::SUCCESS;
         }
-        Ok(Some(event)) => event,
+        Ok(Some(event)) => with_peer_address(event, std::env::var_os(PEER_ADDRESS_VAR)),
         // Bytes this codec cannot read at all are still a hook: where they report a result
         // the harness has already produced, the codec renders the withholding for it, so
         // the output the tool produced does not stay in front of the model.
@@ -212,19 +241,19 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     // out of the model's attention instead of staying in front of it.
     let body = match wire_body(&event) {
         Ok(body) => body,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
     };
     let answered =
         Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
     let answer = match answered {
         Ok(answer) => answer,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
     };
     if decides == Decides::Nothing {
         return ExitCode::SUCCESS;
     }
     match (decision_of(&answer.body), answer.is_success()) {
-        (Ok(decision), true) => deliver(&(codec.render)(&event, &decision)),
+        (Ok(decision), true) => deliver(&(codec.render)(&host_event, &event, &decision)),
         // A refusal is rendered too, and for a result that already ran the rendering
         // is the whole answer: the harness reads it only from a hook that exits zero,
         // so a replacement carried out on a blocking exit would be discarded and the
@@ -234,9 +263,15 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         // and the rendering only reports it.
         (answered, false) => {
             let failure = refusal(&answer);
-            carry_out(&codec, &event, refused(&event, answered.ok(), &failure), &failure)
+            carry_out(
+                &codec,
+                &host_event,
+                &event,
+                refused(&event, answered.ok(), &failure),
+                &failure,
+            )
         }
-        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&event), &failure, decides),
+        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
     }
 }
 
@@ -269,13 +304,13 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
     }
 }
 
-fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
+fn carry_out(codec: &Codec, host: &[u8], event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
     match refused {
-        Refused::Withheld(withholding) => withhold(&(codec.render)(event, &withholding), failure),
+        Refused::Withheld(withholding) => withhold(&(codec.render)(host, event, &withholding), failure),
         // The exit code stops the call either way; where the answer's own rendering could
         // not be delivered, the failure to write it is surfaced beside the refusal rather
         // than swallowed.
-        Refused::Stopped(answered) => match answered.map(|decision| print(&(codec.render)(event, &decision))) {
+        Refused::Stopped(answered) => match answered.map(|decision| print(&(codec.render)(host, event, &decision))) {
             Some(Err(error)) => block(&format!("{failure}; the answer could not be written: {error}")),
             _ => block(failure),
         },
@@ -303,7 +338,7 @@ fn withhold(withholding: &serde_json::Value, failure: &str) -> ExitCode {
 /// codec can tell what a host's own bytes report, so the unread ones are handed back to it
 /// rather than sniffed here.
 enum Unanswered<'a> {
-    Event(&'a HookEvent),
+    Event(&'a [u8], &'a HookEvent),
     Unparsed(&'a [u8]),
 }
 
@@ -329,8 +364,9 @@ fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decid
 /// — by the codec, which reads the host's own shape for a result the harness has produced.
 fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<serde_json::Value> {
     match hook {
-        Unanswered::Event(event) => reports_a_result(event).then(|| {
+        Unanswered::Event(host, event) => reports_a_result(event).then(|| {
             (codec.render)(
+                host,
                 event,
                 &HookDecision::Block {
                     reason: format!("the runtime did not answer this hook: {failure}"),
@@ -530,7 +566,7 @@ mod tests {
                 matches!(withholding, HookDecision::Block { .. }),
                 "a refusal carrying no replacement synthesizes one: {withholding:?}"
             );
-            let rendered = (codec.render)(&event, &withholding).to_string();
+            let rendered = (codec.render)(host, &event, &withholding).to_string();
             assert!(
                 !rendered.contains("root:x:0:0"),
                 "the withheld output does not reach the model: {rendered}"

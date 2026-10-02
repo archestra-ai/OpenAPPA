@@ -23,6 +23,9 @@ from typing import Any
 _HEADERS_STATE_KEY = "headers"
 _ROOT_HEADER = "x-kagent-root-context-id"
 _PARENT_HEADER = "x-kagent-parent-context-id"
+# The spawn binding of the parent's released spawn. The child binds to
+# that spawn only, so a delegated entry without it opens no child.
+SPAWN_BINDING_HEADER = "x-appa-spawn-binding"
 
 TrajectoryIds = tuple[str, str | None]
 
@@ -53,6 +56,12 @@ class SessionIdentity:
             root = headers.get(_ROOT_HEADER) or headers.get(_PARENT_HEADER)
         delegated = isinstance(root, str) and root != "" and root != session.id
         return (root, session.id) if delegated else (session.id, None)
+
+    def spawn_binding(self, session: Any) -> str | None:
+        """The spawn binding the delegated entry's request carried, or None."""
+        headers = (getattr(session, "state", None) or {}).get(_HEADERS_STATE_KEY)
+        binding = headers.get(SPAWN_BINDING_HEADER) if isinstance(headers, dict) else None
+        return binding if isinstance(binding, str) and binding else None
 
     def open_invocation(self, invocation_context: Any) -> TrajectoryIds:
         """Pin the run's pair from its session state. The first open of a run wins.

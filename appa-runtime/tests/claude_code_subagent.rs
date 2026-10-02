@@ -193,13 +193,21 @@ async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
         let (status, answer) = call(runtime, event).await;
         assert_eq!(status, 200, "{name} answered {answer}");
         match name {
-            "PreToolUse" => assert_eq!(
-                answer["hookSpecificOutput"]["permissionDecision"], "allow",
-                "{name} {} is released: {answer}",
-                event["tool_name"]
-            ),
+            "PreToolUse" => assert_released(event, &answer),
             _ => assert_eq!(answer, serde_json::json!({}), "{name} carries no opinion: {answer}"),
         }
+    }
+}
+
+/// A released call answers `allow`, except in auto mode, where it is left to Claude Code's
+/// classifier with no decision.
+fn assert_released(event: &serde_json::Value, answer: &serde_json::Value) {
+    match event["permission_mode"].as_str() {
+        Some("auto") => assert_eq!(answer, &serde_json::json!({}), "released to the classifier: {answer}"),
+        _ => assert_eq!(
+            answer["hookSpecificOutput"]["permissionDecision"], "allow",
+            "released: {answer}"
+        ),
     }
 }
 
@@ -235,6 +243,20 @@ fn floored_at(trust: &str) -> RemedyArguments {
             audience: None,
         }),
         return_schema: None,
+    }
+}
+
+fn attested_at(audience: Option<&str>) -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling {
+            trust: None,
+            audience: audience.map(|audience| vec![audience.to_string()]),
+        }),
+        return_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": { "status": { "type": "string", "enum": ["posted", "failed"] } },
+            "required": ["status"],
+        })),
     }
 }
 
@@ -293,13 +315,12 @@ async fn the_synchronous_recording_crosses_the_return_at_the_subagents_stop() {
     next_child_call["tool_use_id"] = serde_json::json!("toolu_test_after_return");
     let (status, answer) = call(&runtime, &next_child_call).await;
     assert_eq!(status, 200);
-    assert_eq!(
-        answer["hookSpecificOutput"]["permissionDecision"], "allow",
-        "a return leaves the subagent live to work on: {answer}"
-    );
-    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
+    // A return leaves the subagent live to work on.
+    assert_released(&next_child_call, &answer);
+    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
+    let (status, answer) = call(&runtime, &proposal).await;
     assert_eq!(status, 200);
-    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
+    assert_released(&proposal, &answer);
 }
 
 #[tokio::test]
@@ -317,12 +338,11 @@ async fn the_asynchronous_recording_returns_while_the_parent_is_free() {
         "the launch acknowledgement crosses nothing"
     );
 
-    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
+    // The acknowledgement closed the spawn call, so the parent proposes freely.
+    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
+    let (status, answer) = call(&runtime, &proposal).await;
     assert_eq!(status, 200);
-    assert_eq!(
-        answer["hookSpecificOutput"]["permissionDecision"], "allow",
-        "the acknowledgement closed the spawn call, so the parent proposes freely: {answer}"
-    );
+    assert_released(&proposal, &answer);
 
     // The parent's turn ends, a helper stops, and the subagent works on.
     replay(&runtime, &events[ack + 1..stop]).await;
@@ -432,6 +452,113 @@ async fn a_subagent_under_the_parents_own_floor_cannot_accept_a_suspicious_read(
         offers(reason).is_empty(),
         "no acceptance below the declared floor is offered: {reason}"
     );
+}
+
+/// Delegation can isolate a suspicious, private read only when the return declaration permits
+/// both dimensions in the child. Attestation unbinds trust, but a public audience floor still
+/// refuses the read. Declaring the private audience admits it, and an empty return then ends the
+/// child without narrowing the parent.
+#[tokio::test]
+async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_before_an_empty_return() {
+    let make_runtime = || deployment("", "", "delta = { trust = \"suspicious\", audience = [\"self\"] }");
+    let events = ASYNC.events();
+    let spawn = hook(&events, "PreToolUse", Some("Agent"), false);
+    let read = hook(&events, "PreToolUse", Some("Bash"), true);
+    let start = index_of(&events, &hook(&events, "SubagentStart", None, true));
+    let ack = index_of(&events, &hook(&events, "PostToolUse", Some("Agent"), false));
+
+    let incompatible = make_runtime();
+    replay(&incompatible, &events[..1]).await;
+    let (status, answer) = call(&incompatible, &as_root(read.clone())).await;
+    assert_eq!(status, 200);
+    let guidance = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the root's narrowing block carries delegation guidance");
+    assert!(
+        guidance.contains("choose a floor and sanitizer whose combined route permits every narrowing"),
+        "{guidance}"
+    );
+    assert!(
+        guidance.contains("Returning nothing controls what crosses back; it does not relax what the child may"),
+        "{guidance}"
+    );
+
+    let HookDecision::DenyCall { feedback, .. } = hooks::handle(&incompatible, parsed(&spawn)).await else {
+        panic!("the spawn asks for its return declaration");
+    };
+    assert!(
+        feedback.contains(
+            "`attest-schema` unbinds trust by raising the return's trust; it does not widen or unbind audience"
+        ),
+        "{feedback}"
+    );
+    assert!(
+        feedback.contains("label: {audience: [\"<audience-entry>\"]}"),
+        "the attestation route asks for its bound audience dimension: {feedback}"
+    );
+
+    declare_spawn(&incompatible, &spawn, Some("attest-schema"), attested_at(None)).await;
+    replay(&incompatible, &events[1..start]).await;
+    let (status, answer) = call(&incompatible, &events[start]).await;
+    assert_eq!(status, 200);
+    assert!(
+        answer["hookSpecificOutput"]["additionalContext"].is_string(),
+        "the attested spawn tells the child its return schema: {answer}"
+    );
+    replay(&incompatible, &events[start + 1..=ack]).await;
+    let (status, answer) = call(&incompatible, &read).await;
+    assert_eq!(status, 200);
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the incompatible child read carries its refusal");
+    assert!(
+        offers(reason).is_empty(),
+        "attestation does not unbind the public audience floor: {reason}"
+    );
+
+    let compatible = make_runtime();
+    replay(&compatible, &events[..1]).await;
+    declare_spawn(&compatible, &spawn, Some("attest-schema"), attested_at(Some("self"))).await;
+    replay(&compatible, &events[1..start]).await;
+    let (status, answer) = call(&compatible, &events[start]).await;
+    assert_eq!(status, 200);
+    assert!(
+        answer["hookSpecificOutput"]["additionalContext"].is_string(),
+        "the attested spawn tells the child its return schema: {answer}"
+    );
+    replay(&compatible, &events[start + 1..=ack]).await;
+    let (status, answer) = call(&compatible, &read).await;
+    assert_eq!(status, 200);
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the compatible child read carries its acceptance offer");
+    let offer = offers(reason)
+        .pop()
+        .expect("the private audience floor permits accepting the suspicious/private read");
+    let accepted = compatible
+        .execute_remedy(
+            &Actor {
+                root: ASYNC.root(),
+                child: Some(ASYNC.child()),
+            },
+            offer,
+        )
+        .await;
+    assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+    replay(&compatible, &[read, hook(&events, "PostToolUse", Some("Bash"), true)]).await;
+
+    let mut empty_stop = child_stop(&events);
+    empty_stop["last_assistant_message"] = serde_json::json!("");
+    let (status, answer) = call(&compatible, &empty_stop).await;
+    assert_eq!((status, answer), (200, serde_json::json!({})));
+    assert!(
+        returns(&compatible, &ASYNC.root()).is_empty(),
+        "an empty stop crosses no value"
+    );
+    let parent = compatible.status(&ASYNC.root()).expect("the parent answers");
+    assert_eq!((parent.trust.as_str(), parent.audience.as_str()), ("trusted", "public"));
 }
 
 /// The parent declared at the spawn that it takes a suspicious return. The subagent
@@ -585,9 +712,10 @@ async fn an_agent_result_naming_another_subagent_is_withheld() {
         "only the subagent's own stop crossed"
     );
 
-    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
+    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
+    let (status, answer) = call(&runtime, &proposal).await;
     assert_eq!(status, 200);
-    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
+    assert_released(&proposal, &answer);
 }
 
 #[tokio::test]

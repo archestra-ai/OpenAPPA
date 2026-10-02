@@ -3,14 +3,11 @@
 #![cfg(unix)]
 mod common;
 
-use appa_runtime::{
-    api::{AuditEvent, RemedyOutcome, Runtime},
-    config::Config,
-    hooks,
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_runtime_api::{HookDecision, ProposedCall};
+use common::{
+    Classifier, actor, members_source, offer_of, propose, ran, raw, repo_root, root, serve_runtime, session_runtime,
 };
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
-use axum::{Router, routing::post};
-use common::{Classifier, actor, offer_of, propose, ran, raw, repo_root, root, serve, serve_runtime};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -25,17 +22,6 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
 
 fn statement(query: &str) -> ProposedCall {
     call("execute_sql", serde_json::json!({ "query": query }))
-}
-
-/// A loopback `databricks` audience source answering every collection with one reader.
-async fn members_source() -> String {
-    let router = Router::new().route(
-        "/audience",
-        post(|_body: String| async move {
-            serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
-        }),
-    );
-    format!("{}/audience", serve(router).await)
 }
 
 /// The Databricks mandate's three answers: a read of suspicious internal data from input
@@ -122,18 +108,7 @@ async fn runtime(dir: &tempfile::TempDir) -> (Arc<Runtime>, Classifier) {
     install_battery(dir).await;
     let (command, classifier) = Classifier::install(dir.path());
     let path = root_config(dir, &command, "");
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
+    let runtime = session_runtime(dir.path(), &path).await;
     (runtime, classifier)
 }
 

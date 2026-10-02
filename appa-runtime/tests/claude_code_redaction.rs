@@ -112,8 +112,9 @@ async fn through_the_masker(runtime: &Runtime, proposal: &serde_json::Value) -> 
     let (status, allowed) = claude_hook(runtime, proposal).await;
     assert_eq!(status, 200, "the re-proposed call is answered: {allowed}");
     assert_eq!(
-        allowed["hookSpecificOutput"]["permissionDecision"], "allow",
-        "the authorized plan releases the call: {allowed}"
+        allowed,
+        serde_json::json!({}),
+        "the authorized plan releases the call to auto mode's classifier: {allowed}"
     );
     allowed
 }

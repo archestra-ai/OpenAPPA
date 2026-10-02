@@ -45,13 +45,13 @@ const ENTRY_OVERHEAD: usize = 32;
 
 /// Which trajectory an export is about.
 ///
-/// A caller never names one: `Vouched` carries the root the hook before the call attested,
-/// and `Recent` is for a caller with no session of its own, where the runtime takes whichever
-/// trajectory was recently active and refuses to guess between several.
+/// `Vouched` carries the root the hook before the call attested. `Recent` is for a local CLI
+/// caller with no session of its own. An explicit root only narrows the same recent set; it
+/// cannot retrieve a trajectory outside that set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Selection {
-    /// Whichever trajectory was recently active on this machine. What `appa yell` gets.
-    Recent,
+    /// The named recent root, or the only recently active root when none is named.
+    Recent(Option<TrajectoryId>),
     /// The trajectory a hook vouched for, which is the one that made the call.
     Vouched(TrajectoryId),
     /// No trajectory at all: the agent asked for the rules alone.
@@ -99,7 +99,7 @@ pub(crate) enum Diagnostic {
 
 /// Why an export holds no trajectory. Each is a state a caller can act on: wait for the agent
 /// to do something, name a session, or read the store error the runtime already logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OmittedReason {
     NoRecentTrajectory,

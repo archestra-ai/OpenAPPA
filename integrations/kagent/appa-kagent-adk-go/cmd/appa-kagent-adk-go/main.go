@@ -289,8 +289,8 @@ type lineageSessionService struct {
 }
 
 // lineageHeaders are the two headers kagent's remote agent tool stamps
-// on a delegated call.
-var lineageHeaders = []string{"x-kagent-root-context-id", "x-kagent-parent-context-id"}
+// on a delegated call, and the spawn binding the parent's plugin adds.
+var lineageHeaders = []string{"x-kagent-root-context-id", "x-kagent-parent-context-id", appakagentadk.SpawnBindingHeader}
 
 func (s lineageSessionService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
 	resp, err := s.Service.Create(ctx, req)
@@ -310,7 +310,9 @@ func (s lineageSessionService) Get(ctx context.Context, req *adksession.GetReque
 
 // landLineageHeaders sets the lineage headers the request carried on the
 // session's own state map — the concrete session the inner service
-// returned, so AppendEvent's type asserts keep holding.
+// returned, so AppendEvent's type asserts keep holding. A request with
+// none replaces the headers an earlier request landed, as the python
+// executor does, so the entry classifies from its own request only.
 func landLineageHeaders(ctx context.Context, sess adksession.Session) {
 	// Bookkeeping, never a gate: a session the inner service returned as
 	// a typed nil, or a state it cannot set, must not take the run down.
@@ -331,9 +333,6 @@ func landLineageHeaders(ctx context.Context, sess adksession.Session) {
 		if values, ok := callCtx.RequestMeta().Get(name); ok && len(values) > 0 && values[0] != "" {
 			headers[name] = values[0]
 		}
-	}
-	if len(headers) == 0 {
-		return
 	}
 	state := sess.State()
 	if state == nil {

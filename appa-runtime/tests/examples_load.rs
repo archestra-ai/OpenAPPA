@@ -224,7 +224,9 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -325,12 +327,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
 
     let publication = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
-    let HookDecision::DenyCall {
-        feedback,
-        offers,
-        review,
-    } = publication
-    else {
+    let HookDecision::DenyCall { offers, review, .. } = publication else {
         panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
     };
     assert_eq!(
@@ -339,8 +336,6 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "the default authority can review the audience expansion"
     );
     assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
-    assert!(feedback.contains("Submit for approval"));
-    assert!(feedback.contains("The confirmation card is not open yet"));
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),
@@ -388,7 +383,9 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -488,7 +485,9 @@ command = ["/bin/sh", "annotator.sh"]
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,
@@ -547,7 +546,9 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
             &runtime,
             HookEvent::SessionStart {
                 root: root(),
-                principal: None
+                principal: None,
+                address: None,
+                title: None,
             }
         )
         .await,

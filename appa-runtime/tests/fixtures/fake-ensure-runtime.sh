@@ -1,6 +1,6 @@
 #!/bin/sh
 # The installed plugin's starter, as init runs it. Exits 0 with nothing started
-# by default, because fake-curl answers as a healthy runtime anyway.
+# by default, because the fixture's stand-in endpoint answers as a healthy runtime anyway.
 #
 # FAKE_STARTER_FAILS makes the start fail, which is what a runtime that never
 # became healthy looks like to init.
@@ -8,7 +8,7 @@
 # FAKE_RUNTIME_STAND_IN names a directory: a perl copy named `appa` is started
 # there, sleeping, detached from this script's pipes so init's wait on the
 # starter returns, and its pid is written to `$FAKE_RUNTIME_STAND_IN/pid` for
-# fake-curl to report. It passes init's same-user, process-name ownership check,
+# the stand-in endpoint to report. It passes init's same-user, process-name ownership check,
 # so it is what init stops when it rolls a failed install back.
 set -eu
 

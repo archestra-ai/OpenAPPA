@@ -29,10 +29,11 @@
 //! The runtime stages replacement bytes beside the target and atomically replaces it.
 //! Success validates bytes and publishes immutable version metadata before admitting the
 //! result. No file-derived result reaches MCP before admission. An unchanged failure admits
-//! its error text but publishes no version. A changed failure, missing outcome,
-//! or unmatched digest leaves the session's in-memory reservation in place. Further file
-//! calls in that session stop. A released call the harness never ran gives its reservation
-//! back at the turn end, and only while the workspace still shows the pinned state.
+//! its error text but publishes no version. A changed failure or unmatched digest leaves the
+//! workspace's durable reservation in place. A missing outcome triggers mechanical repair after
+//! the writer stops: the runtime releases an unchanged reservation or records an attributable
+//! publication under the request's bound Label. An incompatible state keeps the reservation,
+//! and further file calls in that workspace stop.
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
 //! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
@@ -50,14 +51,15 @@
 //! configuration. The table's presence enables file tracking. Each root session binds to
 //! its first file call's working directory and checks it for links without reading content.
 //! Each file gets the initial Label when a call first touches it. Its subagents share that workspace
-//! and ledger; another root session can bind to a different workspace.
+//! event stream; roots bound to the same canonical workspace share its one reservation.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
 //! The plugin's HTTP MCP calls consume exact one-shot hook approvals; their outcomes
-//! are already admitted when the post-tool hook arrives. Native tools remain available
-//! in Claude, but calls reaching APPA are refused in this mode — including APPA's own
-//! management tools, which an operator runs from the `appa` command line instead.
+//! are already admitted when the post-tool hook arrives. Native tools remain visible in Claude.
+//! Before root binding, calls use ordinary policy admission. Binding refuses native filesystem
+//! and shell tools. Runtime-owned file tools use the workspace event stream, while other
+//! policy-named tools continue through ordinary admission.
 //! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
 //! The policy must declare each enabled tool. File tools alone do not enforce OS isolation.
 //! `--file-process-backend /host/backend` additionally enables `appa_process_files`; its
@@ -67,8 +69,9 @@
 //! The constrained launcher exposes only file tools and the remedy control tool. Bash, other
 //! MCP tools, subagents, general rename/delete, links and known execution-control writes are unsupported.
 //! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
-//! Sanitizer/rewrite policies are unsupported. File ledger state does not survive a runtime
-//! restart. Historical bytes are not retained.
+//! Tool-input sanitizers and rewrite routes are unsupported. Output-only sanitizers remain
+//! available unless `confined_results` names a runtime-owned file tool. Workspace events survive
+//! a runtime restart; historical bytes are not retained.
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
@@ -77,7 +80,6 @@ use appa_eventlog::files::PinnedBasis;
 #[cfg(feature = "daemon")]
 use appa_eventlog::files::beneath::{self, Entry};
 use appa_eventlog::files::{FileOperation, FileStore};
-use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -89,7 +91,6 @@ use super::{EventError, ProposedCall};
 mod process;
 
 pub(super) struct FileTracking {
-    pub(super) stores: std::sync::Mutex<HashMap<String, std::sync::Arc<FileStore>>>,
     pub(super) initial: appa_engine::label::Label,
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
@@ -102,13 +103,11 @@ impl FileTracking {
     /// A later call cannot move the root to another workspace.
     pub(super) fn bind(
         &self,
+        authority: &std::sync::Arc<appa_eventlog::LogStore>,
         root: &super::TrajectoryId,
         workspace: &str,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
         let workspace = std::fs::canonicalize(workspace)?;
-        if let Some(store) = self.bound(root, &workspace)? {
-            return Ok(store);
-        }
         if self.protected_paths.iter().any(|path| path.starts_with(&workspace))
             || self
                 .process_backend
@@ -119,65 +118,96 @@ impl FileTracking {
                 "runtime state, configuration, and process backends must be outside the tracked workspace".into(),
             ));
         }
-        let store = std::sync::Arc::new(FileStore::new(&workspace, &self.initial)?);
-        let mut stores = self.lock_stores()?;
-        same_workspace(stores.entry(root.0.clone()).or_insert(store), &workspace)
-    }
-
-    fn bound(
-        &self,
-        root: &super::TrajectoryId,
-        workspace: &std::path::Path,
-    ) -> Result<Option<std::sync::Arc<FileStore>>, appa_eventlog::files::FileStoreError> {
-        self.lock_stores()?
-            .get(&root.0)
-            .map(|store| same_workspace(store, workspace))
-            .transpose()
-    }
-
-    fn lock_stores(
-        &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<FileStore>>>,
-        appa_eventlog::files::FileStoreError,
-    > {
-        self.stores
-            .lock()
-            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))
+        let store = std::sync::Arc::new(FileStore::open(
+            std::sync::Arc::clone(authority),
+            &workspace,
+            &self.policy_key,
+            &self.initial,
+        )?);
+        store.bind_root(root)?;
+        Ok(store)
     }
 
     pub(super) fn store(
         &self,
+        authority: &std::sync::Arc<appa_eventlog::LogStore>,
         root: &super::TrajectoryId,
     ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-        self.lock_stores()?.get(&root.0).cloned().ok_or_else(|| {
-            appa_eventlog::files::FileStoreError::Configuration(
-                "the session has not supplied a working directory for file tracking".into(),
-            )
+        Ok(std::sync::Arc::new(FileStore::for_root(
+            std::sync::Arc::clone(authority),
+            root,
+            &self.policy_key,
+            &self.initial,
+        )?))
+    }
+
+    pub(super) fn root_is_bound(
+        &self,
+        authority: &appa_eventlog::LogStore,
+        root: &super::TrajectoryId,
+    ) -> Result<bool, appa_eventlog::files::FileStoreError> {
+        FileStore::root_is_bound(authority, root)
+    }
+}
+
+/// The runtime-owned file tools, each served under its own MCP name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileTool {
+    Read,
+    Write,
+    Edit,
+    Copy,
+    Move,
+    Process,
+}
+
+impl FileTool {
+    pub(crate) const ALL: [FileTool; 6] = [
+        FileTool::Read,
+        FileTool::Write,
+        FileTool::Edit,
+        FileTool::Copy,
+        FileTool::Move,
+        FileTool::Process,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            FileTool::Read => "appa_read_file",
+            FileTool::Write => "appa_write_file",
+            FileTool::Edit => "appa_edit_file",
+            FileTool::Copy => "appa_copy_file",
+            FileTool::Move => "appa_move_file",
+            FileTool::Process => "appa_process_files",
+        }
+    }
+
+    fn operation(self) -> FileOperation {
+        match self {
+            FileTool::Read => FileOperation::Read,
+            FileTool::Write => FileOperation::Replace,
+            FileTool::Edit => FileOperation::Edit,
+            FileTool::Copy => FileOperation::Copy,
+            FileTool::Move => FileOperation::Move,
+            FileTool::Process => FileOperation::Process,
+        }
+    }
+
+    fn of(call: &ProposedCall) -> Option<FileTool> {
+        let name = call.tool.strip_prefix(PREFIX)?;
+        FileTool::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    #[cfg(feature = "daemon")]
+    fn call(self, arguments: &serde_json::Value) -> Result<ProposedCall, EventError> {
+        Ok(ProposedCall {
+            tool: format!("{PREFIX}{}", self.name()),
+            arguments: serde_json::value::to_raw_value(arguments).map_err(refused)?,
+            cwd: None,
         })
     }
 }
 
-fn same_workspace(
-    store: &std::sync::Arc<FileStore>,
-    workspace: &std::path::Path,
-) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
-    if store.workspace() != workspace {
-        return Err(appa_eventlog::files::FileStoreError::Configuration(
-            "a session cannot change its tracked workspace".into(),
-        ));
-    }
-    Ok(std::sync::Arc::clone(store))
-}
-
-pub(crate) const TOOLS: [&str; 6] = [
-    "appa_read_file",
-    "appa_write_file",
-    "appa_edit_file",
-    "appa_copy_file",
-    "appa_move_file",
-    "appa_process_files",
-];
 const PREFIX: &str = "mcp/appa/";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -224,21 +254,31 @@ pub(crate) enum FileReply {
 }
 
 pub(crate) fn owns(call: &ProposedCall) -> bool {
-    call.tool.strip_prefix(PREFIX).is_some_and(|name| TOOLS.contains(&name))
+    FileTool::of(call).is_some()
+}
+
+/// Claude Code tools that can observe or mutate a bound workspace without using its event
+/// stream. Other native and MCP tools continue through ordinary policy admission.
+pub(super) fn bypasses_tracking(call: &ProposedCall) -> bool {
+    matches!(
+        call.tool.as_str(),
+        "host/claude-code/Read"
+            | "host/claude-code/Write"
+            | "host/claude-code/Edit"
+            | "host/claude-code/MultiEdit"
+            | "host/claude-code/NotebookEdit"
+            | "host/claude-code/Grep"
+            | "host/claude-code/Glob"
+            | "host/claude-code/Bash"
+            | "host/claude-code/PowerShell"
+            | "host/claude-code/Monitor"
+    )
 }
 
 pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), EventError> {
-    let operation = match call.tool.as_str() {
-        "mcp/appa/appa_read_file" => FileOperation::Read,
-        "mcp/appa/appa_write_file" => FileOperation::Replace,
-        "mcp/appa/appa_edit_file" => FileOperation::Edit,
-        "mcp/appa/appa_copy_file" => FileOperation::Copy,
-        "mcp/appa/appa_move_file" => FileOperation::Move,
-        "mcp/appa/appa_process_files" => FileOperation::Process,
-        _ => {
-            return Err(refused("file tracking permits only runtime-owned file tools"));
-        }
-    };
+    let operation = FileTool::of(call)
+        .ok_or_else(|| refused("file tracking permits only runtime-owned file tools"))?
+        .operation();
     // Validate only argument shape here. In particular, never search old_string before
     // the engine has accepted observation of the predecessor's Label.
     let path = match operation {
@@ -367,14 +407,10 @@ impl super::Runtime {
     pub(crate) async fn execute_bound_file(
         &self,
         actor: &appa_runtime_api::Actor,
-        tool: &str,
+        tool: FileTool,
         arguments: serde_json::Value,
     ) -> Result<FileReply, EventError> {
-        let call = ProposedCall {
-            tool: format!("{PREFIX}{tool}"),
-            arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
-            cwd: None,
-        };
+        let call = tool.call(&arguments)?;
         let session = self.session(&actor.root, super::acting_trajectory(actor))?;
         match session.on_tool_call_identified(call.clone(), None, None, None).await? {
             super::ToolCallDecision::Deny { feedback, .. } => Ok(FileReply::Failure(feedback)),
@@ -383,15 +419,15 @@ impl super::Runtime {
     }
 
     #[cfg(feature = "daemon")]
-    pub(crate) async fn execute_file(&self, tool: &str, arguments: serde_json::Value) -> Result<FileReply, EventError> {
+    pub(crate) async fn execute_file(
+        &self,
+        tool: FileTool,
+        arguments: serde_json::Value,
+    ) -> Result<FileReply, EventError> {
         let (actor, _) = self
-            .take_vouched(&super::PermitKey::call(tool, &arguments))
+            .take_vouched(&super::PermitKey::call(tool.name(), &arguments))
             .map_err(|_| refused("no unique one-shot host vouch for this file call"))?;
-        let call = ProposedCall {
-            tool: format!("{PREFIX}{tool}"),
-            arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
-            cwd: None,
-        };
+        let call = tool.call(&arguments)?;
         self.session(&actor.root, super::acting_trajectory(&actor))?
             .execute_file(call)
             .await
@@ -447,6 +483,15 @@ delta = {}
 [[policy.tool]]
 name = "host/claude-code/Agent"
 delta = {}
+[[policy.tool]]
+name = "host/claude-code/Read"
+delta = {}
+[[policy.tool]]
+name = "host/claude-code/Bash"
+delta = {}
+[[policy.tool]]
+name = "mcp/github/get_issue"
+delta = {}
 [policy.deployment]
 context_control = true
 [externals]
@@ -473,8 +518,124 @@ max_body_bytes = 65536
         dir
     }
 
+    fn enable_with_policy(dir: &Path, policy: &str) -> Result<Runtime, super::super::OpenError> {
+        let config = dir.join("compatibility-policy.toml");
+        std::fs::write(&config, policy).unwrap();
+        Runtime::open_served(
+            Config::load(&config).unwrap(),
+            dir.join("compatibility.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )?
+        .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
+    }
+
     #[test]
-    fn file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces() {
+    fn file_tracking_accepts_output_sanitizers_but_refuses_input_sanitizers_and_confined_file_results() {
+        let output = tempfile::tempdir().unwrap();
+        enable_with_policy(
+            output.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "host/claude-code/Bash"
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_output"]
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+[policy.deployment]
+confined_results = ["host/claude-code/Bash"]
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
+"#,
+        )
+        .expect("an output-only sanitizer is compatible");
+
+        let input = tempfile::tempdir().unwrap();
+        let Err(input_error) = enable_with_policy(
+            input.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "host/claude-code/Bash"
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_input"]
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
+"#,
+        ) else {
+            panic!("an input sanitizer must be refused");
+        };
+        assert!(input_error.to_string().contains("tool-input sanitizer"));
+
+        let confined = tempfile::tempdir().unwrap();
+        let Err(confined_error) = enable_with_policy(
+            confined.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "mcp/appa/appa_read_file"
+[policy.deployment]
+confined_results = ["mcp/appa/appa_read_file"]
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+"#,
+        ) else {
+            panic!("a confined file-tool result must be refused");
+        };
+        assert!(confined_error.to_string().contains("cannot confine"));
+    }
+
+    #[test]
+    fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let battery = dir.path().join("batteries/claude-code");
+        std::fs::create_dir_all(&battery).unwrap();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let default =
+            std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
+        std::fs::copy(
+            repository.join("marketplace/batteries/claude-code/appa.toml"),
+            battery.join("appa.toml"),
+        )
+        .unwrap();
+        let config = dir.path().join("appa.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "include = [\"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
+            ),
+        )
+        .unwrap();
+        let runtime = Runtime::open_served(
+            Config::load(&config).unwrap(),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .unwrap();
+
+        runtime
+            .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
+            .expect("the shipped output-only sanitizer remains available with file tracking");
+    }
+
+    #[test]
+    fn file_event_streams_are_shared_by_workspace_and_isolated_across_workspaces() {
         let dir = fixture();
         let other_workspace = dir.path().join("other-work");
         std::fs::create_dir(&other_workspace).unwrap();
@@ -483,15 +644,30 @@ max_body_bytes = 65536
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let root = TrajectoryId("cc:session".into());
         let same_root_for_child = TrajectoryId("cc:session".into());
+        let same_workspace_root = TrajectoryId("cc:same-workspace".into());
         let other_root = TrajectoryId("cc:other-session".into());
+        let authority = &runtime.inner.store;
 
-        files.bind(&root, dir.path().join("work").to_str().unwrap()).unwrap();
-        files.bind(&other_root, other_workspace.to_str().unwrap()).unwrap();
-        let parent = files.store(&root).unwrap();
-        let child = files.store(&same_root_for_child).unwrap();
-        let other = files.store(&other_root).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&parent, &child));
-        assert!(!std::sync::Arc::ptr_eq(&parent, &other));
+        files
+            .bind(authority, &root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
+        files
+            .bind(
+                authority,
+                &same_workspace_root,
+                dir.path().join("work").to_str().unwrap(),
+            )
+            .unwrap();
+        files
+            .bind(authority, &other_root, other_workspace.to_str().unwrap())
+            .unwrap();
+        let parent = files.store(authority, &root).unwrap();
+        let child = files.store(authority, &same_root_for_child).unwrap();
+        let same_workspace = files.store(authority, &same_workspace_root).unwrap();
+        let other = files.store(authority, &other_root).unwrap();
+        assert_eq!(parent.workspace(), child.workspace());
+        assert_eq!(parent.workspace(), same_workspace.workspace());
+        assert_ne!(parent.workspace(), other.workspace());
         assert_eq!(
             parent.workspace(),
             std::fs::canonicalize(dir.path().join("work")).unwrap()
@@ -499,10 +675,14 @@ max_body_bytes = 65536
         assert_eq!(other.workspace(), std::fs::canonicalize(&other_workspace).unwrap());
         assert!(parent.current("other.txt").unwrap().is_none());
         assert!(other.current("source.txt").unwrap().is_none());
-        assert!(files.bind(&root, other_workspace.to_str().unwrap()).is_err());
+        assert!(files.bind(authority, &root, other_workspace.to_str().unwrap()).is_err());
         assert!(
             files
-                .bind(&TrajectoryId("cc:unsafe".into()), dir.path().to_str().unwrap())
+                .bind(
+                    authority,
+                    &TrajectoryId("cc:unsafe".into()),
+                    dir.path().to_str().unwrap()
+                )
                 .is_err(),
             "the runtime database and policy cannot be inside a root's workspace"
         );
@@ -511,7 +691,27 @@ max_body_bytes = 65536
             .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
             .unwrap();
         assert!(parent.pin_for("cc:session:child", "call").unwrap().is_some());
+        assert!(same_workspace.pin_for("cc:session:child", "call").unwrap().is_some());
         assert!(other.pin_for("cc:session:child", "call").unwrap().is_none());
+    }
+
+    #[test]
+    fn root_workspace_binding_survives_restart() {
+        let dir = fixture();
+        let other = dir.path().join("other-work");
+        std::fs::create_dir(&other).unwrap();
+        let root = TrajectoryId("durably-bound-root".into());
+        let runtime = open(dir.path());
+        runtime
+            .bind_file_workspace(&root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
+        drop(runtime);
+
+        let runtime = open(dir.path());
+        assert!(runtime.bind_file_workspace(&root, other.to_str().unwrap()).is_err());
+        runtime
+            .bind_file_workspace(&root, dir.path().join("work").to_str().unwrap())
+            .unwrap();
     }
 
     fn bind(runtime: &Runtime, root: &TrajectoryId, dir: &Path) {
@@ -548,7 +748,7 @@ max_body_bytes = 65536
         runtime.vouch(&super::super::call_key(&call).unwrap(), &actor, None);
         runtime
             .execute_file(
-                call.tool.strip_prefix(PREFIX).unwrap(),
+                FileTool::of(&call).unwrap(),
                 serde_json::from_str(call.arguments.get()).unwrap(),
             )
             .await
@@ -574,20 +774,23 @@ max_body_bytes = 65536
     }
 
     #[tokio::test]
-    async fn managed_files_allow_declared_subagent_spawns_but_refuse_other_native_tools() {
+    async fn bound_workspaces_refuse_bypass_tools_but_keep_other_policy_tools() {
         use appa_runtime_api::HookDecision;
         let dir = fixture();
         let runtime = open(dir.path());
-        assert!(matches!(
-            hook(
-                &runtime,
-                serde_json::json!({
-                    "hook_event_name":"SessionStart", "session_id":"spawn-test"
-                }),
-            )
-            .await,
-            HookDecision::Context { .. }
-        ));
+        let HookDecision::Context { text } = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"SessionStart", "session_id":"spawn-test"
+            }),
+        )
+        .await
+        else {
+            panic!("file tracking must add session context");
+        };
+        assert!(text.contains("The first file call binds the root"));
+        assert!(text.contains("Other policy-approved tools remain available"));
+        assert!(!text.contains("file-only mode"));
 
         let spawn = hook(
             &runtime,
@@ -608,6 +811,56 @@ max_body_bytes = 65536
             "the declared spawn should reach the engine's return contract: {spawn:?}"
         );
 
+        let unbound_read = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"unbound-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Read", "tool_input":{"file_path":"source.txt"}
+            }),
+        )
+        .await;
+        assert_eq!(unbound_read, HookDecision::AllowCall { spawn: None });
+
+        let unbound_bash = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"bash-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"}
+            }),
+        )
+        .await;
+        assert_eq!(unbound_bash, HookDecision::AllowCall { spawn: None });
+        let bash_result = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PostToolUse", "session_id":"bash-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"},
+                "tool_response":{"stdout":"Policy: policy.toml", "stderr":"", "interrupted":false}
+            }),
+        )
+        .await;
+        assert_eq!(bash_result, HookDecision::Ack);
+
+        let connection = rusqlite::Connection::open(dir.path().join("runtime.db")).unwrap();
+        let file_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('file_events','file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_tables, 0, "an ordinary unbound call must not install file tables");
+
+        runtime
+            .bind_file_workspace(
+                &TrajectoryId("cc:spawn-test".into()),
+                dir.path().join("work").to_str().unwrap(),
+            )
+            .unwrap();
+
         let native = hook(
             &runtime,
             serde_json::json!({
@@ -618,9 +871,46 @@ max_body_bytes = 65536
         )
         .await;
         assert!(
-            matches!(native, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("only runtime-owned file tools and declared subagent spawns")),
-            "an unrelated native tool should remain refused: {native:?}"
+            matches!(native, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("bound workspace refuses native filesystem and shell tools")),
+            "a native filesystem tool must not bypass the bound workspace stream: {native:?}"
         );
+
+        let bash = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Bash", "tool_input":{"command":"appa describe"}
+            }),
+        )
+        .await;
+        assert!(
+            matches!(bash, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("bound workspace refuses native filesystem and shell tools")),
+            "Bash must not bypass the bound workspace stream: {bash:?}"
+        );
+
+        let github = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"mcp__github__get_issue", "tool_input":{"owner":"o", "repo":"r", "issue_number":1}
+            }),
+        )
+        .await;
+        assert_eq!(github, HookDecision::AllowCall { spawn: None });
+        let github_result = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PostToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"mcp__github__get_issue",
+                "tool_input":{"owner":"o", "repo":"r", "issue_number":1},
+                "tool_response":{"title":"Ordinary policy result"}
+            }),
+        )
+        .await;
+        assert_eq!(github_result, HookDecision::Ack);
     }
 
     #[tokio::test]
@@ -639,12 +929,7 @@ max_body_bytes = 65536
         .await;
         assert!(matches!(start, HookDecision::Context { text } if text.contains("appa_read_file(file_path)")));
         let arguments = serde_json::json!({"file_path":"new.txt", "content":"trusted original"});
-        assert!(
-            runtime
-                .execute_file("appa_write_file", arguments.clone())
-                .await
-                .is_err()
-        );
+        assert!(runtime.execute_file(FileTool::Write, arguments.clone()).await.is_err());
         assert!(matches!(
             hook(
                 &runtime,
@@ -660,13 +945,13 @@ max_body_bytes = 65536
         assert!(
             runtime
                 .execute_file(
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"new.txt", "content":"substituted"})
                 )
                 .await
                 .is_err()
         );
-        // Another root has an independent session-local ledger and reservation.
+        // Another workspace has an independent event stream and reservation.
         let competing = hook(
             &runtime,
             serde_json::json!({
@@ -679,10 +964,7 @@ max_body_bytes = 65536
         .await;
         assert!(matches!(competing, HookDecision::AllowCall { .. }));
         assert_eq!(
-            runtime
-                .execute_file("appa_write_file", arguments.clone())
-                .await
-                .unwrap(),
+            runtime.execute_file(FileTool::Write, arguments.clone()).await.unwrap(),
             FileReply::Value("file written".into())
         );
         let version = runtime
@@ -691,7 +973,7 @@ max_body_bytes = 65536
             .files
             .as_ref()
             .unwrap()
-            .store(&TrajectoryId("cc:plugin-test".into()))
+            .store(&runtime.inner.store, &TrajectoryId("cc:plugin-test".into()))
             .unwrap()
             .current("new.txt")
             .unwrap()
@@ -710,7 +992,7 @@ max_body_bytes = 65536
                 HookDecision::Ack
             ));
         }
-        assert!(runtime.execute_file("appa_write_file", arguments).await.is_err());
+        assert!(runtime.execute_file(FileTool::Write, arguments).await.is_err());
         assert_eq!(
             runtime
                 .inner
@@ -718,7 +1000,7 @@ max_body_bytes = 65536
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&TrajectoryId("cc:plugin-test".into()))
+                .store(&runtime.inner.store, &TrajectoryId("cc:plugin-test".into()))
                 .unwrap()
                 .current("new.txt")
                 .unwrap()
@@ -746,7 +1028,7 @@ max_body_bytes = 65536
             "file_path": "source.txt", "old_string": "absent", "new_string": "replacement"
         });
         let blocked = runtime
-            .execute_bound_file(&actor, "appa_edit_file", arguments.clone())
+            .execute_bound_file(&actor, FileTool::Edit, arguments.clone())
             .await
             .unwrap();
         assert!(matches!(blocked, FileReply::Failure(message) if message.contains("trusted -> suspicious")));
@@ -772,7 +1054,7 @@ max_body_bytes = 65536
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"after-reconnect.txt", "content":"the string was absent"})
                 )
                 .await
@@ -788,7 +1070,7 @@ max_body_bytes = 65536
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({"file_path":"forged.txt", "content":"x", "trajectory":"clean"})
                 )
                 .await
@@ -818,10 +1100,7 @@ max_body_bytes = 65536
             ));
             assert!(
                 runtime
-                    .execute_file(
-                        "appa_edit_file",
-                        serde_json::from_str(proposal.arguments.get()).unwrap()
-                    )
+                    .execute_file(FileTool::Edit, serde_json::from_str(proposal.arguments.get()).unwrap())
                     .await
                     .is_err()
             );
@@ -848,7 +1127,7 @@ max_body_bytes = 65536
             );
             assert!(
                 runtime
-                    .execute_file("appa_write_file", serde_json::from_str(output.arguments.get()).unwrap())
+                    .execute_file(FileTool::Write, serde_json::from_str(output.arguments.get()).unwrap())
                     .await
                     .is_err()
             );
@@ -975,7 +1254,7 @@ else:
             .files
             .as_ref()
             .unwrap()
-            .store(root)
+            .store(&runtime.inner.store, root)
             .unwrap()
             .current(path)
             .unwrap()
@@ -995,8 +1274,8 @@ else:
         bind(&runtime, &actor.root, dir.path());
         runtime.create_session(actor.root.clone(), None).unwrap();
         for (tool, source, destination) in [
-            ("appa_copy_file", "source.txt", "copied.txt"),
-            ("appa_move_file", "copied.txt", "moved.txt"),
+            (FileTool::Copy, "source.txt", "copied.txt"),
+            (FileTool::Move, "copied.txt", "moved.txt"),
         ] {
             assert_eq!(
                 runtime
@@ -1025,7 +1304,7 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&actor.root)
+                .store(&runtime.inner.store, &actor.root)
                 .unwrap()
                 .current("copied.txt")
                 .unwrap()
@@ -1035,7 +1314,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_write_file",
+                    FileTool::Write,
                     serde_json::json!({
                         "file_path":"ack-only.txt", "content":"only observed acknowledgements"
                     })
@@ -1049,7 +1328,7 @@ else:
         let runtime = open(dir.path());
         bind(&runtime, &actor.root, dir.path());
         assert!(
-            matches!(runtime.execute_bound_file(&actor, "appa_read_file", serde_json::json!({
+            matches!(runtime.execute_bound_file(&actor, FileTool::Read, serde_json::json!({
             "file_path":"moved.txt"
         })).await.unwrap(), FileReply::Failure(message) if message.contains("trusted -> suspicious"))
         );
@@ -1057,7 +1336,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_move_file",
+                    FileTool::Move,
                     serde_json::json!({
                         "source_path":"moved.txt", "destination_path":"CLAUDE.md"
                     })
@@ -1070,7 +1349,7 @@ else:
             runtime
                 .execute_bound_file(
                     &actor,
-                    "appa_move_file",
+                    FileTool::Move,
                     serde_json::json!({
                         "source_path":"CLAUDE.md", "destination_path":"stolen-instructions.txt"
                     })
@@ -1107,6 +1386,8 @@ else:
 
         let runtime = open(dir.path());
         bind(&runtime, &id, dir.path());
+        assert_eq!(label(&runtime, &id, "clean.txt").trust, Trust::new(1));
+        assert_eq!(label(&runtime, &id, "derived.txt").trust, Trust::new(0));
         allow(&runtime, &id, call("Edit", "clean.txt")).await;
         std::fs::write(
             dir.path().join("work/clean.txt"),
@@ -1121,7 +1402,7 @@ else:
             .files
             .as_ref()
             .unwrap()
-            .store(&id)
+            .store(&runtime.inner.store, &id)
             .unwrap()
             .current("clean.txt")
             .unwrap()
@@ -1134,7 +1415,7 @@ else:
     }
 
     #[tokio::test]
-    async fn managed_files_failures_quarantine_only_the_live_session_ledger() {
+    async fn managed_file_quarantine_survives_restart() {
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
@@ -1171,20 +1452,97 @@ else:
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("quarantined")
+                .contains("incompatible with the pending file operation")
         );
         drop(runtime);
         let runtime = open(dir.path());
         bind(&runtime, &id, dir.path());
+        let error = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_call(call("Read", "after-error.txt"), false)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
-            runtime
-                .session(&id, &id)
-                .unwrap()
-                .on_tool_call(call("Read", "after-error.txt"), false)
-                .await
-                .is_ok(),
-            "a process restart creates a fresh session-local ledger"
+            error.contains("pending"),
+            "durable quarantine must refuse the workspace: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_end_repairs_an_attributable_file_publication_without_a_result() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, call("Edit", "source.txt")).await;
+        std::fs::write(dir.path().join("work/source.txt"), "published before report loss").unwrap();
+
+        runtime.session(&id, &id).unwrap().on_turn_end().await.unwrap();
+
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        assert_eq!(
+            label(&runtime, &id, "source.txt"),
+            Label::new(Trust::new(0), Audience::public())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_indeterminate_result_repairs_the_file_before_refusing_its_missing_result() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        let edit = call("Edit", "source.txt");
+        allow(&runtime, &id, edit.clone()).await;
+        std::fs::write(dir.path().join("work/source.txt"), "published before report loss").unwrap();
+
+        let error = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_result(edit, ToolOutcome::Indeterminate)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no file result can be delivered"));
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        assert_eq!(label(&runtime, &id, "source.txt").trust, Trust::new(0));
+    }
+
+    #[tokio::test]
+    async fn published_file_label_survives_an_outcome_append_failure_and_restart() {
+        let dir = fixture();
+        let id = TrajectoryId("append-failure-session".into());
+        let write = call("Write", "published.txt");
+        let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, write.clone()).await;
+        std::fs::write(dir.path().join("work/published.txt"), "durable publication").unwrap();
+
+        runtime.store().fail_commit_after(0);
+        let result = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_result(
+                write.clone(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("native output".into()),
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(EventError::Storage(_))));
+        assert_eq!(label(&runtime, &id, "published.txt").trust, Trust::new(1));
+        drop(runtime);
+
+        let runtime = open(dir.path());
+        bind(&runtime, &id, dir.path());
+        assert_eq!(label(&runtime, &id, "published.txt").trust, Trust::new(1));
+        success(&runtime, &id, write).await;
+        assert!(runtime.open_dispatches(&id, &id).is_empty());
     }
 
     #[test]
@@ -1275,7 +1633,11 @@ else:
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
         files
-            .bind(&TrajectoryId("direct-perform".into()), workspace.to_str().unwrap())
+            .bind(
+                &runtime.inner.store,
+                &TrajectoryId("direct-perform".into()),
+                workspace.to_str().unwrap(),
+            )
             .unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
@@ -1299,7 +1661,11 @@ else:
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let workspace = std::fs::canonicalize(dir.path().join("work")).unwrap();
         files
-            .bind(&TrajectoryId("parent-swap".into()), workspace.to_str().unwrap())
+            .bind(
+                &runtime.inner.store,
+                &TrajectoryId("parent-swap".into()),
+                workspace.to_str().unwrap(),
+            )
             .unwrap();
         let outside = dir.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -1363,7 +1729,7 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store(&id)
+                .store(&runtime.inner.store, &id)
                 .unwrap()
                 .current("later.txt")
                 .unwrap()
@@ -1372,7 +1738,7 @@ else:
     }
 
     #[tokio::test]
-    async fn managed_files_bypasses_and_missing_outcomes_fail_closed() {
+    async fn managed_files_refuse_bypasses_and_repair_missing_outcomes() {
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
@@ -1392,13 +1758,6 @@ else:
         allow(&runtime, &id, call("Write", "unreported.txt")).await;
         std::fs::write(dir.path().join("work/unreported.txt"), "outcome lost").unwrap();
         session.on_turn_end().await.unwrap();
-        assert!(
-            session
-                .on_tool_call(call("Read", "source.txt"), false)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("pending")
-        );
+        allow(&runtime, &id, call("Read", "source.txt")).await;
     }
 }

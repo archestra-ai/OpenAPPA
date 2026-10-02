@@ -2,13 +2,17 @@
 //! activation may do about it.
 
 use crate::installation::archive::debug_override;
+use crate::loopback_http::{self, Answer, Deadline};
+use crate::runtime_start::STOP_BUDGET;
 #[cfg(unix)]
 use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Command, Output};
+#[cfg(unix)]
+use std::process::Command;
+use std::time::Duration;
 
 use super::InitError;
 use super::config::ComposedPolicy;
@@ -64,11 +68,21 @@ impl Endpoint {
         &self.url
     }
 
-    /// The URL of one runtime path, for probes such as `/binary-fingerprint`.
-    pub(super) fn join(&self, path: &str) -> String {
-        format!("{}{path}", self.url)
+    fn loopback(&self) -> loopback_http::Endpoint {
+        loopback_http::Endpoint::parse(&self.url).expect("a parsed endpoint is an http:// URL naming its host")
+    }
+
+    /// Every question init asks a runtime goes out through here, each bounded by
+    /// one deadline for its whole round trip.
+    fn ask(&self, method: &str, path: &str, budget: Duration) -> Result<Answer, String> {
+        loopback_http::request(&self.loopback(), method, path, b"", &Deadline::spanning(budget))
     }
 }
+
+const PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// A reload validates and composes the whole policy before it answers.
+const RELOAD_BUDGET: Duration = Duration::from_secs(10);
 
 /// What this activation did about the policy the running runtime serves.
 ///
@@ -111,33 +125,17 @@ pub(super) enum EndpointOwner {
     Foreign { pid: i32 },
 }
 
-/// How long init waits for a runtime it asked to stop, and how often it looks.
-///
-/// Every wait for a stopping runtime uses the same budget: a runtime that outlives
-/// one of them has outlived all of them, and `RuntimeSurvived` means the same thing
-/// wherever it is raised.
-const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often init looks at a runtime it asked to stop. It waits [`STOP_BUDGET`],
+/// the budget of every wait for a stopping runtime: a runtime that outlives one
+/// of them has outlived all of them.
+const STOP_POLL: Duration = Duration::from_millis(50);
 
-const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// Every question init asks a runtime goes out through here, so the flags that
-/// decide how long init waits and whether curl reports its own failure have one
-/// definition rather than one per question.
-fn ask_endpoint(endpoint: &Endpoint, path: &str, arguments: &[&str]) -> std::io::Result<Output> {
-    crate::child_process::output(Command::new("curl").args(arguments).arg(endpoint.join(path)))
-}
-
-pub(super) fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
-    let output = ask_endpoint(endpoint, "/health", &["--fail", "--silent", "--max-time", "2"]).map_err(|error| {
-        InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: error.to_string(),
-        }
-    })?;
-    if !output.status.success() {
-        return Ok(None);
+/// The endpoint's health answer; `None` when nothing answers it successfully.
+pub(super) fn endpoint_health(endpoint: &Endpoint) -> Option<String> {
+    match endpoint.ask("GET", "/health", PROBE_BUDGET) {
+        Ok(answer) if answer.is_success() => Some(String::from_utf8_lossy(&answer.body).trim().to_owned()),
+        Ok(_) | Err(_) => None,
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
 pub(crate) fn positive_pid(pid: &str) -> Option<i32> {
@@ -147,7 +145,7 @@ pub(crate) fn positive_pid(pid: &str) -> Option<i32> {
     pid.parse().ok()
 }
 
-fn stale_pid(answer: &str) -> Option<i32> {
+pub(crate) fn stale_pid(answer: &str) -> Option<i32> {
     positive_pid(answer.strip_prefix("stale ")?)
 }
 
@@ -159,7 +157,7 @@ fn stale_pid(answer: &str) -> Option<i32> {
 /// starter before sending a signal. An `ok`, malformed, or absent health answer
 /// never grants shutdown authority.
 pub(super) fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
-    let Some(answer) = endpoint_health(endpoint)? else {
+    let Some(answer) = endpoint_health(endpoint) else {
         return Ok(());
     };
     let Some(pid) = stale_pid(&answer) else {
@@ -175,7 +173,7 @@ pub(super) fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError>
     }
     // Close the validation-to-signal race: the process must still be the one
     // answering with the same stale pid immediately before it is terminated.
-    match endpoint_health(endpoint)? {
+    match endpoint_health(endpoint) {
         None => return Ok(()),
         Some(ref current) if current == "ok" => return Ok(()),
         Some(ref current) if stale_pid(current) == Some(pid) => {}
@@ -188,9 +186,9 @@ pub(super) fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError>
     }
     terminate_owned_appa_runtime(pid, endpoint)?;
 
-    let deadline = std::time::Instant::now() + STOP_DEADLINE;
+    let deadline = std::time::Instant::now() + STOP_BUDGET;
     while std::time::Instant::now() < deadline {
-        match endpoint_health(endpoint)? {
+        match endpoint_health(endpoint) {
             None => return Ok(()),
             Some(ref current) if current == "ok" => return Ok(()),
             Some(ref current) if stale_pid(current) == Some(pid) => {
@@ -225,13 +223,11 @@ fn terminate_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), Ini
 /// Stop the appa runtime answering the endpoint as `pid`, this deployment's
 /// or an earlier one's, and wait until the endpoint no longer answers from it.
 pub(super) fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
-    let loopback = crate::loopback_http::Endpoint::parse(endpoint.url()).map_err(|reason| {
-        crate::runtime_start::StopError::Endpoint {
-            url: endpoint.url().to_owned(),
-            reason,
-        }
-    })?;
-    Ok(crate::runtime_start::stop_pid(&loopback, endpoint.url(), pid)?)
+    Ok(crate::runtime_start::stop_pid(
+        &endpoint.loopback(),
+        endpoint.url(),
+        pid,
+    )?)
 }
 
 #[cfg(unix)]
@@ -348,20 +344,12 @@ pub(super) fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) 
         path: binary.to_path_buf(),
         source,
     })?;
-    let output = ask_endpoint(
-        endpoint,
-        "/binary-fingerprint",
-        &["--fail", "--silent", "--max-time", "2"],
-    )
-    .map_err(|error| InitError::RuntimeIdentity {
-        endpoint: endpoint.url().to_owned(),
-        message: error.to_string(),
-    })?;
-    if !output.status.success() {
-        return Ok(EndpointOwner::Unidentified);
+    match endpoint.ask("GET", "/binary-fingerprint", PROBE_BUDGET) {
+        Ok(answer) if answer.is_success() => {
+            classify_endpoint_owner(&expected, config, endpoint, &String::from_utf8_lossy(&answer.body))
+        }
+        Ok(_) | Err(_) => Ok(EndpointOwner::Unidentified),
     }
-    let answer = String::from_utf8_lossy(&output.stdout);
-    classify_endpoint_owner(&expected, config, endpoint, &answer)
 }
 
 /// A process is this deployment only when it names both this build and this configuration.
@@ -438,16 +426,11 @@ fn serving_policy_key(endpoint: &Endpoint) -> Result<String, InitError> {
         endpoint: endpoint.url().to_owned(),
         message,
     };
-    let output = ask_endpoint(
-        endpoint,
-        "/policy-key",
-        &["--fail", "--silent", "--show-error", "--max-time", "2"],
-    )
-    .map_err(|error| refused(error.to_string()))?;
-    if !output.status.success() {
-        return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
+    let answer = endpoint.ask("GET", "/policy-key", PROBE_BUDGET).map_err(refused)?;
+    if !answer.is_success() {
+        return Err(refused(format!("/policy-key answered HTTP {}", answer.status)));
     }
-    let key = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let key = String::from_utf8_lossy(&answer.body).trim().to_owned();
     if key.is_empty() {
         return Err(refused("the answer names no policy key".to_owned()));
     }
@@ -465,28 +448,12 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
         path: config.to_path_buf(),
         message,
     };
-    let output = ask_endpoint(
-        endpoint,
-        "/reload",
-        &[
-            "--fail-with-body",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "10",
-            "-X",
-            "POST",
-        ],
-    )
-    .map_err(|error| refused(error.to_string()))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    // A refused reload answers with the runtime's reason; curl's own line only names the status.
-    let reason = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    match reason.is_empty() {
-        true => Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned())),
-        false => Err(refused(reason)),
+    let answer = endpoint.ask("POST", "/reload", RELOAD_BUDGET).map_err(refused)?;
+    let reason = String::from_utf8_lossy(&answer.body).trim().to_owned();
+    match (answer.is_success(), reason.is_empty()) {
+        (true, _) => Ok(()),
+        (false, true) => Err(refused(format!("/reload answered HTTP {}", answer.status))),
+        (false, false) => Err(refused(reason)),
     }
 }
 
@@ -580,7 +547,7 @@ mod tests {
         // never ran.
         let ready = at.with_extension("ready");
         let script = "open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30";
-        let spawn_deadline = std::time::Instant::now() + STOP_DEADLINE;
+        let spawn_deadline = std::time::Instant::now() + STOP_BUDGET;
         let mut child = loop {
             match crate::child_process::spawn(Command::new(at).args(["-e", script]).arg(&ready).args(arguments)) {
                 Ok(child) => break child,
@@ -595,7 +562,7 @@ mod tests {
         let pid = child.id() as i32;
         std::thread::spawn(move || child.wait());
 
-        let deadline = std::time::Instant::now() + STOP_DEADLINE;
+        let deadline = std::time::Instant::now() + STOP_BUDGET;
         while std::time::Instant::now() < deadline {
             if ready.is_file() {
                 return Some(pid);

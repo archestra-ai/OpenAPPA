@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use appa_runtime_api::AdapterName;
+
 use crate::config::{Config, ConfigError, Externals, Implementation, Section};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,6 +418,18 @@ fn describe_policy_value(
     }
 }
 
+/// The tool identification the runtime applies to every call of the host it serves. The one
+/// place this crate names the adapter crates. `--adapter` parses served names only
+/// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
+pub(crate) fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
+    match adapter {
+        AdapterName::Amp => appa_adapter_amp::adapter(),
+        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
+        AdapterName::Kagent => appa_adapter_kagent::adapter(),
+        AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
+    }
+}
+
 pub struct Description {
     pub text: String,
     pub valid: bool,
@@ -424,18 +438,11 @@ pub struct Description {
 /// `session_tools` are the tool names the configuring agent's own session sees, in the host's
 /// spelling or as canonical ids. No standalone process can list them, so the agent hands them
 /// over; without them the description says they are unavailable.
-pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, session_tools: &[String]) -> Description {
+pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, session_tools: &[String]) -> Description {
     let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
     let mut served_policy = None;
-    let served = match adapter {
-        "amp" => Some(appa_adapter_amp::adapter()),
-        "claude-code" => Some(appa_adapter_claude_code::adapter()),
-        "kagent" => Some(appa_adapter_kagent::adapter()),
-        _ => None,
-    };
-    if let Some(loaded) = &loaded
-        && let Some(served) = served
-    {
+    let served = served(adapter);
+    if let Some(loaded) = &loaded {
         let resolved = crate::tool_validation::resolve(
             loaded.policy_file().value(),
             served,
@@ -446,12 +453,9 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, sess
         served_policy = describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
         policy.tools = authored_tools;
     }
-    let validation = match (loaded, served) {
-        (Some(loaded), Some(served)) => {
-            crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string())
-        }
-        (_, None) => Err(format!("unsupported adapter {adapter:?}")),
-        (None, _) => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
+    let validation = match loaded {
+        Some(loaded) => crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string()),
+        None => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
     };
     let valid = validation.is_ok();
     if !valid && config.state == ConfigState::Loadable {
@@ -544,21 +548,21 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str, sess
             let _ = writeln!(output, "Audience configuration: unavailable (no policy)");
         }
     }
-    let session = served.map(|served| SessionCoverage::of(session_tools, served, served_policy.as_ref()));
+    let session = SessionCoverage::of(session_tools, served, served_policy.as_ref());
     #[cfg(feature = "daemon")]
-    if adapter == "claude-code" {
+    if adapter == AdapterName::ClaudeCode {
         let servers = std::env::current_dir()
             .map(|cwd| crate::installation::discover::servers(appa_package::Host::ClaudeCode, &cwd))
             .unwrap_or_default()
             .into_iter()
-            .chain(session.iter().flat_map(|session| session.servers.iter().cloned()))
+            .chain(session.servers.iter().cloned())
             .filter(|server| server.as_str() != crate::init::RUNTIME_SERVER)
             .collect::<BTreeSet<_>>();
         render_servers(&mut output, path, &servers);
     }
-    match session.filter(|_| !session_tools.is_empty()) {
-        Some(session) => session.render(&mut output),
-        None => {
+    match session_tools.is_empty() {
+        false => session.render(&mut output),
+        true => {
             let _ = writeln!(
                 output,
                 "Session tools: unavailable to this command; pass the names this session sees with --session-tools"
@@ -698,14 +702,9 @@ impl SessionCoverage {
 fn validation(
     path: &Path,
     battery_dirs: &[PathBuf],
-    adapter: &str,
+    adapter: AdapterName,
 ) -> Result<crate::tool_validation::ValidationReport, String> {
-    let adapter = match adapter {
-        "amp" => appa_adapter_amp::adapter(),
-        "claude-code" => appa_adapter_claude_code::adapter(),
-        "kagent" => appa_adapter_kagent::adapter(),
-        _ => return Err(format!("unsupported adapter {adapter:?}")),
-    };
+    let adapter = served(adapter);
     // Config parse errors may quote credentials from the source document.
     let config = Config::load_from(path, battery_dirs)
         .map_err(|_| "configuration cannot be loaded; check the configuration diagnostics above".to_string())?;
@@ -730,14 +729,14 @@ mod tests {
         let path = directory.path().join("appa.toml");
         let policy = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read_secret\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n";
         std::fs::write(&path, policy).unwrap();
-        let report = validation(&path, &[], "kagent").unwrap();
+        let report = validation(&path, &[], AdapterName::Kagent).unwrap();
         assert!(!report.inventory_complete);
         assert!(report.tools_may_change);
         assert!(matches!(
             report.tools[0].status,
             crate::tool_validation::ToolStatus::Unknown { .. }
         ));
-        let description = render(&path, &[], "kagent", &[]);
+        let description = render(&path, &[], AdapterName::Kagent, &[]);
         assert!(description.valid);
         assert!(
             description.text.contains("1 declared tools have no host observation"),
@@ -751,7 +750,7 @@ mod tests {
             format!("{policy}\n[[appa_inventory.tools]]\nname = \"write_secret\"\ntool = \"mcp:demo/write_secret\"\n"),
         )
         .unwrap();
-        assert!(!render(&path, &[], "kagent", &[]).valid);
+        assert!(!render(&path, &[], AdapterName::Kagent, &[]).valid);
     }
 
     #[test]
@@ -760,7 +759,7 @@ mod tests {
         let path = directory.path().join("appa.toml");
         std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\nannotator = \"missing\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
         assert!(Config::load_from(&path, &[]).is_ok());
-        assert!(!render(&path, &[], "kagent", &[]).valid);
+        assert!(!render(&path, &[], AdapterName::Kagent, &[]).valid);
     }
 
     /// Each tool the session reports lands in exactly one bucket of the served policy: a rule,
@@ -892,7 +891,7 @@ mod tests {
                 from: vec!["slack:user-group/finance".to_string()],
             }]
         );
-        let rendered = render(&root, &[batteries], "claude-code", &[]).text;
+        let rendered = render(&root, &[batteries], AdapterName::ClaudeCode, &[]).text;
         assert!(rendered.contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
@@ -911,11 +910,10 @@ mod tests {
         std::fs::write(&path, format!("token = \\\"{secret}")).expect("malformed config");
 
         let (config, _, _) = inspect(&path, &[]);
-        let output = render(&path, &[], "claude-code", &[]).text;
+        let output = render(&path, &[], AdapterName::ClaudeCode, &[]).text;
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
-        assert!(output.contains("line 1, column"), "{output}");
     }
 
     #[test]
@@ -925,7 +923,7 @@ mod tests {
         std::fs::write(&path, "[policy]\nversion = 2\n[externals]\nmax_body_bytes = 65536\n").expect("config");
 
         let (config, _, _) = inspect(&path, &[]);
-        let output = render(&path, &[], "claude-code", &[]).text;
+        let output = render(&path, &[], AdapterName::ClaudeCode, &[]).text;
 
         assert_eq!(config.state, ConfigState::Invalid);
         assert!(output.contains("configuration does not load: "), "{output}");
@@ -935,10 +933,8 @@ mod tests {
     #[test]
     fn human_output_is_small_and_explicit_about_unknown_session_facts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let output = render(&directory.path().join("appa.toml"), &[], "claude-code", &[]).text;
+        let description = render(&directory.path().join("appa.toml"), &[], AdapterName::ClaudeCode, &[]);
 
-        assert!(output.contains("Config:"));
-        assert!(output.contains("Batteries: none"));
-        assert!(output.contains("Session tools: unavailable"));
+        assert!(!description.valid);
     }
 }

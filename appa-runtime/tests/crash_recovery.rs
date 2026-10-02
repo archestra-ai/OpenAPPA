@@ -102,6 +102,26 @@ fn acked(answer: &serde_json::Value) -> bool {
     answer["decision"] == "ack"
 }
 
+fn assert_file_tracking_left_the_database_alone(db: &Path) {
+    let connection = rusqlite::Connection::open(db).expect("the runtime database opens for inspection");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("the schema version reads");
+    let file_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name IN ('file_events','file_roots')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the optional table count reads");
+    assert_eq!(version, 7, "ordinary runtimes retain the frozen core schema version");
+    assert_eq!(
+        file_tables, 0,
+        "ordinary runtimes do not install experimental file tables"
+    );
+}
+
 #[test]
 fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
     let _scenario = serialize_server_scenarios();
@@ -130,6 +150,7 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
     // `ServedRuntime` kills the process on drop, which is the hard kill this
     // scenario needs: the server never runs a shutdown path.
     drop(server);
+    assert_file_tracking_left_the_database_alone(&db);
 
     let server = serve_runtime(&config, &db);
     let kept = post_hook(
@@ -145,6 +166,55 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
     )
     .expect("the second PostToolUse still answers 200 with a block");
     assert_eq!(refused["decision"], "block", "{refused}");
+    drop(server);
+    assert_file_tracking_left_the_database_alone(&db);
+}
+
+#[test]
+fn a_session_in_a_database_too_old_to_upgrade_stays_refused_after_archiving() {
+    let _scenario = serialize_server_scenarios();
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = write_config(dir.path(), CONFIG);
+    let db = dir.path().join("appa.db");
+    let server = serve_runtime(&config, &db);
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"startup"}"#,
+    )
+    .expect("SessionStart answers");
+    drop(server);
+    rusqlite::Connection::open(&db)
+        .expect("the database reopens")
+        .pragma_update(None, "user_version", 4)
+        .expect("the version moves back past the upgrade chain");
+
+    let server = serve_runtime(&config, &db);
+    assert!(
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"resume"}"#,
+        )
+        .is_none(),
+        "the archived session's start is refused"
+    );
+    let denied = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert_eq!(denied["decision"], "deny_call", "{denied}");
+
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
+    )
+    .expect("a new session starts");
+    let allow = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert!(allowed(&allow), "{allow}");
 }
 
 #[test]

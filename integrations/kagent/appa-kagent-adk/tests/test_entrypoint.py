@@ -60,11 +60,13 @@ async def test_isolated_remote_uses_the_pinned_transport_approval_payload(approv
     from appa_kagent_adk.remote_agents import IsolatedRemoteTool
 
     sent = []
+    headers = []
     confirmations = []
 
     class Client:
         async def send_message(self, *, request, context):
             sent.append(request)
+            headers.append(context.state.get("_a2a_extra_headers", {}))
             state = TaskState.input_required if len(sent) == 1 else TaskState.completed
             yield Task(id="paused-task", context_id=request.context_id, status=TaskStatus(state=state)), None
 
@@ -72,10 +74,12 @@ async def test_isolated_remote_uses_the_pinned_transport_approval_payload(approv
     delegate._a2a_client = Client()
     context = SimpleNamespace(
         tool_confirmation=None,
+        function_call_id="fc-1",
         session=SimpleNamespace(user_id="test-user", id="parent-context", state={}),
         request_confirmation=lambda **kwargs: confirmations.append(kwargs),
     )
     tool = IsolatedRemoteTool(delegate)
+    tool.release("fc-1", "fork-1")
     pending = await tool.run_async(args={"request": "request approval"}, tool_context=context)
     assert pending["status"] == "pending"
     payload = confirmations[0]["payload"]
@@ -88,6 +92,9 @@ async def test_isolated_remote_uses_the_pinned_transport_approval_payload(approv
     assert sent[1].task_id == "paused-task"
     assert sent[1].parts[0].root.data["decision_type"] == ("approve" if approved else "reject")
     assert result["subagent_session_id"] == sent[0].context_id
+    # The released spawn binding rides the delegation; the resume opens no child.
+    assert [entry.get("x-appa-spawn-binding") for entry in headers] == ["fork-1", None]
+    assert headers[0]["x-kagent-root-context-id"] == "parent-context"
 
 
 @pytest.fixture()

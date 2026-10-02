@@ -14,11 +14,7 @@ pub(crate) use exporter::{Telemetry, shutdown_signal};
 
 /// Bound caller-controlled identifiers without splitting UTF-8.
 pub(crate) fn name(value: &str) -> &str {
-    let mut end = value.len().min(256);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
+    &value[..value.floor_char_boundary(256)]
 }
 
 fn count(metric: &'static str, attributes: &[KeyValue]) {
@@ -77,6 +73,7 @@ fn error_class(error: &EventError) -> &'static str {
         EventError::AnnotationRefused { .. } => "annotation_refused",
         EventError::UndeclaredTool { .. } => "undeclared_tool",
         EventError::UndeclaredSpawn { .. } => "undeclared_spawn",
+        EventError::PeerMessageTooLarge { .. } => "peer_message",
         EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => "principal",
         EventError::CallOutstanding
         | EventError::SpawnOutstanding
@@ -84,7 +81,7 @@ fn error_class(error: &EventError) -> &'static str {
         | EventError::ChildDispatchOpen => "outstanding_call",
         EventError::CallIdReused => "call_id_reused",
         EventError::TrajectoryEnded => "trajectory_ended",
-        EventError::UnknownTrajectory | EventError::TrajectoryExists => "trajectory",
+        EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => "trajectory",
         EventError::UnknownDispatch | EventError::OutcomeMismatch => "dispatch",
         EventError::UnknownOffer | EventError::RemedyArguments { .. } => "remedy",
         EventError::NotAChild
@@ -219,10 +216,7 @@ pub(crate) fn yell(report: &crate::yell::Finished, root: &appa_runtime_api::Traj
 fn report_chunks(mut text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     while !text.is_empty() {
-        let mut end = text.len().min(16 * 1024);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = text.floor_char_boundary(16 * 1024);
         chunks.push(&text[..end]);
         text = &text[end..];
     }

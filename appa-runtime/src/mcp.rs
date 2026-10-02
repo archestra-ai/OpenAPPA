@@ -31,6 +31,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::yell::Harness;
 
+use crate::api::files::FileTool;
 use crate::api::{ExecuteRemedyPlanArgs, PermitKey, RemedyReply, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
 use crate::elicit::{Elicitation, Review};
@@ -113,40 +114,6 @@ pub struct RuntimeStateArgs {
     pub actor: String,
 }
 
-trait ManagementArguments: serde::Serialize {
-    fn actor(&self) -> &str;
-}
-
-impl ManagementArguments for MatchBatteriesArgs {
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-}
-
-impl ManagementArguments for PolicyKeyArgs {
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-}
-
-impl ManagementArguments for IncludeBatteryArgs {
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-}
-
-impl ManagementArguments for UpdatePolicyArgs {
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-}
-
-impl ManagementArguments for RuntimeStateArgs {
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-}
-
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
 struct BatteryMatch {
     battery: String,
@@ -198,18 +165,22 @@ impl RuntimeTools {
     /// adapter's name, or the name an embedding host files its reports under. `yell` is
     /// dropped from the router where the deployment has not turned agent reporting on,
     /// which is both how it stops being advertised and how a call to it stops being routed.
+    /// Only Claude Code sessions message each other, so only they read held peer messages.
     pub fn new(runtime: Arc<Runtime>, harness: Harness) -> RuntimeTools {
         let mut tool_router = Self::tool_router();
         if !runtime.agent_yell() {
             tool_router.remove_route(YELL);
         }
+        if harness != Harness::ClaudeCode {
+            tool_router.remove_route(crate::api::peer::READ_PEER_MESSAGE);
+        }
         if !runtime.file_tracking_enabled() {
-            for tool in crate::api::files::TOOLS {
-                tool_router.remove_route(tool);
+            for tool in FileTool::ALL {
+                tool_router.remove_route(tool.name());
             }
         }
         if !runtime.file_process_enabled() {
-            tool_router.remove_route("appa_process_files");
+            tool_router.remove_route(FileTool::Process.name());
         }
         RuntimeTools {
             runtime,
@@ -238,39 +209,21 @@ impl RuntimeTools {
         description = "Read a UTF-8 file in the tracked workspace. APPA checks its source Label before reading content."
     )]
     pub async fn appa_read_file(&self, Parameters(args): Parameters<crate::api::files::ReadArgs>) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_read_file",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Read, args).await
     }
 
     #[tool(
         description = "Atomically replace a UTF-8 file in the tracked workspace with content derived from this trajectory."
     )]
     pub async fn appa_write_file(&self, Parameters(args): Parameters<crate::api::files::WriteArgs>) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_write_file",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Write, args).await
     }
 
     #[tool(
         description = "Replace exactly one occurrence of old_string in a UTF-8 file. APPA checks the file Label before matching, including failed matches."
     )]
     pub async fn appa_edit_file(&self, Parameters(args): Parameters<crate::api::files::EditArgs>) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_edit_file",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Edit, args).await
     }
 
     #[tool(
@@ -280,13 +233,7 @@ impl RuntimeTools {
         &self,
         Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
     ) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_copy_file",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Copy, args).await
     }
 
     #[tool(
@@ -296,13 +243,7 @@ impl RuntimeTools {
         &self,
         Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
     ) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_move_file",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Move, args).await
     }
 
     #[tool(
@@ -312,13 +253,45 @@ impl RuntimeTools {
         &self,
         Parameters(args): Parameters<crate::api::files::ProcessArgs>,
     ) -> CallToolResult {
-        file_result(
-            &self.runtime,
-            self.file_actor.as_ref(),
-            "appa_process_files",
-            serde_json::to_value(args).expect("file arguments serialize"),
-        )
-        .await
+        self.file_result(FileTool::Process, args).await
+    }
+
+    #[tool(
+        description = "Read a message another session sent that APPA held for this session, by \
+                       the id its notice gave. The content carries the label the notice named, so \
+                       reading it narrows this session to that label; read it inside a subagent to \
+                       keep this session's label. A message is read once."
+    )]
+    pub(crate) async fn read_peer_message(
+        &self,
+        Parameters(args): Parameters<crate::api::peer::ReadPeerArgs>,
+    ) -> CallToolResult {
+        let arguments = serde_json::to_value(&args).expect("peer read arguments are plain data");
+        let Ok((actor, _)) = self
+            .runtime
+            .take_vouched(&PermitKey::call(crate::api::peer::READ_PEER_MESSAGE, &arguments))
+        else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "[appa] This call was not seen by a hook, so no session holds the message for it.",
+            )]);
+        };
+        let Ok(id) = appa_eventlog::HeldPeerId::parse(&args.id) else {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "[appa] {} is not a held message id: copy the id from the notice exactly.",
+                args.id
+            ))]);
+        };
+        match self.runtime.take_held(&actor.root, &id) {
+            Ok(Some(body)) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Ok(None) => CallToolResult::error(vec![ContentBlock::text(format!(
+                "[appa] No peer message {} is held for this session: it was read or it expired.",
+                args.id
+            ))]),
+            Err(error) => {
+                tracing::warn!(%error, "a held peer message could not be read");
+                CallToolResult::error(vec![ContentBlock::text("[appa] The held message could not be read.")])
+            }
+        }
     }
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
@@ -409,7 +382,7 @@ impl RuntimeToolService {
         description = "Match observed native tool names against the battery catalog. Matches are suggestions, not permission. Supply the exact configured MCP endpoint to check coverage against the serving policy and obtain its server identity for an approved battery binding. Without an endpoint MCP coverage is unknown. Use source namespace/delegations for agent names."
     )]
     pub async fn appa_match_batteries(&self, Parameters(args): Parameters<MatchBatteriesArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_match_batteries", &args) {
+        if !take_management_vouch(&self.runtime, "appa_match_batteries", &args, &args.actor) {
             return management_refused();
         }
         let state = self
@@ -445,7 +418,7 @@ impl RuntimeToolService {
         description = "Read the runtime's serving policy, policy key, included batteries, refresh state, and Kubernetes policy identity. This operation is read-only."
     )]
     pub async fn appa_get_runtime_state(&self, Parameters(args): Parameters<RuntimeStateArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_get_runtime_state", &args) {
+        if !take_management_vouch(&self.runtime, "appa_get_runtime_state", &args, &args.actor) {
             return management_refused();
         }
         management_result(crate::management::run::<PolicyKeyArgs>("appa-guide-runtime-state", None).await)
@@ -455,7 +428,7 @@ impl RuntimeToolService {
         description = "Include one available battery in the complete current root policy, update the runtime-owned ConfigMap, wait for its mounted file, and reload atomically. Requires an allowed APPA ToolCall and human approval."
     )]
     pub async fn appa_include_battery(&self, Parameters(args): Parameters<IncludeBatteryArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_include_battery", &args) {
+        if !take_management_vouch(&self.runtime, "appa_include_battery", &args, &args.actor) {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-include-battery", Some(&args)).await)
@@ -465,7 +438,7 @@ impl RuntimeToolService {
         description = "Validate and publish one complete root policy while retaining every existing table in order, then wait for the ConfigMap and reload atomically. Approved field values may change. Requires an allowed APPA ToolCall and human approval."
     )]
     pub async fn appa_update_policy(&self, Parameters(args): Parameters<UpdatePolicyArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_update_policy", &args) {
+        if !take_management_vouch(&self.runtime, "appa_update_policy", &args, &args.actor) {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-update-policy", Some(&args)).await)
@@ -475,7 +448,7 @@ impl RuntimeToolService {
         description = "Reload the complete policy currently mounted for this runtime. Requires an allowed APPA ToolCall and human approval."
     )]
     pub async fn appa_reload_policy(&self, Parameters(args): Parameters<PolicyKeyArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_reload_policy", &args) {
+        if !take_management_vouch(&self.runtime, "appa_reload_policy", &args, &args.actor) {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-reload-policy", Some(&args)).await)
@@ -485,45 +458,45 @@ impl RuntimeToolService {
         description = "Fetch the latest verified stable OpenAPPA battery release, validate it against serving policy, publish it, reload, and commit or roll back as one operation. Requires an allowed APPA ToolCall and human approval."
     )]
     pub async fn appa_refresh_batteries(&self, Parameters(args): Parameters<PolicyKeyArgs>) -> CallToolResult {
-        if !take_management_vouch(&self.runtime, "appa_refresh_batteries", &args) {
+        if !take_management_vouch(&self.runtime, "appa_refresh_batteries", &args, &args.actor) {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-refresh-batteries", Some(&args)).await)
     }
 }
 
-async fn file_result(
-    runtime: &Runtime,
-    actor: Option<&appa_runtime_api::Actor>,
-    tool: &str,
-    arguments: serde_json::Value,
-) -> CallToolResult {
-    let result = match actor {
-        Some(actor) => runtime.execute_bound_file(actor, tool, arguments).await,
-        None => runtime.execute_file(tool, arguments).await,
-    };
-    match result {
-        Ok(crate::api::files::FileReply::Value(value)) => CallToolResult::success(vec![ContentBlock::text(value)]),
-        Ok(crate::api::files::FileReply::Failure(message)) => CallToolResult::error(vec![ContentBlock::text(message)]),
-        Err(error) => {
-            tracing::warn!(%error, "runtime-owned file operation could not admit an observation");
-            CallToolResult::error(vec![ContentBlock::text(
-                "file operation was not admitted; no file observation is returned",
-            )])
+impl RuntimeTools {
+    async fn file_result<T: serde::Serialize>(&self, tool: FileTool, args: T) -> CallToolResult {
+        let arguments = serde_json::to_value(args).expect("file arguments serialize");
+        let result = match &self.file_actor {
+            Some(actor) => self.runtime.execute_bound_file(actor, tool, arguments).await,
+            None => self.runtime.execute_file(tool, arguments).await,
+        };
+        match result {
+            Ok(crate::api::files::FileReply::Value(value)) => CallToolResult::success(vec![ContentBlock::text(value)]),
+            Ok(crate::api::files::FileReply::Failure(message)) => {
+                CallToolResult::error(vec![ContentBlock::text(message)])
+            }
+            Err(error) => {
+                tracing::warn!(%error, "runtime-owned file operation could not admit an observation");
+                CallToolResult::error(vec![ContentBlock::text(
+                    "file operation was not admitted; no file observation is returned",
+                )])
+            }
         }
     }
 }
 
-fn take_management_vouch<T: ManagementArguments>(runtime: &Runtime, tool: &str, arguments: &T) -> bool {
+fn take_management_vouch<T: serde::Serialize>(runtime: &Runtime, tool: &str, arguments: &T, claimed: &str) -> bool {
     let arguments_value = serde_json::to_value(arguments).expect("management arguments are plain data");
     runtime
         .take_vouched(&PermitKey::call(tool, &arguments_value))
         .is_ok_and(|(actor, _)| {
             let actual = &crate::api::acting_trajectory(&actor).0;
-            actual == arguments.actor()
+            actual == claimed
                 || actual
                     .strip_prefix("kagent:")
-                    .is_some_and(|trajectory| trajectory == arguments.actor())
+                    .is_some_and(|trajectory| trajectory == claimed)
         })
 }
 
@@ -634,11 +607,7 @@ fn source_coverage(
         {
             return Err("endpoint must be an HTTP(S) URL without userinfo or a fragment".into());
         }
-        let hex: String = Sha256::digest(endpoint.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let server = format!("server-{hex}");
+        let server = format!("server-{}", crate::engine::hex(&Sha256::digest(endpoint.as_bytes())));
         inventory.tools = observed
             .iter()
             .map(|name| ObservedTool {
@@ -832,7 +801,7 @@ mod tests {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        assert_eq!(remedy_tools, ["execute_remedy_plan"]);
+        assert_eq!(remedy_tools, ["execute_remedy_plan", "read_peer_message"]);
 
         let guide = RuntimeToolService::new(runtime);
         assert_eq!(guide.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
@@ -1169,7 +1138,12 @@ mod tests {
             cwd: None,
         };
         runtime.vouch(&crate::api::call_key(&call).expect("a management call"), &actor, None);
-        assert!(take_management_vouch(&runtime, "appa_include_battery", &args));
+        assert!(take_management_vouch(
+            &runtime,
+            "appa_include_battery",
+            &args,
+            &args.actor
+        ));
     }
 
     #[tokio::test]
@@ -1850,5 +1824,54 @@ max_body_bytes = 4096
             prompt: None,
             ruling: None,
         }
+    }
+
+    /// A held message is read by the session holding it, once, and only through a call a
+    /// hook vouched for.
+    #[tokio::test]
+    async fn a_held_peer_message_is_read_once_by_its_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Arc::new(Runtime::open(config(), dir.path().join("appa.db"), None).expect("the runtime opens"));
+        let holder = acting("cc:held");
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: holder.root.clone(),
+                    principal: None,
+                    address: None,
+                    title: None,
+                },
+            )
+            .await,
+            HookDecision::Ack
+        );
+        let frame = appa_runtime_api::PeerFrame::Parsed {
+            body: "the plan".to_string(),
+        };
+        let crate::api::peer::Received::Held(notice) = runtime
+            .receive_peer(&holder.root, &frame, "ignored")
+            .expect("the message is taken in")
+        else {
+            panic!("an unattributed message is held");
+        };
+        let tools = RuntimeTools::new(Arc::clone(&runtime), Harness::ClaudeCode);
+        let read = || crate::api::peer::ReadPeerArgs {
+            id: notice.id.as_str().to_string(),
+        };
+        let key = PermitKey::call(
+            crate::api::peer::READ_PEER_MESSAGE,
+            &serde_json::to_value(read()).expect("the arguments serialize"),
+        );
+
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
+        runtime.vouch(&key, &acting("cc:other"), None);
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
+
+        runtime.vouch(&key, &holder, None);
+        let first = tools.read_peer_message(Parameters(read())).await;
+        assert_eq!(first.content, vec![ContentBlock::text("the plan")]);
+        runtime.vouch(&key, &holder, None);
+        assert_eq!(tools.read_peer_message(Parameters(read())).await.is_error, Some(true));
     }
 }

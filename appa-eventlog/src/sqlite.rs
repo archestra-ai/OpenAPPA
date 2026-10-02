@@ -2,11 +2,13 @@
 //! of [`Backend::Memory`](crate::Backend::Memory). This module owns the schema, its version
 //! stamp, and every statement either runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::SystemTime;
 
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
+use appa_runtime_api::PeerDigest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 
@@ -15,6 +17,7 @@ use crate::HostObservation;
 #[cfg(feature = "fault-injection")]
 use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
+use crate::held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage, NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
     ProcessedResultRequest, ReceiptError, SessionScope, StoredJson, StoredOperation, StoredOperationInput,
@@ -23,9 +26,33 @@ use crate::receipts::{
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
 
-const SCHEMA: &str = "CREATE TABLE logs (
+/// The oldest version a database upgrades from. A fresh database installs [`BASE_SCHEMA`] at
+/// this version and then runs every step of [`UPGRADES`], so the fresh and the upgraded paths
+/// are one path.
+const BASE_VERSION: i64 = 5;
+
+/// Step `n` moves a database from `BASE_VERSION + n` to the next version. A change that cannot
+/// carry the stored data forward raises `BASE_VERSION` instead of adding a step.
+const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
+    "CREATE TABLE held_peer_messages (
+         seq INTEGER PRIMARY KEY,
+         id TEXT NOT NULL UNIQUE,
+         receiver TEXT NOT NULL,
+         digest TEXT NOT NULL,
+         label TEXT NOT NULL,
+         body TEXT NOT NULL,
+         expires_at INTEGER NOT NULL,
+         notified INTEGER NOT NULL
+     );
+     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);",
+    "CREATE TABLE archived_roots (
+         root TEXT PRIMARY KEY
+     );",
+];
+
+const BASE_SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
                          seq   INTEGER NOT NULL,
                          facts BLOB NOT NULL,
@@ -63,6 +90,18 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          PRIMARY KEY (organization_id, session_id, tool_call_id)
                      );";
 
+const FILE_SCHEMA: &str = "CREATE TABLE file_events (
+                               workspace TEXT NOT NULL,
+                               seq INTEGER NOT NULL,
+                               payload BLOB NOT NULL,
+                               PRIMARY KEY (workspace, seq)
+                           );
+                           CREATE TABLE file_roots (
+                               root TEXT PRIMARY KEY,
+                               workspace TEXT NOT NULL,
+                               seq INTEGER NOT NULL
+                           );";
+
 pub(crate) struct Sqlite(Mutex<Connection>);
 
 impl Sqlite {
@@ -90,24 +129,97 @@ impl Sqlite {
         Self::install(Connection::open_in_memory()?, ":memory:".to_string())
     }
 
-    /// Give a fresh database the schema and its version stamp, or check an existing one.
+    /// Open the file as [`Sqlite::open`] does, but replace a database too old to upgrade with a
+    /// fresh one. The old file stays beside it under an `.archived-<millis>` name, and every
+    /// root it held is recorded in the fresh one, so [`Sqlite::create`] refuses to reopen any of
+    /// them at the starting label.
+    pub(crate) fn open_archiving(path: &Path) -> Result<(Self, Option<PathBuf>), OpenError> {
+        match Self::open(path) {
+            Err(OpenError::Incompatible { .. }) => {}
+            opened => return opened.map(|store| (store, None)),
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        // Two processes archiving one file would each read roots from whatever sits at the
+        // path. The lock makes one finish first; the other then finds the replacement.
+        let lock_path = path.with_file_name(format!("{name}.upgrade-lock"));
+        let lock = std::fs::File::create(&lock_path).map_err(|error| moving(&lock_path, error))?;
+        lock.lock().map_err(|error| moving(&lock_path, error))?;
+        let refusal = match Self::open(path) {
+            Err(refusal @ OpenError::Incompatible { .. }) => refusal,
+            opened => return opened.map(|store| (store, None)),
+        };
+        // A file whose roots cannot be listed, or that another process still holds, is left
+        // for the operator rather than moved.
+        let Ok((held, roots)) = checkpointed_roots(path) else {
+            return Err(refusal);
+        };
+        let fresh = path.with_file_name(format!("{name}.upgrading"));
+        let archive = path.with_file_name(format!("{name}.archived-{}", millis(SystemTime::now())));
+        for stale in [fresh.clone()].iter().chain(&sidecars(&fresh)) {
+            remove_if_present(stale)?;
+        }
+        {
+            let store = Self::open(&fresh)?;
+            let mut connection = store.connection();
+            immediate(&mut connection, |transaction| {
+                let mut insert = transaction.prepare("INSERT INTO archived_roots (root) VALUES (?1)")?;
+                for root in &roots {
+                    insert.execute(params![root])?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })?;
+            // Leaving WAL mode folds the log into the main file, which the rename below moves
+            // alone.
+            connection.pragma_update(None, "journal_mode", "DELETE")?;
+        }
+        // The link keeps the old file whole under its archive name; the rename then replaces
+        // the configured path in one step. A crash between them leaves the old database in
+        // place, and the next open archives it again.
+        std::fs::hard_link(path, &archive).map_err(|error| moving(&archive, error))?;
+        for stale in &sidecars(path) {
+            remove_if_present(stale)?;
+        }
+        std::fs::rename(&fresh, path).map_err(|error| moving(path, error))?;
+        drop(held);
+        Ok((Self::open(path)?, Some(archive)))
+    }
+
+    /// Give a fresh database the schema and its version stamp, upgrade an older one, or check a
+    /// current one.
     fn install(mut connection: Connection, path: String) -> Result<Self, OpenError> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let stamped: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         // Only an empty file is initialized. A database that holds tables
         // but carries no stamp was written by something else — an earlier
         // store, another tool — and creating this schema beside its data
         // would leave its histories present and invisible.
-        if version == 0 && is_empty(&transaction)? {
-            transaction.execute_batch(SCHEMA)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        } else if version != SCHEMA_VERSION {
-            return Err(OpenError::ForeignSchema {
+        let version = if stamped == 0 && is_empty(&transaction)? {
+            transaction.execute_batch(BASE_SCHEMA)?;
+            BASE_VERSION
+        } else {
+            stamped
+        };
+        if version > SCHEMA_VERSION {
+            return Err(OpenError::Newer {
                 path,
                 found: version,
-                expected: SCHEMA_VERSION,
+                supported: SCHEMA_VERSION,
             });
-        } else if !has_schema(&transaction)? {
+        }
+        if version < BASE_VERSION {
+            return Err(OpenError::Incompatible {
+                path,
+                found: version,
+                oldest: BASE_VERSION,
+            });
+        }
+        for step in &UPGRADES[(version - BASE_VERSION) as usize..] {
+            transaction.execute_batch(step)?;
+        }
+        if version != SCHEMA_VERSION {
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        if !has_schema(&transaction)? {
             return Err(OpenError::Damaged {
                 path,
                 detail: "stamped at this build's schema version, but its tables are missing".to_string(),
@@ -134,6 +246,18 @@ impl Sqlite {
         before_commit: impl FnOnce() -> Result<(), CreateError>,
     ) -> Result<(), CreateError> {
         immediate(&mut self.connection(), |transaction| {
+            let archived: Option<i64> = transaction
+                .query_row(
+                    "SELECT 1 FROM archived_roots WHERE root = ?1",
+                    params![root.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if archived.is_some() {
+                return Err(CreateError::Archived {
+                    root: root.as_str().to_string(),
+                });
+            }
             transaction.execute(
                 "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
                 params![key.as_str(), policy_file],
@@ -198,6 +322,114 @@ impl Sqlite {
             (batches, policy_file)
         };
         decoded(root, batches, policy_file)
+    }
+
+    pub(crate) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare("SELECT seq,payload FROM file_events WHERE workspace=?1 ORDER BY seq")
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        let rows = statement
+            .query_map(params![workspace], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?
+            .collect::<Result<Vec<(i64, Vec<u8>)>, _>>()
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        contiguous(rows).map_err(|error| crate::files::FileStoreError::Corrupt(error.to_string()))
+    }
+
+    pub(crate) fn create_workspace(&self, workspace: &str, payload: &[u8]) -> Result<(), crate::files::FileStoreError> {
+        let mut connection = self.connection();
+        immediate::<_, rusqlite::Error>(&mut connection, |transaction| {
+            install_file_schema(transaction)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO file_events(workspace,seq,payload) VALUES (?1,0,?2)",
+                params![workspace, payload],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))
+    }
+
+    pub(crate) fn append_workspace(
+        &self,
+        workspace: &str,
+        basis: u64,
+        payload: &[u8],
+        root: Option<&TrajectoryId>,
+    ) -> Result<(), crate::files::FileStoreError> {
+        let mut connection = self.connection();
+        immediate(&mut connection, |transaction| {
+            let current: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(seq)+1,0) FROM file_events WHERE workspace=?1",
+                params![workspace],
+                |row| row.get(0),
+            )?;
+            if current as u64 != basis {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    crate::files::FileStoreError::Conflict {
+                        expected: basis,
+                        actual: current as u64,
+                    },
+                )));
+            }
+            if let Some(root) = root {
+                let existing: Option<String> = transaction
+                    .query_row(
+                        "SELECT workspace FROM file_roots WHERE root=?1",
+                        params![root.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if existing.as_deref().is_some_and(|existing| existing != workspace) {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        crate::files::FileStoreError::Configuration(
+                            "a root cannot change its tracked workspace".into(),
+                        ),
+                    )));
+                }
+                transaction.execute(
+                    "INSERT OR IGNORE INTO file_roots(root,workspace,seq) VALUES (?1,?2,?3)",
+                    params![root.as_str(), workspace, current],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO file_events(workspace,seq,payload) VALUES (?1,?2,?3)",
+                params![workspace, current, payload],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            rusqlite::Error::ToSqlConversionFailure(error) => error
+                .downcast::<crate::files::FileStoreError>()
+                .map(|error| *error)
+                .unwrap_or_else(|error| crate::files::FileStoreError::Storage(error.to_string())),
+            error => crate::files::FileStoreError::Storage(error.to_string()),
+        })
+    }
+
+    pub(crate) fn workspace_for_root(
+        &self,
+        root: &TrajectoryId,
+    ) -> Result<Option<String>, crate::files::FileStoreError> {
+        let connection = self.connection();
+        let installed: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        if !installed {
+            return Ok(None);
+        }
+        connection
+            .query_row(
+                "SELECT workspace FROM file_roots WHERE root=?1",
+                params![root.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))
     }
 
     pub(crate) fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
@@ -317,6 +549,121 @@ impl Sqlite {
             .optional()?;
         Ok(found.is_some())
     }
+
+    pub(crate) fn hold_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        digest: PeerDigest,
+        body: &str,
+        held: &NewHeld,
+        now: SystemTime,
+        quota: usize,
+    ) -> Result<(), HeldError> {
+        let label_json = held.label.to_string();
+        immediate(&mut self.connection(), |transaction| {
+            transaction.execute(
+                "INSERT INTO held_peer_messages (id, receiver, digest, label, body, expires_at, notified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    held.id.as_str(),
+                    receiver.as_str(),
+                    digest.to_string(),
+                    label_json,
+                    body,
+                    held.expires_at
+                ],
+            )?;
+            // Every receiver's expired rows go, so a session that ended unread leaves none.
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE expires_at <= ?1",
+                params![millis(now)],
+            )?;
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE receiver = ?1 AND seq NOT IN (
+                     SELECT seq FROM held_peer_messages WHERE receiver = ?1 ORDER BY seq DESC LIMIT ?2
+                 )",
+                params![receiver.as_str(), quota_limit(quota)],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
+        // Asked on every acknowledged hook: a receiver with nothing new takes no write lock.
+        let pending: bool = self.connection().query_row(
+            "SELECT EXISTS (SELECT 1 FROM held_peer_messages
+             WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2)",
+            params![receiver.as_str(), millis(now)],
+            |row| row.get(0),
+        )?;
+        if !pending {
+            return Ok(Vec::new());
+        }
+        immediate(&mut self.connection(), |transaction| {
+            let notices = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, digest, label, expires_at FROM held_peer_messages
+                     WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2 ORDER BY seq ASC",
+                )?;
+                statement
+                    .query_map(params![receiver.as_str(), millis(now)], held_row)?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            transaction.execute(
+                "UPDATE held_peer_messages SET notified = 1
+                 WHERE receiver = ?1 AND notified = 0 AND expires_at > ?2",
+                params![receiver.as_str(), millis(now)],
+            )?;
+            notices.into_iter().map(decode_held).collect()
+        })
+    }
+
+    pub(crate) fn peek_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldNotice>, HeldError> {
+        self.connection()
+            .query_row(
+                "SELECT id, digest, label, expires_at FROM held_peer_messages
+                 WHERE receiver = ?1 AND id = ?2 AND expires_at > ?3",
+                params![receiver.as_str(), id.as_str(), millis(now)],
+                held_row,
+            )
+            .optional()?
+            .map(decode_held)
+            .transpose()
+    }
+
+    pub(crate) fn take_peer_message(
+        &self,
+        receiver: &TrajectoryId,
+        id: &HeldPeerId,
+        now: SystemTime,
+    ) -> Result<Option<HeldPeerMessage>, HeldError> {
+        immediate(&mut self.connection(), |transaction| {
+            let found = transaction
+                .query_row(
+                    "SELECT id, digest, label, expires_at, body FROM held_peer_messages
+                     WHERE receiver = ?1 AND id = ?2",
+                    params![receiver.as_str(), id.as_str()],
+                    |row| Ok((held_row(row)?, row.get::<_, String>(4)?)),
+                )
+                .optional()?;
+            transaction.execute(
+                "DELETE FROM held_peer_messages WHERE receiver = ?1 AND id = ?2",
+                params![receiver.as_str(), id.as_str()],
+            )?;
+            match found {
+                Some((stored, body)) if stored.3 > millis(now) => Ok(Some(HeldPeerMessage {
+                    notice: decode_held(stored)?,
+                    body,
+                })),
+                Some(_) | None => Ok(None),
+            }
+        })
+    }
 }
 
 /// A held connection that one append runs on.
@@ -354,7 +701,7 @@ impl Appender<'_> {
             for (root, observation) in records {
                 let at = position(transaction, root)?;
                 let key = observation.and_then(HostObservation::key);
-                insert_batch(transaction, root, at, &encode(&[], *observation), key)?;
+                insert_batch(transaction, root, at, &encode(&[], *observation), key.as_deref())?;
             }
             Ok(())
         })
@@ -442,13 +789,103 @@ fn is_taken(error: &rusqlite::Error) -> bool {
     )
 }
 
+const TABLES: [&str; 7] = [
+    "logs",
+    "policy_files",
+    "host_keys",
+    "operations",
+    "processed_results",
+    "held_peer_messages",
+    "archived_roots",
+];
+
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let names = TABLES.map(|table| format!("'{table}'")).join(", ");
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results')",
+        &format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ({names})"),
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 5)
+    Ok(found == TABLES.len() as i64)
+}
+
+fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT name,sql FROM sqlite_master
+         WHERE type='table' AND name IN ('file_events','file_roots') ORDER BY name",
+    )?;
+    let found = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if found.is_empty() {
+        return connection.execute_batch(FILE_SCHEMA);
+    }
+    let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let expected = [
+        (
+            "file_events",
+            "CREATE TABLE file_events ( workspace TEXT NOT NULL, seq INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (workspace, seq) )",
+        ),
+        (
+            "file_roots",
+            "CREATE TABLE file_roots ( root TEXT PRIMARY KEY, workspace TEXT NOT NULL, seq INTEGER NOT NULL )",
+        ),
+    ];
+    if found.len() == expected.len()
+        && found
+            .iter()
+            .zip(expected)
+            .all(|((name, sql), (expected_name, expected_sql))| name == expected_name && normalize(sql) == expected_sql)
+    {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some("the optional file-event schema is partial or incompatible".into()),
+    ))
+}
+
+/// Every root the database at `path` holds, read after folding its write-ahead log into the
+/// main file, so the file alone is the whole database. The returned connection holds the
+/// database exclusively, so no other process writes to it while it is moved; a database
+/// another process has open fails here instead.
+fn checkpointed_roots(path: &Path) -> Result<(Connection, Vec<String>), rusqlite::Error> {
+    let connection = Connection::open(path)?;
+    connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    let blocked: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    if blocked != 0 {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("another connection holds the write-ahead log".to_string()),
+        ));
+    }
+    let roots = connection
+        .prepare("SELECT DISTINCT root FROM logs")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok((connection, roots))
+}
+
+fn sidecars(path: &Path) -> [PathBuf; 2] {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    [
+        path.with_file_name(format!("{name}-wal")),
+        path.with_file_name(format!("{name}-shm")),
+    ]
+}
+
+fn remove_if_present(path: &Path) -> Result<(), OpenError> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(moving(path, error)),
+        _ => Ok(()),
+    }
+}
+
+fn moving(path: &Path, error: std::io::Error) -> OpenError {
+    OpenError::Archive {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    }
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -520,6 +957,29 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
         .optional()?)
 }
 
+/// A held row's notice columns: id, digest, label JSON, expiry.
+type HeldRow = (String, String, String, i64);
+
+fn held_row(row: &rusqlite::Row<'_>) -> Result<HeldRow, rusqlite::Error> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn decode_held((id, digest, label, expires_at): HeldRow) -> Result<HeldNotice, HeldError> {
+    StoredNotice {
+        id,
+        digest,
+        label: serde_json::from_str(&label).map_err(|error| HeldError::Corrupt(error.to_string()))?,
+        expires_at,
+    }
+    .decode()
+}
+
+impl From<rusqlite::Error> for HeldError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.to_string())
+    }
+}
+
 fn json(raw: &str) -> StoredJson {
     serde_json::from_str(raw).map_err(|error| ReceiptError::storage(error.to_string()))
 }
@@ -535,11 +995,16 @@ mod tests {
     fn a_fresh_sqlite_store_has_the_frozen_schema() {
         let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected: Vec<(String, String, Option<String>)> = [
+            ("archived_roots", Some("CREATE TABLE archived_roots ( root TEXT PRIMARY KEY )")),
+            ("held_peer_messages", Some("CREATE TABLE held_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, receiver TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL, expires_at INTEGER NOT NULL, notified INTEGER NOT NULL )")),
+            ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
+            ("sqlite_autoindex_archived_roots_1", None),
+            ("sqlite_autoindex_held_peer_messages_1", None),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
             ("sqlite_autoindex_operations_1", None),
@@ -548,7 +1013,10 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, sql)| {
-            let kind = if sql.is_some() { "table" } else { "index" };
+            let kind = match sql {
+                Some(sql) if sql.starts_with("CREATE TABLE") => "table",
+                Some(_) | None => "index",
+            };
             (kind.to_owned(), name.to_owned(), sql.map(str::to_owned))
         })
         .collect();
@@ -566,7 +1034,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("the version reads");
-            assert_eq!(version, 5);
+            assert_eq!(version, SCHEMA_VERSION);
             let mut statement = connection
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
                 .expect("the schema query prepares");
@@ -586,7 +1054,49 @@ mod tests {
     }
 
     #[test]
-    fn a_database_at_another_schema_version_is_refused() {
+    fn file_tracking_installs_only_its_optional_schema_without_moving_the_core_version() {
+        let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+        let connection = store.lock();
+        install_file_schema(&connection).expect("the optional schema installs");
+        install_file_schema(&connection).expect("the exact optional schema is accepted again");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the core version reads");
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name IN ('file_events','file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the optional tables read");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn a_partial_optional_schema_refuses_file_access_but_not_core_startup() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("the core store opens"));
+        Connection::open(&path)
+            .expect("the database reopens for damage")
+            .execute_batch(
+                "CREATE TABLE file_events (
+                     workspace TEXT NOT NULL,
+                     seq INTEGER NOT NULL,
+                     payload BLOB NOT NULL,
+                     PRIMARY KEY (workspace, seq)
+                 );",
+            )
+            .expect("one optional table is installed");
+
+        let store = LogStore::open(Backend::Sqlite { path }).expect("optional damage does not block core startup");
+        assert!(install_file_schema(&store.lock()).is_err());
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
@@ -595,11 +1105,16 @@ mod tests {
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("the version moves");
 
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
+        for opened in [
+            LogStore::open(Backend::Sqlite { path: path.clone() }).err(),
+            LogStore::open_archiving(&path).err(),
+        ] {
+            match opened {
+                Some(OpenError::Newer { found, supported, .. }) => {
+                    assert_eq!((found, supported), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
+                }
+                other => panic!("expected a newer-schema refusal, got {other:?}"),
             }
-            other => panic!("expected a schema refusal, got {other:?}"),
         }
     }
 
@@ -627,12 +1142,27 @@ mod tests {
             .execute_batch("CREATE TABLE batches (family TEXT, seq INTEGER, bytes BLOB);")
             .expect("the older schema lands");
 
-        match LogStore::open(Backend::Sqlite { path: path.clone() }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (0, SCHEMA_VERSION));
+        for opened in [
+            LogStore::open(Backend::Sqlite { path: path.clone() }).err(),
+            LogStore::open_archiving(&path).err(),
+        ] {
+            match opened {
+                Some(OpenError::Incompatible { found, oldest, .. }) => {
+                    assert_eq!((found, oldest), (0, BASE_VERSION));
+                }
+                other => panic!("expected a schema refusal, got {other:?}"),
             }
-            other => panic!("expected a schema refusal, got {other:?}"),
         }
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("the directory lists")
+                .all(|entry| !entry
+                    .expect("the entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".archived-")),
+            "a file this store did not write is not moved"
+        );
         let tables: i64 = Connection::open(&path)
             .expect("the file reopens")
             .query_row(

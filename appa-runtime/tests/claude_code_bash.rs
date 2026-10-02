@@ -5,9 +5,9 @@
 #![cfg(unix)]
 mod common;
 
-use appa_runtime::{api::Runtime, config::Config, hooks};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
-use common::{fake_claude, propose, raw, repo_root, root};
+use appa_runtime::api::Runtime;
+use appa_runtime_api::{HookDecision, ProposedCall};
+use common::{fake_claude, propose, raw, repo_root, session_runtime};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
@@ -48,19 +48,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
         ),
     )
     .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root(),
-                principal: None
-            }
-        )
-        .await,
-        HookDecision::Ack
-    );
-    runtime
+    session_runtime(dir.path(), &path).await
 }
 
 #[tokio::test]

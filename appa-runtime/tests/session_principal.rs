@@ -43,6 +43,8 @@ async fn start(runtime: &Arc<Runtime>, principal: Option<&str>) -> HookDecision 
         HookEvent::SessionStart {
             root: root(),
             principal: principal.map(str::to_string),
+            address: None,
+            title: None,
         },
     )
     .await

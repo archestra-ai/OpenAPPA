@@ -12,7 +12,7 @@ use appa_package::generation::{
 };
 use serde::Deserialize;
 
-use super::{InstallError, Selection, io, verify_packages};
+use super::{InstallError, Selection, invalid, io, verify_packages};
 
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TAG_PAGES: usize = 5;
@@ -74,8 +74,7 @@ impl Acquired {
             .state
             .join("generations")
             .join(generation.commit().as_str());
-        let cached = Generation::parse(&super::required_bytes(&root.join(DESCRIPTOR_FILE))?)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let cached = Generation::parse(&super::required_bytes(&root.join(DESCRIPTOR_FILE))?).map_err(invalid)?;
         if cached != generation {
             return Err(InstallError::Invalid(
                 "the retained descriptor disagrees with the installed version".into(),
@@ -130,18 +129,16 @@ impl Acquired {
         verify_artifact(snapshot.path(), digest)?;
         let unpacked = stage.path().join("unpacked");
         fs::create_dir(&unpacked).map_err(|error| io("stage bundle contents", &unpacked, error))?;
-        super::archive::extract_bundle_archive(snapshot.path(), &unpacked)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let generation = Generation::parse(&super::required_bytes(&unpacked.join(DESCRIPTOR_FILE))?)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let selection: Selection = serde_json::from_slice(&super::required_bytes(&unpacked.join("selection.json"))?)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        super::archive::extract_bundle_archive(snapshot.path(), &unpacked).map_err(invalid)?;
+        let generation =
+            Generation::parse(&super::required_bytes(&unpacked.join(DESCRIPTOR_FILE))?).map_err(invalid)?;
+        let selection: Selection =
+            serde_json::from_slice(&super::required_bytes(&unpacked.join("selection.json"))?).map_err(invalid)?;
         selection.validate()?;
         if selection.generation() != &generation {
             return Err(InstallError::Invalid("the bundle mixes versions".into()));
         }
-        let config = String::from_utf8(super::required_bytes(&unpacked.join("config.toml"))?)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let config = String::from_utf8(super::required_bytes(&unpacked.join("config.toml"))?).map_err(invalid)?;
         let snapshot = selection
             .files
             .as_ref()
@@ -208,7 +205,7 @@ impl Acquired {
         let commit = option_env!("APPA_BUILD_COMMIT")
             .map(Commit::parse)
             .transpose()
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            .map_err(invalid)?;
         match commit {
             Some(commit) if git_head(root).as_deref() == Some(commit.as_str()) => {
                 let repository = stage.join("repository");
@@ -230,7 +227,7 @@ impl Acquired {
                     .into(),
             )
         })?;
-        let commit = Commit::parse(commit).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let commit = Commit::parse(commit).map_err(invalid)?;
         let batteries_tree = option_env!("APPA_BATTERIES_TREE_SHA256")
             .ok_or_else(|| InstallError::Invalid("this build carries no batteries identity".into()))?;
         let platform = Platform::current()
@@ -246,11 +243,7 @@ impl Acquired {
         let staged = stage.path().join("plugin");
         crate::batteries_staging::stage_repository(&repository, &staged)
             .map_err(|error| InstallError::Invalid(format!("cannot stage the batteries tree: {error}")))?;
-        let actual = appa_package::canonical_tree_digest(&staged)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let actual = crate::engine::hex(&appa_package::canonical_tree_digest(&staged).map_err(invalid)?);
         if actual != batteries_tree {
             return Err(InstallError::Invalid(format!(
                 "the batteries tree at commit {commit} does not match this build; rebuild from that commit"
@@ -272,7 +265,7 @@ impl Acquired {
             digest_of(&binary_archive)?,
             digest_of(&batteries_archive)?,
         )
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        .map_err(invalid)?;
         verify_packages(&marketplace, &generation).map_err(|error| {
             InstallError::Invalid(format!(
                 "{error}; if packages changed at commit {commit}, regenerate the catalog with scripts/appa-marketplace.sh and commit it"
@@ -300,10 +293,7 @@ impl Acquired {
                 .ok_or_else(|| InstallError::Invalid("this development build has no published version; specify --revision with a published tag or commit".into()))?,
         };
         let expected_commit = if revision.is_none() {
-            own_commit
-                .map(Commit::parse)
-                .transpose()
-                .map_err(|error| InstallError::Invalid(error.to_string()))?
+            own_commit.map(Commit::parse).transpose().map_err(invalid)?
         } else {
             None
         };
@@ -326,7 +316,7 @@ impl Acquired {
         let commit = if revision.starts_with('v') {
             None
         } else {
-            Some(Commit::parse(revision).map_err(|error| InstallError::Invalid(error.to_string()))?)
+            Some(Commit::parse(revision).map_err(invalid)?)
         };
         let release = match &commit {
             Some(commit) => release_for_commit(commit, api, stage.path())?,
@@ -339,7 +329,7 @@ impl Acquired {
             appa_package::generation::MAX_DESCRIPTOR_BYTES as u64,
         )?;
         let bytes = fs::read(&descriptor).map_err(|error| io("read generation descriptor", &descriptor, error))?;
-        let generation = Generation::parse(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let generation = Generation::parse(&bytes).map_err(invalid)?;
         if generation.published().map(|published| published.release()) != Some(release.as_str())
             || commit
                 .as_ref()
@@ -367,8 +357,7 @@ impl Acquired {
         }
         let marketplace = stage.path().join("marketplace");
         fs::create_dir(&marketplace).map_err(|error| io("stage marketplace", &marketplace, error))?;
-        super::archive::extract_archive(&archives[&marketplace_archive], &marketplace)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        super::archive::extract_archive(&archives[&marketplace_archive], &marketplace).map_err(invalid)?;
         verify_packages(&marketplace, &generation)?;
         Ok(Self {
             _stage: Some(stage),
@@ -444,8 +433,8 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
         .map_err(|error| InstallError::Invalid(format!("cannot fetch this build's source: {error}")))?;
     let container = stage.join("source");
     fs::create_dir(&container).map_err(|error| io("stage source", &container, error))?;
-    super::archive::extract_archive(&archive, &container).map_err(|error| InstallError::Invalid(error.to_string()))?;
-    super::archive::single_directory(&container).map_err(|error| InstallError::Invalid(error.to_string()))
+    super::archive::extract_archive(&archive, &container).map_err(invalid)?;
+    super::archive::single_directory(&container).map_err(invalid)
 }
 
 fn git_head(root: &Path) -> Option<String> {
@@ -489,7 +478,7 @@ fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
 /// One archive for one tree, byte for byte: fixed metadata and canonical order,
 /// so the same commit yields the same digest on every install.
 fn pack_tree(root: &Path, destination: &Path) -> Result<(), InstallError> {
-    let entries = appa_package::tree::walk(root).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let entries = appa_package::tree::walk(root).map_err(invalid)?;
     let file = File::create(destination).map_err(|error| io("create archive", destination, error))?;
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
     for entry in entries {
@@ -623,7 +612,7 @@ pub(super) fn validate_revision(revision: &str) -> Result<(), InstallError> {
 }
 
 fn asset_url(base: &str, release: &str, file: &str) -> Result<String, InstallError> {
-    let mut url = url::Url::parse(base).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let mut url = url::Url::parse(base).map_err(invalid)?;
     url.path_segments_mut()
         .map_err(|()| InstallError::Invalid("invalid release endpoint".into()))?
         .pop_if_empty()
@@ -660,8 +649,7 @@ fn release_for_commit(commit: &Commit, api: &str, directory: &Path) -> Result<St
             1024 * 1024,
         )?;
         let bytes = fs::read(&path).map_err(|error| io("read release tags", &path, error))?;
-        let tags: Vec<Tag> =
-            serde_json::from_slice(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let tags: Vec<Tag> = serde_json::from_slice(&bytes).map_err(invalid)?;
         for tag in &tags {
             if tag.commit.sha == commit.as_str() && tag.name.starts_with('v') {
                 validate_revision(&tag.name)?;

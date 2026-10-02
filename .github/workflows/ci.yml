@@ -18,6 +18,18 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
+  archestra-update-tests:
+    name: Archestra Update Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout updater
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test release validation and PR lifecycle
+        run: python3 .github/scripts/test_appa_archestra_update.py
+
   cargo-release-age:
     name: Cargo Release Age
     runs-on: ubuntu-latest

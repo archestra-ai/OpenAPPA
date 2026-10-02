@@ -152,18 +152,6 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
     }
 }
 
-/// The tool identification the runtime applies to every call of the host it serves. The one
-/// place this crate names the adapter crates. `--adapter` parses served names only
-/// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
-fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
-    match adapter {
-        AdapterName::Amp => appa_adapter_amp::adapter(),
-        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
-        AdapterName::Kagent => appa_adapter_kagent::adapter(),
-        AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
-    }
-}
-
 fn log_level(verbose: u8) -> &'static str {
     match verbose {
         0 => "info",
@@ -228,8 +216,7 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
 /// two sides must render the digest identically, so they share this one definition.
 pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(crate::engine::hex(&Sha256::digest(bytes)))
 }
 
 #[derive(Clone)]
@@ -404,6 +391,9 @@ struct ReportRequestBody {
     /// Required, with no default: this is the question a person was asked, and a request that
     /// does not carry their answer has no business getting either kind of report.
     pseudonymize: bool,
+    /// A family root the caller identifies from its harness session. The runtime accepts it
+    /// only when that root is in the same recent set used by an unnamed request.
+    trajectory: Option<String>,
 }
 
 /// One finished `openappa.yell.v1` document.
@@ -430,11 +420,11 @@ async fn report(
             true => crate::yell::Mode::Pseudonymized,
             false => crate::yell::Mode::Baseline,
         },
-        // A caller here names no trajectory: it gets whichever one was recently active, or
-        // nothing. That narrows the endpoint — no session can be asked for by name — without
-        // making it a per-caller boundary. The recently active trajectory may well belong to
-        // someone else's session on this machine, and loopback is the only thing between them.
-        selection: crate::yell::Selection::Recent,
+        // A caller gets the only recently active trajectory, or can narrow that same recent
+        // set by root. It cannot ask for an older trajectory by name. This is still not a
+        // per-caller boundary: a recent trajectory may belong to another session on this
+        // machine, and loopback is the only thing between them.
+        selection: crate::yell::Selection::Recent(body.trajectory.map(crate::api::TrajectoryId)),
         harness: crate::yell::report::Harness::served(state.adapter.name),
         hostname: None,
     };
@@ -519,7 +509,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
-    let adapter = served(args.adapter);
+    let adapter = crate::describe::served(args.adapter);
     let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
         catalog: crate::batteries::snapshot(&battery_dirs),
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
@@ -617,6 +607,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             ),
         )
         .merge(management)
+        .layer(axum::middleware::from_fn(refuse_browser_origin))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
@@ -647,10 +638,12 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let app = axum::Router::new().nest_service(
-            "/guide-mcp",
-            mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
-        );
+        let app = axum::Router::new()
+            .nest_service(
+                "/guide-mcp",
+                mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
+            )
+            .layer(axum::middleware::from_fn(refuse_browser_origin));
         Some((address, listener, app))
     } else {
         None
@@ -693,8 +686,17 @@ async fn loopback_management_only(
     request: Request,
     next: Next,
 ) -> Response {
-    if !management_peer_is_allowed(peer) || request.headers().contains_key("origin") {
+    if !management_peer_is_allowed(peer) {
         return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
+    }
+    next.run(request).await
+}
+
+/// Browsers attach `Origin` to every POST and cross-origin fetch; harnesses and MCP
+/// clients send none. Refusing it keeps a web page from driving a reachable listener.
+async fn refuse_browser_origin(request: Request, next: Next) -> Response {
+    if request.headers().contains_key(axum::http::header::ORIGIN) {
+        return (StatusCode::FORBIDDEN, "the runtime refuses browser requests").into_response();
     }
     next.run(request).await
 }

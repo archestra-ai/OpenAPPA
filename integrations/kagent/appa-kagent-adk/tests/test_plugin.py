@@ -132,13 +132,26 @@ async def test_a_delegated_entry_classifies_as_the_childs_start():
     plugin = plugin_over(hook)
     session = FakeSession(
         "child-ctx",
-        state={"headers": {"x-kagent-source": "agent", "x-kagent-root-context-id": "root-ctx"}},
+        state={
+            "headers": {
+                "x-kagent-source": "agent",
+                "x-kagent-root-context-id": "root-ctx",
+                "x-appa-spawn-binding": "binding-root-ctx",
+            }
+        },
     )
     await plugin.on_user_message_callback(
         invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
     )
     assert hook.events == [
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "root-ctx",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-root-ctx",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -150,18 +163,73 @@ async def test_a_delegated_entry_classifies_as_the_childs_start():
     ]
 
 
+async def test_a_delegated_entry_without_a_spawn_binding_opens_no_child():
+    hook = Hook()
+    plugin = plugin_over(hook)
+    session = FakeSession("child-ctx", state={"headers": {"x-kagent-root-context-id": "root-ctx"}})
+    with pytest.raises(AppaFailClosed, match="carries no spawn binding"):
+        await plugin.on_user_message_callback(
+            invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
+        )
+    assert hook.events == []
+
+
+async def test_the_released_spawn_binding_rides_its_own_delegation_only():
+    class Remote:
+        """kagent's remote-agent tool, as far as the binding goes: each send
+        builds its headers from the tool's header provider."""
+
+        name = "kagent__NS__billing_agent"
+        description = "Bill the invoices"
+        _last_context_id = "shared"
+        _header_provider = None
+        sent: list[dict] = []
+
+        async def run_async(self, *, args, tool_context):
+            headers = self._header_provider(tool_context) if self._header_provider else {}
+            Remote.sent.append(headers)
+            return {"result": "done", "subagent_session_id": self._last_context_id}
+
+    from appa_kagent_adk.remote_agents import IsolatedRemoteTool
+
+    hook = Hook({"protocol": 1, "decision": "allow_call", "spawn_binding": "fork-1"})
+    plugin = plugin_over(hook)
+    tool = IsolatedRemoteTool(Remote())
+    released = dispatch(FakeSession("parent-ctx"))
+    assert await plugin.before_tool_callback(tool=tool, tool_args={"request": "bill"}, tool_context=released) is None
+    await tool.run_async(args={"request": "bill"}, tool_context=released)
+    # A call the plugin released no binding for, and a second run of the
+    # released call, carry none: the binding is taken once.
+    await tool.run_async(args={"request": "bill"}, tool_context=dispatch(FakeSession("parent-ctx"), call_id="fc-2"))
+    await tool.run_async(args={"request": "bill"}, tool_context=released)
+    assert Remote.sent == [{"x-appa-spawn-binding": "fork-1"}, {}, {}]
+
+
 async def test_a_parent_context_header_alone_classifies_as_the_childs_start():
     hook = Hook(ACK, ACK)
     plugin = plugin_over(hook)
     session = FakeSession(
         "child-ctx",
-        state={"headers": {"x-kagent-source": "agent", "x-kagent-parent-context-id": "parent-ctx"}},
+        state={
+            "headers": {
+                "x-kagent-source": "agent",
+                "x-kagent-parent-context-id": "parent-ctx",
+                "x-appa-spawn-binding": "binding-parent-ctx",
+            }
+        },
     )
     await plugin.on_user_message_callback(
         invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
     )
     assert hook.events == [
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "parent-ctx", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "parent-ctx",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-parent-ctx",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -178,7 +246,13 @@ async def test_the_root_header_wins_over_the_parent_header():
     plugin = plugin_over(hook)
     session = FakeSession(
         "grandchild-ctx",
-        state={"headers": {"x-kagent-root-context-id": "root-ctx", "x-kagent-parent-context-id": "child-ctx"}},
+        state={
+            "headers": {
+                "x-kagent-root-context-id": "root-ctx",
+                "x-kagent-parent-context-id": "child-ctx",
+                "x-appa-spawn-binding": "binding-root-ctx",
+            }
+        },
     )
     await plugin.on_user_message_callback(
         invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
@@ -202,7 +276,7 @@ async def test_an_opened_invocation_keeps_its_ids_when_the_headers_change_mid_ru
     await plugin.before_tool_callback(
         tool=FakeTool("k8s_get_pods"), tool_args={}, tool_context=FakeContext(session, "i1")
     )
-    session.state["headers"] = {"x-kagent-root-context-id": "root-ctx"}
+    session.state["headers"] = {"x-kagent-root-context-id": "root-ctx", "x-appa-spawn-binding": "binding-root-ctx"}
     await plugin.before_tool_callback(
         tool=FakeTool("k8s_get_pods"), tool_args={}, tool_context=FakeContext(session, "i1")
     )
@@ -229,11 +303,13 @@ async def test_a_run_error_ends_the_turn_under_the_pinned_pair_and_releases_it()
     the error callback ends the turn under the pin and drops it."""
     hook = Hook(ACK, ACK, ACK, ALLOW)
     plugin = plugin_over(hook)
-    session = FakeSession("child-ctx", state={"headers": {"x-kagent-root-context-id": "root-1"}})
+    session = FakeSession(
+        "child-ctx", state={"headers": {"x-kagent-root-context-id": "root-1", "x-appa-spawn-binding": "binding-root-1"}}
+    )
     await plugin.on_user_message_callback(
         invocation_context=FakeInvocationContext(session, "i1"), user_message=FakeContent("total the invoices")
     )
-    session.state["headers"] = {"x-kagent-root-context-id": "root-2"}
+    session.state["headers"] = {"x-kagent-root-context-id": "root-2", "x-appa-spawn-binding": "binding-root-2"}
     await plugin.on_run_error_callback(invocation_context=FakeInvocationContext(session, "i1"), error=RuntimeError())
     assert hook.events[-1] == {
         "protocol": 1,
@@ -258,7 +334,9 @@ async def test_a_run_error_ends_the_turn_under_the_pinned_pair_and_releases_it()
 
 
 def delegated_child(root: str) -> FakeSession:
-    return FakeSession("child-ctx", state={"headers": {"x-kagent-root-context-id": root}})
+    return FakeSession(
+        "child-ctx", state={"headers": {"x-kagent-root-context-id": root, "x-appa-spawn-binding": f"binding-{root}"}}
+    )
 
 
 async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
@@ -275,7 +353,7 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
     # The child session now carries content, and the next parent's
     # headers land before its run.
     session.events.append(FakeEvent(content=FakeContent("total the invoices")))
-    session.state["headers"] = {"x-kagent-root-context-id": "root-2"}
+    session.state["headers"] = {"x-kagent-root-context-id": "root-2", "x-appa-spawn-binding": "binding-root-2"}
     await plugin.on_user_message_callback(
         invocation_context=FakeInvocationContext(session, "i2"), user_message=FakeContent("list the pods")
     )
@@ -284,7 +362,14 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
     )
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i2"))
     assert hook.events == [
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-root-1",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -303,7 +388,14 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
             "arguments": {},
         },
         {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "root-2",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-root-2",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -340,7 +432,14 @@ async def test_the_same_parent_sends_no_second_child_start():
         invocation_context=FakeInvocationContext(session, "i2"), user_message=FakeContent("now the refunds")
     )
     assert hook.events == [
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-root-1",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -1687,7 +1786,14 @@ async def test_the_return_contract_rides_the_first_user_message_of_a_child():
         "total the invoices",
     ], "the contract goes in front, and the request the parent sent stands unchanged"
     assert gated(hook) == [
-        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_start",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "spawn_binding": "binding-root-1",
+        },
         {
             "protocol": 1,
             "adapter": "kagent",
@@ -1744,7 +1850,9 @@ async def test_a_child_scope_stops_through_the_return_gate_in_a_real_runner():
         app=App(name="kagent", root_agent=LlmAgent(name="log_analyst", model=model), plugins=[plugin])
     )
     session = await runner.session_service.create_session(
-        app_name="kagent", user_id="op", state={"headers": {"x-kagent-root-context-id": "root-1"}}
+        app_name="kagent",
+        user_id="op",
+        state={"headers": {"x-kagent-root-context-id": "root-1", "x-appa-spawn-binding": "binding-root-1"}},
     )
     spoken = []
     try:

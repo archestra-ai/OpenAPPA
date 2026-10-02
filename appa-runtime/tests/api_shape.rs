@@ -56,12 +56,20 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::SessionStart { root, .. } => {
             let _: TrajectoryId = root;
         }
-        HookEvent::Prompt { actor, text, settles } => {
+        HookEvent::Prompt {
+            actor,
+            text,
+            settles,
+            peer,
+            title,
+        } => {
             let Actor { root, child } = actor;
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;
             let _: String = text;
             let _: Option<String> = settles;
+            let _: Option<appa_runtime_api::PeerFrame> = peer;
+            let _: Option<appa_runtime_api::SessionTitle> = title;
         }
         HookEvent::TurnEnd { actor } => {
             let Actor { root, child } = actor;
@@ -268,7 +276,7 @@ async fn the_declared_remedy_entry(runtime: &Runtime, acting: &Actor, offer: Off
 fn the_declared_codec() {
     let codec: Codec = appa_adapter_claude_code::codec();
     let _: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal> = codec.parse;
-    let _: fn(&HookEvent, &HookDecision) -> serde_json::Value = codec.render;
+    let _: fn(&[u8], &HookEvent, &HookDecision) -> serde_json::Value = codec.render;
     let served: Adapter = appa_adapter_claude_code::adapter();
     let _: appa_runtime_api::AdapterName = served.name;
     let _: appa_runtime_api::IdentifyToolFn = served.identify_tool;

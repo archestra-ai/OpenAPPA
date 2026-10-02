@@ -3270,3 +3270,189 @@ samp {
     @apply bg-background text-foreground;
   }
 }
+
+/* ————————————————————————————————————————————————
+   Song ship — the music video, playing in the middle of the page while
+   the song does. The scene is one SVG; the sail's slides are HTML inside
+   a foreignObject, styled as in the video.
+   ———————————————————————————————————————————————— */
+.song-ship {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  animation: song-ship-arrive 1.2s ease-out both;
+}
+
+/* The frame takes clicks so a click outside it can be told apart; the
+   rest of the overlay lets them through to the page. */
+.song-ship > svg {
+  pointer-events: auto;
+  width: min(80vw, 80vh);
+  height: auto;
+  overflow: hidden;
+  filter: drop-shadow(0 24px 40px rgba(0, 0, 0, 0.35));
+}
+
+.song-ship-lanterns rect:last-child {
+  filter: drop-shadow(0 0 18px rgba(242, 201, 76, 0.7));
+}
+
+/* mascots: the crew on deck and the small ones on the sail */
+.song-ship .mascot {
+  display: block;
+  overflow: visible;
+}
+.song-ship .mascot.cream .body { fill: #f2e5c9; }
+.song-ship .mascot.cream .dim { fill: #a89c88; }
+.song-ship .mascot.cream .eye { fill: #211f1c; }
+.song-ship .mascot.dark .body { fill: #211f1c; }
+.song-ship .mascot.dark .dim { fill: #8d8a86; }
+.song-ship .mascot.dark .eye { fill: #fdfcfa; }
+.song-ship .mascot .eyes rect {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+/* the sail is the screen: every lyric drawn as a small diagram */
+.song-sail {
+  --cream: #f2e5c9;
+  --s-ink: #211f1c;
+  --s-muted: #6a6255;
+  --s-line: #c9bc9f;
+  --s-green: #1f8a57;
+  --s-red: #c8372d;
+  --s-card: #fbf3df;
+  position: relative;
+  width: 660px;
+  height: 420px;
+  overflow: hidden;
+  background: var(--cream);
+  color: var(--s-ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: normal;
+  box-shadow: inset 0 -14px 0 rgba(33, 31, 28, 0.08), inset 14px 0 0 rgba(33, 31, 28, 0.04), inset -14px 0 0 rgba(33, 31, 28, 0.04);
+}
+.song-sail,
+.song-sail * {
+  box-sizing: content-box;
+}
+.song-sail .mono { font-family: var(--font-mono); }
+.song-sail .sl { position: absolute; inset: 0; display: none; }
+.song-sail .sl > *,
+.song-sail .abs { position: absolute; }
+.song-sail .sl svg.wire { left: 0; top: 0; width: 660px; height: 420px; overflow: visible; }
+.song-sail .wire line,
+.song-sail .wire path { stroke: var(--s-ink); stroke-width: 4; fill: none; stroke-dasharray: 1; }
+.song-sail .nd {
+  border: 3px solid var(--s-ink);
+  background: var(--s-card);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  line-height: 1.05;
+}
+.song-sail .nd small {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+  margin-top: 6px;
+}
+.song-sail .chip {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  border: 3px solid var(--s-ink);
+  background: var(--s-card);
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.song-sail .chip.r { color: #fff; background: var(--s-red); border-color: var(--s-red); }
+.song-sail .chip.g { color: #fff; background: var(--s-green); border-color: var(--s-green); }
+.song-sail .chip.k { color: var(--cream); background: var(--s-ink); }
+.song-sail .lab {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+  white-space: nowrap;
+}
+.song-sail .big { font-weight: 700; letter-spacing: -0.03em; line-height: 1; white-space: nowrap; }
+.song-sail .q { font-size: 64px; font-weight: 700; color: var(--s-red); line-height: 1; }
+.song-sail .row4 {
+  left: 40px;
+  width: 420px;
+  height: 58px;
+  border: 3px solid var(--s-ink);
+  background: var(--s-card);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  font-size: 25px;
+  font-weight: 600;
+}
+.song-sail .row4 b {
+  font-family: var(--font-mono);
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  background: var(--s-ink);
+  color: var(--cream);
+  font-size: 17px;
+}
+.song-sail .logl { left: 0; font-family: var(--font-mono); font-size: 19px; font-weight: 500; white-space: nowrap; }
+.song-sail .logl i { color: var(--s-muted); font-style: normal; }
+
+/* The scene itself fades in over the intro and out over the last bars
+   (the SVG's opacity, set per frame from the song). Stopping the song early
+   sinks the whole frame away instead. */
+.song-ship.is-leaving {
+  animation: song-ship-leave 0.9s ease-in both;
+}
+
+/* The ship rises from below the fold and settles into its swell. */
+@keyframes song-ship-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(40vh);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes song-ship-leave {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(40vh);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .song-ship,
+  .song-ship.is-leaving {
+    animation: none;
+  }
+}

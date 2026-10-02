@@ -36,6 +36,10 @@ name = "annotate_cli"
 required-features = ["daemon"]
 
 [[test]]
+name = "files_cli"
+required-features = ["daemon"]
+
+[[test]]
 name = "hitl_elicitation"
 required-features = ["daemon"]
 

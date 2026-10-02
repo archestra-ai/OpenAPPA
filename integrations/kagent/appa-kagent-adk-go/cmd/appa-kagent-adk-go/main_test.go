@@ -445,6 +445,8 @@ func TestTheLineageHeadersLandInSessionStateOnGetAndCreate(t *testing.T) {
 	ctx, _ := a2asrv.WithCallContext(context.Background(), a2asrv.NewRequestMeta(map[string][]string{
 		"x-kagent-root-context-id":   {"root-1"},
 		"x-kagent-parent-context-id": {"parent-1"},
+		"x-appa-spawn-binding":       {"fork-1"},
+		"x-kagent-source":            {"agent"},
 	}))
 	created, err := service.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u1", SessionID: "child-1"})
 	if err != nil {
@@ -454,8 +456,9 @@ func TestTheLineageHeadersLandInSessionStateOnGetAndCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the lineage lands on Create: %v", err)
 	}
-	if got := headers.(map[string]any); got["x-kagent-root-context-id"] != "root-1" || got["x-kagent-parent-context-id"] != "parent-1" {
-		t.Fatalf("the python-shaped headers dict: %v", got)
+	want := map[string]any{"x-kagent-root-context-id": "root-1", "x-kagent-parent-context-id": "parent-1", "x-appa-spawn-binding": "fork-1"}
+	if got := headers.(map[string]any); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the python-shaped headers dict: got %v, want %v", got, want)
 	}
 	fetched, err := service.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u1", SessionID: "child-1"})
 	if err != nil {
@@ -472,6 +475,30 @@ func TestTheLineageHeadersLandInSessionStateOnGetAndCreate(t *testing.T) {
 	}
 	if _, err := plain.Session.State().Get("headers"); err == nil {
 		t.Fatal("a request with no lineage leaves the key absent: the entry is a root")
+	}
+}
+
+func TestARequestWithoutLineageReplacesTheHeadersAnEarlierRequestLanded(t *testing.T) {
+	stale := map[string]any{"x-kagent-root-context-id": "root-1", "x-appa-spawn-binding": "fork-1"}
+	service := lineageSessionService{adksession.InMemoryService()}
+	if _, err := service.Create(context.Background(), &adksession.CreateRequest{
+		AppName: "app", UserID: "u1", SessionID: "child-1", State: map[string]any{"headers": stale},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, _ := a2asrv.WithCallContext(context.Background(), a2asrv.NewRequestMeta(map[string][]string{
+		"x-kagent-source": {"agent"},
+	}))
+	fetched, err := service.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u1", SessionID: "child-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers, err := fetched.Session.State().Get("headers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := headers.(map[string]any); len(got) != 0 {
+		t.Fatalf("the entry classifies from its own request only, got %v", got)
 	}
 }
 

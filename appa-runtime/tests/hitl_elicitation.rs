@@ -142,6 +142,8 @@ async fn deployment_from(policy: String) -> Deployment {
         HookEvent::SessionStart {
             root: root.clone(),
             principal: None,
+            address: None,
+            title: None,
         },
     )
     .await;
@@ -265,6 +267,8 @@ builtin = "hitl"
         HookEvent::SessionStart {
             root: root.clone(),
             principal: None,
+            address: None,
+            title: None,
         },
     )
     .await;
@@ -616,6 +620,8 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
         HookEvent::SessionStart {
             root: root.clone(),
             principal: None,
+            address: None,
+            title: None,
         },
     )
     .await;

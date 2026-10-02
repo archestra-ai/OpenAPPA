@@ -116,15 +116,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # Required to update the release manifest and changelog.
-      issues: write # Required to apply Release Please labels.
-      pull-requests: write # Required to create and update the approval PR.
+      contents: read # Required to check out the release PR; the App handles writes.
     steps:
+      # App-authenticated PR creation and pushes start CI without the approval
+      # required for pull_request events generated with GITHUB_TOKEN.
+      - name: Generate release PR token
+        id: release-pr-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
+          private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+          owner: archestra-ai
+          repositories: OpenAPPA
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
       - name: Create or update next release PR
         id: release-pr
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.release-pr-token.outputs.token }}
           config-file: .github/release-please/release-please-config.json
           manifest-file: .github/release-please/.release-please-manifest.json
           target-branch: main
@@ -148,7 +160,7 @@ jobs:
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         env:
           RELEASE_PR: ${{ steps.release-pr.outputs.pr }}
-          RELEASE_PUSH_TOKEN: ${{ github.token }}
+          RELEASE_PUSH_TOKEN: ${{ steps.release-pr-token.outputs.token }}
         run: |
           release_branch=$(jq -er '.headBranchName' <<<"$RELEASE_PR")
           bash scripts/appa-marketplace.sh
@@ -515,3 +527,16 @@ jobs:
         run: |
           gh release edit "$TAG_NAME" --draft=false
           echo "Published release $TAG_NAME."
+
+  update-archestra:
+    name: Propose Archestra runtime update
+    needs: [release-please, publish-release]
+    permissions:
+      contents: read
+      actions: read # Allow the updater to download its prepared Cargo bundle.
+    uses: ./.github/workflows/update-archestra.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.tag_name }}
+      source_commit: ${{ needs.release-please.outputs.source_commit }}
+    secrets:
+      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}

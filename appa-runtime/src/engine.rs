@@ -80,9 +80,9 @@ use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, Remedy
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
-    HistoryEntry, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, SpawnKind};
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -205,14 +205,14 @@ pub enum ExternalEvidence {
     AudienceSource {
         provider: String,
         selector: String,
-        members: Option<Vec<ReaderId>>,
+        members: Result<Vec<ReaderId>, crate::events::NoAnswerClass>,
     },
     MemberLookup {
         provider: String,
         member: String,
-        /// `None`: the consult produced no answer. `Some(None)`: the answering entry
-        /// definitively does not know the member, who keeps its qualified identity.
-        principal: Option<Option<ReaderId>>,
+        /// `Ok(None)`: the answering entry definitively does not know the member, who keeps
+        /// its qualified identity. `Err`: the consult produced no usable answer.
+        principal: Result<Option<ReaderId>, crate::events::NoAnswerClass>,
     },
 }
 
@@ -768,9 +768,6 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
-    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
-    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
-    /// the name written.
     /// Every tool name the policy writes exactly — the spellings the deployment chose, and
     /// so the only ones a report may carry as spelled.
     ///
@@ -793,6 +790,9 @@ impl RuntimeEngine {
             .collect()
     }
 
+    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
+    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
+    /// the name written.
     pub(crate) fn names_tool(&self, tool: &str) -> bool {
         let name = appa_engine::value::ToolName::new(tool);
         self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)
@@ -899,7 +899,6 @@ impl RuntimeEngine {
         open.len() > 1
     }
 
-    /// Which trajectory pursues this offer.
     /// The compiled policy this engine decides under.
     pub(crate) fn registry(&self) -> &appa_engine::registry::Registry {
         self.engine.registry()
@@ -941,6 +940,7 @@ impl RuntimeEngine {
         }
     }
 
+    /// Which trajectory pursues this offer.
     pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
@@ -1065,7 +1065,7 @@ impl RuntimeEngine {
     }
 
     /// The label by name: each dimension as chain names and reader ids.
-    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
+    pub(crate) fn render_label(&self, label: &Label) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
         let trust = if label.trust == Trust::new(u8::MAX) {
             chain
@@ -1339,12 +1339,18 @@ impl RuntimeEngine {
             AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views), presentation)?;
+        let then = self.deliver_proposals(
+            &batch_id(entropy),
+            decision.follow_up,
+            &self.return_bounds(&views),
+            presentation,
+        )?;
         Ok(EngineDecision { append, then })
     }
 
     fn deliver_proposals(
         &self,
+        batch: &ProposalBatchId,
         follow_up: FollowUp,
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
@@ -1359,7 +1365,7 @@ impl RuntimeEngine {
             } => {
                 if let Some(release) = releases.into_iter().next() {
                     return Ok(Next::ModelResponse {
-                        invocations: vec![released(&release)],
+                        invocations: vec![released(batch, &release)],
                         feedback: Vec::new(),
                     });
                 }
@@ -1392,22 +1398,6 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> Feedback {
-        let (text, offers, review, display) = self.rendered_block(block, bounds, presentation);
-        let offers = self.offered_remedies(block, offers);
-        Feedback {
-            text,
-            offers,
-            display,
-            review,
-        }
-    }
-
-    fn rendered_block(
-        &self,
-        block: &CoreBlocked,
-        bounds: &ReturnBounds,
-        presentation: &EmbeddedPresentationOptions,
-    ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
         // Export gap classes, never recipient sets, review text, or call values.
         let gaps: BTreeSet<&str> = block
             .block
@@ -1444,12 +1434,12 @@ impl RuntimeEngine {
             presentation,
         );
         let review = self.pending_reviews(block, &offers);
-        (
-            rendered.text,
-            offers.into_iter().map(|(offer, _)| offer).collect(),
+        Feedback {
+            text: rendered.text,
+            offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
+            display: rendered.display,
             review,
-            rendered.display,
-        )
+        }
     }
 
     fn offered_remedies(&self, block: &CoreBlocked, offers: Vec<OfferId>) -> Vec<OfferedRemedy> {
@@ -1769,10 +1759,7 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
-            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
-            }
-            FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
+            FollowUp::Offer(OfferFollowUp::Denied { block } | OfferFollowUp::Substituted { block }) => {
                 Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
@@ -1863,10 +1850,15 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
-        let (feedback, offers, review, display) = self.rendered_block(block, bounds, presentation);
+        let Feedback {
+            text,
+            offers,
+            display,
+            review,
+        } = self.block_delivery(block, bounds, presentation);
         Presentation::Blocked {
-            feedback,
-            offers: self.offered_remedies(block, offers),
+            feedback: text,
+            offers,
             review,
             display,
         }
@@ -2075,12 +2067,9 @@ impl RuntimeEngine {
         };
         let withheld = UnresolvedAudience::Withheld { subject: "return" };
         let blocked = |feedback: String| {
-            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+            Ok(EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                 feedback,
-                offers: Vec::new(),
-                review: Vec::new(),
-                display: None,
-            })))
+            ))))
         };
         let judged = self.judge_under_audience(view.principal(), evidence, withheld, |audience| {
             let report = ChildReport {
@@ -2401,14 +2390,7 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         withheld: &str,
     ) -> Result<Next, EngineRefusal> {
-        let blocked = || {
-            Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-                review: Vec::new(),
-                display: None,
-            }))
-        };
+        let blocked = || Ok(Next::PresentToModel(blocked_without_offers(withheld.to_string())));
         match request {
             EvidenceRequest::Sanitizer {
                 sanitizer,
@@ -2515,16 +2497,19 @@ impl RuntimeEngine {
                         continue;
                     }
                     match members {
-                        Some(members) => payload.sources.push(SourceClaims {
+                        Ok(members) => payload.sources.push(SourceClaims {
                             provider: provider.clone(),
                             selector: selector.clone(),
                             members: members.clone(),
                         }),
-                        None => {
-                            unanswered.selectors.insert(SelectorSpec {
-                                provider: provider.clone(),
-                                selector: selector.clone(),
-                            });
+                        Err(reason) => {
+                            unanswered.selectors.insert(
+                                SelectorSpec {
+                                    provider: provider.clone(),
+                                    selector: selector.clone(),
+                                },
+                                *reason,
+                            );
                         }
                     }
                 }
@@ -2537,13 +2522,13 @@ impl RuntimeEngine {
                         continue;
                     }
                     match principal {
-                        Some(principal) => payload.lookups.push(MemberLookup {
+                        Ok(principal) => payload.lookups.push(MemberLookup {
                             provider: provider.clone(),
                             member: member.clone(),
                             principal: principal.clone(),
                         }),
-                        None => {
-                            unanswered.members.insert(member.clone());
+                        Err(reason) => {
+                            unanswered.members.insert(member.clone(), *reason);
                         }
                     }
                 }
@@ -2562,25 +2547,17 @@ impl RuntimeEngine {
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
         for owed in audience.member_lookups_owed(&payload) {
-            if unanswered.members.contains(&owed.member) {
+            if let Some(reason) = unanswered.members.get(&owed.member) {
                 // The member is directory data the model has not seen.
-                return Err(AudienceFailure::Refused(format!(
-                    "audience source {} gave no answer for a member lookup",
-                    owed.provider
+                return Err(AudienceFailure::Refused(audience_failure(
+                    &owed.provider,
+                    "a member lookup",
+                    *reason,
                 )));
             }
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
-            let answering = audience
-                .lookup_target(&owed.provider)
-                .unwrap_or(&owed.provider)
-                .to_string();
-            requests.push(ExternalRequest::MemberLookup {
-                provider: owed.provider,
-                member: owed.member,
-                answering,
-                templates,
-            });
+            requests.push(member_lookup(audience, owed.provider, owed.member, templates));
         }
         if !requests.is_empty() {
             return Err(AudienceFailure::Consult(requests));
@@ -2616,10 +2593,11 @@ impl RuntimeEngine {
             if answered {
                 continue;
             }
-            if act.unanswered.selectors.contains(spec) {
-                return Ok(AudienceConsult::Unresolved(format!(
-                    "audience source {} gave no answer for {}",
-                    spec.provider, spec.selector
+            if let Some(reason) = act.unanswered.selectors.get(spec) {
+                return Ok(AudienceConsult::Unresolved(audience_failure(
+                    &spec.provider,
+                    &spec.selector,
+                    *reason,
                 )));
             }
             requests.push(ExternalRequest::AudienceSource {
@@ -2632,23 +2610,20 @@ impl RuntimeEngine {
             if act.payload.lookups.iter().any(|lookup| lookup.member == spec.member) {
                 continue;
             }
-            if act.unanswered.members.contains(&spec.member) {
+            if let Some(reason) = act.unanswered.members.get(&spec.member) {
                 // The member can be a reader a delta wrote that the model never saw.
-                return Ok(AudienceConsult::Unresolved(format!(
-                    "audience source {} gave no answer for a member lookup",
-                    spec.provider
+                return Ok(AudienceConsult::Unresolved(audience_failure(
+                    &spec.provider,
+                    "a member lookup",
+                    *reason,
                 )));
             }
-            let audience = self.engine.registry().audience();
-            requests.push(ExternalRequest::MemberLookup {
-                provider: spec.provider.clone(),
-                member: spec.member.clone(),
-                answering: audience
-                    .lookup_target(&spec.provider)
-                    .unwrap_or(&spec.provider)
-                    .to_string(),
-                templates: self.templates_of(&spec.provider)?,
-            });
+            requests.push(member_lookup(
+                audience,
+                spec.provider.clone(),
+                spec.member.clone(),
+                self.templates_of(&spec.provider)?,
+            ));
         }
         if requests.is_empty() {
             // Every primitive is answered and pre-validated, yet the act still asked.
@@ -2760,7 +2735,51 @@ fn annotation_args(
 }
 
 fn unresolved_audience(tool: &str, detail: &str) -> String {
-    format!("[appa] {tool}: {detail}; the call was not checked — propose it again later")
+    format!("[appa] {tool}: {detail}; the call was not checked")
+}
+
+/// Safe model-visible guidance for one audience consult failure. The class carries no
+/// external response or stderr. In particular, a non-success status says nothing about
+/// retryability.
+fn audience_failure(provider: &str, subject: &str, reason: crate::events::NoAnswerClass) -> String {
+    use crate::events::NoAnswerClass;
+
+    let failure = format!("audience source {provider} gave no answer for {subject}");
+    match reason {
+        NoAnswerClass::Unregistered => {
+            format!("{failure}: no implementation is configured; an operator must repair the deployment configuration")
+        }
+        NoAnswerClass::Unreachable => {
+            format!(
+                "{failure}: its configured implementation cannot be reached; an operator must repair the deployment configuration or environment"
+            )
+        }
+        NoAnswerClass::Timeout => format!("{failure}: the request timed out; retrying later may succeed"),
+        NoAnswerClass::NonSuccess { status } => format!(
+            "{failure}: it returned non-success status {status}; the cause and retryability are unknown, so ask an operator to inspect the runtime diagnostics"
+        ),
+        NoAnswerClass::Transport => format!(
+            "{failure}: the transport failed for an unknown reason; retryability is unknown, so ask an operator to inspect the runtime diagnostics"
+        ),
+        NoAnswerClass::Malformed => {
+            format!(
+                "{failure}: it returned a malformed answer; an operator must repair the audience-source integration"
+            )
+        }
+        NoAnswerClass::Oversized => {
+            format!(
+                "{failure}: its answer exceeded the configured size limit; an operator must repair the audience-source integration"
+            )
+        }
+        NoAnswerClass::UnsupportedVersion => format!(
+            "{failure}: it used an unsupported protocol version; an operator must repair the audience-source integration"
+        ),
+        NoAnswerClass::ModuleError | NoAnswerClass::ModulePanicked => {
+            format!("{failure}: its module failed; an operator must repair the audience-source integration")
+        }
+        #[cfg(feature = "daemon")]
+        NoAnswerClass::Dismissed => format!("{failure}: the request was dismissed; no retryability is known"),
+    }
 }
 
 fn unconfigured_audience(level: ChainAudience) -> String {
@@ -2788,7 +2807,8 @@ struct Resolution(Vec<ExternalRequest>);
 
 enum AudienceConsult {
     Requests(Vec<ExternalRequest>),
-    /// An answer this trajectory did not obtain; proposing again can obtain it.
+    /// An answer this trajectory did not obtain, with safe guidance based on the known
+    /// failure class.
     Unresolved(String),
     /// A built-in level the loaded policy maps to no sources; proposing again cannot
     /// change the answer.
@@ -2802,9 +2822,9 @@ enum AudienceConsult {
 enum UnresolvedAudience<'a> {
     /// The proposed call is denied.
     Denied { tool: &'a str },
-    /// The value — a tool result or a child's return — is withheld and may be retried.
+    /// The value — a tool result or a child's return — is withheld.
     Withheld { subject: &'static str },
-    /// The offer stands and may be executed again.
+    /// The offer stands.
     OfferStands,
 }
 
@@ -2812,17 +2832,10 @@ impl UnresolvedAudience<'_> {
     fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
         match self {
             UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
-            UnresolvedAudience::Withheld { subject } => {
-                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
-                    offers: Vec::new(),
-                    review: Vec::new(),
-                    display: None,
-                }))
-            }
-            UnresolvedAudience::OfferStands => {
-                no_answer(format!("[appa] {detail}; the offer stands and may be executed again"))
-            }
+            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
+            )),
+            UnresolvedAudience::OfferStands => no_answer(format!("[appa] {detail}; the offer stands")),
         }
     }
 
@@ -2835,14 +2848,9 @@ impl UnresolvedAudience<'_> {
                 "[appa] {}: {detail}; the call is denied",
                 naming.model_spelling(tool)
             )),
-            UnresolvedAudience::Withheld { subject } => {
-                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: format!("[appa] {detail}; the {subject} is withheld"),
-                    offers: Vec::new(),
-                    review: Vec::new(),
-                    display: None,
-                }))
-            }
+            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
+            )),
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
@@ -2884,11 +2892,26 @@ pub(crate) fn selector_templates(
     })
 }
 
+fn member_lookup(
+    audience: &appa_engine::audience::AudienceRegistry,
+    provider: String,
+    member: String,
+    templates: Vec<String>,
+) -> ExternalRequest {
+    let answering = audience.lookup_target(&provider).unwrap_or(&provider).to_string();
+    ExternalRequest::MemberLookup {
+        provider,
+        member,
+        answering,
+        templates,
+    }
+}
+
 #[derive(Debug, Default)]
 struct Unanswered {
-    selectors: BTreeSet<SelectorSpec>,
+    selectors: BTreeMap<SelectorSpec, crate::events::NoAnswerClass>,
     /// Qualified members whose lookup produced no answer.
-    members: BTreeSet<String>,
+    members: BTreeMap<String, crate::events::NoAnswerClass>,
 }
 
 fn deny(text: String) -> EngineDecision {
@@ -2907,6 +2930,15 @@ fn deny_next(text: String) -> Next {
     }
 }
 
+fn blocked_without_offers(feedback: String) -> Presentation {
+    Presentation::Blocked {
+        feedback,
+        offers: Vec::new(),
+        review: Vec::new(),
+        display: None,
+    }
+}
+
 fn declined(feedback: String) -> EngineDecision {
     EngineDecision::deliver(Next::PresentToModel(Presentation::Declined { feedback }))
 }
@@ -2919,18 +2951,55 @@ fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
     EngineOfferNonce::new(entropy.0)
 }
 
+/// Fresh entropy, recorded only in the family log. It keys the seal of every spawn binding the
+/// batch releases, so it never leaves the runtime.
 fn batch_id(entropy: &OfferNonce) -> ProposalBatchId {
     ProposalBatchId::new(hex(&entropy.0))
 }
 
-fn fork_binding(fork: &ForkId) -> SpawnBinding {
-    SpawnBinding(serde_json::to_string(fork).expect("a fork id serializes"))
+const BINDING_ENCODING: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+/// The binding a released spawn is handed out under: the fork it names and a seal keyed by the
+/// releasing batch's identity, both base64url. Only the harness the release was delivered to
+/// holds the seal, so a caller who can reproduce the spawn's arguments still cannot name its fork.
+fn fork_binding(batch: &ProposalBatchId, fork: &ForkId) -> SpawnBinding {
+    use hmac::Mac;
+    sealed_binding(fork, &spawn_seal(batch, fork).finalize().into_bytes())
 }
 
-/// Recover the fork one spawn binding names. `None` for a binding
-/// this runtime did not mint.
-pub(crate) fn parse_fork(binding: &SpawnBinding) -> Option<ForkId> {
-    serde_json::from_str(&binding.0).ok()
+pub(crate) fn sealed_binding(fork: &ForkId, seal: &[u8]) -> SpawnBinding {
+    use base64::Engine;
+    let fork = serde_json::to_vec(fork).expect("a fork id serializes");
+    SpawnBinding(format!(
+        "{}.{}",
+        BINDING_ENCODING.encode(fork),
+        BINDING_ENCODING.encode(seal)
+    ))
+}
+
+fn spawn_seal(batch: &ProposalBatchId, fork: &ForkId) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::{KeyInit, Mac};
+    let mut seal =
+        hmac::Hmac::<sha2::Sha256>::new_from_slice(batch.as_str().as_bytes()).expect("HMAC takes a key of any length");
+    seal.update(&serde_json::to_vec(fork).expect("a fork id serializes"));
+    seal
+}
+
+/// Recover the fork one spawn binding names, checking its seal in constant time against the
+/// batch that released the fork in this family's log. `None` for a binding this runtime did not
+/// mint for this family.
+pub(crate) fn parse_fork(log: &Log, binding: &SpawnBinding) -> Option<ForkId> {
+    use base64::Engine;
+    use hmac::Mac;
+    let (fork, seal) = binding.0.split_once('.')?;
+    let fork: ForkId = serde_json::from_slice(&BINDING_ENCODING.decode(fork).ok()?).ok()?;
+    let seal = BINDING_ENCODING.decode(seal).ok()?;
+    let batch = log.facts().iter().find_map(|fact| match fact {
+        Fact::ProposalBatchDecided { batch, released, .. } if released.contains(fork.dispatch()) => Some(batch),
+        _ => None,
+    })?;
+    spawn_seal(batch, &fork).verify_slice(&seal).ok()?;
+    Some(fork)
 }
 
 const RENDERED_OFFER_CHARS: usize = 16;
@@ -2997,11 +3066,11 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
         .collect()
 }
 
-fn released(release: &Released) -> ReleasedCall {
+fn released(batch: &ProposalBatchId, release: &Released) -> ReleasedCall {
     ReleasedCall {
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
-        fork: release.fork.as_ref().map(fork_binding),
+        fork: release.fork.as_ref().map(|fork| fork_binding(batch, fork)),
         dispatch: release.dispatch.clone(),
     }
 }
@@ -3476,7 +3545,7 @@ fn return_instruction(
              tool again with the same arguments. The subagent starts at this session's label, now {floor}. Its floor \
              must cover every narrowing its task needs. Set `trust` to the lowest rank it may read and `audience` to \
              the narrowest audience its data may be confined to. Remove either field from the call when that dimension \
-             should keep its current value.\n    {call}, with \
+             should keep its current value. Returning no final value does not relax this floor.\n    {call}, with \
              <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, \
              or reader ID from the policy; add audience entries as needed"
             )
@@ -3485,29 +3554,38 @@ fn return_instruction(
             let call = remedy_call(
                 control,
                 id,
-                &format!(", label: {floor}, return_schema: {{type: \"object\", ...}}"),
+                ", label: {audience: [\"<audience-entry>\"]}, return_schema: {type: \"object\", ...}",
                 description,
                 include_display_plan,
             );
             format!(
                 "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
+             floor must cover every audience narrowing its task needs, even when the subagent returns no final value. \
+             `attest-schema` unbinds trust by raising the return's trust; it does not widen or unbind audience. Set \
+             `audience` to the narrowest audience its data may be confined to, and omit `trust` because this sanitizer \
+             already unbinds it. The \
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
              `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
-             label.\n    {call}"
+             label.\n    {call}, with each <audience-entry> a built-in audience, configured group, or reader ID \
+             from the policy; add audience entries as needed"
             )
         }
         Some(name) => {
             let call = remedy_call(
                 control,
                 id,
-                &format!(", label: {floor}"),
+                ", label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}",
                 description,
                 include_display_plan,
             );
             format!(
                 "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor.\n    {call}",
+             floor. The floor must cover every narrowing its task needs on dimensions the sanitizer does not raise, even \
+             when the subagent returns no final value. Set every bound dimension low enough for the data the subagent \
+             must read.\n    {call}, with <rank> one of {ranks} (lowest first), and each \
+             <audience-entry> a built-in audience, configured group, or reader ID from the policy; add audience entries \
+             as needed",
                 terminal_safe(name.as_str()),
             )
         }
@@ -3833,14 +3911,18 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     } else {
         "this call and all work that uses its result"
     };
+    let declare_floor = "When the spawn asks for a return declaration, choose a floor and sanitizer whose combined \
+                         route permits every narrowing the delegated work needs. A sanitizer unbinds only the dimension \
+                         it raises. Returning nothing controls what crosses back; it does not relax what the child may \
+                         read or accept under that route.";
     match (standing, sanitized_return) {
         (FloorStanding::Unbound, true) => format!(
-            "If a child-session or subagent tool is available, delegate {delegated} there.\nFinish there \
-             by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
-             change to this session."
+            "If a child-session or subagent tool is available, delegate {delegated} there.\n{declare_floor}\nFinish \
+             there by returning nothing, or choose a registered return sanitizer whose declared permit covers the \
+             narrowed dimensions. Returning the raw value applies the same change to this session."
         ),
         (FloorStanding::Unbound, false) => format!(
-            "If a child-session or subagent tool is available, delegate {delegated} there.\nNo \
+            "If a child-session or subagent tool is available, delegate {delegated} there.\n{declare_floor}\nNo \
              registered return sanitizer carries this change back without applying it here, so finish there by \
              returning nothing: a returned value applies the same change to this session."
         ),
@@ -3879,7 +3961,8 @@ mod tests {
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
         Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
-        audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines, terminal_safe,
+        audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines,
+        terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
@@ -3891,6 +3974,35 @@ mod tests {
     use appa_engine::names::{AnnotatorName, MarkName, SanitizerName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
+
+    #[test]
+    fn audience_failure_guidance_distinguishes_repair_retry_and_unknown() {
+        use crate::events::NoAnswerClass;
+
+        let unregistered = audience_failure("slack", "channel/eng", NoAnswerClass::Unregistered);
+        assert!(unregistered.contains("operator must repair the deployment configuration"));
+        assert!(!unregistered.contains("retrying"));
+
+        let timeout = audience_failure("slack", "channel/eng", NoAnswerClass::Timeout);
+        assert!(timeout.contains("timed out; retrying later may succeed"));
+
+        let failed = audience_failure("slack", "channel/eng", NoAnswerClass::NonSuccess { status: 7 });
+        assert!(failed.contains("non-success status 7"));
+        assert!(failed.contains("cause and retryability are unknown"));
+        assert!(!failed.contains("propose it again"));
+    }
+
+    #[test]
+    fn audience_failure_feedback_contains_only_the_safe_classification() {
+        let detail = audience_failure("slack", "a member lookup", crate::events::NoAnswerClass::Transport);
+        let feedback = unresolved_audience("SlackSend", &detail);
+
+        assert_eq!(
+            feedback,
+            "[appa] SlackSend: audience source slack gave no answer for a member lookup: the transport failed for an unknown reason; retryability is unknown, so ask an operator to inspect the runtime diagnostics; the call was not checked"
+        );
+        assert!(!feedback.contains("propose it again later"));
+    }
 
     #[test]
     fn a_parent_floor_restricts_raw_results_not_offered_output_sanitizers() {

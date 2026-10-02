@@ -24,7 +24,7 @@ class Remote:
 async def test_parallel_and_sequential_calls_get_distinct_child_ids():
     original = Remote()
     tool = IsolatedRemoteTool(original)
-    context = SimpleNamespace(tool_confirmation=None)
+    context = SimpleNamespace(tool_confirmation=None, function_call_id="fc-1")
     first, second = await asyncio.gather(
         *[tool.run_async(args={"request": str(i)}, tool_context=context) for i in range(2)]
     )
@@ -51,7 +51,9 @@ async def test_non_task_results_never_claim_a_child_identity(result):
             return result
 
     tool = IsolatedRemoteTool(MessageRemote())
-    actual = await tool.run_async(args={}, tool_context=SimpleNamespace(tool_confirmation=None))
+    actual = await tool.run_async(
+        args={}, tool_context=SimpleNamespace(tool_confirmation=None, function_call_id="fc-1")
+    )
     assert actual == result
 
 

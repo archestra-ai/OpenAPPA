@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use super::client;
 use super::report::{Finished, Origin, Report, ReportId, UnreachableClass, YellMessage};
-use super::{Author, Mode};
+use super::{Author, Mode, OmittedReason};
 
 /// How long the runtime gets to build a report. Longer than a hook's budget: a long session's
 /// facts are stripped, serialized and gzipped before the answer comes back.
@@ -24,9 +24,10 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
 const ASK: &str = "?";
 const TICK: &str = "✓";
 const CROSS: &str = "✗";
+const WARN: &str = "!";
 
 /// Run one yell to completion.
-pub fn run(url: &str, yes: bool, message: Vec<String>) -> ExitCode {
+pub fn run(url: &str, yes: bool, trajectory: Option<String>, message: Vec<String>) -> ExitCode {
     // Before anything is asked: a build with nowhere to send to has nothing to ask about.
     let Some((receiver, source)) = client::Receiver::resolve() else {
         return fail(&client::SendFailure::NoReceiver);
@@ -43,18 +44,19 @@ pub fn run(url: &str, yes: bool, message: Vec<String>) -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return fail(&format!("no async runtime: {error}")),
     };
-    runtime.block_on(yell(url, yes, message, mode, receiver, source))
+    runtime.block_on(yell(url, yes, trajectory.as_deref(), message, mode, receiver, source))
 }
 
 async fn yell(
     url: &str,
     yes: bool,
+    trajectory: Option<&str>,
     message: YellMessage,
     mode: Mode,
     receiver: client::Receiver,
     source: client::Source,
 ) -> ExitCode {
-    let finished = match build(url, &message, mode).await {
+    let finished = match build(url, trajectory, &message, mode).await {
         Ok(finished) => finished,
         Err(class) => match local(message, mode, class) {
             Ok(finished) => finished,
@@ -68,6 +70,12 @@ async fn yell(
     let path = written.path.display();
     println!();
     println!("{TICK} Report written to {path}");
+    if let Some(warning) = omission_warning(&written.finished) {
+        println!("{WARN} {warning}");
+        if yes {
+            println!("  --yes is set, so this incomplete report will still be sent.");
+        }
+    }
     println!();
     let destination = destination(source);
     match yes {
@@ -129,7 +137,12 @@ fn fail(error: &impl std::fmt::Display) -> ExitCode {
 /// loopback literal, checked here rather than resolved; no proxy is consulted, whatever the
 /// environment says; and a redirect is not followed, because a redirect is another
 /// destination.
-async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished, UnreachableClass> {
+async fn build(
+    url: &str,
+    trajectory: Option<&str>,
+    message: &YellMessage,
+    mode: Mode,
+) -> Result<Finished, UnreachableClass> {
     let endpoint = runtime_report_url(url).ok_or(UnreachableClass::NotLoopback)?;
     // `reqwest` refuses to build any client until a provider is installed, TLS or not.
     crate::tls::install_crypto_provider();
@@ -144,6 +157,7 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         .json(&serde_json::json!({
             "message": message,
             "pseudonymize": mode == Mode::Pseudonymized,
+            "trajectory": trajectory,
         }))
         .send()
         .await
@@ -171,6 +185,40 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         .ok()
         .filter(|finished| is_a_report(&finished.plain))
         .ok_or(UnreachableClass::NotARuntime)
+}
+
+/// What the person needs to know before approving a report with missing diagnostic evidence.
+/// Delivery and collection are separate outcomes: a receiver can successfully accept a
+/// report that contains no trajectory.
+fn omission_warning(finished: &Finished) -> Option<&'static str> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        trajectory: TrajectoryProbe,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TrajectoryProbe {
+        omitted_reason: Option<OmittedReason>,
+    }
+
+    let reason = serde_json::from_slice::<Probe>(&finished.plain)
+        .ok()?
+        .trajectory
+        .omitted_reason?;
+    Some(match reason {
+        OmittedReason::Ambiguous => {
+            "Diagnostic collection is incomplete: trajectory evidence is missing because more than one family was recently active. \
+             Nothing was guessed. Rerun with the intended harness session's family root, for example --trajectory cc:<session-id>."
+        }
+        OmittedReason::NoRecentTrajectory => {
+            "Diagnostic collection is incomplete: no matching trajectory was recently active."
+        }
+        OmittedReason::LogUnavailable => {
+            "Diagnostic collection is incomplete: the runtime could not read the selected trajectory log."
+        }
+        OmittedReason::RuntimeUnavailable => "Diagnostic collection is incomplete: the runtime could not be reached.",
+        OmittedReason::NotRequested => "Diagnostic collection is incomplete: trajectory evidence was not requested.",
+    })
 }
 
 /// Whether the answer claims to be the document this build knows how to send.
@@ -342,7 +390,7 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
         let url = format!("http://{addr}");
-        let refusal = build(&url, &message, Mode::Baseline)
+        let refusal = build(&url, None, &message, Mode::Baseline)
             .await
             .expect_err("nothing is listening on closed port");
         assert_eq!(refusal, UnreachableClass::NotListening);
@@ -360,5 +408,33 @@ mod tests {
         assert!(!is_a_report(br#"{"schema":"openappa.yell.v2"}"#));
         assert!(!is_a_report(b"{}"));
         assert!(!is_a_report(b"<html>not a runtime</html>"));
+    }
+
+    #[test]
+    fn every_omitted_trajectory_is_visible_before_sharing() {
+        for (reason, expected) in [
+            ("ambiguous", "more than one family"),
+            ("no_recent_trajectory", "no matching trajectory"),
+            ("log_unavailable", "could not read"),
+            ("runtime_unavailable", "could not be reached"),
+            ("not_requested", "not requested"),
+        ] {
+            let finished = Finished::of(
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": super::super::report::SCHEMA,
+                    "trajectory": { "omitted_reason": reason },
+                }))
+                .expect("the fixture serializes"),
+            )
+            .expect("the fixture fits");
+            assert!(
+                omission_warning(&finished).is_some_and(|warning| warning.contains(expected)),
+                "{reason} gets an actionable warning"
+            );
+        }
+
+        let complete = Finished::of(br#"{"schema":"openappa.yell.v1","trajectory":{"facts":[]}}"#.to_vec())
+            .expect("the fixture fits");
+        assert_eq!(omission_warning(&complete), None);
     }
 }

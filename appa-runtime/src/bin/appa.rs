@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::{env, ffi::OsString, iter};
 
 use appa_runtime_api::AdapterName;
@@ -51,6 +52,11 @@ enum Command {
     Battery {
         #[command(subcommand)]
         command: PackageCommand,
+    },
+    /// Manage tracked files and workspace state.
+    Files {
+        #[command(subcommand)]
+        command: FilesCommand,
     },
     /// Export a locked deployment and its artifacts for offline installation.
     Bundle(appa_runtime::installation::cli::Bundle),
@@ -115,6 +121,11 @@ enum Command {
         /// Answer both questions with yes: pseudonymize the report, and send it.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+
+        /// Select the intended recently active family on this machine by its root ID. For
+        /// Claude Code, use `cc:<session-id>`. Confirm the ID belongs to the intended session.
+        #[arg(long)]
+        trajectory: Option<String>,
 
         /// What went wrong. Read from stdin when absent.
         message: Vec<String>,
@@ -209,6 +220,113 @@ enum PluginCommand {
     Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
+#[derive(Subcommand)]
+enum FilesCommand {
+    /// Repair a pending file operation from its recorded request and disk state.
+    #[command(
+        after_help = "Caution: Stop all processes writing to the workspace before running this command.\n\nCompares the disk state with the pending operation. If the disk reflects an expected result, the command records the file version under the request's bound Label without marking the operation successful. If the disk is incompatible with the recorded operation, the command fails and keeps the workspace reservation."
+    )]
+    Repair {
+        /// Path to the tracked workspace.
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Installed deployment data directory; uses the platform default when absent.
+        #[arg(long, env = "APPA_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Assign the configured initial Label to selected tracked files.
+    #[command(
+        after_help = "Caution: Relabelling overrides security state. This command records the current contents of each selected file under the configured initial Label.\n\nPrecondition: All pending file operations must be resolved before running this command."
+    )]
+    Relabel {
+        /// Path to the tracked workspace.
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Installed deployment data directory; uses the platform default when absent.
+        #[arg(long, env = "APPA_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+
+        /// Paths to tracked files to record under the initial Label.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+}
+
+fn file_store(data_dir: Option<PathBuf>) -> Result<Arc<appa_eventlog::LogStore>, String> {
+    appa_runtime::runtime_start::Deployment::installed(None, data_dir)
+        .map_err(|error| error.to_string())
+        .and_then(|deployment| {
+            appa_eventlog::LogStore::open(appa_eventlog::Backend::Sqlite {
+                path: deployment.data_dir.join("appa.db"),
+            })
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+        })
+}
+
+fn repair_files(workspace: PathBuf, data_dir: Option<PathBuf>) -> ExitCode {
+    let result = file_store(data_dir).and_then(|store| {
+        appa_eventlog::files::FileStore::repair_workspace(store, &workspace).map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(appa_eventlog::files::RepairOutcome::Released) => {
+            println!(
+                "Released unchanged file reservation for workspace: {}",
+                workspace.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Repaired) => {
+            println!("Repaired pending file operation in workspace: {}", workspace.display());
+            ExitCode::SUCCESS
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Quarantined) => {
+            eprintln!("appa files repair: disk state matches neither the pre-execution state nor an expected result");
+            ExitCode::FAILURE
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Absent) => unreachable!("workspace repair requires a reservation"),
+        Err(error) => {
+            eprintln!("appa files repair: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn relabel_files(workspace: PathBuf, data_dir: Option<PathBuf>, paths: Vec<PathBuf>) -> ExitCode {
+    let result = file_store(data_dir).and_then(|store| {
+        appa_eventlog::files::FileStore::relabel_workspace(store, &workspace, &paths).map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(()) => {
+            println!(
+                "Relabelled selected files with the initial Label in workspace: {}",
+                workspace.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("appa files relabel: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn claude_exit<T>(outcome: Result<T, appa_runtime::init::InitError>) -> ExitCode {
+    match outcome {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("appa: {error}");
+            match error {
+                appa_runtime::init::InitError::Recovery { .. } => ExitCode::from(3),
+                _ => ExitCode::FAILURE,
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("runtime")) {
         let args = iter::once(OsString::from("appa runtime")).chain(env::args_os().skip(2));
@@ -247,17 +365,7 @@ fn main() -> ExitCode {
             command: PackageCommand::Status(args),
         } => appa_runtime::ui::status(args),
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
-        Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                if matches!(error, appa_runtime::init::InitError::Recovery { .. }) {
-                    ExitCode::from(3)
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
-        },
+        Command::ActivateClaude { config } => claude_exit(appa_runtime::init::activate_claude_code(&config)),
         Command::Plugin {
             command: PluginCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),
@@ -267,13 +375,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::RemoveClaude { config: _ } => claude_exit(appa_runtime::init::claude_code_remove()),
         Command::Battery {
             command: PackageCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Battery, args),
@@ -283,6 +385,17 @@ fn main() -> ExitCode {
         Command::Battery {
             command: PackageCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_battery(args),
+        Command::Files {
+            command: FilesCommand::Repair { workspace, data_dir },
+        } => repair_files(workspace, data_dir),
+        Command::Files {
+            command:
+                FilesCommand::Relabel {
+                    workspace,
+                    data_dir,
+                    paths,
+                },
+        } => relabel_files(workspace, data_dir, paths),
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
         Command::FileMcp(args) => appa_runtime::claude_files::serve(args),
@@ -317,7 +430,12 @@ fn main() -> ExitCode {
             arguments,
         } => appa_runtime::protected_launch::launch(&settings, &data_dir, &arguments),
         Command::RecordLaunch { data_dir, event } => appa_runtime::protected_launch::record(&data_dir, event),
-        Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
+        Command::Yell {
+            url,
+            yes,
+            trajectory,
+            message,
+        } => appa_runtime::yell::cli::run(&url, yes, trajectory, message),
         Command::Replay {
             config,
             modules_dir,
@@ -340,7 +458,7 @@ fn main() -> ExitCode {
             } else {
                 batteries_dir
             };
-            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str(), &session_tools);
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter, &session_tools);
             print!("{}", description.text);
             match appa_runtime::ui::describe_readiness(&config, &batteries_dir) {
                 Ok(readiness) => print!("{readiness}"),

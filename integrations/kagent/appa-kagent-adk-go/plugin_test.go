@@ -431,16 +431,28 @@ func TestADelegatedEntryClassifiesAsTheChildsStart(t *testing.T) {
 	sess := newFakeSession("child-ctx").withHeaders(map[string]any{
 		"x-kagent-source":          "agent",
 		"x-kagent-root-context-id": "root-ctx",
+		SpawnBindingHeader:         "binding-root-ctx",
 	})
 	if _, err := p.onUserMessage(newFakeContext(sess), textContent("total the invoices")); err != nil {
 		t.Fatalf("the delegated entry must pass: %v", err)
 	}
 	want := []map[string]any{
-		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx", "spawn_binding": "binding-root-ctx"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-ctx", "child_id": "child-ctx", "text": "total the invoices"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the delegated opening drifted: got %v, want %v", got, want)
+	}
+}
+
+func TestADelegatedEntryWithoutASpawnBindingOpensNoChild(t *testing.T) {
+	h := newHook(t)
+	p := pluginOver(t, h)
+	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-ctx"})
+	_, err := p.onUserMessage(newFakeContext(sess), textContent("total the invoices"))
+	mustFailClosed(t, err, "the unbound delegated entry")
+	if got := h.recorded(); len(got) != 0 {
+		t.Errorf("an unbound delegated entry sends nothing, got %v", got)
 	}
 }
 
@@ -457,7 +469,7 @@ func TestAnOpenedInvocationKeepsItsIdsWhenTheHeadersChangeMidRun(t *testing.T) {
 	if _, err := p.beforeTool(strict(newFakeContext(sess)), &fakeTool{"k8s_get_pods"}, map[string]any{}); err != nil {
 		t.Fatalf("the first call must pass: %v", err)
 	}
-	sess.withHeaders(map[string]any{rootHeader: "root-ctx"})
+	sess.withHeaders(map[string]any{rootHeader: "root-ctx", SpawnBindingHeader: "binding-root-ctx"})
 	if _, err := p.beforeTool(strict(newFakeContext(sess)), &fakeTool{"k8s_get_pods"}, map[string]any{}); err != nil {
 		t.Fatalf("the second call must pass: %v", err)
 	}
@@ -486,7 +498,7 @@ func TestAnOpenedInvocationKeepsItsIdsWhenTheHeadersChangeMidRun(t *testing.T) {
 func TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot(t *testing.T) {
 	h := newHook(t, ack, ack, allow, ack, ack, ack, allow, ack)
 	p := pluginOver(t, h)
-	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1"})
+	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	if _, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices")); err != nil {
 		t.Fatalf("the first parent's delegation must pass: %v", err)
 	}
@@ -496,7 +508,7 @@ func TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot(t *testing.T) {
 	p.afterRun(newFakeContext(sess).forInvocation("i1"))
 	// The child session now carries content, and the next parent's
 	// headers land before its run.
-	sess.withContentEvent("total the invoices").withHeaders(map[string]any{rootHeader: "root-2"})
+	sess.withContentEvent("total the invoices").withHeaders(map[string]any{rootHeader: "root-2", SpawnBindingHeader: "binding-root-2"})
 	if _, err := p.onUserMessage(newFakeContext(sess).forInvocation("i2"), textContent("list the pods")); err != nil {
 		t.Fatalf("the second parent's delegation must pass: %v", err)
 	}
@@ -505,11 +517,11 @@ func TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot(t *testing.T) {
 	}
 	p.afterRun(newFakeContext(sess).forInvocation("i2"))
 	want := []map[string]any{
-		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx", "spawn_binding": "binding-root-1"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-1", "child_id": "child-ctx", "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger", "arguments": map[string]any{}},
 		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
-		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx", "spawn_binding": "binding-root-2"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-2", "child_id": "child-ctx", "text": "list the pods"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-2", "child_id": "child-ctx", "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods", "arguments": map[string]any{}},
 		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
@@ -526,16 +538,16 @@ func TestTheSameParentSendsNoSecondChildStart(t *testing.T) {
 	// gets back.
 	h := newHook(t, ack, ack, ack)
 	p := pluginOver(t, h)
-	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1"})
+	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	if _, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices")); err != nil {
 		t.Fatalf("the first delegation must pass: %v", err)
 	}
-	sess.withContentEvent("total the invoices").withHeaders(map[string]any{rootHeader: "root-1"})
+	sess.withContentEvent("total the invoices").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	if _, err := p.onUserMessage(newFakeContext(sess).forInvocation("i2"), textContent("now the refunds")); err != nil {
 		t.Fatalf("the second delegation must pass: %v", err)
 	}
 	want := []map[string]any{
-		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx", "spawn_binding": "binding-root-1"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "now the refunds"},
 	}
@@ -550,7 +562,7 @@ func TestARefusedChildStartFailsClosedAndTheNextEntryOpensAgain(t *testing.T) {
 	// next entry.
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ack, ack)
 	p := pluginOver(t, h)
-	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1"})
+	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	_, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices"))
 	failure := mustFailClosed(t, err, "the refused child start")
 	if failure.Reason != "appa refused the session: storage failure" {
@@ -1365,7 +1377,7 @@ func TestATurnEndReportsAndNeverBlocks(t *testing.T) {
 func TestADelegatedChildsTurnEndCarriesItsChildID(t *testing.T) {
 	h := newHook(t, ack)
 	p := pluginOver(t, h)
-	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-ctx"})
+	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-ctx", SpawnBindingHeader: "binding-root-ctx"})
 	p.afterRun(newFakeContext(sess))
 	want := []map[string]any{{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-ctx", "child_id": "child-ctx"}}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
@@ -1646,7 +1658,7 @@ func TestARefuseAnswerFailsEveryGatedCallbackClosed(t *testing.T) {
 // The value of the child crosses there and nowhere else.
 
 func delegatedChild(root string) *fakeSession {
-	return newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: root})
+	return newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: root, SpawnBindingHeader: "binding-" + root})
 }
 
 // spoke is one model response that carries a final message.
@@ -2273,7 +2285,7 @@ func TestTheReturnContractRidesTheFirstUserMessageOfAChild(t *testing.T) {
 		t.Errorf("the contract goes in front, and the request the parent sent stands unchanged, got %v", message.Parts)
 	}
 	want := []map[string]any{
-		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx", "spawn_binding": "binding-root-1"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
 	}
 	if got := gated(h); !reflect.DeepEqual(got, want) {
@@ -2361,7 +2373,7 @@ func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 		AppName:   "kagent",
 		UserID:    "op",
 		SessionID: "child-ctx",
-		State:     map[string]any{headersStateKey: map[string]any{rootHeader: "root-1"}},
+		State:     map[string]any{headersStateKey: map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"}},
 	})
 	if err != nil {
 		t.Fatalf("the child session must be created: %v", err)
@@ -2562,7 +2574,7 @@ func TestAToolsetCannotTakeTheGatesSlotInARealRunner(t *testing.T) {
 		AppName:   "kagent",
 		UserID:    "op",
 		SessionID: "child-ctx",
-		State:     map[string]any{headersStateKey: map[string]any{rootHeader: "root-1"}},
+		State:     map[string]any{headersStateKey: map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"}},
 	})
 	if err != nil {
 		t.Fatalf("the child session must be created: %v", err)

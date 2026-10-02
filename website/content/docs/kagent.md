@@ -42,7 +42,7 @@ export OPENAI_API_KEY="your-api-key"
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.30.0 # x-release-please-version
+APPA_VERSION=0.31.1 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -169,6 +169,8 @@ Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me i
 
 The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked up front.
 
+Each delegation is bound to the spawn the parent's gate released. The parent's plugin forwards that spawn's binding in the `x-appa-spawn-binding` A2A header. The subagent's plugin opens the child trajectory on that spawn only. A delegated request without a binding is refused before the subagent runs. The binding is a per-delegation secret: the runtime seals it to that one release, so a caller who reproduces the delegation cannot forge it. The request carries it as a bearer token, so keep a gated agent's A2A traffic inside the cluster.
+
 #### 5. Dynamic input rules
 
 Compare how OpenAPPA evaluates the same tool dynamically based on its arguments:
@@ -198,7 +200,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.30.0 # x-release-please-version
+APPA_VERSION=0.31.1 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa

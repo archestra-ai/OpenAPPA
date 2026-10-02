@@ -166,6 +166,11 @@ const (
 	remedyTimeout = 300 * time.Second
 )
 
+// SpawnBindingHeader carries the spawn binding of the parent's released
+// spawn to the child pod. The child binds to that spawn only, so a
+// delegated entry without it opens no child.
+const SpawnBindingHeader = "x-appa-spawn-binding"
+
 // FailClosedError reports that the runtime blocked, refused, or could
 // not answer. The gated action stops.
 type FailClosedError struct {
@@ -675,6 +680,13 @@ func classify(sess session.Session) trajectoryIDs {
 }
 
 func lineageRoot(sess session.Session) string {
+	if root := lineageHeader(sess, rootHeader); root != "" {
+		return root
+	}
+	return lineageHeader(sess, parentHeader)
+}
+
+func lineageHeader(sess session.Session, name string) string {
 	value, err := sess.State().Get(headersStateKey)
 	if err != nil {
 		return ""
@@ -682,21 +694,15 @@ func lineageRoot(sess session.Session) string {
 	// Session state round-trips through JSON, so the header dict
 	// arrives as map[string]any; a runtime handing the native go map
 	// classifies the same.
-	header := func(name string) string {
-		switch headers := value.(type) {
-		case map[string]any:
-			if text, ok := headers[name].(string); ok {
-				return text
-			}
-		case map[string]string:
-			return headers[name]
+	switch headers := value.(type) {
+	case map[string]any:
+		if text, ok := headers[name].(string); ok {
+			return text
 		}
-		return ""
+	case map[string]string:
+		return headers[name]
 	}
-	if root := header(rootHeader); root != "" {
-		return root
-	}
-	return header(parentHeader)
+	return ""
 }
 
 // isFresh reports whether no content has crossed this session yet.
@@ -826,7 +832,9 @@ func localChildID(invocationID, agentName string) string {
 // it. A delegated entry opens with child_start while this plugin
 // instance has not opened its (root, child) pair: the child session id
 // can be shared by every parent that delegates into this pod, so the
-// pair, not the session, decides.
+// pair, not the session, decides. The child_start carries the spawn
+// binding the parent forwarded, so the child binds to the spawn its
+// parent released and no other; an entry without one fails closed.
 //
 // A re-entry of an opened pair sends no child_start. That re-entry is a
 // second delegation from the same parent into the same child context.
@@ -836,31 +844,35 @@ func localChildID(invocationID, agentName string) string {
 // tool calls, and the parent's return comes back withheld with "the
 // spawn did not take". The log line tells that case from a child opened
 // under another parent's root, which opens with its own child_start.
-func (p *AppaPluginKagent) opening(sess session.Session, ids trajectoryIDs) map[string]any {
+func (p *AppaPluginKagent) opening(sess session.Session, ids trajectoryIDs) (map[string]any, error) {
 	if ids.childID != "" {
 		if p.isOpened(ids) {
 			log.Printf("appa: child %s re-enters under root %s with its pair already open; no child_start is sent. "+
 				"A re-entry after the child's return runs in the ended child trajectory: the runtime refuses its "+
 				"tool calls, and the parent's return comes back withheld", ids.childID, ids.rootID)
-			return nil
+			return nil, nil
+		}
+		binding := lineageHeader(sess, SpawnBindingHeader)
+		if binding == "" {
+			return nil, failClosed("the delegated entry under root %s carries no spawn binding", ids.rootID)
 		}
 		log.Printf("appa: child %s opens under root %s", ids.childID, ids.rootID)
-		return childStartEvent(ids.rootID, ids.childID, "")
+		return childStartEvent(ids.rootID, ids.childID, binding), nil
 	}
 	if isFresh(sess) {
 		log.Printf("appa: trajectory %s opens as a root", ids.rootID)
-		return sessionStartEvent(ids.rootID)
+		return sessionStartEvent(ids.rootID), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // openScope sends the opening event the emitting scope needs and
 // returns the return contract a fork answered with, if any. An empty
 // contract is a scope that works under no words of its own.
 func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, ids trajectoryIDs) (string, error) {
-	opening := p.opening(sess, ids)
-	if opening == nil {
-		return "", nil
+	opening, err := p.opening(sess, ids)
+	if err != nil || opening == nil {
+		return "", err
 	}
 	if p.discovery != nil {
 		if invocation, ok := ctx.(interface{ InvocationID() string }); ok {
@@ -1350,6 +1362,9 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	}
 	switch decision.Kind {
 	case "allow_call", "pass_control":
+		if remote, ok := t.(*remoteApprovalTool); ok && decision.SpawnBinding != "" {
+			remote.release(ctx.FunctionCallID(), decision.SpawnBinding)
+		}
 		return nil, nil
 	case "deny_call":
 		p.rememberReviews(ctx.InvocationID(), decision.Review)

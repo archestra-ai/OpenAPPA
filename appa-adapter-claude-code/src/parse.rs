@@ -10,7 +10,7 @@
 //! | `UserPromptSubmit` | `Prompt` |
 //! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
 //! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult`, naming the subagent (`agentId`) and carrying its message (`content`) where the response has them |
-//! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
+//! | `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
 //! | `Stop`, `StopFailure` | `TurnEnd` for the actor that finished |
@@ -66,6 +66,7 @@
 //! | observation | `ToolOutcome` |
 //! |---|---|
 //! | `PostToolUseFailure` | `Failure` — the run failed; no effects commit |
+//! | `PermissionDenied` | `Failure` — auto mode's classifier refused a released call, so it never ran |
 //! | `PostToolUse` with a `tool_response` | `Success` carrying that response's JSON rendering |
 //! | `PostToolUse` with no `tool_response` (absent or null — the wire spells them alike) | `Indeterminate` — no effects commit, the reservation stands |
 //! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd`, or the next `Prompt` when the turn was interrupted and sent no `Stop`, closes it as not run |
@@ -78,8 +79,8 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, HookEvent, OutcomeBody, ParseRefusal, PromptKey, ProposedCall, SpawnKind, SpawnRef, ToolOutcome,
-    TrajectoryId,
+    Actor, HookEvent, OutcomeBody, ParseRefusal, PeerFrame, PromptKey, ProposedCall, SessionTitle, SpawnKind, SpawnRef,
+    ToolOutcome, TrajectoryId,
 };
 
 use crate::identity::spawn_kind;
@@ -116,6 +117,9 @@ pub(crate) struct WireEvent {
     /// carry the id of the prompt its `Workflow` call was made under.
     #[serde(default)]
     prompt_id: Option<String>,
+    /// The title Claude Code shows for the session.
+    #[serde(default)]
+    session_title: Option<String>,
 }
 
 /// The `agent_type` of an agent a `Workflow` script started.
@@ -250,12 +254,16 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         "SessionStart" => Ok(Some(HookEvent::SessionStart {
             root: event.root(),
             principal: None,
+            address: None,
+            title: session_title(&event),
         })),
         "UserPromptSubmit" => match event.prompt.clone() {
             Some(text) => Ok(Some(HookEvent::Prompt {
                 actor: event.actor(),
                 settles: settled_call(&text),
+                peer: peer_frame(&text),
                 text,
+                title: session_title(&event),
             })),
             None => Err(malformed("UserPromptSubmit without a prompt")),
         },
@@ -327,6 +335,18 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             })),
             None => Err(malformed("a tool outcome without its tool call")),
         },
+        // Auto mode's classifier refused a call the hooks released: the call never ran.
+        "PermissionDenied" => match event.call() {
+            Some(call) => Ok(Some(HookEvent::ToolResult {
+                actor: event.actor(),
+                call,
+                call_id: event.tool_use_id.clone(),
+                outcome: ToolOutcome::Failure {
+                    message: "Claude Code's auto mode denied the call".to_string(),
+                },
+            })),
+            None => Err(malformed("a permission denial without its tool call")),
+        },
         "SubagentStart" => match (event.agent(), event.workflow_agent(), event.prompt_key()) {
             (None, _, _) => Err(malformed("SubagentStart without an agent id")),
             (Some(_), true, None) => Err(malformed("a Workflow agent's SubagentStart without its prompt_id")),
@@ -374,6 +394,46 @@ fn settled_call(prompt: &str) -> Option<String> {
     let (_, rest) = notice.split_once("<tool-use-id>")?;
     let (call, _) = rest.split_once("</tool-use-id>")?;
     non_empty(Some(call.trim())).map(str::to_string)
+}
+
+fn session_title(event: &WireEvent) -> Option<SessionTitle> {
+    non_empty(event.session_title.as_deref()).and_then(|title| SessionTitle::parse(title).ok())
+}
+
+const PEER_OPEN: &str = "<cross-session-message";
+const PEER_CLOSE: &str = "\n</cross-session-message>";
+
+/// The frame another session's message arrives in. Claude Code delivers it as a prompt that
+/// is exactly `<cross-session-message from="…" …>\n<body>\n</cross-session-message>`. A prompt
+/// opening with the tag is a peer frame whatever follows, so one this reading cannot take
+/// apart is `Malformed` rather than a person's prompt; a prompt that does not open with the
+/// tag, leading whitespace included, is none.
+fn peer_frame(prompt: &str) -> Option<PeerFrame> {
+    let framed = prompt.strip_prefix(PEER_OPEN)?;
+    Some(parsed_peer_frame(framed).unwrap_or(PeerFrame::Malformed))
+}
+
+/// The opening tag's attributes (`name="value"`, whitespace-separated), then `>` and one `\n`;
+/// the body is everything up to the closing line that ends the prompt. The attributes are
+/// skipped: any process can write them, so none of them says who sent the body.
+fn parsed_peer_frame(framed: &str) -> Option<PeerFrame> {
+    let mut rest = framed;
+    let body = loop {
+        let spaced = rest.trim_start_matches([' ', '\t']);
+        if let Some(after) = spaced.strip_prefix(">\n") {
+            break after.strip_suffix(PEER_CLOSE)?;
+        }
+        if spaced.len() == rest.len() {
+            return None;
+        }
+        let (name, value) = spaced.split_once("=\"")?;
+        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+            return None;
+        }
+        let (_, after) = value.split_once('"')?;
+        rest = after;
+    };
+    Some(PeerFrame::Parsed { body: body.to_string() })
 }
 
 pub(crate) fn map_outcome(response: Option<&serde_json::Value>) -> ToolOutcome {
@@ -653,6 +713,8 @@ mod tests {
                 },
                 text: "work".to_string(),
                 settles: None,
+                peer: None,
+                title: None,
             })),
         );
     }
@@ -889,6 +951,27 @@ mod tests {
     }
 
     #[test]
+    fn an_auto_mode_denial_parses_to_a_failure_of_the_denied_call() {
+        let event = serde_json::json!({
+            "hook_event_name": "PermissionDenied",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "touch canary.txt"},
+            "tool_use_id": "t1",
+        });
+        match parse_value(&event) {
+            Ok(Some(HookEvent::ToolResult {
+                call, call_id, outcome, ..
+            })) => {
+                assert_eq!(call.tool, "Bash");
+                assert_eq!(call_id.as_deref(), Some("t1"));
+                assert!(matches!(outcome, ToolOutcome::Failure { .. }));
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_failed_edit_preserves_the_native_error_observation() {
         let event = serde_json::json!({
             "hook_event_name": "PostToolUseFailure",
@@ -1080,5 +1163,90 @@ mod tests {
         );
         assert_eq!(prompt("what does <tool-use-id>toolu_9</tool-use-id> mean?"), None);
         assert_eq!(prompt("list the files"), None);
+    }
+
+    fn prompted(body: serde_json::Value) -> (Option<PeerFrame>, Option<SessionTitle>) {
+        let mut event = serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "s1"});
+        event
+            .as_object_mut()
+            .expect("an object")
+            .extend(body.as_object().expect("an object").clone());
+        match parse_value(&event) {
+            Ok(Some(HookEvent::Prompt { peer, title, .. })) => (peer, title),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn peer_of(text: &str) -> Option<PeerFrame> {
+        prompted(serde_json::json!({"prompt": text})).0
+    }
+
+    fn parsed(body: &str) -> Option<PeerFrame> {
+        Some(PeerFrame::Parsed { body: body.to_string() })
+    }
+
+    /// The exact prompt Claude Code 2.1.286 delivered to a receiving session, with its title.
+    #[test]
+    fn a_cross_session_message_carries_its_body() {
+        let probe = "<cross-session-message from=\"uds:/tmp/appa-peer-probe/a.sock\" from-name=\"peer-a\" \
+                     from-mode=\"prompting\">\nPROBE-UDS-7731 first line\n</cross-session-message>";
+        let (peer, title) = prompted(serde_json::json!({
+            "prompt": probe,
+            "session_title": "peer-b",
+            "prompt_id": "p1",
+        }));
+        assert_eq!(peer, parsed("PROBE-UDS-7731 first line"));
+        assert_eq!(title, Some(SessionTitle::parse("peer-b").expect("a title")));
+
+        assert_eq!(
+            peer_of(
+                "<cross-session-message from=\"uds:/a\" hop-chain=\"x>y\">\nline one\n\nline three\n</cross-session-message>"
+            ),
+            parsed("line one\n\nline three")
+        );
+        assert_eq!(
+            peer_of(
+                "<cross-session-message from=\"uds:/a\">\nquoted </cross-session-message> inside\n</cross-session-message>"
+            ),
+            parsed("quoted </cross-session-message> inside"),
+            "only the closing line that ends the prompt closes the frame"
+        );
+        assert_eq!(
+            peer_of("<cross-session-message from-session=\"s2\" from=\"pipe:appa-a\">\nhi\n</cross-session-message>"),
+            parsed("hi")
+        );
+    }
+
+    #[test]
+    fn a_prompt_spelled_as_a_peer_frame_it_cannot_read_is_malformed() {
+        for text in [
+            "<cross-session-message from=\"uds:/a\">\nhi\n</cross-session-message>\nand more",
+            "<cross-session-message from=\"uds:/a\">\nhi\n</cross-session-message>\n",
+            "<cross-session-message from=\"uds:/a\">hi\n</cross-session-message>",
+            "<cross-session-message from=\"uds:/a\">\nhi</cross-session-message>",
+            "<cross-session-message from=uds:/a>\nhi\n</cross-session-message>",
+            "<cross-session-messagefrom=\"uds:/a\">\nhi\n</cross-session-message>",
+            "<cross-session-message",
+        ] {
+            assert_eq!(peer_of(text), Some(PeerFrame::Malformed), "{text:?}");
+        }
+    }
+
+    /// Only a prompt that opens with the tag is a peer frame: leading whitespace, a mention
+    /// in passing, and a task notification are ordinary prompts.
+    #[test]
+    fn a_prompt_not_opening_with_the_tag_is_no_peer_frame() {
+        for text in [
+            " <cross-session-message from=\"uds:/a\">\nhi\n</cross-session-message>",
+            "what is <cross-session-message from=\"uds:/a\">?",
+            "<task-notification>\n<tool-use-id>toolu_9</tool-use-id>",
+            "list the files",
+        ] {
+            assert_eq!(peer_of(text), None, "{text:?}");
+        }
+        let (_, title) = prompted(serde_json::json!({"prompt": "hi", "session_title": " \n"}));
+        assert_eq!(title, None, "an invalid title is no title");
+        let (_, title) = prompted(serde_json::json!({"prompt": "hi"}));
+        assert_eq!(title, None);
     }
 }

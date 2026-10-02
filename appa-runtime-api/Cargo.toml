@@ -11,6 +11,7 @@ serde = { workspace = true }
 # `CanonicalArguments` — sees duplicate keys and other refusable forms
 # instead of a parser's interpretation of them.
 serde_json = { workspace = true, features = ["raw_value"] }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

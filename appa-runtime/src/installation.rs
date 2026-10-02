@@ -54,6 +54,14 @@ impl From<crate::config::ConfigError> for InstallError {
     }
 }
 
+fn invalid(error: impl ToString) -> InstallError {
+    InstallError::Invalid(error.to_string())
+}
+
+fn read_catalog(marketplace: &Path) -> Result<Marketplace, InstallError> {
+    Marketplace::read(&marketplace.join("marketplace.toml")).map_err(invalid)
+}
+
 fn io(operation: &'static str, path: &Path, source: std::io::Error) -> InstallError {
     InstallError::Io {
         operation,
@@ -160,7 +168,7 @@ impl Selection {
             ));
         }
         for name in self.plugins.iter().chain(&self.batteries) {
-            PackageName::parse(name).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            PackageName::parse(name).map_err(invalid)?;
         }
         Ok(())
     }
@@ -399,8 +407,8 @@ impl Installation {
             .ok_or_else(|| InstallError::Invalid("no installed selection to export".into()))?;
         kagent::verify(self, &selection)?;
         let config = required_bytes(&self.config)?;
-        crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let text = std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load(&self.config).map_err(invalid)?;
+        let text = std::str::from_utf8(&config).map_err(invalid)?;
         let (snapshot, exported_config) = if let Some(snapshot) = self.selected_files(&selection)? {
             self.verify_selected_files(&selection, text)?;
             let portable = snapshot.rebase(text, self, true)?;
@@ -423,13 +431,12 @@ impl Installation {
             append_bytes(
                 &mut archive,
                 "selection.json",
-                &serde_json::to_vec(&selection).map_err(|error| InstallError::Invalid(error.to_string()))?,
+                &serde_json::to_vec(&selection).map_err(invalid)?,
             )?;
             append_bytes(
                 &mut archive,
                 DESCRIPTOR_FILE,
-                &serde_json::to_vec(selection.generation())
-                    .map_err(|error| InstallError::Invalid(error.to_string()))?,
+                &serde_json::to_vec(selection.generation()).map_err(invalid)?,
             )?;
             append_bytes(&mut archive, "config.toml", &exported_config)?;
             if let Some(snapshot) = &snapshot {
@@ -458,8 +465,7 @@ impl Installation {
         // payload budget even when the compressed export is small. Check the
         // actual archive with the same extractor before publishing it.
         let preflight = tempfile::tempdir_in(parent).map_err(|error| io("stage export validation", output, error))?;
-        archive::extract_bundle_archive(stage.path(), preflight.path())
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        archive::extract_bundle_archive(stage.path(), preflight.path()).map_err(invalid)?;
         preflight
             .close()
             .map_err(|error| io("remove export validation files", parent, error))?;
@@ -500,7 +506,7 @@ impl Installation {
         require_directory_or_absent(&destination)?;
         if destination.exists() {
             let descriptor = required_bytes(&destination.join(DESCRIPTOR_FILE))?;
-            let cached = Generation::parse(&descriptor).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let cached = Generation::parse(&descriptor).map_err(invalid)?;
             if &cached != generation {
                 return Err(InstallError::Invalid(
                     "one commit has conflicting version descriptors".into(),
@@ -515,7 +521,7 @@ impl Installation {
         verify_packages(&packages, generation)?;
         write_synced(
             &stage.path().join(DESCRIPTOR_FILE),
-            &serde_json::to_vec(generation).map_err(|error| InstallError::Invalid(error.to_string()))?,
+            &serde_json::to_vec(generation).map_err(invalid)?,
         )?;
         sync_directory(stage.path())?;
         fs::rename(stage.path(), &destination).map_err(|error| io("publish generation", &destination, error))?;
@@ -614,10 +620,7 @@ impl Installation {
     ) -> Result<(), InstallError> {
         self.recover_config()?;
         selection.validate()?;
-        self.verify_selected_files(
-            selection,
-            std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        )?;
+        self.verify_selected_files(selection, std::str::from_utf8(after).map_err(invalid)?)?;
         if !selection.plugins.is_empty() || !selection.batteries.is_empty() {
             selection.validate_packages(&self.version_marketplace(selection))?;
         }
@@ -633,10 +636,9 @@ impl Installation {
         candidate
             .write_all(after)
             .map_err(|error| io("write candidate config", candidate.path(), error))?;
-        let text = std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let text = std::str::from_utf8(after).map_err(invalid)?;
         self.require_version_batteries(selection, text)?;
-        crate::config::Config::load_from(candidate.path(), &[self.version_batteries(selection)])
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::config::Config::load_from(candidate.path(), &[self.version_batteries(selection)]).map_err(invalid)?;
         let previous = self.selection()?;
         if activation == Activation::Claude {
             // Missing or mismatched executables fail before the config changes.
@@ -655,10 +657,7 @@ impl Installation {
             activation,
             previous,
         };
-        atomic_write(
-            &journal_path,
-            &serde_json::to_vec(&journal).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        )?;
+        atomic_write(&journal_path, &serde_json::to_vec(&journal).map_err(invalid)?)?;
         self.replace_journalled_config(before, after)?;
         self.recover_config()
     }
@@ -721,15 +720,14 @@ impl Installation {
                 kagent::verify(self, &transaction.selection)?;
                 self.verify_selected_files(
                     &transaction.selection,
-                    std::str::from_utf8(&transaction.after)
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?,
+                    std::str::from_utf8(&transaction.after).map_err(invalid)?,
                 )?;
                 if !transaction.selection.plugins.is_empty() || !transaction.selection.batteries.is_empty() {
                     transaction
                         .selection
                         .validate_packages(&self.version_marketplace(&transaction.selection))?;
                 }
-                crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
+                crate::config::Config::load(&self.config).map_err(invalid)?;
                 Ok::<_, InstallError>(())
             };
             validate().map_err(|error| InstallError::Recovery {
@@ -768,8 +766,7 @@ impl Installation {
                     },
                 })?;
             }
-            let selected =
-                serde_json::to_vec(&transaction.selection).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let selected = serde_json::to_vec(&transaction.selection).map_err(invalid)?;
             let history = self.state.join("history");
             require_directory_or_absent(&history)?;
             fs::create_dir_all(&history).map_err(|error| io("create selection history", &history, error))?;
@@ -961,7 +958,7 @@ fn append_bytes(
 }
 
 fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), InstallError> {
-    let entries = appa_package::tree::walk(source).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let entries = appa_package::tree::walk(source).map_err(invalid)?;
     fs::create_dir(destination).map_err(|error| io("create package snapshot", destination, error))?;
     let mut remaining = appa_package::tree::MAX_UNCOMPRESSED_BYTES;
     for entry in entries {
@@ -995,7 +992,7 @@ fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), InstallErr
     }
     // Flush children before publishing their parent entry.
     for entry in appa_package::tree::walk(destination)
-        .map_err(|error| InstallError::Invalid(error.to_string()))?
+        .map_err(invalid)?
         .into_iter()
         .rev()
     {
@@ -1009,26 +1006,25 @@ fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), InstallErr
 fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>, InstallError> {
     require_directory_or_absent(root)?;
     // Inspect the entire snapshot first: unlisted links are rejected too.
-    appa_package::tree::walk(root).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    appa_package::tree::walk(root).map_err(invalid)?;
     let path = root.join("marketplace.toml");
     let bytes = required_bytes(&path)?;
     if &ArtifactDigest::of_bytes(&bytes) != generation.catalog() {
         return Err(InstallError::Invalid("catalog digest mismatch".into()));
     }
-    let text = std::str::from_utf8(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?;
-    let catalog = Marketplace::parse(text, &path).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let text = std::str::from_utf8(&bytes).map_err(invalid)?;
+    let catalog = Marketplace::parse(text, &path).map_err(invalid)?;
     let mut packages = Vec::new();
     for entry in catalog.packages {
         let path = root.join(entry.path.as_path());
-        let package =
-            appa_package::validate_package(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let package = appa_package::validate_package(&path).map_err(invalid)?;
         let kind = match package.role {
             Role::Plugin(_) => PackageKind::Plugin,
             Role::Battery(_) => PackageKind::Battery,
         };
         if package.name != entry.name
             || kind != entry.kind
-            || TreeDigest::of_tree(&path).map_err(|error| InstallError::Invalid(error.to_string()))? != entry.digest
+            || TreeDigest::of_tree(&path).map_err(invalid)? != entry.digest
         {
             return Err(InstallError::Invalid(format!(
                 "package {} does not match its catalog identity",
@@ -1037,14 +1033,13 @@ fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>,
         }
         packages.push(package);
     }
-    appa_package::check_ownership(&packages).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    appa_package::check_ownership(&packages).map_err(invalid)?;
     Ok(packages)
 }
 
 /// A battery of the catalog under `marketplace`, with its catalog entry.
 pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(PackageEntry, Battery), InstallError> {
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let catalog = read_catalog(marketplace)?;
     battery_package_in(marketplace, &catalog, name)
 }
 
@@ -1068,8 +1063,7 @@ pub(crate) fn battery_package_in(
 /// its policy binds (its audience providers, the credentials its helpers read)
 /// is filled in as the manifest alone cannot.
 pub(crate) fn battery_at(marketplace: &Path, entry: &PackageEntry) -> Result<Battery, InstallError> {
-    let package = appa_package::validate_package(&marketplace.join(entry.path.as_str()))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let package = appa_package::validate_package(&marketplace.join(entry.path.as_str())).map_err(invalid)?;
     match package.role {
         Role::Battery(battery) => Ok(*battery),
         Role::Plugin(_) => Err(InstallError::Invalid(format!("{} is not a battery", entry.name))),
