@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.31.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.30.0...v0.31.0) (2026-10-02)
+
+
+### Features
+
+* **bench:** add SABER evaluation for APPA versus Claude Code Auto ([#575](https://github.com/archestra-ai/OpenAPPA/issues/575)) ([2c6fa40](https://github.com/archestra-ai/OpenAPPA/commit/2c6fa40980234c867dbc174a4dba922bcd84500e))
+* Claude Code's Workflow as a fan-out spawn ([#555](https://github.com/archestra-ai/OpenAPPA/issues/555)) ([d0fa527](https://github.com/archestra-ai/OpenAPPA/commit/d0fa527c994c59a43dfd55e34e9d732b3a2406ef))
+* **claude-code:** cover DesignSync, RemoteTrigger and SendFeedback in the default policy ([#553](https://github.com/archestra-ai/OpenAPPA/issues/553)) ([2f28c84](https://github.com/archestra-ai/OpenAPPA/commit/2f28c84efcd465def0d84844d390e5b256f5d229))
+* **claude-code:** leave released calls to auto mode's classifier ([#576](https://github.com/archestra-ai/OpenAPPA/issues/576)) ([11cad5f](https://github.com/archestra-ai/OpenAPPA/commit/11cad5fceb617395deaeb2c09047d44c70a18e5b))
+* **claude-code:** the battery labels PowerShell calls as it labels Bash ([#556](https://github.com/archestra-ai/OpenAPPA/issues/556)) ([6710c7f](https://github.com/archestra-ai/OpenAPPA/commit/6710c7f22ba2c94ae1b269cd4c5330bc5c24d322))
+* protected Claude Code sessions message each other with their label ([#566](https://github.com/archestra-ai/OpenAPPA/issues/566)) ([0a6b9f9](https://github.com/archestra-ai/OpenAPPA/commit/0a6b9f9a3d2699ab1adc2a20db84e12a2b462b36))
+* **runtime:** event-source tracked file workspaces ([#577](https://github.com/archestra-ai/OpenAPPA/issues/577)) ([5060566](https://github.com/archestra-ai/OpenAPPA/commit/5060566a0d9fed034a5e68ec782a1b00714c7014))
+* **runtime:** scope native-tool refusal and preserve Labels during repair ([#578](https://github.com/archestra-ai/OpenAPPA/issues/578)) ([1356026](https://github.com/archestra-ai/OpenAPPA/commit/135602617804432f460d4aaf7e7c46166198496a))
+* **website:** play the Check the Flow video on the page while the song plays ([#579](https://github.com/archestra-ai/OpenAPPA/issues/579)) ([722bcce](https://github.com/archestra-ai/OpenAPPA/commit/722bccee8aa6fdf990b0afa35335c444d648d77b))
+
+
+### Bug Fixes
+
+* preserve audience source failure diagnostics ([53c3d8e](https://github.com/archestra-ai/OpenAPPA/commit/53c3d8eefb2c3cb35191a389ea04550a3e9ec3b0))
+* restrict runtime ingress, fail closed on agent frontmatter, bind kagent delegations ([#573](https://github.com/archestra-ai/OpenAPPA/issues/573)) ([a96f87d](https://github.com/archestra-ai/OpenAPPA/commit/a96f87d1fec900caf890f14342a089a32b3bfaff))
+* **runtime:** clarify delegation recovery requirements ([#551](https://github.com/archestra-ai/OpenAPPA/issues/551)) ([d39bdb0](https://github.com/archestra-ai/OpenAPPA/commit/d39bdb0c0ff49c5e3156bfae0de2cb536c496e3b))
+* **runtime:** correct file tracking session guidance ([d78b0ff](https://github.com/archestra-ai/OpenAPPA/commit/d78b0ffef5db1283400362e6b078e02e1acdb053))
+* **runtime:** correct SessionStart context for file tracking ([#580](https://github.com/archestra-ai/OpenAPPA/issues/580)) ([d78b0ff](https://github.com/archestra-ai/OpenAPPA/commit/d78b0ffef5db1283400362e6b078e02e1acdb053))
+* **runtime:** preserve audience-source failure diagnostics ([#544](https://github.com/archestra-ai/OpenAPPA/issues/544)) ([53c3d8e](https://github.com/archestra-ai/OpenAPPA/commit/53c3d8eefb2c3cb35191a389ea04550a3e9ec3b0))
+* **runtime:** restrict file tracking to file results ([#581](https://github.com/archestra-ai/OpenAPPA/issues/581)) ([d9d1340](https://github.com/archestra-ai/OpenAPPA/commit/d9d1340fe930a674bf5b4beb5cca8493a9822d4b))
+* **runtime:** surface incomplete yell diagnostics ([#552](https://github.com/archestra-ai/OpenAPPA/issues/552)) ([678b9bc](https://github.com/archestra-ai/OpenAPPA/commit/678b9bc91e97764221de87e30f21b81bf5aecd17))
+
+
+### Documentation
+
+* agent panel in README, benchmark TLDR, Fireship video on main page ([#563](https://github.com/archestra-ai/OpenAPPA/issues/563)) ([8ee91c5](https://github.com/archestra-ai/OpenAPPA/commit/8ee91c55327747d270b7a4495af8f43e328bb245))
+* **readme:** drop redundant install and status notes ([#559](https://github.com/archestra-ai/OpenAPPA/issues/559)) ([9ffa6c5](https://github.com/archestra-ai/OpenAPPA/commit/9ffa6c530d3e8d83fea05ad74a95e3bcfec042c4))
+* **readme:** link validation, drop the appa yell section ([#561](https://github.com/archestra-ai/OpenAPPA/issues/561)) ([fdfc640](https://github.com/archestra-ai/OpenAPPA/commit/fdfc6402807fdb6288a9282dd979d622122cea33))
+* **readme:** match benchmark section to landing page ([#562](https://github.com/archestra-ai/OpenAPPA/issues/562)) ([ea093be](https://github.com/archestra-ai/OpenAPPA/commit/ea093beb1ea09225c935969120d970c9b9c468bc))
+* **readme:** show the clappa and /appa-guide setup step ([#558](https://github.com/archestra-ai/OpenAPPA/issues/558)) ([141fbd6](https://github.com/archestra-ai/OpenAPPA/commit/141fbd6266542e7f3c6437862e26f7baa435b179))
+* refresh coding agent coverage ([#583](https://github.com/archestra-ai/OpenAPPA/issues/583)) ([554121e](https://github.com/archestra-ai/OpenAPPA/commit/554121e0470edee2b905fd118fcd0f268f04ff33))
+* remove AMMPA from the website ([#585](https://github.com/archestra-ai/OpenAPPA/issues/585)) ([310584f](https://github.com/archestra-ai/OpenAPPA/commit/310584fa130d8cf7f7a1cb38c6b2403a368fdd53))
+
+
+### Code Refactoring
+
+* **runtime:** collapse pass-through layers and duplicated helpers ([#565](https://github.com/archestra-ai/OpenAPPA/issues/565)) ([01c6633](https://github.com/archestra-ai/OpenAPPA/commit/01c6633d55987c6b0aa328c8ccce71e83c32b49e))
+
 ## [0.30.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.29.1...v0.30.0) (2026-09-30)
 
 
