@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyOutcome, Runtime};
+use appa_runtime::api::{
+    ConsultRecord, ConsultRecorder, LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyOutcome, Runtime,
+};
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
@@ -123,6 +125,20 @@ struct Pending {
     call: ProposedCall,
 }
 
+/// Host-only records of external consults. They are diagnostic output and are
+/// never read by the runtime or added to an actor's context.
+#[derive(Default)]
+struct RecordedConsults(Mutex<Vec<ConsultRecord>>);
+
+impl ConsultRecorder for RecordedConsults {
+    fn record(&self, record: ConsultRecord) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(record);
+    }
+}
+
 /// One child branch this session opened. `spawn` is the parent call whose
 /// dispatch the child's return closes, so the branch carries it from the fork
 /// to the return rather than trusting the caller to name it again. A branch
@@ -139,6 +155,7 @@ enum ChildBranch {
 
 struct SessionInner {
     runtime: Runtime,
+    consults: Arc<RecordedConsults>,
     trajectory: TrajectoryId,
     tokio: tokio::runtime::Runtime,
     bridge_url: Option<reqwest::Url>,
@@ -207,10 +224,13 @@ impl SessionInner {
         )
         .map_err(|error| error.to_string())?;
         let runtime = Runtime::open(config, store.path().join("appa.db"), None).map_err(|error| error.to_string())?;
+        let consults = Arc::new(RecordedConsults::default());
+        let runtime = runtime.recording(consults.clone());
 
         let trajectory = TrajectoryId("episode".to_string());
         let inner = SessionInner {
             runtime,
+            consults,
             trajectory: trajectory.clone(),
             tokio,
             bridge_url,
@@ -776,6 +796,30 @@ impl SessionInner {
         self.closed = true;
         Ok(())
     }
+
+    fn status(&self) -> Result<String, String> {
+        encode(
+            self.runtime
+                .status(&self.trajectory)
+                .ok_or_else(|| "the session status is unavailable".to_string())?,
+        )
+    }
+
+    fn diagnostics(&self) -> Result<String, String> {
+        #[derive(Serialize)]
+        struct Diagnostics<'a> {
+            status: Option<appa_runtime::api::TrajectoryStatus>,
+            audit: Option<Vec<appa_runtime::api::AuditEntry>>,
+            consults: &'a [ConsultRecord],
+        }
+
+        let consults = self.consults.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        encode(Diagnostics {
+            status: self.runtime.status(&self.trajectory),
+            audit: self.runtime.audit(&self.trajectory),
+            consults: &consults,
+        })
+    }
 }
 
 enum Decision {
@@ -1133,6 +1177,17 @@ impl Session {
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| with(&self.inner, SessionInner::close))
+    }
+
+    /// Return the trajectory's effective label without changing it.
+    fn status(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| with(&self.inner, |inner| inner.status()))
+    }
+
+    /// Export host-only decision diagnostics. This includes the runtime audit
+    /// projection and complete external consult records, but changes no state.
+    fn diagnostics(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| with(&self.inner, |inner| inner.diagnostics()))
     }
 }
 
