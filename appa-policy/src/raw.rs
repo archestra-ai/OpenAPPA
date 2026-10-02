@@ -146,6 +146,18 @@ pub(crate) struct RawTool {
     /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
     /// the static `delta`/`requires`/`effects` — a declaration carries one recipe.
     pub(crate) annotator: Option<String>,
+    /// Static semantics used only when the routed Annotator gives no answer. It must require
+    /// human attention so a transient integration failure never silently releases a call.
+    pub(crate) on_no_answer: Option<RawAnnotationFallback>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAnnotationFallback {
+    pub(crate) delta: Option<RawDelta>,
+    pub(crate) requires: RawRequires,
+    #[serde(default)]
+    pub(crate) effects: Vec<String>,
 }
 
 #[derive(Deserialize)]

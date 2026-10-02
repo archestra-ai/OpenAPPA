@@ -1615,6 +1615,7 @@ impl Session {
                 annotator,
                 call,
                 declaration,
+                fallback,
                 args,
                 context,
             } => {
@@ -1640,10 +1641,11 @@ impl Session {
                         .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
-                // Annotation failure is an operational refusal, never model feedback: the
-                // call is not judged, nothing is appended, and the harness fails closed.
+                // An unconfigured annotation failure is an operational refusal, never model
+                // feedback: the call is not judged, nothing is appended, and the harness fails
+                // closed. A configured fallback becomes normal policy evidence below.
                 let answer = match answer {
-                    Ok(answer) => answer,
+                    Ok(answer) => Some(answer),
                     Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
@@ -1651,16 +1653,26 @@ impl Session {
                             }
                             _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::annotation_refused(annotator.clone(), reason.diagnostic()));
+                        if !fallback {
+                            return Err(EventError::annotation_refused(annotator.clone(), reason.diagnostic()));
+                        }
+                        None
                     }
                 };
-                ExternalEvidence::Annotation {
-                    annotator: annotator.clone(),
-                    // The evidence names the exact call it answered for: a rewritten call
-                    // never consumes a stale annotation.
-                    call: *call,
-                    answer,
-                    context,
+                match answer {
+                    Some(answer) => ExternalEvidence::Annotation {
+                        annotator: annotator.clone(),
+                        // The evidence names the exact call it answered for: a rewritten call
+                        // never consumes a stale annotation.
+                        call: *call,
+                        answer,
+                        context,
+                    },
+                    None => ExternalEvidence::AnnotationNoAnswer {
+                        annotator: annotator.clone(),
+                        call: *call,
+                        context,
+                    },
                 }
             }
             ExternalRequest::AudienceSource {

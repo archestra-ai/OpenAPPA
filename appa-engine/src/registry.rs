@@ -1249,9 +1249,24 @@ impl Registry {
         let attention_marks: BTreeSet<MarkName> = tools
             .values()
             .flatten()
-            .filter_map(|(_, d)| d.declared())
-            .chain(provider_run.values())
-            .flat_map(|tool| tool.requires.attention_marks().iter().cloned())
+            .flat_map(|(_, declaration)| {
+                declaration
+                    .declared()
+                    .map(|tool| tool.requires.attention_marks())
+                    .or_else(|| {
+                        declaration
+                            .on_no_answer()
+                            .map(|fallback| fallback.requires.attention_marks())
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .cloned()
+            })
+            .chain(
+                provider_run
+                    .values()
+                    .flat_map(|tool| tool.requires.attention_marks().iter().cloned()),
+            )
             .chain(
                 config
                     .authorities
@@ -2056,6 +2071,7 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new(by),
+            on_no_answer: None,
         }
     }
 
@@ -3125,6 +3141,7 @@ mod tests {
                 description: None,
                 parameters: crate::params::ToolParameters::open(),
                 annotator: AnnotatorName::new("any"),
+                on_no_answer: None,
             }];
             Registry::build_covered(cfg)
         };
