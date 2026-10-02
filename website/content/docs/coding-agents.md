@@ -5,14 +5,7 @@ order: 4
 description: Tool-flow enforcement, tracked files, isolated processing, shell rules, and checked delegation for coding agents.
 ---
 
-OpenAPPA checks coding-agent flows at the harness boundary. The exact coverage depends on the harness.
-
-| Harness | Current coverage |
-|---|---|
-| [Claude Code](/claude-code) | Checks built-in and MCP tool calls and results. Its default battery covers native file and shell tools. It checks subagent returns. Experimental runtime-owned file tools can preserve Labels across file operations. |
-| [Amp](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/amp) | The source-distributed `amppa` v1 plugin checks tool calls and results only. It does not track provenance across child threads, file transfers, or model prose. |
-
-Amp users must apply policy to each hooked tool and account for those limits. Claude Code adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools. Its runtime-owned file tools are a separate experimental mode.
+OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools. Runtime-owned file tools provide a separate experimental mode that can preserve Labels across file operations.
 
 ## Protected sessions
 
