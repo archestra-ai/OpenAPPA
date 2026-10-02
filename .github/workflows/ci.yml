@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Test release validation and PR lifecycle
-        run: python3 -m unittest scripts/test_appa_archestra_update.py
+        run: python3 .github/scripts/test_appa_archestra_update.py
 
   cargo-release-age:
     name: Cargo Release Age

@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   prepare:
+    name: Validate release and prepare Cargo update
     if: >-
       github.repository == 'archestra-ai/OpenAPPA' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
@@ -70,7 +71,7 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           GH_TOKEN: ${{ github.token }}
         run: >-
-          python3 openappa/scripts/appa-archestra-update.py prepare
+          python3 openappa/.github/scripts/appa-archestra-update.py prepare
           --source openappa --target archestra --tag "$RELEASE_TAG"
           --expected-sha "$SOURCE_COMMIT" --bundle prepared/update.json
 
@@ -88,7 +89,7 @@ jobs:
         env:
           COMPILE_OUTCOME: ${{ steps.compile.outcome }}
         run: >-
-          python3 openappa/scripts/appa-archestra-update.py record-check
+          python3 openappa/.github/scripts/appa-archestra-update.py record-check
           --bundle prepared/update.json --outcome "$COMPILE_OUTCOME"
 
       - name: Upload validated update
@@ -101,13 +102,14 @@ jobs:
           if-no-files-found: error
 
   publish:
+    name: Propose draft Archestra update
     needs: prepare
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read
+      actions: read # Download the validated bundle from this workflow run.
     steps:
       # This fresh runner never executes Archestra or release build scripts.
       - name: Checkout updater
@@ -142,7 +144,7 @@ jobs:
           GH_READ_TOKEN: ${{ github.token }}
           BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
         run: >-
-          python3 openappa/scripts/appa-archestra-update.py publish
+          python3 openappa/.github/scripts/appa-archestra-update.py publish
           --source openappa --bundle prepared/update.json --bot-login "$BOT_LOGIN"
 
       - name: Report incompatible bridge after proposing the update

@@ -521,7 +521,7 @@ jobs:
     needs: [release-please, publish-release]
     permissions:
       contents: read
-      actions: read
+      actions: read # Allow the updater to download its prepared Cargo bundle.
     uses: ./.github/workflows/update-archestra.yml
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}

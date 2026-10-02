@@ -11,7 +11,7 @@ lightweight or annotated tags to a full commit, checks that commit belongs to
 OpenAPPA main, and checks the Cargo workspace version. The release workflow
 also passes its source commit, which must match the tag.
 
-Archestra embeds the Rust runtime, rather than downloading a release binary.
+Archestra embeds the Rust runtime.
 The updater changes the four OpenAPPA Git revisions in
 `platform/archestra-rs/openappa-rs/Cargo.toml`, regenerates
 `platform/archestra-rs/Cargo.lock` with Cargo, and compiles `openappa_rs` with the
@@ -36,10 +36,11 @@ a pending `v1.2.3` update. Closure failures can be repaired by retrying `v1.2.4`
 
 Archestra runs **OpenAPPA Native Tests** on these PRs, including the real native
 addon and PostgreSQL ledger. A human reviews compatibility and dependency
-changes, marks the draft ready, and approves/merges through the normal repository
-process. The updater never reviews, enables auto-merge, queues, merges, or pushes
-to main. Existing review requirements remain in force; the App must not receive
-ruleset or branch-protection bypass privileges.
+changes, marks the draft ready, and merges through the normal repository process.
+The updater never approves, enables auto-merge, queues, merges, or pushes to main.
+Archestra currently requires zero approving reviews in its main ruleset, so
+human review is a process expectation, not an enforced reviewer count. The App
+has no ruleset or branch-protection bypass privileges.
 
 ## GitHub App setup
 
