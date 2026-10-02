@@ -775,16 +775,19 @@ max_body_bytes = 65536
         use appa_runtime_api::HookDecision;
         let dir = fixture();
         let runtime = open(dir.path());
-        assert!(matches!(
-            hook(
-                &runtime,
-                serde_json::json!({
-                    "hook_event_name":"SessionStart", "session_id":"spawn-test"
-                }),
-            )
-            .await,
-            HookDecision::Context { .. }
-        ));
+        let HookDecision::Context { text } = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"SessionStart", "session_id":"spawn-test"
+            }),
+        )
+        .await
+        else {
+            panic!("file tracking must add session context");
+        };
+        assert!(text.contains("The first file call binds the root"));
+        assert!(text.contains("Other policy-approved tools remain available"));
+        assert!(!text.contains("file-only mode"));
 
         let spawn = hook(
             &runtime,
