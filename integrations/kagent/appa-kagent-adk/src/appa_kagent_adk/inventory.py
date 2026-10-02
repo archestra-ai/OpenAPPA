@@ -146,6 +146,24 @@ def builtin_manifest() -> dict[str, Any]:
     return json.loads(resources.files(__package__).joinpath("builtins.json").read_text())
 
 
+def _rescan(text: str, start: int, end: int) -> tuple[str, int]:
+    """How much of a stood run to keep, and where the scan resumes.
+
+    A run carries the only colon a spelling starting inside it could
+    open with, except at its very tail: ``..mcp:ns/tool`` ends on the
+    bare class whose colon stands just past the run. Keep the text up
+    to the class name and rescan from it then; otherwise keep the whole
+    run. Either way nothing emitted is ever revisited, and the scan
+    always moves forward.
+    """
+    if text[end : end + 1] == ":":
+        for cls in sorted(_CLASSES, key=len, reverse=True):
+            if text[start:end].endswith(cls):
+                cut = end - len(cls)
+                return text[start:cut], cut
+    return text[start:end], end
+
+
 @dataclass(frozen=True)
 class ToolInventory:
     """The raw ADK tool names of one agent, each with its wire spelling.
@@ -187,17 +205,60 @@ class ToolInventory:
         side, so ``mcp:demo/list`` inside ``mcp:demo/list/extra`` names
         no tool this inventory gave out and stands, while the period
         that ends the sentence after one is punctuation and is kept.
+        Separator dots the scan absorbs do not glue a whole spelling to
+        what follows either: ``gate:x..y`` despells to the name of
+        ``gate:x`` plus ``..y``.
         """
 
-        def replace(match: re.Match[str]) -> str:
-            start, end = match.start(), match.end()
+        out: list[str] = []
+        pos = 0
+        end_text = len(text)
+        while pos < end_text:
+            match = _SPELLED.match(text, pos)
+            if match is None:
+                out.append(text[pos])
+                pos += 1
+                continue
+            start, end = match.span()
+            blob = match.group()
+            # A match carries the only colon a spelling starting inside
+            # it could open with, except at its very tail (handled when
+            # the run stands): standing the run skips rescanning it.
             if _continues(_char(text, start - 1), _char(text, start - 2)):
-                return match.group()
-            if _continues(_char(text, end), _char(text, end + 1)):
-                return match.group()
-            return self.names.get(match.group(), match.group())
-
-        return _SPELLED.sub(replace, text)
+                kept, pos = _rescan(text, start, end)
+                out.append(kept)
+                continue
+            known = self.names.get(blob)
+            if known is not None:
+                if _continues(_char(text, end), _char(text, end + 1)):
+                    kept, pos = _rescan(text, start, end)
+                    out.append(kept)
+                else:
+                    out.append(known)
+                    pos = end
+                continue
+            # The run may glue a spelled tool to following text through
+            # separator dots the scan absorbs ("gate:x..y"): fall back to
+            # the longest spelled prefix with a clean right edge and
+            # rescan from its end, so a whole spelling is never hidden
+            # inside a run the inventory never gave out.
+            candidates = [
+                spelling
+                for spelling in self.names
+                if blob.startswith(spelling) and _SPELLED.fullmatch(spelling)
+            ]
+            advanced = False
+            for spelling in sorted(candidates, key=len, reverse=True):
+                cut = len(spelling)
+                if not _continues(_char(text, start + cut), _char(text, start + cut + 1)):
+                    out.append(self.names[spelling])
+                    pos = start + cut
+                    advanced = True
+                    break
+            if not advanced:
+                kept, pos = _rescan(text, start, end)
+                out.append(kept)
+        return "".join(out)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], environ: Mapping[str, str] = os.environ) -> ToolInventory:

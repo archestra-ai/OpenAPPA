@@ -254,6 +254,15 @@ LOG_ANALYST = "agent:kagent/log-analyst"
         pytest.param(f"x{LIST_PODS}", f"x{LIST_PODS}", id="a-longer-first-segment"),
         pytest.param(f"notes/{LIST_PODS}", f"notes/{LIST_PODS}", id="preceded-by-a-path"),
         pytest.param(f"a/{LIST_PODS}/b", f"a/{LIST_PODS}/b", id="inside-a-longer-identifier"),
+        # Separator dots the scan absorbs do not glue a whole spelling to
+        # what follows: the spelling is replaced and the rest rescanned.
+        pytest.param(f"called {LIST_PODS}..retrying", "called list_pods..retrying", id="a-glued-dot-run"),
+        pytest.param(f"{LIST_PODS}..json", "list_pods..json", id="a-glued-dotted-suffix"),
+        pytest.param(
+            f"{LIST_PODS}..{LOG_ANALYST}",
+            "list_pods..kagent__NS__log_analyst",
+            id="a-glued-second-spelling",
+        ),
         # A spelling of the right shape this inventory never gave out.
         pytest.param("mcp:other/list_pods", "mcp:other/list_pods", id="never-issued"),
     ],
