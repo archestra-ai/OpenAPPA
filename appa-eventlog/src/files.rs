@@ -38,10 +38,12 @@ pub enum FileStoreError {
     Untracked,
     #[error("the file differs from its recorded version")]
     DigestMismatch,
-    #[error("the host changed the file after a failed operation; the reservation is quarantined")]
+    #[error("the workspace state is incompatible with the pending file operation")]
     Quarantined,
-    #[error("the workspace has no reservation or digest mismatch to reconcile")]
-    NothingToReconcile,
+    #[error("the workspace has no file reservation to repair")]
+    NothingToRepair,
+    #[error("no selected file has a Label to change")]
+    NothingToRelabel,
     #[error("stored data is invalid: {0}")]
     Corrupt(String),
     #[error("filesystem failure: {0}")]
@@ -218,22 +220,24 @@ pub enum FileOutcome {
     Failed,
 }
 
-/// What releasing a call that never ran did to its reservation.
+/// What mechanical recovery did to one file reservation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AbandonOutcome {
+pub enum RepairOutcome {
     /// The call held no reservation.
     Absent,
-    /// The workspace still showed the pinned state; the reservation is released.
+    /// The workspace retained the pre-execution state.
     Released,
-    /// The workspace moved away from the pin. The reservation stands, and every later file
-    /// call in this workspace is refused until an operator reconciles the event stream.
+    /// The operation published an attributable or conservatively merged file version.
+    Repaired,
+    /// The observed state matches no state the operation can produce. The reservation stands.
     Quarantined,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ReservedCall {
-    actor: String,
-    call_key: String,
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RepairPublication {
+    Attributed(FileVersion),
+    Ambiguous(FileVersion),
 }
 
 /// One durable transition in a canonical workspace's event log.
@@ -272,11 +276,13 @@ pub(crate) enum WorkspaceEvent {
         actor: String,
         call_key: String,
     },
-    Reconciled {
-        reservation: Option<ReservedCall>,
-        /// A complete observation of every path the workspace stream has named. `None`
-        /// clears only the reservation; a map value of `None` records an absent path.
-        readopted: Option<BTreeMap<String, Option<String>>>,
+    Repaired {
+        actor: String,
+        call_key: String,
+        publication: RepairPublication,
+    },
+    Relabelled {
+        versions: Vec<FileVersion>,
     },
 }
 
@@ -748,28 +754,35 @@ impl FileStore {
         })
     }
 
-    /// Release the reservation of a call that was released and never ran, provided the
-    /// workspace still shows its pinned state. The runtime cannot tell an unrun call from one
-    /// whose report was lost, so anything else keeps the reservation: a workspace that moved
-    /// is never released by guessing here.
-    pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
+    /// Repair one released call after its writer has stopped. The operation's durable pin and
+    /// bound Label determine every accepted post-execution state; an incompatible state keeps
+    /// the reservation.
+    pub fn repair(&self, actor: &str, call_key: &str) -> Result<RepairOutcome, FileStoreError> {
         self.update(|state| {
             let Some(reservation) = state.reservation.as_ref() else {
-                return Ok((AbandonOutcome::Absent, None));
+                return Ok((RepairOutcome::Absent, None));
             };
             if reservation.actor != actor || reservation.call_key != call_key {
-                return Ok((AbandonOutcome::Absent, None));
+                return Ok((RepairOutcome::Absent, None));
             }
-            if !Observed::of(&self.workspace, &reservation.pin)?.undisturbed(&reservation.pin) {
-                return Ok((AbandonOutcome::Quarantined, None));
+            match repair_decision(state, &self.workspace, reservation)? {
+                RepairDecision::Released => Ok((
+                    RepairOutcome::Released,
+                    Some(WorkspaceEvent::Released {
+                        actor: actor.into(),
+                        call_key: call_key.into(),
+                    }),
+                )),
+                RepairDecision::Repaired(publication) => Ok((
+                    RepairOutcome::Repaired,
+                    Some(WorkspaceEvent::Repaired {
+                        actor: actor.into(),
+                        call_key: call_key.into(),
+                        publication,
+                    }),
+                )),
+                RepairDecision::Quarantined => Ok((RepairOutcome::Quarantined, None)),
             }
-            Ok((
-                AbandonOutcome::Released,
-                Some(WorkspaceEvent::Released {
-                    actor: actor.into(),
-                    call_key: call_key.into(),
-                }),
-            ))
         })
     }
 
@@ -796,52 +809,89 @@ impl FileStore {
         Ok(current_state(&state, &relative))
     }
 
-    /// Resolve an operator-inspected workspace without creating it, then append one explicit
-    /// reconciliation decision. The compare-and-swap is intentionally not retried: a concurrent
-    /// event may name another reservation, which this decision must not clear.
-    pub fn reconcile_workspace(
+    /// Retry mechanical recovery after the operator has stopped all writers. The compare-and-swap
+    /// is intentionally not retried: a concurrent event may name another reservation.
+    pub fn repair_workspace(authority: Arc<LogStore>, workspace: &Path) -> Result<RepairOutcome, FileStoreError> {
+        let workspace = canonical_workspace(workspace)?;
+        check_links(&workspace)?;
+        let store = Self { authority, workspace };
+        let log = store.authority.workspace_log(&store.workspace_key())?;
+        let state = replay(&log)?;
+        let reservation = state.reservation.as_ref().ok_or(FileStoreError::NothingToRepair)?;
+        let event = match repair_decision(&state, &store.workspace, reservation)? {
+            RepairDecision::Released => WorkspaceEvent::Released {
+                actor: reservation.actor.clone(),
+                call_key: reservation.call_key.clone(),
+            },
+            RepairDecision::Repaired(publication) => WorkspaceEvent::Repaired {
+                actor: reservation.actor.clone(),
+                call_key: reservation.call_key.clone(),
+                publication,
+            },
+            RepairDecision::Quarantined => return Ok(RepairOutcome::Quarantined),
+        };
+        let outcome = match event {
+            WorkspaceEvent::Released { .. } => RepairOutcome::Released,
+            WorkspaceEvent::Repaired { .. } => RepairOutcome::Repaired,
+            _ => unreachable!("repair constructs only release or repair events"),
+        };
+        store.authority.append_workspace(&log, &event)?;
+        Ok(outcome)
+    }
+
+    /// Assign the configured initial Label to the current contents of selected tracked paths.
+    /// No file operation may be pending.
+    pub fn relabel_workspace(
         authority: Arc<LogStore>,
         workspace: &Path,
-        readopt_at_initial: bool,
+        paths: &[PathBuf],
     ) -> Result<(), FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
         check_links(&workspace)?;
-        Self { authority, workspace }.reconcile(readopt_at_initial)
-    }
-
-    fn reconcile(&self, readopt_at_initial: bool) -> Result<(), FileStoreError> {
-        let log = self.authority.workspace_log(&self.workspace_key())?;
+        let store = Self { authority, workspace };
+        let log = store.authority.workspace_log(&store.workspace_key())?;
         let state = replay(&log)?;
-        if state.reservation.is_none() && !readopt_at_initial {
-            return Err(FileStoreError::NothingToReconcile);
+        if state.reservation.is_some() {
+            return Err(FileStoreError::Pending);
         }
-        let reservation = state.reservation.as_ref().map(|reservation| ReservedCall {
-            actor: reservation.actor.clone(),
-            call_key: reservation.call_key.clone(),
-        });
-        let readopted = readopt_at_initial
-            .then(|| {
-                state
-                    .known_paths
-                    .iter()
-                    .map(|path| {
-                        state_digest(&self.workspace, path).map(|digest| {
-                            let digest = (digest != ABSENT).then_some(digest);
-                            (path.clone(), digest)
-                        })
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()
-            })
-            .transpose()?;
-        if state.reservation.is_none()
-            && readopted
+        let mut selected = BTreeSet::new();
+        for path in paths {
+            selected.insert(validated_relative(&store.workspace, &path.to_string_lossy())?);
+        }
+        let mut next_id = state.next_id;
+        let mut versions = Vec::new();
+        for path in selected {
+            if !state.known_paths.contains(&path) {
+                return Err(FileStoreError::Untracked);
+            }
+            let current = current_state(&state, &path);
+            let digest = state_digest(&store.workspace, &path)?;
+            if digest == ABSENT {
+                return Err(FileStoreError::Untracked);
+            }
+            if current
                 .as_ref()
-                .is_none_or(|snapshot| !snapshot_differs(&state, snapshot))
-        {
-            return Err(FileStoreError::NothingToReconcile);
+                .is_some_and(|current| current.digest == digest && current.label == state.initial)
+            {
+                continue;
+            }
+            versions.push(FileVersion {
+                id: next_id,
+                path,
+                digest,
+                label: state.initial.clone(),
+                previous: current.map(|current| current.id),
+                content_dependencies: vec![],
+                dispatch: None,
+            });
+            next_id += 1;
         }
-        self.authority
-            .append_workspace(&log, &WorkspaceEvent::Reconciled { reservation, readopted })
+        if versions.is_empty() {
+            return Err(FileStoreError::NothingToRelabel);
+        }
+        store
+            .authority
+            .append_workspace(&log, &WorkspaceEvent::Relabelled { versions })
     }
 
     fn workspace_key(&self) -> String {
@@ -1039,56 +1089,98 @@ fn apply(state: &mut State, event: &WorkspaceEvent) -> Result<(), FileStoreError
             state.reservation = None;
             Ok(())
         }
-        WorkspaceEvent::Reconciled { reservation, readopted } => {
-            let active = state.reservation.as_ref().map(|pending| ReservedCall {
-                actor: pending.actor.clone(),
-                call_key: pending.call_key.clone(),
-            });
-            if &active != reservation || active.is_none() && readopted.is_none() {
+        WorkspaceEvent::Repaired {
+            actor,
+            call_key,
+            publication,
+        } => {
+            let reservation = matching_reservation(state, actor, call_key)
+                .map_err(|_| FileStoreError::Corrupt("a repair has no matching reservation".into()))?
+                .clone();
+            let bound = reservation
+                .bound
+                .as_ref()
+                .ok_or_else(|| FileStoreError::Corrupt("an unbound reservation published a repair".into()))?;
+            let (version, ambiguous) = match publication {
+                RepairPublication::Attributed(version) => (version, false),
+                RepairPublication::Ambiguous(version) => (version, true),
+            };
+            let predecessor = reservation.pin.basis.predecessor();
+            let mut dependencies = publication_dependencies(&reservation.pin.basis);
+            if ambiguous {
+                let predecessor = predecessor
+                    .ok_or_else(|| FileStoreError::Corrupt("an ambiguous repair has no predecessor".into()))?;
+                dependencies.push(predecessor.id);
+                dependencies.sort_unstable();
+                dependencies.dedup();
+            }
+            let expected_label = if ambiguous {
+                predecessor
+                    .expect("an ambiguous repair has a validated predecessor")
+                    .label
+                    .combine(&bound.output_label)
+            } else {
+                bound.output_label.clone()
+            };
+            let expected_dispatch = (!ambiguous).then_some(&bound.dispatch);
+            if version.id != state.next_id
+                || version.path != reservation.pin.path
+                || !valid_digest(&version.digest)
+                || version.label != expected_label
+                || version.previous != predecessor.map(|version| version.id)
+                || version.content_dependencies != dependencies
+                || version.dispatch.as_ref() != expected_dispatch
+                || matches!(reservation.pin.basis, PinnedBasis::Read(_))
+                || ambiguous && predecessor.is_none_or(|predecessor| predecessor.digest != version.digest)
+                || ambiguous && matches!(reservation.pin.basis, PinnedBasis::Move { .. })
+                || !ambiguous
+                    && !matches!(reservation.pin.basis, PinnedBasis::Move { .. })
+                    && predecessor.is_some_and(|predecessor| predecessor.digest == version.digest)
+                || !ambiguous
+                    && matches!(
+                        &reservation.pin.basis,
+                        PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. }
+                            if source.version.digest != version.digest
+                    )
+            {
+                return Err(FileStoreError::Corrupt("a repaired file version is invalid".into()));
+            }
+            state.next_id += 1;
+            if let PinnedBasis::Move { source, .. } = &reservation.pin.basis {
+                state.current.remove(&source.path);
+            }
+            state.versions.insert(version.id, version.clone());
+            state.current.insert(version.path.clone(), version.id);
+            state.reservation = None;
+            Ok(())
+        }
+        WorkspaceEvent::Relabelled { versions } => {
+            if state.reservation.is_some() || versions.is_empty() {
                 return Err(FileStoreError::Corrupt(
-                    "a reconciliation does not identify the active reservation or any digests".into(),
+                    "a relabel requires selected versions and no reservation".into(),
                 ));
             }
-            if let Some(readopted) = readopted {
-                if readopted.keys().ne(state.known_paths.iter()) {
-                    return Err(FileStoreError::Corrupt(
-                        "a reconciliation does not cover every known path".into(),
-                    ));
+            let mut paths = BTreeSet::new();
+            for version in versions {
+                let current = current_state(state, &version.path);
+                if !paths.insert(version.path.clone())
+                    || !state.known_paths.contains(&version.path)
+                    || version.id != state.next_id
+                    || !valid_digest(&version.digest)
+                    || version.label != state.initial
+                    || version.previous != current.as_ref().map(|current| current.id)
+                    || !version.content_dependencies.is_empty()
+                    || version.dispatch.is_some()
+                    || current
+                        .as_ref()
+                        .is_some_and(|current| current.digest == version.digest && current.label == state.initial)
+                {
+                    return Err(FileStoreError::Corrupt("a relabelled file version is invalid".into()));
                 }
-                if active.is_none() && !snapshot_differs(state, readopted) {
-                    return Err(FileStoreError::Corrupt(
-                        "a reconciliation without a reservation records no digest mismatch".into(),
-                    ));
-                }
-                for (path, digest) in readopted {
-                    match digest {
-                        Some(digest) => {
-                            if !valid_digest(digest) {
-                                return Err(FileStoreError::Corrupt(
-                                    "a reconciliation carries an invalid digest".into(),
-                                ));
-                            }
-                            let id = state.next_id;
-                            let version = FileVersion {
-                                id,
-                                path: path.clone(),
-                                digest: digest.clone(),
-                                label: state.initial.clone(),
-                                previous: state.current.get(path).copied(),
-                                content_dependencies: vec![],
-                                dispatch: None,
-                            };
-                            state.next_id += 1;
-                            state.versions.insert(version.id, version);
-                            state.current.insert(path.clone(), id);
-                        }
-                        None => {
-                            state.current.remove(path);
-                        }
-                    }
-                }
+                state.next_id += 1;
+                state.versions.insert(version.id, version.clone());
+                state.current.insert(version.path.clone(), version.id);
             }
-            state.reservation = None;
             Ok(())
         }
     }
@@ -1105,12 +1197,6 @@ fn valid_digest(digest: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn snapshot_differs(state: &State, snapshot: &BTreeMap<String, Option<String>>) -> bool {
-    snapshot
-        .iter()
-        .any(|(path, observed)| current_state(state, path).as_ref().map(|version| &version.digest) != observed.as_ref())
 }
 
 fn validate_pin(state: &State, pin: &FilePin) -> Result<(), FileStoreError> {
@@ -1310,6 +1396,126 @@ impl Observed {
                 .transferred()
                 .is_none_or(|source| self.source.as_deref() == Some(source.version.digest.as_str()))
             && self.inputs_unchanged
+    }
+}
+
+enum RepairDecision {
+    Released,
+    Repaired(RepairPublication),
+    Quarantined,
+}
+
+fn repair_decision(
+    state: &State,
+    workspace: &Path,
+    reservation: &Reservation,
+) -> Result<RepairDecision, FileStoreError> {
+    let observed = Observed::of(workspace, &reservation.pin)?;
+    let Some(_) = &reservation.bound else {
+        return Ok(if observed.undisturbed(&reservation.pin) {
+            RepairDecision::Released
+        } else {
+            RepairDecision::Quarantined
+        });
+    };
+    let pin = &reservation.pin;
+    match &pin.basis {
+        PinnedBasis::Read(_) => Ok(if observed.undisturbed(pin) {
+            RepairDecision::Released
+        } else {
+            RepairDecision::Quarantined
+        }),
+        PinnedBasis::Move { source, .. } => {
+            if observed.source.as_deref() == Some(ABSENT) && observed.destination == source.version.digest {
+                Ok(RepairDecision::Repaired(RepairPublication::Attributed(
+                    repaired_version(state, reservation, &observed.destination, false),
+                )))
+            } else if observed.undisturbed(pin) {
+                Ok(RepairDecision::Released)
+            } else {
+                Ok(RepairDecision::Quarantined)
+            }
+        }
+        PinnedBasis::Copy { source, .. } => {
+            if observed.source.as_deref() != Some(source.version.digest.as_str()) {
+                return Ok(RepairDecision::Quarantined);
+            }
+            repair_destination(state, reservation, &observed.destination, Some(&source.version.digest))
+        }
+        PinnedBasis::Process { .. } if !observed.inputs_unchanged => Ok(RepairDecision::Quarantined),
+        PinnedBasis::Replace(_) | PinnedBasis::Edit(_) | PinnedBasis::Process { .. } => {
+            repair_destination(state, reservation, &observed.destination, None)
+        }
+    }
+}
+
+fn repair_destination(
+    state: &State,
+    reservation: &Reservation,
+    observed: &str,
+    expected: Option<&str>,
+) -> Result<RepairDecision, FileStoreError> {
+    let predecessor = reservation.pin.basis.predecessor();
+    let before = predecessor.map_or(ABSENT, |version| version.digest.as_str());
+    if observed == before {
+        let can_publish_same = predecessor.is_some() && expected.is_none_or(|expected| expected == observed);
+        return Ok(if can_publish_same {
+            RepairDecision::Repaired(RepairPublication::Ambiguous(repaired_version(
+                state,
+                reservation,
+                observed,
+                true,
+            )))
+        } else {
+            RepairDecision::Released
+        });
+    }
+    if observed == ABSENT || expected.is_some_and(|expected| expected != observed) {
+        return Ok(RepairDecision::Quarantined);
+    }
+    Ok(RepairDecision::Repaired(RepairPublication::Attributed(
+        repaired_version(state, reservation, observed, false),
+    )))
+}
+
+fn repaired_version(state: &State, reservation: &Reservation, digest: &str, ambiguous: bool) -> FileVersion {
+    let bound = reservation
+        .bound
+        .as_ref()
+        .expect("a repaired publication belongs to a bound reservation");
+    let predecessor = reservation.pin.basis.predecessor();
+    let mut dependencies = publication_dependencies(&reservation.pin.basis);
+    if ambiguous && let Some(predecessor) = predecessor {
+        dependencies.push(predecessor.id);
+        dependencies.sort_unstable();
+        dependencies.dedup();
+    }
+    let label = if ambiguous {
+        predecessor
+            .expect("an ambiguous publication has a predecessor")
+            .label
+            .combine(&bound.output_label)
+    } else {
+        bound.output_label.clone()
+    };
+    FileVersion {
+        id: state.next_id,
+        path: reservation.pin.path.clone(),
+        digest: digest.into(),
+        label,
+        previous: predecessor.map(|version| version.id),
+        content_dependencies: dependencies,
+        dispatch: (!ambiguous).then(|| bound.dispatch.clone()),
+    }
+}
+
+fn publication_dependencies(basis: &PinnedBasis) -> Vec<i64> {
+    match basis {
+        PinnedBasis::Replace(_) => vec![],
+        PinnedBasis::Edit(version) => vec![version.id],
+        PinnedBasis::Copy { source, .. } | PinnedBasis::Move { source, .. } => vec![source.version.id],
+        PinnedBasis::Process { inputs, .. } => inputs.iter().map(|input| input.version.id).collect(),
+        PinnedBasis::Read(_) => vec![],
     }
 }
 
@@ -1533,29 +1739,27 @@ mod tests {
     }
 
     #[test]
-    fn abandoning_releases_only_an_undisturbed_workspace() {
+    fn repair_releases_an_unbound_undisturbed_reservation_and_rejects_an_invalid_copy() {
         let fixture = Fixture::new();
         fs::write(fixture.workspace.join("destination.txt"), "before").unwrap();
         let store = fixture.store(&Label::top());
-        // A released call the harness never ran: the workspace still shows the pin.
+        // A call not yet bound cannot have run.
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
-        store.bind("a", "unrun", &dispatch(0), &Label::top()).unwrap();
         assert!(store.pin_for("a", "unrun").unwrap().is_some());
-        assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
+        assert_eq!(store.repair("a", "unrun").unwrap(), RepairOutcome::Released);
         assert!(store.pin_for("a", "unrun").unwrap().is_none());
-        assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);
+        assert_eq!(store.repair("a", "unrun").unwrap(), RepairOutcome::Absent);
         // The next call proceeds: the release did not leave the workspace wedged.
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
         store.cancel("b", "next").unwrap();
 
-        // A transfer whose destination moved is not released: the runtime cannot tell an
-        // unrun call from one whose report was lost.
+        // Copy can publish only the pinned source bytes.
         store
             .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "destination.txt")
             .unwrap();
         store.bind("a", "copy", &dispatch(2), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("destination.txt"), "partial").unwrap();
-        assert_eq!(store.abandon("a", "copy").unwrap(), AbandonOutcome::Quarantined);
+        assert_eq!(store.repair("a", "copy").unwrap(), RepairOutcome::Quarantined);
         assert!(store.pin_for("a", "copy").unwrap().is_some());
         assert!(matches!(
             store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
@@ -1564,34 +1768,42 @@ mod tests {
     }
 
     #[test]
-    fn operator_readoption_clears_quarantine_and_adopts_current_bytes_at_the_initial_label() {
+    fn repair_uses_the_bound_output_label_without_manufacturing_a_receipt() {
+        let fixture = Fixture::new();
+        let initial = Label::new(
+            appa_engine::label::Trust::new(3),
+            appa_engine::label::Audience::public(),
+        );
+        let output = Label::new(
+            appa_engine::label::Trust::new(1),
+            appa_engine::label::Audience::nobody(),
+        );
+        let store = fixture.store(&initial);
+        store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
+        store.bind("a", "edit", &dispatch(0), &output).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "published without report").unwrap();
+
+        assert_eq!(store.repair("a", "edit").unwrap(), RepairOutcome::Repaired);
+
+        let repaired = store.current("tracked.txt").unwrap().unwrap();
+        assert_eq!(repaired.label, output);
+        assert_eq!(
+            repaired.digest,
+            state_digest(&fixture.workspace, "tracked.txt").unwrap()
+        );
+        assert_eq!(repaired.dispatch, Some(dispatch(0)));
+        assert!(store.state().unwrap().receipts.is_empty());
+        store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn idle_digest_mismatch_requires_explicit_relabelling() {
         let fixture = Fixture::new();
         let initial = Label::new(
             appa_engine::label::Trust::new(3),
             appa_engine::label::Audience::public(),
         );
         let store = fixture.store(&initial);
-        store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
-        store.bind("a", "edit", &dispatch(0), &Label::top()).unwrap();
-        fs::write(fixture.workspace.join("tracked.txt"), "partial").unwrap();
-        assert!(matches!(
-            store.finish("a", "edit", false),
-            Err(FileStoreError::Quarantined)
-        ));
-
-        store.reconcile(true).unwrap();
-
-        let adopted = store.current("tracked.txt").unwrap().unwrap();
-        assert_eq!(adopted.label, initial);
-        assert_eq!(adopted.digest, state_digest(&fixture.workspace, "tracked.txt").unwrap());
-        assert!(adopted.dispatch.is_none());
-        store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
-    }
-
-    #[test]
-    fn operator_readoption_repairs_an_idle_digest_mismatch() {
-        let fixture = Fixture::new();
-        let store = fixture.store(&Label::top());
         store.prepare("a", "first", FileOperation::Read, "tracked.txt").unwrap();
         store.cancel("a", "first").unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "external change").unwrap();
@@ -1600,39 +1812,126 @@ mod tests {
             Err(FileStoreError::DigestMismatch)
         ));
 
-        store.reconcile(true).unwrap();
+        let digest = state_digest(&fixture.workspace, "tracked.txt").unwrap();
+        FileStore::relabel_workspace(
+            Arc::clone(&store.authority),
+            &fixture.workspace,
+            &[PathBuf::from("tracked.txt")],
+        )
+        .unwrap();
 
         store
-            .prepare("a", "repaired", FileOperation::Read, "tracked.txt")
+            .prepare("a", "relabeled", FileOperation::Read, "tracked.txt")
             .unwrap();
-        store.cancel("a", "repaired").unwrap();
-        assert!(matches!(store.reconcile(true), Err(FileStoreError::NothingToReconcile)));
+        assert_eq!(store.current("tracked.txt").unwrap().unwrap().digest, digest);
     }
 
     #[test]
-    fn clear_only_reconciliation_never_adopts_a_partial_new_destination() {
+    fn repair_attributes_a_new_destination_to_its_bound_request() {
         let fixture = Fixture::new();
+        let output = Label::new(
+            appa_engine::label::Trust::new(2),
+            appa_engine::label::Audience::nobody(),
+        );
         let store = fixture.store(&Label::top());
         store
             .prepare("a", "new", FileOperation::Replace, "partial.txt")
             .unwrap();
-        store.bind("a", "new", &dispatch(0), &Label::top()).unwrap();
-        fs::write(fixture.workspace.join("partial.txt"), "partial").unwrap();
-        assert!(matches!(
-            store.finish("a", "new", false),
-            Err(FileStoreError::Quarantined)
-        ));
+        store.bind("a", "new", &dispatch(0), &output).unwrap();
+        fs::write(fixture.workspace.join("partial.txt"), "published").unwrap();
 
-        store.reconcile(false).unwrap();
+        assert_eq!(store.repair("a", "new").unwrap(), RepairOutcome::Repaired);
 
-        assert!(matches!(
-            store.prepare("b", "next", FileOperation::Replace, "partial.txt"),
-            Err(FileStoreError::Untracked)
-        ));
-        assert!(matches!(
-            store.reconcile(false),
-            Err(FileStoreError::NothingToReconcile)
-        ));
+        let repaired = store.current("partial.txt").unwrap().unwrap();
+        assert_eq!(repaired.label, output);
+        assert!(repaired.previous.is_none());
+        assert_eq!(repaired.dispatch, Some(dispatch(0)));
+    }
+
+    #[test]
+    fn repair_recovers_copy_move_and_process_from_their_pinned_inputs() {
+        let output = Label::new(
+            appa_engine::label::Trust::new(2),
+            appa_engine::label::Audience::nobody(),
+        );
+
+        let copy_fixture = Fixture::new();
+        let copy = copy_fixture.store(&Label::top());
+        let copy_pin = copy
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "copy.txt")
+            .unwrap();
+        copy.bind("a", "copy", &dispatch(0), &output).unwrap();
+        fs::copy(
+            copy_fixture.workspace.join("tracked.txt"),
+            copy_fixture.workspace.join("copy.txt"),
+        )
+        .unwrap();
+        assert_eq!(copy.repair("a", "copy").unwrap(), RepairOutcome::Repaired);
+        let copied = copy.current("copy.txt").unwrap().unwrap();
+        assert_eq!(copied.label, output);
+        assert_eq!(
+            copied.content_dependencies,
+            vec![copy_pin.basis.transferred().unwrap().version.id]
+        );
+
+        let move_fixture = Fixture::new();
+        let moved = move_fixture.store(&Label::top());
+        moved
+            .prepare_transfer("a", "move", FileOperation::Move, "tracked.txt", "moved.txt")
+            .unwrap();
+        moved.bind("a", "move", &dispatch(1), &output).unwrap();
+        fs::rename(
+            move_fixture.workspace.join("tracked.txt"),
+            move_fixture.workspace.join("moved.txt"),
+        )
+        .unwrap();
+        assert_eq!(moved.repair("a", "move").unwrap(), RepairOutcome::Repaired);
+        assert!(moved.current("tracked.txt").unwrap().is_none());
+        assert_eq!(moved.current("moved.txt").unwrap().unwrap().label, output);
+
+        let process_fixture = Fixture::new();
+        let process = process_fixture.store(&Label::top());
+        let process_pin = process
+            .prepare_process("a", "process", &["tracked.txt".into()], "output.txt")
+            .unwrap();
+        process.bind("a", "process", &dispatch(2), &output).unwrap();
+        fs::write(process_fixture.workspace.join("output.txt"), "isolated output").unwrap();
+        assert_eq!(process.repair("a", "process").unwrap(), RepairOutcome::Repaired);
+        let processed = process.current("output.txt").unwrap().unwrap();
+        assert_eq!(processed.label, output);
+        assert_eq!(
+            processed.content_dependencies,
+            process_pin
+                .basis
+                .inputs()
+                .iter()
+                .map(|input| input.version.id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn repair_combines_labels_when_publication_is_byte_identical() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        let output = Label::new(
+            appa_engine::label::Trust::new(1),
+            appa_engine::label::Audience::nobody(),
+        );
+        store
+            .prepare("a", "same", FileOperation::Replace, "tracked.txt")
+            .unwrap();
+        let predecessor = store.current("tracked.txt").unwrap().unwrap();
+        store.bind("a", "same", &dispatch(0), &output).unwrap();
+
+        assert_eq!(store.repair("a", "same").unwrap(), RepairOutcome::Repaired);
+
+        let repaired = store.current("tracked.txt").unwrap().unwrap();
+        assert_eq!(repaired.digest, predecessor.digest);
+        assert_eq!(repaired.label, predecessor.label.combine(&output));
+        assert_eq!(repaired.previous, Some(predecessor.id));
+        assert_eq!(repaired.content_dependencies, vec![predecessor.id]);
+        assert!(repaired.dispatch.is_none());
     }
 
     #[test]
@@ -1779,7 +2078,7 @@ mod tests {
         fs::rename(fixture.workspace.join("sub"), fixture.workspace.join("real")).unwrap();
         std::os::unix::fs::symlink(&outside, fixture.workspace.join("sub")).unwrap();
 
-        assert!(store.abandon("a", "edit").is_err());
+        assert!(store.repair("a", "edit").is_err());
         fs::write(outside.join("file.txt"), "escaped").unwrap();
         assert!(store.finish("a", "edit", true).is_err());
         fs::remove_file(fixture.workspace.join("sub")).unwrap();
@@ -2154,7 +2453,7 @@ mod tests {
             .unwrap();
         store.bind("a", "process", &dispatch(0), &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "changed").unwrap();
-        assert_eq!(store.abandon("a", "process").unwrap(), AbandonOutcome::Quarantined);
+        assert_eq!(store.repair("a", "process").unwrap(), RepairOutcome::Quarantined);
         assert!(matches!(
             store.finish("a", "process", false),
             Err(FileStoreError::Quarantined)

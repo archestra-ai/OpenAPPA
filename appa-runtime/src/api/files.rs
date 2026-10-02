@@ -29,10 +29,11 @@
 //! The runtime stages replacement bytes beside the target and atomically replaces it.
 //! Success validates bytes and publishes immutable version metadata before admitting the
 //! result. No file-derived result reaches MCP before admission. An unchanged failure admits
-//! its error text but publishes no version. A changed failure, missing outcome,
-//! or unmatched digest leaves the workspace's durable reservation in place. Further file
-//! calls in that workspace stop. A released call the harness never ran gives its reservation
-//! back at the turn end, and only while the workspace still shows the pinned state.
+//! its error text but publishes no version. A changed failure or unmatched digest leaves the
+//! workspace's durable reservation in place. A missing outcome triggers mechanical repair after
+//! the writer stops: the runtime releases an unchanged reservation or records an attributable
+//! publication under the request's bound Label. An incompatible state keeps the reservation,
+//! and further file calls in that workspace stop.
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
 //! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
@@ -1396,7 +1397,7 @@ else:
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("quarantined")
+                .contains("incompatible with the pending file operation")
         );
         drop(runtime);
         let runtime = open(dir.path());
@@ -1412,6 +1413,48 @@ else:
             error.contains("pending"),
             "durable quarantine must refuse the workspace: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_end_repairs_an_attributable_file_publication_without_a_result() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, call("Edit", "source.txt")).await;
+        std::fs::write(dir.path().join("work/source.txt"), "published before report loss").unwrap();
+
+        runtime.session(&id, &id).unwrap().on_turn_end().await.unwrap();
+
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        assert_eq!(
+            label(&runtime, &id, "source.txt"),
+            Label::new(Trust::new(0), Audience::public())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_indeterminate_result_repairs_the_file_before_refusing_its_missing_result() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("host-owned-session".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        let edit = call("Edit", "source.txt");
+        allow(&runtime, &id, edit.clone()).await;
+        std::fs::write(dir.path().join("work/source.txt"), "published before report loss").unwrap();
+
+        let error = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_result(edit, ToolOutcome::Indeterminate)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no file result can be delivered"));
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        assert_eq!(label(&runtime, &id, "source.txt").trust, Trust::new(0));
     }
 
     #[tokio::test]
@@ -1640,7 +1683,7 @@ else:
     }
 
     #[tokio::test]
-    async fn managed_files_bypasses_and_missing_outcomes_fail_closed() {
+    async fn managed_files_refuse_bypasses_and_repair_missing_outcomes() {
         let dir = fixture();
         let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
@@ -1660,13 +1703,6 @@ else:
         allow(&runtime, &id, call("Write", "unreported.txt")).await;
         std::fs::write(dir.path().join("work/unreported.txt"), "outcome lost").unwrap();
         session.on_turn_end().await.unwrap();
-        assert!(
-            session
-                .on_tool_call(call("Read", "source.txt"), false)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("pending")
-        );
+        allow(&runtime, &id, call("Read", "source.txt")).await;
     }
 }

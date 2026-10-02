@@ -340,7 +340,7 @@ impl Session {
                 .await
             {
                 Ok(_) => {
-                    self.release_file_reservation(&dispatch.id).await;
+                    self.repair_file_reservation(&dispatch.id).await;
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?dispatch.id,
@@ -355,18 +355,16 @@ impl Session {
         Ok(())
     }
 
-    /// Give back the ledger reservation of a released file call the harness never ran.
+    /// Repair the ledger reservation of a released file call after its writer has stopped.
     ///
-    /// The ledger releases it only while the workspace still shows the pinned state, which is
-    /// what an unrun call leaves behind. A workspace that moved keeps its reservation: the
-    /// runtime cannot tell an unrun call from one whose report was lost, and guessing would
-    /// publish bytes whose Label nobody recorded. That case is an operator's, so it is
-    /// reported loudly rather than resolved here.
+    /// The durable write request fixes the Label of any attributable publication before the
+    /// call runs. Recovery can therefore publish its file metadata without manufacturing a
+    /// successful tool outcome. An incompatible physical state keeps the reservation.
     ///
     /// A ledger failure never turns a turn end into a refusal: the session would then be
     /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
     /// not read stays exactly as it was.
-    async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
+    async fn repair_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
         if self.inner.shared.files.is_none() {
             return;
         }
@@ -377,22 +375,26 @@ impl Session {
                 return;
             }
         };
-        let released = ledger(self.inner.clone(), self.root.clone(), {
+        let repaired = ledger(self.inner.clone(), self.root.clone(), {
             let (actor, key) = (self.trajectory.0.clone(), key);
-            move |store| store.abandon(&actor, &key)
+            move |store| store.repair(&actor, &key)
         })
         .await;
-        match released {
-            Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
-            Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
+        match repaired {
+            Ok(appa_eventlog::files::RepairOutcome::Absent) => {}
+            Ok(appa_eventlog::files::RepairOutcome::Released) => tracing::info!(
                 trajectory = %self.trajectory.0,
                 "released the reservation of a file call the harness never ran"
             ),
-            Ok(appa_eventlog::files::AbandonOutcome::Quarantined) => tracing::warn!(
+            Ok(appa_eventlog::files::RepairOutcome::Repaired) => tracing::info!(
+                trajectory = %self.trajectory.0,
+                "repaired the file version of a call whose outcome was not reported"
+            ),
+            Ok(appa_eventlog::files::RepairOutcome::Quarantined) => tracing::warn!(
                 trajectory = %self.trajectory.0,
                 "a released file call left the workspace inconsistent; the reservation stands and file calls stay refused"
             ),
-            Err(error) => tracing::warn!(%error, "a file reservation could not be released"),
+            Err(error) => tracing::warn!(%error, "a file reservation could not be repaired"),
         }
     }
 
@@ -780,7 +782,7 @@ impl Session {
             .map_err(UnreportableOutcome::refusal)?;
             let key = super::files::key(&dispatch)?;
             // Preserve actual failure text: the native failure hook cannot reliably replace it.
-            // A missing observation keeps the reservation; no later file call may proceed.
+            // A missing observation is repaired after its writer has stopped.
             let o = match o {
                 ToolOutcome::Success {
                     body: OutcomeBody::Unavailable,
@@ -802,8 +804,9 @@ impl Session {
             let decision = self.report_outcome(&call, call_id.as_deref(), &o).await?;
             match &o {
                 ToolOutcome::Indeterminate => {
+                    self.repair_file_reservation(&dispatch).await;
                     return Err(super::files::refused(
-                        "missing outcome; workspace requires operator reconciliation",
+                        "missing outcome; no file result can be delivered",
                     ));
                 }
                 ToolOutcome::Failure { .. } => {
@@ -1223,7 +1226,7 @@ impl Session {
                 .await
             {
                 Ok(_) => {
-                    self.release_file_reservation(&open.id).await;
+                    self.repair_file_reservation(&open.id).await;
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?open.id,

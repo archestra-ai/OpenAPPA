@@ -209,9 +209,25 @@ enum PluginCommand {
 
 #[derive(Subcommand)]
 enum FilesCommand {
-    /// Reconcile a tracked workspace after quarantine or a digest mismatch.
-    #[command(after_help = "Caution: Stop all workspace writers before running.")]
-    Reconcile {
+    /// Repair a pending file operation from its recorded request and disk state.
+    #[command(
+        after_help = "Caution: Stop all processes writing to the workspace before running this command.\n\nCompares the disk state with the pending operation. If the disk reflects an expected result, the command records the file version under the request's bound Label without marking the operation successful. If the disk is incompatible with the recorded operation, the command fails and keeps the workspace reservation."
+    )]
+    Repair {
+        /// Path to the tracked workspace.
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Installed deployment data directory; uses the platform default when absent.
+        #[arg(long, env = "APPA_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Assign the configured initial Label to selected tracked files.
+    #[command(
+        after_help = "Caution: Relabelling overrides security state. This command records the current contents of each selected file under the configured initial Label.\n\nPrecondition: All pending file operations must be resolved before running this command."
+    )]
+    Relabel {
         /// Path to the tracked workspace.
         #[arg(long)]
         workspace: PathBuf,
@@ -220,14 +236,14 @@ enum FilesCommand {
         #[arg(long, env = "APPA_DATA_DIR")]
         data_dir: Option<PathBuf>,
 
-        /// Accept current disk state for known paths; present files receive the configured initial Label.
-        #[arg(long)]
-        accept_current_files: bool,
+        /// Paths to tracked files to record under the initial Label.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
     },
 }
 
-fn reconcile_files(workspace: PathBuf, data_dir: Option<PathBuf>, accept_current_files: bool) -> ExitCode {
-    let result = appa_runtime::runtime_start::Deployment::installed(None, data_dir)
+fn file_store(data_dir: Option<PathBuf>) -> Result<Arc<appa_eventlog::LogStore>, String> {
+    appa_runtime::runtime_start::Deployment::installed(None, data_dir)
         .map_err(|error| error.to_string())
         .and_then(|deployment| {
             appa_eventlog::LogStore::open(appa_eventlog::Backend::Sqlite {
@@ -236,17 +252,50 @@ fn reconcile_files(workspace: PathBuf, data_dir: Option<PathBuf>, accept_current
             .map(Arc::new)
             .map_err(|error| error.to_string())
         })
-        .and_then(|store| {
-            appa_eventlog::files::FileStore::reconcile_workspace(store, &workspace, accept_current_files)
-                .map_err(|error| error.to_string())
-        });
+}
+
+fn repair_files(workspace: PathBuf, data_dir: Option<PathBuf>) -> ExitCode {
+    let result = file_store(data_dir).and_then(|store| {
+        appa_eventlog::files::FileStore::repair_workspace(store, &workspace).map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(appa_eventlog::files::RepairOutcome::Released) => {
+            println!(
+                "Released unchanged file reservation for workspace: {}",
+                workspace.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Repaired) => {
+            println!("Repaired pending file operation in workspace: {}", workspace.display());
+            ExitCode::SUCCESS
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Quarantined) => {
+            eprintln!("appa files repair: disk state matches neither the pre-execution state nor an expected result");
+            ExitCode::FAILURE
+        }
+        Ok(appa_eventlog::files::RepairOutcome::Absent) => unreachable!("workspace repair requires a reservation"),
+        Err(error) => {
+            eprintln!("appa files repair: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn relabel_files(workspace: PathBuf, data_dir: Option<PathBuf>, paths: Vec<PathBuf>) -> ExitCode {
+    let result = file_store(data_dir).and_then(|store| {
+        appa_eventlog::files::FileStore::relabel_workspace(store, &workspace, &paths).map_err(|error| error.to_string())
+    });
     match result {
         Ok(()) => {
-            println!("Reconciled tracked workspace: {}", workspace.display());
+            println!(
+                "Relabelled selected files with the initial Label in workspace: {}",
+                workspace.display()
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("appa files reconcile: {error}");
+            eprintln!("appa files relabel: {error}");
             ExitCode::FAILURE
         }
     }
@@ -318,13 +367,16 @@ fn main() -> ExitCode {
             command: PackageCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_battery(args),
         Command::Files {
+            command: FilesCommand::Repair { workspace, data_dir },
+        } => repair_files(workspace, data_dir),
+        Command::Files {
             command:
-                FilesCommand::Reconcile {
+                FilesCommand::Relabel {
                     workspace,
                     data_dir,
-                    accept_current_files,
+                    paths,
                 },
-        } => reconcile_files(workspace, data_dir, accept_current_files),
+        } => relabel_files(workspace, data_dir, paths),
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
         Command::FileMcp(args) => appa_runtime::claude_files::serve(args),
