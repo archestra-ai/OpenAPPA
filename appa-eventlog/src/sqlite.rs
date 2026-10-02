@@ -2,7 +2,7 @@
 //! of [`Backend::Memory`](crate::Backend::Memory). This module owns the schema, its version
 //! stamp, and every statement either runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -26,9 +26,33 @@ use crate::receipts::{
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
-const SCHEMA: &str = "CREATE TABLE logs (
+/// The oldest version a database upgrades from. A fresh database installs [`BASE_SCHEMA`] at
+/// this version and then runs every step of [`UPGRADES`], so the fresh and the upgraded paths
+/// are one path.
+const BASE_VERSION: i64 = 5;
+
+/// Step `n` moves a database from `BASE_VERSION + n` to the next version. A change that cannot
+/// carry the stored data forward raises `BASE_VERSION` instead of adding a step.
+const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
+    "CREATE TABLE held_peer_messages (
+         seq INTEGER PRIMARY KEY,
+         id TEXT NOT NULL UNIQUE,
+         receiver TEXT NOT NULL,
+         digest TEXT NOT NULL,
+         label TEXT NOT NULL,
+         body TEXT NOT NULL,
+         expires_at INTEGER NOT NULL,
+         notified INTEGER NOT NULL
+     );
+     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);",
+    "CREATE TABLE archived_roots (
+         root TEXT PRIMARY KEY
+     );",
+];
+
+const BASE_SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
                          seq   INTEGER NOT NULL,
                          facts BLOB NOT NULL,
@@ -64,18 +88,7 @@ const SCHEMA: &str = "CREATE TABLE logs (
                          approved_output TEXT,
                          decision TEXT,
                          PRIMARY KEY (organization_id, session_id, tool_call_id)
-                     );
-                     CREATE TABLE held_peer_messages (
-                         seq INTEGER PRIMARY KEY,
-                         id TEXT NOT NULL UNIQUE,
-                         receiver TEXT NOT NULL,
-                         digest TEXT NOT NULL,
-                         label TEXT NOT NULL,
-                         body TEXT NOT NULL,
-                         expires_at INTEGER NOT NULL,
-                         notified INTEGER NOT NULL
-                     );
-                     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);";
+                     );";
 
 const FILE_SCHEMA: &str = "CREATE TABLE file_events (
                                workspace TEXT NOT NULL,
@@ -116,24 +129,87 @@ impl Sqlite {
         Self::install(Connection::open_in_memory()?, ":memory:".to_string())
     }
 
-    /// Give a fresh database the schema and its version stamp, or check an existing one.
+    /// Open the file as [`Sqlite::open`] does, but replace a database too old to upgrade with a
+    /// fresh one. The old file stays beside it under an `.archived-<millis>` name, and every
+    /// root it held is recorded in the fresh one, so [`Sqlite::create`] refuses to reopen any of
+    /// them at the starting label.
+    pub(crate) fn open_archiving(path: &Path) -> Result<(Self, Option<PathBuf>), OpenError> {
+        let refusal = match Self::open(path) {
+            Err(refusal @ OpenError::Incompatible { .. }) => refusal,
+            opened => return opened.map(|store| (store, None)),
+        };
+        // A file whose roots cannot be listed is not one this store wrote, so it is left for
+        // the operator rather than moved.
+        let Ok(roots) = checkpointed_roots(path) else {
+            return Err(refusal);
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let fresh = path.with_file_name(format!("{name}.upgrading"));
+        let archive = path.with_file_name(format!("{name}.archived-{}", millis(SystemTime::now())));
+        for stale in [fresh.clone()].iter().chain(&sidecars(&fresh)) {
+            remove_if_present(stale)?;
+        }
+        {
+            let store = Self::open(&fresh)?;
+            let mut connection = store.connection();
+            immediate(&mut connection, |transaction| {
+                let mut insert = transaction.prepare("INSERT INTO archived_roots (root) VALUES (?1)")?;
+                for root in &roots {
+                    insert.execute(params![root])?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })?;
+            // Leaving WAL mode folds the log into the main file, which the rename below moves
+            // alone.
+            connection.pragma_update(None, "journal_mode", "DELETE")?;
+        }
+        // The link keeps the old file whole under its archive name; the rename then replaces
+        // the configured path in one step. A crash between them leaves the old database in
+        // place, and the next open archives it again.
+        std::fs::hard_link(path, &archive).map_err(|error| moving(&archive, error))?;
+        for stale in &sidecars(path) {
+            remove_if_present(stale)?;
+        }
+        std::fs::rename(&fresh, path).map_err(|error| moving(path, error))?;
+        Ok((Self::open(path)?, Some(archive)))
+    }
+
+    /// Give a fresh database the schema and its version stamp, upgrade an older one, or check a
+    /// current one.
     fn install(mut connection: Connection, path: String) -> Result<Self, OpenError> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let stamped: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         // Only an empty file is initialized. A database that holds tables
         // but carries no stamp was written by something else — an earlier
         // store, another tool — and creating this schema beside its data
         // would leave its histories present and invisible.
-        if version == 0 && is_empty(&transaction)? {
-            transaction.execute_batch(SCHEMA)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        } else if version != SCHEMA_VERSION {
-            return Err(OpenError::ForeignSchema {
+        let version = if stamped == 0 && is_empty(&transaction)? {
+            transaction.execute_batch(BASE_SCHEMA)?;
+            BASE_VERSION
+        } else {
+            stamped
+        };
+        if version > SCHEMA_VERSION {
+            return Err(OpenError::Newer {
                 path,
                 found: version,
-                expected: SCHEMA_VERSION,
+                supported: SCHEMA_VERSION,
             });
-        } else if !has_schema(&transaction)? {
+        }
+        if version < BASE_VERSION {
+            return Err(OpenError::Incompatible {
+                path,
+                found: version,
+                oldest: BASE_VERSION,
+            });
+        }
+        for step in &UPGRADES[(version - BASE_VERSION) as usize..] {
+            transaction.execute_batch(step)?;
+        }
+        if version != SCHEMA_VERSION {
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        if !has_schema(&transaction)? {
             return Err(OpenError::Damaged {
                 path,
                 detail: "stamped at this build's schema version, but its tables are missing".to_string(),
@@ -160,6 +236,18 @@ impl Sqlite {
         before_commit: impl FnOnce() -> Result<(), CreateError>,
     ) -> Result<(), CreateError> {
         immediate(&mut self.connection(), |transaction| {
+            let archived: Option<i64> = transaction
+                .query_row(
+                    "SELECT 1 FROM archived_roots WHERE root = ?1",
+                    params![root.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if archived.is_some() {
+                return Err(CreateError::Archived {
+                    root: root.as_str().to_string(),
+                });
+            }
             transaction.execute(
                 "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
                 params![key.as_str(), policy_file],
@@ -693,11 +781,11 @@ fn is_taken(error: &rusqlite::Error) -> bool {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results', 'held_peer_messages')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'operations', 'processed_results', 'held_peer_messages', 'archived_roots')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 6)
+    Ok(found == 7)
 }
 
 fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -734,6 +822,44 @@ fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
         Some("the optional file-event schema is partial or incompatible".into()),
     ))
+}
+
+/// Every root the database at `path` holds, read after folding its write-ahead log into the
+/// main file, so the file alone is the whole database. A checkpoint another connection blocks
+/// fails rather than leave log pages behind.
+fn checkpointed_roots(path: &Path) -> Result<Vec<String>, rusqlite::Error> {
+    let connection = Connection::open(path)?;
+    let blocked: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    if blocked != 0 {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("another connection holds the write-ahead log".to_string()),
+        ));
+    }
+    let mut statement = connection.prepare("SELECT DISTINCT root FROM logs")?;
+    statement.query_map([], |row| row.get(0))?.collect()
+}
+
+fn sidecars(path: &Path) -> [PathBuf; 2] {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    [
+        path.with_file_name(format!("{name}-wal")),
+        path.with_file_name(format!("{name}-shm")),
+    ]
+}
+
+fn remove_if_present(path: &Path) -> Result<(), OpenError> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(moving(path, error)),
+        _ => Ok(()),
+    }
+}
+
+fn moving(path: &Path, error: std::io::Error) -> OpenError {
+    OpenError::Archive {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    }
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -843,6 +969,7 @@ mod tests {
     fn a_fresh_sqlite_store_has_the_frozen_schema() {
         let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected: Vec<(String, String, Option<String>)> = [
+            ("archived_roots", Some("CREATE TABLE archived_roots ( root TEXT PRIMARY KEY )")),
             ("held_peer_messages", Some("CREATE TABLE held_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, receiver TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL, expires_at INTEGER NOT NULL, notified INTEGER NOT NULL )")),
             ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
@@ -850,6 +977,7 @@ mod tests {
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
+            ("sqlite_autoindex_archived_roots_1", None),
             ("sqlite_autoindex_held_peer_messages_1", None),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
@@ -880,7 +1008,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("the version reads");
-            assert_eq!(version, 6);
+            assert_eq!(version, SCHEMA_VERSION);
             let mut statement = connection
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
                 .expect("the schema query prepares");
@@ -942,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_at_another_schema_version_is_refused() {
+    fn a_database_from_a_newer_build_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
@@ -951,35 +1079,16 @@ mod tests {
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("the version moves");
 
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
+        for opened in [
+            LogStore::open(Backend::Sqlite { path: path.clone() }).err(),
+            LogStore::open_archiving(&path).err(),
+        ] {
+            match opened {
+                Some(OpenError::Newer { found, supported, .. }) => {
+                    assert_eq!((found, supported), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
+                }
+                other => panic!("expected a newer-schema refusal, got {other:?}"),
             }
-            other => panic!("expected a schema refusal, got {other:?}"),
-        }
-    }
-
-    /// A file the previous build wrote — without the held peer messages table, stamped 5 — is
-    /// refused rather than read as this build's schema.
-    #[test]
-    fn a_database_from_the_previous_schema_version_is_refused() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
-        let previous = Connection::open(&path).expect("the file reopens");
-        previous
-            .execute_batch("DROP TABLE held_peer_messages")
-            .expect("the newer table drops");
-        previous
-            .pragma_update(None, "user_version", 5)
-            .expect("the version moves back");
-        drop(previous);
-
-        match LogStore::open(Backend::Sqlite { path }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (5, 6));
-            }
-            other => panic!("expected a schema refusal, got {other:?}"),
         }
     }
 
@@ -1007,12 +1116,27 @@ mod tests {
             .execute_batch("CREATE TABLE batches (family TEXT, seq INTEGER, bytes BLOB);")
             .expect("the older schema lands");
 
-        match LogStore::open(Backend::Sqlite { path: path.clone() }).err() {
-            Some(OpenError::ForeignSchema { found, expected, .. }) => {
-                assert_eq!((found, expected), (0, SCHEMA_VERSION));
+        for opened in [
+            LogStore::open(Backend::Sqlite { path: path.clone() }).err(),
+            LogStore::open_archiving(&path).err(),
+        ] {
+            match opened {
+                Some(OpenError::Incompatible { found, oldest, .. }) => {
+                    assert_eq!((found, oldest), (0, BASE_VERSION));
+                }
+                other => panic!("expected a schema refusal, got {other:?}"),
             }
-            other => panic!("expected a schema refusal, got {other:?}"),
         }
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("the directory lists")
+                .all(|entry| !entry
+                    .expect("the entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".archived-")),
+            "a file this store did not write is not moved"
+        );
         let tables: i64 = Connection::open(&path)
             .expect("the file reopens")
             .query_row(

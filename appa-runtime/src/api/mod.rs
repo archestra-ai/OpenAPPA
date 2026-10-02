@@ -507,6 +507,10 @@ pub(crate) enum EventError {
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
     TrajectoryExists,
+    #[error(
+        "this session started under an APPA version whose database could not be upgraded, so its label is unknown; start a new session"
+    )]
+    RootArchived,
     #[error("the session principal {0:?} is not an address")]
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
@@ -605,6 +609,7 @@ impl EventError {
             | EventError::RemedyArguments { .. }
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
+            | EventError::RootArchived
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
@@ -955,11 +960,20 @@ impl Prepared {
         } else {
             None
         };
-        let store = LogStore::open(backend).map_err(|error| match error {
+        let opened = match backend {
+            Backend::Sqlite { path } => LogStore::open_archiving(&path),
+            backend => LogStore::open(backend).map(|store| (store, None)),
+        };
+        let (store, archive) = opened.map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
-            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
         })?;
+        if let Some(archive) = archive {
+            tracing::warn!(
+                archive = %archive.display(),
+                "the database was too old to upgrade; it was moved aside and its sessions cannot resume"
+            );
+        }
         Ok(self.with_store(Arc::new(store), state_path))
     }
 
@@ -2031,6 +2045,7 @@ impl Runtime {
             })
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
+                appa_eventlog::CreateError::Archived { .. } => EventError::RootArchived,
                 error => EventError::Storage(error.to_string()),
             })?;
         Ok(Session::attach(

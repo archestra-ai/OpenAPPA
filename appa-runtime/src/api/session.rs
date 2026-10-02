@@ -7029,6 +7029,30 @@ delta = {}
         ));
     }
 
+    #[test]
+    fn a_session_from_an_archived_database_cannot_reopen() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        Runtime::open(config_with(FETCH_AND_SEND, None), path.clone(), None)
+            .expect("the runtime opens")
+            .create_session(root(), None)
+            .expect("a fresh id opens");
+        rusqlite::Connection::open(&path)
+            .expect("the file reopens")
+            .pragma_update(None, "user_version", 4)
+            .expect("the version moves back past the upgrade chain");
+
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), path, None)
+            .expect("a database too old to upgrade is archived, not refused");
+        assert!(matches!(
+            runtime.create_session(root(), None),
+            Err(EventError::RootArchived)
+        ));
+        runtime
+            .create_session(TrajectoryId("cc:new".to_string()), None)
+            .expect("a new session opens");
+    }
+
     #[tokio::test]
     async fn a_decision_whose_append_fails_never_acts() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");

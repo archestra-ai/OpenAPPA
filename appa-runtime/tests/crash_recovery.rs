@@ -115,7 +115,7 @@ fn assert_file_tracking_left_the_database_alone(db: &Path) {
             |row| row.get(0),
         )
         .expect("the optional table count reads");
-    assert_eq!(version, 6, "ordinary runtimes retain the frozen core schema version");
+    assert_eq!(version, 7, "ordinary runtimes retain the frozen core schema version");
     assert_eq!(
         file_tables, 0,
         "ordinary runtimes do not install experimental file tables"

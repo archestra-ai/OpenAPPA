@@ -157,6 +157,11 @@ directory used by the Claude Code starter (`APPA_CONFIG_DIR` can override it).
 ./target/debug/appa runtime --config appa.toml --db appa.db
 ```
 
+The runtime upgrades a database from an earlier release in place. It moves a
+database too old to upgrade aside to `appa.db.archived-<millis>` and starts a
+new one. Sessions recorded in the old database cannot resume: the runtime
+refuses them, because their labels are not in the new database.
+
 `curl localhost:8787/health` prints `ok` when it is up. The listener
 accepts loopback addresses only. Useful flags: `--listen
 127.0.0.1:<port>` for another port, `-v` to log each hook and
