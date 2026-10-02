@@ -216,22 +216,28 @@ enum FilesCommand {
         #[arg(long)]
         workspace: PathBuf,
 
-        /// Runtime database containing the workspace event stream.
-        #[arg(long, env = "APPA_DB", default_value = "appa.db")]
-        db: PathBuf,
+        /// Installed deployment data directory; uses the platform default when absent.
+        #[arg(long, env = "APPA_DATA_DIR")]
+        data_dir: Option<PathBuf>,
 
-        /// Accept all paths in the workspace stream and assign present files the configured initial Label.
+        /// Accept current disk state for known paths; present files receive the configured initial Label.
         #[arg(long)]
-        readopt_at_initial: bool,
+        accept_current_files: bool,
     },
 }
 
-fn reconcile_files(workspace: PathBuf, db: PathBuf, readopt_at_initial: bool) -> ExitCode {
-    let result = appa_eventlog::LogStore::open(appa_eventlog::Backend::Sqlite { path: db })
-        .map(Arc::new)
+fn reconcile_files(workspace: PathBuf, data_dir: Option<PathBuf>, accept_current_files: bool) -> ExitCode {
+    let result = appa_runtime::runtime_start::Deployment::installed(None, data_dir)
         .map_err(|error| error.to_string())
+        .and_then(|deployment| {
+            appa_eventlog::LogStore::open(appa_eventlog::Backend::Sqlite {
+                path: deployment.data_dir.join("appa.db"),
+            })
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+        })
         .and_then(|store| {
-            appa_eventlog::files::FileStore::reconcile_workspace(store, &workspace, readopt_at_initial)
+            appa_eventlog::files::FileStore::reconcile_workspace(store, &workspace, accept_current_files)
                 .map_err(|error| error.to_string())
         });
     match result {
@@ -315,10 +321,10 @@ fn main() -> ExitCode {
             command:
                 FilesCommand::Reconcile {
                     workspace,
-                    db,
-                    readopt_at_initial,
+                    data_dir,
+                    accept_current_files,
                 },
-        } => reconcile_files(workspace, db, readopt_at_initial),
+        } => reconcile_files(workspace, data_dir, accept_current_files),
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
         Command::FileMcp(args) => appa_runtime::claude_files::serve(args),

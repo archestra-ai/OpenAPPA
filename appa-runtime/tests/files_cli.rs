@@ -17,11 +17,13 @@ fn dispatch() -> DispatchId {
 }
 
 #[test]
-fn reconcile_command_readopts_quarantine_and_unblocks_the_next_file_call() {
+fn reconcile_command_accepts_current_files_from_the_installed_database() {
     let fixture = tempfile::tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
-    let database = fixture.path().join("appa.db");
+    let data_dir = fixture.path().join("data");
+    let database = data_dir.join("appa.db");
     std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&data_dir).unwrap();
     std::fs::write(workspace.join("tracked.txt"), "before").unwrap();
 
     let authority = Arc::new(LogStore::open(Backend::Sqlite { path: database.clone() }).unwrap());
@@ -43,10 +45,9 @@ fn reconcile_command_readopts_quarantine_and_unblocks_the_next_file_call() {
             "reconcile",
             "--workspace",
             workspace.to_str().unwrap(),
-            "--db",
-            database.to_str().unwrap(),
-            "--readopt-at-initial",
+            "--accept-current-files",
         ])
+        .env("APPA_DATA_DIR", &data_dir)
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
