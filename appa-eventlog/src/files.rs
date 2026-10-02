@@ -1,6 +1,6 @@
 //! Event-sourced workspace versions for runtime-owned filesystem tool calls.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 #[cfg(unix)]
@@ -40,6 +40,8 @@ pub enum FileStoreError {
     DigestMismatch,
     #[error("the host changed the file after a failed operation; the reservation is quarantined")]
     Quarantined,
+    #[error("the workspace has no reservation or digest mismatch to reconcile")]
+    NothingToReconcile,
     #[error("stored data is invalid: {0}")]
     Corrupt(String),
     #[error("filesystem failure: {0}")]
@@ -228,6 +230,12 @@ pub enum AbandonOutcome {
     Quarantined,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReservedCall {
+    actor: String,
+    call_key: String,
+}
+
 /// One durable transition in a canonical workspace's event log.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -264,6 +272,12 @@ pub(crate) enum WorkspaceEvent {
         actor: String,
         call_key: String,
     },
+    Reconciled {
+        reservation: Option<ReservedCall>,
+        /// A complete observation of every path the workspace stream has named. `None`
+        /// clears only the reservation; a map value of `None` records an absent path.
+        readopted: Option<BTreeMap<String, Option<String>>>,
+    },
 }
 
 /// A workspace history and the compare-and-swap position it was read at.
@@ -288,6 +302,9 @@ struct State {
     reservation: Option<Reservation>,
     receipts: HashMap<String, FileReceipt>,
     roots: HashSet<TrajectoryId>,
+    /// Every path a durable version or reservation has named. A reconciled partial write
+    /// must never become a fresh first-touch adoption merely because it published no version.
+    known_paths: BTreeSet<String>,
 }
 
 /// A live reservation: the pinned operation a released call holds the workspace for.
@@ -369,6 +386,21 @@ impl FileStore {
             ));
         }
         Ok(store)
+    }
+
+    /// Whether the authoritative workspace history contains this root binding. The index
+    /// locates the stream, but never answers on its own.
+    pub fn root_is_bound(authority: &LogStore, root: &TrajectoryId) -> Result<bool, FileStoreError> {
+        let Some(workspace) = authority.workspace_for_root(root)? else {
+            return Ok(false);
+        };
+        let state = replay(&authority.workspace_log(&workspace)?)?;
+        if !state.roots.contains(root) {
+            return Err(FileStoreError::Corrupt(
+                "the derived root index has no authoritative binding event".into(),
+            ));
+        }
+        Ok(true)
     }
 
     pub fn prepare(
@@ -764,6 +796,54 @@ impl FileStore {
         Ok(current_state(&state, &relative))
     }
 
+    /// Resolve an operator-inspected workspace without creating it, then append one explicit
+    /// reconciliation decision. The compare-and-swap is intentionally not retried: a concurrent
+    /// event may name another reservation, which this decision must not clear.
+    pub fn reconcile_workspace(
+        authority: Arc<LogStore>,
+        workspace: &Path,
+        readopt_at_initial: bool,
+    ) -> Result<(), FileStoreError> {
+        let workspace = canonical_workspace(workspace)?;
+        check_links(&workspace)?;
+        Self { authority, workspace }.reconcile(readopt_at_initial)
+    }
+
+    fn reconcile(&self, readopt_at_initial: bool) -> Result<(), FileStoreError> {
+        let log = self.authority.workspace_log(&self.workspace_key())?;
+        let state = replay(&log)?;
+        if state.reservation.is_none() && !readopt_at_initial {
+            return Err(FileStoreError::NothingToReconcile);
+        }
+        let reservation = state.reservation.as_ref().map(|reservation| ReservedCall {
+            actor: reservation.actor.clone(),
+            call_key: reservation.call_key.clone(),
+        });
+        let readopted = readopt_at_initial
+            .then(|| {
+                state
+                    .known_paths
+                    .iter()
+                    .map(|path| {
+                        state_digest(&self.workspace, path).map(|digest| {
+                            let digest = (digest != ABSENT).then_some(digest);
+                            (path.clone(), digest)
+                        })
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()
+            })
+            .transpose()?;
+        if state.reservation.is_none()
+            && readopted
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot_differs(&state, snapshot))
+        {
+            return Err(FileStoreError::NothingToReconcile);
+        }
+        self.authority
+            .append_workspace(&log, &WorkspaceEvent::Reconciled { reservation, readopted })
+    }
+
     fn workspace_key(&self) -> String {
         self.workspace.to_string_lossy().into_owned()
     }
@@ -811,6 +891,7 @@ fn replay(log: &WorkspaceLog) -> Result<State, FileStoreError> {
         reservation: None,
         receipts: HashMap::new(),
         roots: HashSet::new(),
+        known_paths: BTreeSet::new(),
     };
     for event in &log.events[1..] {
         apply(&mut state, event)?;
@@ -847,15 +928,17 @@ fn apply(state: &mut State, event: &WorkspaceEvent) -> Result<(), FileStoreError
                     || version.previous.is_some()
                     || !version.content_dependencies.is_empty()
                     || version.dispatch.is_some()
-                    || state.versions.values().any(|known| known.path == version.path)
+                    || state.known_paths.contains(&version.path)
                 {
                     return Err(FileStoreError::Corrupt("an adopted file version is invalid".into()));
                 }
                 state.next_id += 1;
                 state.versions.insert(version.id, version.clone());
                 state.current.insert(version.path.clone(), version.id);
+                state.known_paths.insert(version.path.clone());
             }
             validate_pin(state, pin)?;
+            state.known_paths.extend(pin_paths(pin));
             state.reservation = Some(pending_reservation(actor, call_key, pin));
             Ok(())
         }
@@ -956,7 +1039,78 @@ fn apply(state: &mut State, event: &WorkspaceEvent) -> Result<(), FileStoreError
             state.reservation = None;
             Ok(())
         }
+        WorkspaceEvent::Reconciled { reservation, readopted } => {
+            let active = state.reservation.as_ref().map(|pending| ReservedCall {
+                actor: pending.actor.clone(),
+                call_key: pending.call_key.clone(),
+            });
+            if &active != reservation || active.is_none() && readopted.is_none() {
+                return Err(FileStoreError::Corrupt(
+                    "a reconciliation does not identify the active reservation or any digests".into(),
+                ));
+            }
+            if let Some(readopted) = readopted {
+                if readopted.keys().ne(state.known_paths.iter()) {
+                    return Err(FileStoreError::Corrupt(
+                        "a reconciliation does not cover every known path".into(),
+                    ));
+                }
+                if active.is_none() && !snapshot_differs(state, readopted) {
+                    return Err(FileStoreError::Corrupt(
+                        "a reconciliation without a reservation records no digest mismatch".into(),
+                    ));
+                }
+                for (path, digest) in readopted {
+                    match digest {
+                        Some(digest) => {
+                            if !valid_digest(digest) {
+                                return Err(FileStoreError::Corrupt(
+                                    "a reconciliation carries an invalid digest".into(),
+                                ));
+                            }
+                            let id = state.next_id;
+                            let version = FileVersion {
+                                id,
+                                path: path.clone(),
+                                digest: digest.clone(),
+                                label: state.initial.clone(),
+                                previous: state.current.get(path).copied(),
+                                content_dependencies: vec![],
+                                dispatch: None,
+                            };
+                            state.next_id += 1;
+                            state.versions.insert(version.id, version);
+                            state.current.insert(path.clone(), id);
+                        }
+                        None => {
+                            state.current.remove(path);
+                        }
+                    }
+                }
+            }
+            state.reservation = None;
+            Ok(())
+        }
     }
+}
+
+fn pin_paths(pin: &FilePin) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(pin.path.clone())
+        .chain(pin.basis.transferred().map(|source| source.path.clone()))
+        .chain(pin.basis.inputs().iter().map(|input| input.path.clone()))
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn snapshot_differs(state: &State, snapshot: &BTreeMap<String, Option<String>>) -> bool {
+    snapshot
+        .iter()
+        .any(|(path, observed)| current_state(state, path).as_ref().map(|version| &version.digest) != observed.as_ref())
 }
 
 fn validate_pin(state: &State, pin: &FilePin) -> Result<(), FileStoreError> {
@@ -1204,7 +1358,7 @@ fn touch(state: &mut State, workspace: &Path, path: &str) -> Result<Touched, Fil
     let actual = state_digest(workspace, path)?;
     let version = match current_state(state, path) {
         Some(version) => Some(version),
-        None if actual == ABSENT || state.versions.values().any(|version| version.path == path) => None,
+        None if actual == ABSENT || state.known_paths.contains(path) => None,
         None => {
             let version = FileVersion {
                 id: state.next_id,
@@ -1406,6 +1560,78 @@ mod tests {
         assert!(matches!(
             store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
             Err(FileStoreError::Pending)
+        ));
+    }
+
+    #[test]
+    fn operator_readoption_clears_quarantine_and_adopts_current_bytes_at_the_initial_label() {
+        let fixture = Fixture::new();
+        let initial = Label::new(
+            appa_engine::label::Trust::new(3),
+            appa_engine::label::Audience::public(),
+        );
+        let store = fixture.store(&initial);
+        store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
+        store.bind("a", "edit", &dispatch(0), &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "partial").unwrap();
+        assert!(matches!(
+            store.finish("a", "edit", false),
+            Err(FileStoreError::Quarantined)
+        ));
+
+        store.reconcile(true).unwrap();
+
+        let adopted = store.current("tracked.txt").unwrap().unwrap();
+        assert_eq!(adopted.label, initial);
+        assert_eq!(adopted.digest, state_digest(&fixture.workspace, "tracked.txt").unwrap());
+        assert!(adopted.dispatch.is_none());
+        store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn operator_readoption_repairs_an_idle_digest_mismatch() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store.prepare("a", "first", FileOperation::Read, "tracked.txt").unwrap();
+        store.cancel("a", "first").unwrap();
+        fs::write(fixture.workspace.join("tracked.txt"), "external change").unwrap();
+        assert!(matches!(
+            store.prepare("a", "mismatch", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::DigestMismatch)
+        ));
+
+        store.reconcile(true).unwrap();
+
+        store
+            .prepare("a", "repaired", FileOperation::Read, "tracked.txt")
+            .unwrap();
+        store.cancel("a", "repaired").unwrap();
+        assert!(matches!(store.reconcile(true), Err(FileStoreError::NothingToReconcile)));
+    }
+
+    #[test]
+    fn clear_only_reconciliation_never_adopts_a_partial_new_destination() {
+        let fixture = Fixture::new();
+        let store = fixture.store(&Label::top());
+        store
+            .prepare("a", "new", FileOperation::Replace, "partial.txt")
+            .unwrap();
+        store.bind("a", "new", &dispatch(0), &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("partial.txt"), "partial").unwrap();
+        assert!(matches!(
+            store.finish("a", "new", false),
+            Err(FileStoreError::Quarantined)
+        ));
+
+        store.reconcile(false).unwrap();
+
+        assert!(matches!(
+            store.prepare("b", "next", FileOperation::Replace, "partial.txt"),
+            Err(FileStoreError::Untracked)
+        ));
+        assert!(matches!(
+            store.reconcile(false),
+            Err(FileStoreError::NothingToReconcile)
         ));
     }
 

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::{env, ffi::OsString, iter};
 
 use appa_runtime_api::AdapterName;
@@ -46,6 +47,11 @@ enum Command {
     Battery {
         #[command(subcommand)]
         command: PackageCommand,
+    },
+    /// Manage tracked files and workspace state.
+    Files {
+        #[command(subcommand)]
+        command: FilesCommand,
     },
     /// Export a locked deployment and its artifacts for offline installation.
     Bundle(appa_runtime::installation::cli::Bundle),
@@ -201,6 +207,45 @@ enum PluginCommand {
     Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
+#[derive(Subcommand)]
+enum FilesCommand {
+    /// Reconcile a tracked workspace after quarantine or a digest mismatch.
+    #[command(after_help = "Caution: Stop all workspace writers before running.")]
+    Reconcile {
+        /// Path to the tracked workspace.
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Runtime database containing the workspace event stream.
+        #[arg(long, env = "APPA_DB", default_value = "appa.db")]
+        db: PathBuf,
+
+        /// Accept all paths in the workspace stream and assign present files the configured initial Label.
+        #[arg(long)]
+        readopt_at_initial: bool,
+    },
+}
+
+fn reconcile_files(workspace: PathBuf, db: PathBuf, readopt_at_initial: bool) -> ExitCode {
+    let result = appa_eventlog::LogStore::open(appa_eventlog::Backend::Sqlite { path: db })
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
+        .and_then(|store| {
+            appa_eventlog::files::FileStore::reconcile_workspace(store, &workspace, readopt_at_initial)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => {
+            println!("Reconciled tracked workspace: {}", workspace.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("appa files reconcile: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn claude_exit<T>(outcome: Result<T, appa_runtime::init::InitError>) -> ExitCode {
     match outcome {
         Ok(_) => ExitCode::SUCCESS,
@@ -266,6 +311,14 @@ fn main() -> ExitCode {
         Command::Battery {
             command: PackageCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_battery(args),
+        Command::Files {
+            command:
+                FilesCommand::Reconcile {
+                    workspace,
+                    db,
+                    readopt_at_initial,
+                },
+        } => reconcile_files(workspace, db, readopt_at_initial),
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
         Command::FileMcp(args) => appa_runtime::claude_files::serve(args),

@@ -688,6 +688,12 @@ impl PostgresStore {
     ) -> Result<Option<String>, crate::files::FileStoreError> {
         let root = root.as_str().to_owned();
         self.query(move |client| {
+            let installed: bool = client
+                .query_one("SELECT to_regclass('openappa_file_roots') IS NOT NULL", &[])?
+                .get(0);
+            if !installed {
+                return Ok(None);
+            }
             Ok(client
                 .query_opt("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
                 .map(|row| row.get(0)))

@@ -1461,9 +1461,25 @@ impl Runtime {
                 .get_mut()
                 .expect("the deployment lock is never poisoned: no panic runs while it is held"),
         );
-        if deployment.resident.registry().sanitizers().next().is_some() {
+        if deployment
+            .resident
+            .registry()
+            .sanitizers()
+            .any(|sanitizer| sanitizer.on.input)
+        {
             return Err(OpenError::Storage(
-                "file tracking does not support sanitizer or rewrite routes".into(),
+                "file tracking does not support tool-input sanitizer or rewrite routes".into(),
+            ));
+        }
+        if files::FileTool::ALL.into_iter().any(|tool| {
+            deployment
+                .resident
+                .registry()
+                .profile()
+                .confines_result(&appa_engine::value::ToolName::new(format!("mcp/appa/{}", tool.name())))
+        }) {
+            return Err(OpenError::Storage(
+                "file tracking cannot confine the result of a runtime-owned file tool".into(),
             ));
         }
         let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());

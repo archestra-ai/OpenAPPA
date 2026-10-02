@@ -55,9 +55,10 @@
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
 //! The plugin's HTTP MCP calls consume exact one-shot hook approvals; their outcomes
-//! are already admitted when the post-tool hook arrives. Native tools remain available
-//! in Claude, but calls reaching APPA are refused in this mode — including APPA's own
-//! management tools, which an operator runs from the `appa` command line instead.
+//! are already admitted when the post-tool hook arrives. Native tools remain visible in Claude.
+//! Before root binding, calls use ordinary policy admission. Binding refuses native filesystem
+//! and shell tools. Runtime-owned file tools use the workspace event stream, while other
+//! policy-named tools continue through ordinary admission.
 //! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
 //! The policy must declare each enabled tool. File tools alone do not enforce OS isolation.
 //! `--file-process-backend /host/backend` additionally enables `appa_process_files`; its
@@ -67,8 +68,9 @@
 //! The constrained launcher exposes only file tools and the remedy control tool. Bash, other
 //! MCP tools, subagents, general rename/delete, links and known execution-control writes are unsupported.
 //! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
-//! Sanitizer/rewrite policies are unsupported. Workspace events survive a runtime
-//! restart; historical bytes are not retained.
+//! Tool-input sanitizers and rewrite routes are unsupported. Output-only sanitizers remain
+//! available unless `confined_results` names a runtime-owned file tool. Workspace events survive
+//! a runtime restart; historical bytes are not retained.
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
@@ -136,6 +138,14 @@ impl FileTracking {
             &self.policy_key,
             &self.initial,
         )?))
+    }
+
+    pub(super) fn root_is_bound(
+        &self,
+        authority: &appa_eventlog::LogStore,
+        root: &super::TrajectoryId,
+    ) -> Result<bool, appa_eventlog::files::FileStoreError> {
+        FileStore::root_is_bound(authority, root)
     }
 }
 
@@ -244,6 +254,24 @@ pub(crate) enum FileReply {
 
 pub(crate) fn owns(call: &ProposedCall) -> bool {
     FileTool::of(call).is_some()
+}
+
+/// Claude Code tools that can observe or mutate a bound workspace without using its event
+/// stream. Other native and MCP tools continue through ordinary policy admission.
+pub(super) fn bypasses_tracking(call: &ProposedCall) -> bool {
+    matches!(
+        call.tool.as_str(),
+        "host/claude-code/Read"
+            | "host/claude-code/Write"
+            | "host/claude-code/Edit"
+            | "host/claude-code/MultiEdit"
+            | "host/claude-code/NotebookEdit"
+            | "host/claude-code/Grep"
+            | "host/claude-code/Glob"
+            | "host/claude-code/Bash"
+            | "host/claude-code/PowerShell"
+            | "host/claude-code/Monitor"
+    )
 }
 
 pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), EventError> {
@@ -454,6 +482,12 @@ delta = {}
 [[policy.tool]]
 name = "host/claude-code/Agent"
 delta = {}
+[[policy.tool]]
+name = "host/claude-code/Read"
+delta = {}
+[[policy.tool]]
+name = "mcp/github/get_issue"
+delta = {}
 [policy.deployment]
 context_control = true
 [externals]
@@ -478,6 +512,122 @@ max_body_bytes = 65536
         std::fs::create_dir(dir.path().join("work")).unwrap();
         std::fs::write(dir.path().join("work/source.txt"), "outside information").unwrap();
         dir
+    }
+
+    fn enable_with_policy(dir: &Path, policy: &str) -> Result<Runtime, super::super::OpenError> {
+        let config = dir.join("compatibility-policy.toml");
+        std::fs::write(&config, policy).unwrap();
+        Runtime::open_served(
+            Config::load(&config).unwrap(),
+            dir.join("compatibility.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )?
+        .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
+    }
+
+    #[test]
+    fn file_tracking_accepts_output_sanitizers_but_refuses_input_sanitizers_and_confined_file_results() {
+        let output = tempfile::tempdir().unwrap();
+        enable_with_policy(
+            output.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "host/claude-code/Bash"
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_output"]
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+[policy.deployment]
+confined_results = ["host/claude-code/Bash"]
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
+"#,
+        )
+        .expect("an output-only sanitizer is compatible");
+
+        let input = tempfile::tempdir().unwrap();
+        let Err(input_error) = enable_with_policy(
+            input.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "host/claude-code/Bash"
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_input"]
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
+"#,
+        ) else {
+            panic!("an input sanitizer must be refused");
+        };
+        assert!(input_error.to_string().contains("tool-input sanitizer"));
+
+        let confined = tempfile::tempdir().unwrap();
+        let Err(confined_error) = enable_with_policy(
+            confined.path(),
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "mcp/appa/appa_read_file"
+[policy.deployment]
+confined_results = ["mcp/appa/appa_read_file"]
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+"#,
+        ) else {
+            panic!("a confined file-tool result must be refused");
+        };
+        assert!(confined_error.to_string().contains("cannot confine"));
+    }
+
+    #[test]
+    fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let battery = dir.path().join("batteries/claude-code");
+        std::fs::create_dir_all(&battery).unwrap();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let default =
+            std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
+        std::fs::copy(
+            repository.join("marketplace/batteries/claude-code/appa.toml"),
+            battery.join("appa.toml"),
+        )
+        .unwrap();
+        let config = dir.path().join("appa.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "include = [\"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
+            ),
+        )
+        .unwrap();
+        let runtime = Runtime::open_served(
+            Config::load(&config).unwrap(),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .unwrap();
+
+        runtime
+            .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
+            .expect("the shipped output-only sanitizer remains available with file tracking");
     }
 
     #[test]
@@ -620,7 +770,7 @@ max_body_bytes = 65536
     }
 
     #[tokio::test]
-    async fn managed_files_allow_declared_subagent_spawns_but_refuse_other_native_tools() {
+    async fn bound_workspaces_refuse_bypass_tools_but_keep_other_policy_tools() {
         use appa_runtime_api::HookDecision;
         let dir = fixture();
         let runtime = open(dir.path());
@@ -654,6 +804,33 @@ max_body_bytes = 65536
             "the declared spawn should reach the engine's return contract: {spawn:?}"
         );
 
+        let unbound_read = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"unbound-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"Read", "tool_input":{"file_path":"source.txt"}
+            }),
+        )
+        .await;
+        assert_eq!(unbound_read, HookDecision::AllowCall { spawn: None });
+        let connection = rusqlite::Connection::open(dir.path().join("runtime.db")).unwrap();
+        let file_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('file_events','file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_tables, 0, "an ordinary unbound call must not install file tables");
+
+        runtime
+            .bind_file_workspace(
+                &TrajectoryId("cc:spawn-test".into()),
+                dir.path().join("work").to_str().unwrap(),
+            )
+            .unwrap();
+
         let native = hook(
             &runtime,
             serde_json::json!({
@@ -664,9 +841,20 @@ max_body_bytes = 65536
         )
         .await;
         assert!(
-            matches!(native, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("only runtime-owned file tools and declared subagent spawns")),
-            "an unrelated native tool should remain refused: {native:?}"
+            matches!(native, HookDecision::DenyCall { ref feedback, .. } if feedback.contains("bound workspace refuses native filesystem and shell tools")),
+            "a native filesystem tool must not bypass the bound workspace stream: {native:?}"
         );
+
+        let github = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"spawn-test",
+                "cwd":dir.path().join("work"),
+                "tool_name":"mcp__github__get_issue", "tool_input":{"owner":"o", "repo":"r", "issue_number":1}
+            }),
+        )
+        .await;
+        assert_eq!(github, HookDecision::AllowCall { spawn: None });
     }
 
     #[tokio::test]

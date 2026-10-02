@@ -460,12 +460,15 @@ impl Session {
             return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
         };
         if !super::files::owns(&call) {
-            if spawn.is_some() {
-                return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
+            let bound = files
+                .root_is_bound(&self.inner.store, &self.root)
+                .map_err(super::files::refused)?;
+            if bound && super::files::bypasses_tracking(&call) {
+                return Err(super::files::refused(
+                    "the bound workspace refuses native filesystem and shell tools",
+                ));
             }
-            return Err(super::files::refused(
-                "file tracking permits only runtime-owned file tools and declared subagent spawns",
-            ));
+            return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
         }
         match call.cwd.as_deref() {
             Some(cwd) => {

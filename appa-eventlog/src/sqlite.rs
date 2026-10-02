@@ -299,7 +299,18 @@ impl Sqlite {
         &self,
         root: &TrajectoryId,
     ) -> Result<Option<String>, crate::files::FileStoreError> {
-        self.connection()
+        let connection = self.connection();
+        let installed: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_roots')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| crate::files::FileStoreError::Storage(error.to_string()))?;
+        if !installed {
+            return Ok(None);
+        }
+        connection
             .query_row(
                 "SELECT workspace FROM file_roots WHERE root=?1",
                 params![root.as_str()],
