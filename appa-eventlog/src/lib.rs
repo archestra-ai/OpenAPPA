@@ -1183,9 +1183,9 @@ mod tests {
     fn a_database_another_connection_holds_is_not_archived() {
         let (_dir, path) = written_at(4);
         let holder = rusqlite::Connection::open(&path).expect("another connection opens");
-        holder
-            .execute_batch("BEGIN; SELECT COUNT(*) FROM logs;")
-            .expect("the other connection reads");
+        let _: i64 = holder
+            .query_row("SELECT COUNT(*) FROM logs", [], |row| row.get(0))
+            .expect("the other connection reads, then idles");
 
         assert!(matches!(
             LogStore::open_archiving(&path).err(),

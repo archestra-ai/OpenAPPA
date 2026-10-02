@@ -134,8 +134,9 @@ impl Sqlite {
     /// root it held is recorded in the fresh one, so [`Sqlite::create`] refuses to reopen any of
     /// them at the starting label.
     pub(crate) fn open_archiving(path: &Path) -> Result<(Self, Option<PathBuf>), OpenError> {
-        if !matches!(Self::open(path), Err(OpenError::Incompatible { .. })) {
-            return Self::open(path).map(|store| (store, None));
+        match Self::open(path) {
+            Err(OpenError::Incompatible { .. }) => {}
+            opened => return opened.map(|store| (store, None)),
         }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         // Two processes archiving one file would each read roots from whatever sits at the
@@ -799,12 +800,13 @@ const TABLES: [&str; 7] = [
 ];
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let names = TABLES.map(|table| format!("'{table}'")).join(", ");
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (SELECT value FROM json_each(?1))",
-        params![serde_json::to_string(&TABLES).expect("table names serialize")],
+        &format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ({names})"),
+        [],
         |row| row.get(0),
     )?;
-    Ok(usize::try_from(found) == Ok(TABLES.len()))
+    Ok(found == TABLES.len() as i64)
 }
 
 fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {

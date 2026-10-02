@@ -462,6 +462,8 @@ pub enum OpenError {
     JevTrustRanks(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
+    #[error("{0}")]
+    Schema(String),
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -966,6 +968,9 @@ impl Prepared {
         };
         let (store, archive) = opened.map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+            error @ (appa_eventlog::OpenError::Newer { .. } | appa_eventlog::OpenError::Incompatible { .. }) => {
+                OpenError::Schema(error.to_string())
+            }
             error => OpenError::Storage(error.to_string()),
         })?;
         if let Some(archive) = archive {
