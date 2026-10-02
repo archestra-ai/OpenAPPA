@@ -660,7 +660,9 @@ pub enum ParseRefusal {
 #[derive(Clone, Copy)]
 pub struct Codec {
     pub parse: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal>,
-    pub render: fn(&HookEvent, &HookDecision) -> serde_json::Value,
+    /// Renders a decision for the event the host bytes reported; the bytes carry what the
+    /// host's own permission pipeline does after the hook.
+    pub render: fn(&[u8], &HookEvent, &HookDecision) -> serde_json::Value,
     /// The answer that withholds a result, read from host bytes
     /// [`Codec::parse`] refused. `Some` where those bytes report a
     /// result the harness has already produced, carrying the host's own

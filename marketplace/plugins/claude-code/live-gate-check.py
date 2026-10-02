@@ -245,6 +245,7 @@ def hook_settings(url: str, config: Path, data_dir: Path) -> dict[str, Any]:
         ("PreToolUse", "*", False),
         ("PostToolUse", "*", False),
         ("PostToolUseFailure", "*", False),
+        ("PermissionDenied", "*", False),
         ("SubagentStart", None, True),
         ("SubagentStop", None, False),
     ):

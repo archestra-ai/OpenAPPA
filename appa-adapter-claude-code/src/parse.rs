@@ -10,7 +10,7 @@
 //! | `UserPromptSubmit` | `Prompt` |
 //! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
 //! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult`, naming the subagent (`agentId`) and carrying its message (`content`) where the response has them |
-//! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
+//! | `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
 //! | `Stop`, `StopFailure` | `TurnEnd` for the actor that finished |
@@ -66,6 +66,7 @@
 //! | observation | `ToolOutcome` |
 //! |---|---|
 //! | `PostToolUseFailure` | `Failure` — the run failed; no effects commit |
+//! | `PermissionDenied` | `Failure` — auto mode's classifier refused a released call, so it never ran |
 //! | `PostToolUse` with a `tool_response` | `Success` carrying that response's JSON rendering |
 //! | `PostToolUse` with no `tool_response` (absent or null — the wire spells them alike) | `Indeterminate` — no effects commit, the reservation stands |
 //! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd`, or the next `Prompt` when the turn was interrupted and sent no `Stop`, closes it as not run |
@@ -333,6 +334,18 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 },
             })),
             None => Err(malformed("a tool outcome without its tool call")),
+        },
+        // Auto mode's classifier refused a call the hooks released: the call never ran.
+        "PermissionDenied" => match event.call() {
+            Some(call) => Ok(Some(HookEvent::ToolResult {
+                actor: event.actor(),
+                call,
+                call_id: event.tool_use_id.clone(),
+                outcome: ToolOutcome::Failure {
+                    message: "Claude Code's auto mode denied the call".to_string(),
+                },
+            })),
+            None => Err(malformed("a permission denial without its tool call")),
         },
         "SubagentStart" => match (event.agent(), event.workflow_agent(), event.prompt_key()) {
             (None, _, _) => Err(malformed("SubagentStart without an agent id")),
@@ -934,6 +947,27 @@ mod tests {
                 ),
                 other => panic!("expected a ToolResult event for {tool}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_auto_mode_denial_parses_to_a_failure_of_the_denied_call() {
+        let event = serde_json::json!({
+            "hook_event_name": "PermissionDenied",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "touch canary.txt"},
+            "tool_use_id": "t1",
+        });
+        match parse_value(&event) {
+            Ok(Some(HookEvent::ToolResult {
+                call, call_id, outcome, ..
+            })) => {
+                assert_eq!(call.tool, "Bash");
+                assert_eq!(call_id.as_deref(), Some("t1"));
+                assert!(matches!(outcome, ToolOutcome::Failure { .. }));
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
         }
     }
 

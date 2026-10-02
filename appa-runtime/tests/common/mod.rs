@@ -50,7 +50,7 @@ pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u
     let wire = serde_json::to_vec(&wire).expect("the wire event serializes");
     let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await;
     match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
-        Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+        Ok(Ok(decision)) => (status, (codec.render)(&body, &event, &decision)),
         _ => (status, answer),
     }
 }

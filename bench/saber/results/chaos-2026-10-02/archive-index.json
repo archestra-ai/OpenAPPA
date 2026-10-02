@@ -1,0 +1,91 @@
+{
+  "format_version": 1,
+  "benchmark": "saber",
+  "git_commit": "04528130f307c60eb503916d9daf459ddc72298c",
+  "run_id": "chaos-evaluation-2026-10-02",
+  "archive": "chaos-evaluation-2026-10-02-a91c0cf5b41e11299cb37ac045257c9f43a2ef4ff7802d9e8585af99c5cc13e9.tar.zst",
+  "sha256": "a91c0cf5b41e11299cb37ac045257c9f43a2ef4ff7802d9e8585af99c5cc13e9",
+  "archive_bytes": 606887,
+  "source_file_count": 282,
+  "manifest": "chaos-evaluation-2026-10-02/archive-manifest.json",
+  "runs": [
+    {
+      "run_id": "pilot-chaos-2026-10-01",
+      "file_count": 20,
+      "result_count": 8,
+      "recorded_commit": "53c3d8eefb2c3cb35191a389ea04550a3e9ec3b0",
+      "recorded_dirty": true,
+      "harness_sha256": "07905e873f23ed2fe1a0b01c8efce638b5fb32fb1e278259e69118172aa99b76"
+    },
+    {
+      "run_id": "pilot-chaos-overlay-2026-10-01",
+      "file_count": 28,
+      "result_count": 8,
+      "recorded_commit": "53c3d8eefb2c3cb35191a389ea04550a3e9ec3b0",
+      "recorded_dirty": true,
+      "harness_sha256": "9c865e8a36c63e0d7cb07f842ab3cb7c728fe792754600354ac42628963b1b6a"
+    },
+    {
+      "run_id": "pilot-chaos-verified-2026-10-01",
+      "file_count": 19,
+      "result_count": 8,
+      "recorded_commit": "53c3d8eefb2c3cb35191a389ea04550a3e9ec3b0",
+      "recorded_dirty": true,
+      "harness_sha256": "5ccc452edfa42aedce730cd6725d8a77e9cda697c0afb9846248c6a612bfa565"
+    },
+    {
+      "run_id": "sequencing-chaos-2026-10-01",
+      "file_count": 63,
+      "result_count": 24,
+      "recorded_commit": "3194489a22c63bcc91c46dd1eb25b0377a051534",
+      "recorded_dirty": true,
+      "harness_sha256": "fe6e2ee7f6cadd05b39eeb6fe66f50daac8154ac40ebe9702274762a97c1c5c7"
+    },
+    {
+      "run_id": "sequencing-chaos-funded-2026-10-01",
+      "file_count": 63,
+      "result_count": 24,
+      "recorded_commit": "04528130f307c60eb503916d9daf459ddc72298c",
+      "recorded_dirty": true,
+      "harness_sha256": "8bfc71d842651ee3a7359493f4eeab608604654815127e0f6dd70da46bd0e7e4"
+    },
+    {
+      "run_id": "sequencing-chaos-recovery-2026-10-02",
+      "file_count": 6,
+      "result_count": 1,
+      "recorded_commit": "04528130f307c60eb503916d9daf459ddc72298c",
+      "recorded_dirty": true,
+      "harness_sha256": "8bfc71d842651ee3a7359493f4eeab608604654815127e0f6dd70da46bd0e7e4"
+    },
+    {
+      "run_id": "sequencing-chaos-recovery-start-failed-2026-10-02",
+      "file_count": 1,
+      "result_count": 0,
+      "recorded_commit": null,
+      "recorded_dirty": null,
+      "harness_sha256": null
+    },
+    {
+      "run_id": "sequencing-chaos-retry-2026-10-01",
+      "file_count": 61,
+      "result_count": 23,
+      "recorded_commit": "04528130f307c60eb503916d9daf459ddc72298c",
+      "recorded_dirty": true,
+      "harness_sha256": "8bfc71d842651ee3a7359493f4eeab608604654815127e0f6dd70da46bd0e7e4"
+    }
+  ],
+  "validation": {
+    "identical_rebuilds": 2,
+    "all_manifest_hashes_verified": true,
+    "credential_scan": "passed",
+    "local_path_scan": "passed",
+    "path_redacted_files": 188,
+    "source_expression_scan_exceptions": 6
+  },
+  "published": true,
+  "publication": {
+    "gcs_prefix": "gs://archestra-appa-bench-archive/bench/saber/04528130f307c60eb503916d9daf459ddc72298c/chaos-evaluation-2026-10-02",
+    "relay_index_sha256": "fc2adeb6b0e33ce3e5cc180336d97e1d1da8b10515baeaa8a5f116516babf61f",
+    "verified_workflow": "https://github.com/archestra-ai/OpenAPPA/actions/runs/36999596902"
+  }
+}

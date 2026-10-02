@@ -39,6 +39,39 @@ pub(crate) fn structured_echo(value: &str) -> String {
 const UNSTRUCTURED: &str = "[appa] what crosses to the parent in place of this input is not JSON, so no \
                             StructuredOutput input can carry it; this return cannot cross";
 
+/// Claude Code's permission mode as the hook reports it. In `auto` the classifier gates a
+/// call after the hooks, but a hook `allow` skips it, so a released call answers with no
+/// decision there: the classifier then runs, and can only deny more than APPA does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionMode {
+    Auto,
+    Other,
+}
+
+#[derive(Deserialize)]
+struct HostMode {
+    #[serde(default)]
+    permission_mode: Option<String>,
+}
+
+fn permission_mode(host: &[u8]) -> PermissionMode {
+    match serde_json::from_slice::<HostMode>(host)
+        .ok()
+        .and_then(|mode| mode.permission_mode)
+        .as_deref()
+    {
+        Some("auto") => PermissionMode::Auto,
+        _ => PermissionMode::Other,
+    }
+}
+
+pub(crate) fn answer(host: &[u8], event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
+    match (permission_mode(host), event, decision) {
+        (PermissionMode::Auto, HookEvent::ToolCall { .. }, HookDecision::AllowCall { .. }) => serde_json::json!({}),
+        _ => render(event, decision),
+    }
+}
+
 pub(crate) fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
     match event {
         HookEvent::ChildReturn { .. } => structured_return(event, decision),
@@ -257,6 +290,30 @@ mod tests {
             ),
             serde_json::json!({"error": "storage failure: disk full"}),
         );
+    }
+
+    #[test]
+    fn auto_mode_leaves_a_released_call_to_its_classifier_and_keeps_every_denial() {
+        let event = pre_tool_use();
+        let host = |mode: &str| {
+            serde_json::to_vec(&serde_json::json!({"hook_event_name": "PreToolUse", "permission_mode": mode}))
+                .expect("serializes")
+        };
+        let release = HookDecision::AllowCall { spawn: None };
+        let denial = HookDecision::DenyCall {
+            feedback: "blocked: the recipient cannot read this".to_string(),
+            offers: Vec::new(),
+            review: Vec::new(),
+        };
+        assert_eq!(answer(&host("auto"), &event, &release), serde_json::json!({}));
+        assert_eq!(answer(&host("auto"), &event, &denial), render(&event, &denial));
+        assert_eq!(
+            answer(&host("auto"), &event, &HookDecision::PassControl),
+            render(&event, &HookDecision::PassControl)
+        );
+        for other in [host("default"), host("acceptEdits"), b"{}".to_vec()] {
+            assert_eq!(answer(&other, &event, &release), render(&event, &release));
+        }
     }
 
     #[test]

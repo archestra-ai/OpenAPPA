@@ -1,6 +1,6 @@
 # File mediation
 
-Runtime-owned file tools for a workspace the runtime owns: a session-local version ledger, Label
+Runtime-managed file tools for an exclusive workspace: an append-only event stream, Label
 propagation through file operations, and opt-in isolated processing of declared inputs.
 
 **Status: draft.** The file runtime is off unless the APPA configuration contains a
@@ -21,7 +21,7 @@ Related documents:
 | --- | --- |
 | run it on a host | [Operating it](#operating-it) |
 | understand why the runtime owns the file tools | [Why a hook is not enough](#why-a-hook-is-not-enough) |
-| review the design | [How one call is checked](#how-one-call-is-checked) and [The ledger](#the-ledger) |
+| review the design | [How one call is checked](#how-one-call-is-checked) and [The workspace event stream](#the-workspace-event-stream) |
 | judge the security claims | [What is verified](#what-is-verified) and [What is not covered](#what-is-not-covered) |
 | find the code | [Where the code lives](#where-the-code-lives) |
 
@@ -64,7 +64,7 @@ flowchart LR
         engine["Engine<br/>policy, Labels, admission"]
         tools["file tools<br/>Read, Write, Edit, Copy, Move"]
         process["appa_process_files"]
-        ledger[("session-local<br/>file ledgers")]
+        ledger[("workspace<br/>event stream")]
         log[("trajectory log<br/>runtime.db")]
     end
 
@@ -87,15 +87,17 @@ flowchart LR
     backend --> job
 ```
 
-The workspace, runtime database, policy, and backend are host-owned state. The file ledgers
-live only in runtime memory. The runtime never mounts the live workspace into an isolated command.
+The host retains ownership of the workspace, policy, backend, and runtime database. The runtime
+does not mount the live workspace into an isolated command. It records file transitions in an
+append-only workspace event stream managed by the same event-log backend as trajectory logs.
 
 | Piece | What it owns |
 | --- | --- |
 | `hooks` and the MCP endpoint | the harness boundary: proposals, results, session lifecycle |
 | `Engine` | the policy check, Label combination, and the trajectory log |
 | file tools | the six runtime-owned tools and the reservation protocol |
-| file ledger | one root session's versions, digests, Labels, dependencies, and reservation |
+| workspace event stream | authoritative file transitions for one canonical workspace |
+| file projection | replay-derived versions, path heads, Labels, dependencies, receipts, and active reservation |
 | agentsh backend | execution of `appa_process_files` under namespaces, Landlock and seccomp |
 
 ## How one call is checked
@@ -108,7 +110,7 @@ sequenceDiagram
     autonumber
     participant C as Claude Code
     participant H as runtime: hook
-    participant L as file ledger
+    participant L as workspace event stream
     participant E as Engine
     participant T as runtime: file tool
     participant W as workspace
@@ -130,7 +132,7 @@ sequenceDiagram
 
 1. **Proposal.** The harness sends the tool call to the PreToolUse hook. The hook knows the
    actor; the MCP request that follows does not, because an MCP request carries no session.
-2. **Reservation.** The ledger takes the one workspace reservation and pins what it finds:
+2. **Reservation.** The stream takes the one workspace reservation and pins what it finds:
    the path's current version, digest and Label, or "absent". Initialization and every
    `prepare` refuse symlinks, hard links and non-regular files, so a pin always names a
    regular file.
@@ -189,7 +191,7 @@ reason the tools exist, and mixing them up is the easiest way to misread this su
   the file's Label into the trajectory. A `Write`, `Edit`, `Copy` or `Move` returns a
   constant acknowledgement, so the content does not enter the trajectory — a later `Read`
   is what does.
-- The **published file label** is what the call writes into the ledger as the Label of the
+- The **published file label** is what the call writes into the stream as the Label of the
   new file content. A `Copy` or `Move` puts the source's Label there even though the model
   never sees the bytes.
 
@@ -212,21 +214,27 @@ Label a success would have used, so an error can never say more than the call it
 An `Edit` records the predecessor version as a content dependency. A `Write` records none:
 replacement destroys content rather than deriving from it, so history is not a dependency.
 
-## The ledger
+## The workspace event stream
 
-The runtime keeps one in-memory ledger for each root session. A root trajectory and all child
-trajectories use the same root ID to select it. Therefore, subagents share file Labels,
-versions, receipts, and the live reservation. Another root session gets an independent ledger.
+The runtime maintains one append-only event stream for each canonical workspace. Trajectory trees
+select a stream through the root's persistent binding. Roots mapped to the same workspace share
+one reservation, version history, Labels, and receipts. Roots pointing elsewhere use distinct
+streams.
 
-The first file operation in a root session binds the workspace. Binding checks file metadata
-for links and reads no content. A file gets the operator-configured initial Label when an
-operation first touches it: the ledger hashes the file and records that digest as its first
-version. The ledger then holds every published version, the current version per path, one
-live reservation, and idempotent receipts for completed calls.
-The map and every ledger are process-local. Restarting the runtime discards them.
+The first file operation establishes the immutable root-to-workspace binding. This binding
+survives restart. The `RootBound` event and the derived root lookup commit in one transaction.
+The lookup accelerates root resolution; replay of the event stream remains authoritative. Binding
+validates link metadata without reading file contents.
 
-Hashes verify bytes; they never classify them. Historical bytes are not retained, so a
-version is a record of what was there, not a copy of it.
+When an operation touches a path with no history, its `Prepared` event records the initial version
+and the operator-configured initial Label. Completion events record published versions and
+receipts. Replay derives path heads, Labels, dependencies, receipts, and the active reservation;
+no authoritative state snapshot exists. Content digests verify byte integrity. They never
+classify data. Events retain metadata but not historical file contents.
+
+Every writer commits against the workspace stream's compare-and-swap position. A competing root,
+runtime view, or process cannot reserve or publish from a stale projection. A conflict causes the
+runtime to reread the stream, replay its projection, and evaluate the transition again.
 
 ### The reservation lifecycle
 
@@ -240,11 +248,12 @@ stateDiagram-v2
     Prepared --> Free: the turn ends, the harness never ran it, the workspace matches
     Bound --> Quarantined: changed failure, missing outcome, or bytes moved
     Prepared --> Quarantined: the turn ends and the workspace moved away from the pin
-    Quarantined --> [*]: the runtime restarts
+    Quarantined --> Quarantined: the runtime restarts
 ```
 
-A quarantined ledger refuses every later file call in that root session. The runtime cannot
-tell an unrun call from one whose report was lost. It does not guess a Label for changed bytes.
+A quarantined projection rejects every later file call in that workspace, including calls from
+another bound root. The runtime cannot distinguish an unrun operation from one whose report was
+lost, so it does not infer a Label from altered bytes. Operator reconciliation is required.
 
 ## Isolated declared-input processing
 
@@ -256,7 +265,7 @@ built from [`integrations/agentsh`](../integrations/agentsh/README.md).
 sequenceDiagram
     autonumber
     participant R as runtime
-    participant L as file ledger
+    participant L as workspace event stream
     participant B as agentsh backend
     participant J as private job directory
 
@@ -291,21 +300,37 @@ appa runtime --config /host/file-policy.toml --db /host/runtime.db \
 
 - The `[file_tracking]` table in `file-policy.toml` is the feature flag. Omitting it disables
   file tracking. A complete table supplies `initial_trust` and `initial_audience`.
-- Each root session binds to the `cwd` in its first file call. Its subagents share that
-  workspace and ledger. Another root session can bind to a different workspace.
-- The initial settings classify each file on its first touch in a root session. They do not
-  inspect content. The policy separately defines which file-tool flows are permitted.
+- A root trajectory binds to the `cwd` on its first file call. Spawned subagents inherit that
+  binding. Roots bound to the same canonical workspace share its event stream and reservation.
+- The initial settings classify a path only on its first touch without existing workspace
+  history. They do not inspect content. The policy separately defines permitted file-tool flows.
+- Workspace events use the runtime's configured event-log backend: SQLite, memory, or PostgreSQL.
+  PostgreSQL hosts must install the file-event migration tables and share one canonical filesystem
+  namespace across participating runtimes.
 - Binding refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
 - Keep the policy, runtime database, and backend outside the workspace.
 - The policy must name all six file tools. A tool the policy does not name is refused, not
   annotated.
-- The policy must not use sanitizers or rewrite routes. File tracking refuses to start when
-  the registry holds any, because a rewritten call would render arguments the ledger never
-  pinned.
-- In file mode, APPA admits declared subagent spawns so children can use the root ledger.
-  Every other call that reaches APPA and is not one of the six file tools is refused,
-  including APPA's own management tools. Run those from the `appa` command line.
-- One file operation runs at a time per root session. A root and its subagents share that reservation.
+- Tool-input sanitizers and rewrite routes are incompatible with file tracking. They can mutate
+  paths after runtime pinning. Output-only sanitizers remain supported. `confined_results` must
+  not name a runtime-owned `appa_*` file tool because its MCP result cannot be withheld.
+- Before a root binds to a workspace, all tool calls use ordinary policy admission. After binding,
+  APPA refuses Claude Code's native filesystem and shell tools. Runtime-owned file tools use the
+  workspace event stream. Other policy-named tools, including MCP integrations, continue through
+  ordinary policy admission.
+- One file operation runs at a time per canonical workspace. Every bound root and subagent shares
+  that reservation.
+- **Automatic repair:** After a writer stops with no recorded outcome, the runtime attempts repair.
+  If the filesystem retains the pre-execution state, it releases the workspace reservation. If
+  the filesystem reflects a state the recorded request could produce, it records the file version
+  under the request's bound Label without marking the operation successful. An incompatible state
+  remains quarantined.
+- **Manual repair:** Stop all workspace writers before running manual repair. If automatic repair
+  did not run before a runtime crash, run `appa files repair --workspace <path>`. The command finds
+  the installed runtime database by default and applies the same repair rules.
+- **Relabelling:** Relabelling is separate from repair. Run
+  `appa files relabel --workspace <path> <file>...` to assign the configured initial Label to the
+  current contents of selected tracked files. Resolve all pending operations before relabelling.
 - `appa claude-files` is a separate constrained test launcher: it removes the native tools,
   starts Claude in a private empty directory, and serves the file tools over private stdio
   bound to a host-assigned trajectory. It is an experimental test path, not required by the
@@ -367,21 +392,23 @@ Unit and integration tests cover the mediated contract, not the unmediated paths
 | Area | Covered by |
 | --- | --- |
 | Hook binding, duplicate results, and root-session isolation | `managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results` |
-| Subagent sharing and root-workspace isolation | `file_ledgers_are_shared_by_subagents_and_isolated_across_root_workspaces` |
+| Workspace and subagent sharing | `file_event_streams_are_shared_by_workspace_and_isolated_across_workspaces` |
 | Label combination for Read/Write/Edit, restart and reopen | `managed_files_read_write_edit_and_restart_use_engine_labels`, `managed_files_bound_caller_retains_failure_taint_after_reopen` |
 | Check-before-match, admitted failure text | `managed_files_owned_execution_checks_before_matching_and_admits_errors` |
 | Copy/Move Labels without payload admission | `managed_files_copy_move_bypass_payload_admission_but_preserve_labels` |
 | Pinned path execution | `managed_files_execute_the_pinned_path_not_the_argument_path` |
-| Quarantine and release | `managed_files_failures_quarantine_only_the_live_session_ledger`, `managed_files_release_a_released_call_the_harness_never_ran` |
+| Quarantine and release | `managed_file_quarantine_survives_restart`, `managed_files_release_a_released_call_the_harness_never_ran` |
+| Publication followed by outcome-append failure | `published_file_label_survives_an_outcome_append_failure_and_restart` |
 | Process Labels and dependencies | `managed_files_process_results_and_failures_keep_input_labels` |
-| In-memory ledger invariants and store isolation | `appa-eventlog/src/files.rs` unit tests |
+| Workspace event and replay invariants | `appa-eventlog/src/files.rs` unit tests |
 | Isolation: allowed processing, input immutability, control files, sockets, keyrings, inherited descriptors, parent memory, descendant teardown, the process ceiling | `integrations/agentsh/test_live.py` on a built backend |
 
 Live Claude Code 2.1.268 exercises through the installed plugin — run by hand, not part of
 the automated suites — cover Read/Write/Edit with narrowing, Copy/Move without a Read,
 overwrite and refusal cases, a two-input invoice calculation that persists both dependency
-edges, denied control-file, network and input-write attempts, symlink publication refusal,
-and restart behavior under a fresh session ledger.
+edges, denied control-file, network and input-write attempts, and symlink publication refusal.
+The automated suites additionally cover durable reopen, quarantine across restart, and an
+injected trajectory-outcome append failure after file publication.
 
 ## What is not covered
 
@@ -397,10 +424,20 @@ and restart behavior under a fresh session ledger.
   rather than confined.
 - **Precise dependencies inside a program.** Process Labels are conservative: every declared
   input contributes whether or not the command read it.
-- **Declassification.** No sanitizer or rewrite policy is supported in file mode, and no
-  operation lowers a Label.
-- **Restart persistence.** File versions, Labels, receipts, and reservations do not survive
-  a runtime restart. A reopened trajectory gets a fresh ledger from the current workspace.
+- **Relabelling and sanitization.** File operations derive output Labels from their recorded
+  requests and never lower those Labels during repair. Assigning selected files the configured
+  initial Label requires the explicit `appa files relabel` operator command. Tool-input sanitizers
+  and rewrite routes remain unsupported. Output-only sanitizers remain available, except on
+  runtime-owned file tools whose MCP results cannot be confined.
+- **Non-atomic filesystem boundary.** Filesystem operations and event-log commits cannot form one
+  transaction. The runtime commits `Prepared` to acquire the reservation and `Bound` to record the
+  request's output Label. It then mutates the filesystem, commits `Finished`, and appends the
+  outcome to the trajectory log. A missing report reaches automatic repair while the runtime is
+  serving. A runtime crash can leave the reservation for `appa files repair`, which applies the
+  same rules after restart. Repair accepts only the pre-execution baseline or a state the request
+  could produce; incompatible states remain quarantined. A committed `Finished` event survives a
+  later trajectory append failure, and an exact retry reuses its version and receipt. Historical
+  file contents are not retained.
 - **Metadata and timing flows, resource exhaustion, kernel vulnerabilities.** Resource
   ceilings bound cost rather than eliminate it.
 - **Writers outside the runtime.** The design assumes no process outside the harness edits
@@ -414,7 +451,7 @@ and restart behavior under a fresh session ledger.
 | [`src/api/files.rs`](src/api/files.rs) | the six tools, the reservation protocol, execution and admission |
 | [`src/api/process.rs`](src/api/process.rs) | the staged-input contract and output import |
 | [`src/claude_files.rs`](src/claude_files.rs) | the constrained launcher and its private stdio server |
-| [`../appa-eventlog/src/files.rs`](../appa-eventlog/src/files.rs) | the in-memory version ledger |
+| [`../appa-eventlog/src/files.rs`](../appa-eventlog/src/files.rs) | workspace events, replay validation, and file projections |
 | [`../appa-engine/src/value.rs`](../appa-engine/src/value.rs) | `FileBasis`, the two output labels |
 | [`../appa-engine/src/check.rs`](../appa-engine/src/check.rs) | requirement checking over a resolved call |
 | [`../integrations/agentsh`](../integrations/agentsh) | the pinned, patched isolation backend |

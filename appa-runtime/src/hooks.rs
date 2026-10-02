@@ -431,13 +431,13 @@ impl Dispatcher<'_> {
         match opened {
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
-                    text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
+                    text: "APPA file tracking is enabled. Use appa_read_file(file_path), appa_write_file(file_path, content), \
                            appa_edit_file(file_path, old_string, new_string), and \
                            appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-                           Paths resolve within this root session's working directory. The root and its subagents \
-                           share that workspace. The harness's own file tools and \
-                           its tool discovery are not used in this mode. Observations the harness makes before a \
-                           call are not tracked."
+                           Paths resolve within this root session's working directory. The first file call binds the root \
+                           and its subagents to that shared workspace. After binding, APPA refuses the harness's native \
+                           filesystem and shell tools. Other policy-approved tools remain available. APPA does not track \
+                           observations that the harness makes before a call."
                         .to_owned()
                         + if runtime.file_process_enabled() {
                             " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
@@ -1078,7 +1078,7 @@ mod tests {
         let body = serde_json::to_vec(&wire).expect("serializes");
         let (status, answer) = answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
         match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
-            Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+            Ok(Ok(decision)) => (status, (codec.render)(claude_hook_json, &event, &decision)),
             _ => (status, answer),
         }
     }

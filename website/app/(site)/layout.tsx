@@ -1,9 +1,11 @@
 import { Header } from "@/components/Header";
+import { SongShip } from "@/components/SongShip";
 
 export default function SiteLayout({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Header />
+      <SongShip />
       {children}
       <footer className="site-footer">
         <span>© {new Date().getFullYear()} OpenAPPA</span>

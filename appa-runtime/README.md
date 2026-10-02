@@ -206,8 +206,8 @@ bytes to the model. The mode is experimental, it assumes the runtime owns the wo
 it refuses every call that is not one of those tools.
 
 [`FILE-MEDIATION.md`](FILE-MEDIATION.md) is the architecture note: component map, call
-sequence, the session-local ledger and its reservation lifecycle, the Label algebra, the isolated Process
-contract, and the list of what is and is not covered.
+sequence, the workspace event stream and its reservation lifecycle, the Label algebra, the
+isolated Process contract, and the boundary between covered and uncovered behavior.
 
 ## Things to know
 

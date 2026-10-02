@@ -9,6 +9,22 @@ CREATE TABLE openappa_events (
     CONSTRAINT openappa_events_seq_nonnegative CHECK (seq >= 0)
 );
 
+CREATE TABLE openappa_file_events (
+    workspace text NOT NULL,
+    seq bigint NOT NULL,
+    payload bytea NOT NULL,
+    CONSTRAINT openappa_file_events_workspace_seq_pk PRIMARY KEY (workspace, seq),
+    CONSTRAINT openappa_file_events_seq_nonnegative CHECK (seq >= 0)
+);
+
+CREATE TABLE openappa_file_roots (
+    root text PRIMARY KEY,
+    workspace text NOT NULL,
+    seq bigint NOT NULL,
+    CONSTRAINT openappa_file_roots_seq_nonnegative CHECK (seq >= 0)
+);
+CREATE INDEX openappa_file_roots_workspace_idx ON openappa_file_roots (workspace);
+
 CREATE TABLE openappa_host_keys (
     key text NOT NULL,
     root text NOT NULL,
