@@ -781,7 +781,7 @@ impl PostgresStore {
     ) -> Result<bool, EmbeddedError> {
         let (root, id, call_id) = (root.to_owned(), id.to_owned(), call_id.to_owned());
         let decision = serde_json::from_str::<serde_json::Value>(decision)
-            .unwrap_or_else(|_| serde_json::Value::String(decision.to_owned()));
+            .map_err(|error| EmbeddedError::Storage(format!("invalid read receipt JSON: {error}")))?;
         self.serialized(embedded_lock(&root), move |client| {
             let changed = client.execute(
                 "UPDATE openappa_embedded_peer_messages SET decision = $4

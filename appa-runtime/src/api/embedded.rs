@@ -707,7 +707,7 @@ fn stored_outcome(row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeer
     })
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum StoredOutcome {
     Deliver { value: String },

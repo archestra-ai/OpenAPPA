@@ -1492,6 +1492,24 @@ impl Session {
                 },
                 _ => None,
             };
+            let call_binding = match (opening.call_id, opens_dispatch) {
+                (Some(call_id), Some(dispatch)) => {
+                    if call_id.is_empty()
+                        || log
+                            .call_bindings()
+                            .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
+                    {
+                        return Err(EventError::CallIdReused);
+                    }
+                    Some(appa_eventlog::HostObservation::CallBound {
+                        trajectory: self.trajectory.clone(),
+                        call_id: call_id.to_string(),
+                        dispatch,
+                        prompt: fan_out_prompt,
+                    })
+                }
+                _ => None,
+            };
             let binds_read = facts.iter().any(|fact| {
                 matches!(
                     fact,
@@ -1503,65 +1521,21 @@ impl Session {
                 .ok()
                 .filter(|hold| hold.root == self.root.as_str());
             let appended = if let Some(hold) = hold {
-                if let (Some(call_id), Some(dispatch)) = (opening.call_id, opens_dispatch) {
-                    if call_id.is_empty()
-                        || log
-                            .call_bindings()
-                            .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
-                    {
-                        return Err(EventError::CallIdReused);
-                    }
-                    self.inner.store.append_holding_embedded_read(
-                        &log,
-                        facts,
-                        Some(&appa_eventlog::HostObservation::CallBound {
-                            trajectory: self.trajectory.clone(),
-                            call_id: call_id.to_string(),
-                            dispatch,
-                            prompt: fan_out_prompt,
-                        }),
-                        &appa_eventlog::embedded::EmbeddedAppendHold {
-                            id: &hold.id,
-                            call_id: &hold.call_id,
-                            generation: hold.generation,
-                            bind: binds_read,
-                        },
-                    )
-                } else {
-                    self.inner.store.append_holding_embedded_read(
-                        &log,
-                        facts,
-                        None,
-                        &appa_eventlog::embedded::EmbeddedAppendHold {
-                            id: &hold.id,
-                            call_id: &hold.call_id,
-                            generation: hold.generation,
-                            bind: binds_read,
-                        },
-                    )
-                }
+                self.inner.store.append_holding_embedded_read(
+                    &log,
+                    facts,
+                    call_binding.as_ref(),
+                    &appa_eventlog::embedded::EmbeddedAppendHold {
+                        id: &hold.id,
+                        call_id: &hold.call_id,
+                        generation: hold.generation,
+                        bind: binds_read,
+                    },
+                )
             } else {
-                match (opening.call_id, opens_dispatch) {
-                    (Some(call_id), Some(dispatch)) => {
-                        if call_id.is_empty()
-                            || log
-                                .call_bindings()
-                                .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
-                        {
-                            return Err(EventError::CallIdReused);
-                        }
-                        self.inner.store.append_host(
-                            &log,
-                            facts,
-                            &appa_eventlog::HostObservation::CallBound {
-                                trajectory: self.trajectory.clone(),
-                                call_id: call_id.to_string(),
-                                dispatch,
-                                prompt: fan_out_prompt,
-                            },
-                        )
-                    }
-                    _ => self.inner.store.append(&log, facts),
+                match call_binding.as_ref() {
+                    Some(binding) => self.inner.store.append_host(&log, facts, binding),
+                    None => self.inner.store.append(&log, facts),
                 }
             };
             match appended {

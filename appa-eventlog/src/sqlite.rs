@@ -117,12 +117,12 @@ const EMBEDDED_SCHEMA: &str = "CREATE TABLE embedded_peer_messages (
          digest TEXT NOT NULL,
          label TEXT NOT NULL,
          body TEXT,
-         status TEXT NOT NULL,
-         read_call_id TEXT,
-         decision TEXT,
-         expires_at INTEGER NOT NULL,
-         created_at INTEGER NOT NULL,
-         read_arguments TEXT,
+          status TEXT NOT NULL,
+          read_call_id TEXT,
+          read_arguments TEXT,
+          decision TEXT,
+          expires_at INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
          UNIQUE (root, sender, dispatch)
      );
      CREATE INDEX embedded_peer_recipient ON embedded_peer_messages (root, recipient, status);
@@ -1300,7 +1300,7 @@ fn install_embedded_schema(connection: &Connection) -> Result<(), rusqlite::Erro
     let expected = [
         (
             "embedded_peer_messages",
-            "CREATE TABLE embedded_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, root TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, pending_spawn TEXT, dispatch TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT, status TEXT NOT NULL, read_call_id TEXT, decision TEXT, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, read_arguments TEXT, UNIQUE (root, sender, dispatch) )",
+            "CREATE TABLE embedded_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, root TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, pending_spawn TEXT, dispatch TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT, status TEXT NOT NULL, read_call_id TEXT, read_arguments TEXT, decision TEXT, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, UNIQUE (root, sender, dispatch) )",
         ),
         (
             "embedded_peer_read_call",
