@@ -1,6 +1,7 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
 //! event model this crate declares.
 
+mod embedded;
 pub(crate) mod files;
 mod host;
 pub(crate) mod peer;
@@ -24,6 +25,7 @@ pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
     TrajectoryId,
 };
+pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 /// Why a host could not read a root's current status.

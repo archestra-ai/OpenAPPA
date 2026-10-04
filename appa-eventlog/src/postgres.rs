@@ -24,6 +24,10 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
+use crate::embedded::{
+    DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
+    StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
+};
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
@@ -100,6 +104,7 @@ impl Worker {
                     SELECT hash, bytes FROM openappa_policy_files LIMIT 0;
                     SELECT key, root FROM openappa_host_keys LIMIT 0;
                     SELECT seq, id, receiver, digest, label, body, expires_at, notified FROM openappa_held_peer_messages LIMIT 0;
+                    SELECT seq, id, root, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments, created_at FROM openappa_embedded_peer_messages LIMIT 0;
                     SET lock_timeout = '30s'; SET statement_timeout = '60s'",
                     )?;
                     check_receipt_keys(&mut client)?;
@@ -634,6 +639,181 @@ impl PostgresStore {
         })
     }
 
+    pub(crate) fn claim_embedded_peer(&self, fresh: &NewEmbedded) -> Result<EmbeddedClaim, EmbeddedError> {
+        let fresh = fresh.clone();
+        self.serialized(embedded_lock(&fresh.root), move |client| {
+            claim_embedded_pg(client, &fresh)
+        })
+    }
+
+    pub(crate) fn load_embedded_peer(&self, root: &str, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+        let (root, id) = (root.to_owned(), id.to_owned());
+        let stored = self
+            .query(move |client| {
+                Ok(client
+                    .query_opt(&embedded_select("root = $1 AND id = $2"), &[&root, &id])?
+                    .map(|row| embedded_pg_row(&row)))
+            })
+            .map_err(EmbeddedError::from)?;
+        stored.map(StoredEmbedded::decode).transpose()
+    }
+
+    pub(crate) fn expire_embedded_inbox(&self, root: &str, now: i64) -> Result<(), EmbeddedError> {
+        let root = root.to_owned();
+        self.query(move |client| {
+            client.execute(
+                "UPDATE openappa_embedded_peer_messages SET body = NULL
+                 WHERE root = $1 AND status IN ('held', 'direct') AND expires_at <= $2",
+                &[&root, &now],
+            )?;
+            Ok(())
+        })
+        .map_err(EmbeddedError::from)
+    }
+
+    pub(crate) fn list_embedded_peer(
+        &self,
+        root: &str,
+        recipient: &str,
+        now: i64,
+    ) -> Result<Vec<EmbeddedRow>, EmbeddedError> {
+        let (root, recipient) = (root.to_owned(), recipient.to_owned());
+        let stored = self
+            .query(move |client| {
+                client.execute(
+                    "UPDATE openappa_embedded_peer_messages SET body = NULL
+                     WHERE root = $1 AND recipient = $2 AND status IN ('held', 'direct') AND expires_at <= $3",
+                    &[&root, &recipient, &now],
+                )?;
+                Ok(client
+                    .query(
+                        "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+                         FROM openappa_embedded_peer_messages
+                         WHERE root = $1 AND recipient = $2 AND status = 'held' AND body IS NOT NULL AND expires_at > $3
+                         ORDER BY seq ASC",
+                        &[&root, &recipient, &now],
+                    )?
+                    .into_iter()
+                    .map(|row| embedded_pg_row(&row))
+                    .collect::<Vec<_>>())
+            })
+            .map_err(EmbeddedError::from)?;
+        stored.into_iter().map(StoredEmbedded::decode).collect()
+    }
+
+    pub(crate) fn take_embedded_direct(
+        &self,
+        root: &str,
+        id: &str,
+        sender: &str,
+        recipient: &str,
+        digest: &str,
+    ) -> Result<DirectTake, EmbeddedError> {
+        let (root, id, sender, recipient, digest) = (
+            root.to_owned(),
+            id.to_owned(),
+            sender.to_owned(),
+            recipient.to_owned(),
+            digest.to_owned(),
+        );
+        self.serialized(embedded_lock(&root), move |client| {
+            let Some(row) = load_embedded_pg(client, &root, &id)? else {
+                return Ok(DirectTake::Missing);
+            };
+            if row.sender != sender || row.recipient != recipient || row.digest != digest {
+                return Ok(DirectTake::Missing);
+            }
+            match row.status {
+                EmbeddedStatus::Direct => Ok(DirectTake::Already(row)),
+                EmbeddedStatus::Read => Ok(DirectTake::Busy),
+                EmbeddedStatus::Held => {
+                    client.execute(
+                        "UPDATE openappa_embedded_peer_messages SET status = 'direct'
+                         WHERE root = $1 AND id = $2 AND status = 'held'",
+                        &[&root, &id],
+                    )?;
+                    Ok(DirectTake::Taken(row))
+                }
+            }
+        })
+    }
+
+    pub(crate) fn claim_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        recipient: &str,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<ReadTake, EmbeddedError> {
+        let (root, id, recipient, call_id, arguments) = (
+            root.to_owned(),
+            id.to_owned(),
+            recipient.to_owned(),
+            call_id.to_owned(),
+            arguments.to_owned(),
+        );
+        self.serialized(embedded_lock(&root), move |client| {
+            let Some(row) = load_embedded_pg(client, &root, &id)? else {
+                return Ok(ReadTake::Missing);
+            };
+            if row.recipient != recipient {
+                return Ok(ReadTake::Missing);
+            }
+            if let Some(taken) = classify_read(&row, &call_id, &arguments) {
+                return Ok(taken);
+            }
+            match row.status {
+                EmbeddedStatus::Held => claim_held_read_pg(client, &root, &id, &recipient, &call_id, &arguments),
+                EmbeddedStatus::Read => resume_embedded_read_pg(client, &root, &id, &row),
+                EmbeddedStatus::Direct => Ok(ReadTake::Busy),
+            }
+        })
+    }
+
+    pub(crate) fn finish_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+        decision: &str,
+    ) -> Result<bool, EmbeddedError> {
+        let (root, id, call_id) = (root.to_owned(), id.to_owned(), call_id.to_owned());
+        let decision = serde_json::from_str::<serde_json::Value>(decision)
+            .map_err(|error| EmbeddedError::Storage(format!("invalid read receipt JSON: {error}")))?;
+        self.serialized(embedded_lock(&root), move |client| {
+            let changed = client.execute(
+                "UPDATE openappa_embedded_peer_messages SET decision = $4
+                 WHERE root = $1 AND id = $2 AND read_call_id = $3 AND status = 'read'
+                   AND decision->>'kind' IN ('opening', 'bound')
+                   AND (decision->>'generation')::bigint = $5",
+                &[&root, &id, &call_id, &decision, &generation],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
+    pub(crate) fn release_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+    ) -> Result<bool, EmbeddedError> {
+        let (root, id, call_id) = (root.to_owned(), id.to_owned(), call_id.to_owned());
+        self.serialized(embedded_lock(&root), move |client| {
+            let changed = client.execute(
+                "UPDATE openappa_embedded_peer_messages
+                 SET status = 'held', read_call_id = NULL, read_arguments = NULL, decision = NULL
+                 WHERE root = $1 AND id = $2 AND read_call_id = $3 AND status = 'read'
+                   AND decision->>'kind' = 'opening' AND (decision->>'generation')::bigint = $4",
+                &[&root, &id, &call_id, &generation],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     /// Run `operation` in a transaction, serialized against other writers of `lock`.
     fn serialized<T, E>(
         &self,
@@ -871,6 +1051,57 @@ impl PostgresStore {
         }
         Ok(())
     }
+
+    pub(super) fn append_holding_read(
+        &self,
+        root: &TrajectoryId,
+        basis: u64,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+        hold: &crate::embedded::EmbeddedAppendHold<'_>,
+    ) -> Result<(), AppendError> {
+        let root_lock = root.as_str().to_owned();
+        let root = root.as_str().to_owned();
+        let key = key.map(str::to_owned);
+        let id = hold.id.to_owned();
+        let call_id = hold.call_id.to_owned();
+        let generation = hold.generation;
+        let bind = hold.bind;
+        let bound = serde_json::json!({"generation": generation, "kind": TICKET_BOUND});
+        self.serialized::<_, PostgresError>(root_lock, move |client| {
+            let current = client
+                .query_one(
+                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
+                    &[&root],
+                )?
+                .get::<_, i64>(0) as u64;
+            if current != basis {
+                return Ok(Err(AppendError::Conflict { current }));
+            }
+            let changed = client.execute(
+                "UPDATE openappa_embedded_peer_messages
+                 SET decision = CASE WHEN $6 THEN $5 ELSE decision END
+                 WHERE root = $1 AND id = $2 AND read_call_id = $3 AND status = 'read'
+                   AND decision->>'kind' IN ('opening', 'bound')
+                   AND (decision->>'generation')::bigint = $4",
+                &[&root, &id, &call_id, &generation, &bound, &bind],
+            )?;
+            if changed != 1 {
+                return Ok(Err(AppendError::ReadClaimLost));
+            }
+            client.execute(
+                "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3)",
+                &[&root, &(current as i64), &bytes],
+            )?;
+            if let Some(key) = key {
+                client.execute(
+                    "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&key, &root],
+                )?;
+            }
+            Ok(Ok(()))
+        })?
+    }
 }
 
 impl From<PostgresError> for ReceiptError {
@@ -984,6 +1215,236 @@ impl From<PostgresError> for HeldError {
 }
 
 impl From<::postgres::Error> for HeldError {
+    fn from(error: ::postgres::Error) -> Self {
+        PostgresError::from(error).into()
+    }
+}
+
+fn claim_held_read_pg(
+    client: &mut Client,
+    root: &str,
+    id: &str,
+    recipient: &str,
+    call_id: &str,
+    arguments: &str,
+) -> Result<ReadTake, EmbeddedError> {
+    let taken: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM openappa_embedded_peer_messages
+             WHERE root = $1 AND recipient = $2 AND read_call_id = $3 AND id != $4",
+            &[&root, &recipient, &call_id, &id],
+        )?
+        .get(0);
+    if taken > 0 {
+        return Ok(ReadTake::Busy);
+    }
+    let ticket =
+        serde_json::from_str::<serde_json::Value>(&read_ticket(TICKET_OPENING, 1)).expect("the opening ticket is json");
+    let changed = match client.execute(
+        "UPDATE openappa_embedded_peer_messages
+         SET status = 'read', read_call_id = $3, read_arguments = $4, decision = $5
+         WHERE root = $1 AND id = $2 AND status = 'held'",
+        &[&root, &id, &call_id, &arguments, &ticket],
+    ) {
+        Ok(changed) => changed,
+        Err(error) if error.code() == Some(&::postgres::error::SqlState::UNIQUE_VIOLATION) => {
+            return Ok(ReadTake::Busy);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if changed == 0 {
+        return Ok(ReadTake::Busy);
+    }
+    owned_read_pg(client, root, id, 1)
+}
+
+fn resume_embedded_read_pg(
+    client: &mut Client,
+    root: &str,
+    id: &str,
+    row: &EmbeddedRow,
+) -> Result<ReadTake, EmbeddedError> {
+    let (kind, next) = next_read_ticket(row.decision.as_deref())?;
+    let generation = next - 1;
+    let ticket = serde_json::json!({"generation": next, "kind": kind});
+    let changed = if row.decision.is_none() {
+        client.execute(
+            "UPDATE openappa_embedded_peer_messages SET decision = $3
+             WHERE root = $1 AND id = $2 AND status = 'read' AND decision IS NULL",
+            &[&root, &id, &ticket],
+        )?
+    } else {
+        client.execute(
+            "UPDATE openappa_embedded_peer_messages SET decision = $4
+             WHERE root = $1 AND id = $2 AND status = 'read'
+               AND decision->>'kind' = $3 AND (decision->>'generation')::bigint = $5",
+            &[&root, &id, &kind, &ticket, &generation],
+        )?
+    };
+    if changed == 0 {
+        return Ok(ReadTake::Busy);
+    }
+    owned_read_pg(client, root, id, next)
+}
+
+fn owned_read_pg(client: &mut Client, root: &str, id: &str, generation: i64) -> Result<ReadTake, EmbeddedError> {
+    Ok(ReadTake::Ready(ReadClaim {
+        row: load_embedded_pg(client, root, id)?
+            .ok_or_else(|| EmbeddedError::Storage("the claimed embedded peer row is missing".to_string()))?,
+        generation,
+    }))
+}
+
+fn claim_embedded_pg(client: &mut Client, fresh: &NewEmbedded) -> Result<EmbeddedClaim, EmbeddedError> {
+    client.execute(
+        "UPDATE openappa_embedded_peer_messages SET body = NULL
+         WHERE root = $1 AND status IN ('held', 'direct') AND expires_at <= $2",
+        &[&fresh.root, &fresh.created_at],
+    )?;
+    if let Some(existing) = load_embedded_dispatch_pg(client, &fresh.root, &fresh.sender, &fresh.dispatch)? {
+        return Ok(if same_payload(&existing, fresh) {
+            EmbeddedClaim::Stored(existing)
+        } else {
+            EmbeddedClaim::Conflict
+        });
+    }
+    let unread_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM openappa_embedded_peer_messages
+             WHERE root = $1 AND recipient = $2 AND status = 'held' AND body IS NOT NULL AND expires_at > $3",
+            &[&fresh.root, &fresh.recipient, &fresh.created_at],
+        )?
+        .get(0);
+    if unread_count >= crate::embedded::UNREAD_QUOTA as i64 {
+        return Ok(EmbeddedClaim::Quota);
+    }
+    client.execute(
+        "INSERT INTO openappa_embedded_peer_messages (
+            id, root, sender, recipient, pending_spawn, dispatch, digest, label, body, status, expires_at, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'held', $10, $11)",
+        &[
+            &fresh.id,
+            &fresh.root,
+            &fresh.sender,
+            &fresh.recipient,
+            &fresh.pending_spawn,
+            &fresh.dispatch,
+            &fresh.digest,
+            &fresh.label,
+            &fresh.body,
+            &fresh.expires_at,
+            &fresh.created_at,
+        ],
+    )?;
+    Ok(EmbeddedClaim::Stored(
+        load_embedded_pg(client, &fresh.root, &fresh.id)?
+            .ok_or_else(|| EmbeddedError::Storage("the inserted embedded peer row is missing".to_string()))?,
+    ))
+}
+
+fn load_embedded_pg(client: &mut Client, root: &str, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+    client
+        .query_opt(
+            "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+             FROM openappa_embedded_peer_messages WHERE root = $1 AND id = $2",
+            &[&root, &id],
+        )?
+        .map(|row| StoredEmbedded::decode(embedded_pg_row(&row)))
+        .transpose()
+}
+
+fn load_embedded_dispatch_pg(
+    client: &mut Client,
+    root: &str,
+    sender: &str,
+    dispatch: &str,
+) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+    client
+        .query_opt(
+            "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+             FROM openappa_embedded_peer_messages WHERE root = $1 AND sender = $2 AND dispatch = $3",
+            &[&root, &sender, &dispatch],
+        )?
+        .map(|row| StoredEmbedded::decode(embedded_pg_row(&row)))
+        .transpose()
+}
+
+fn embedded_pg_row(row: &::postgres::Row) -> StoredEmbedded {
+    let decision: Option<serde_json::Value> = row.get(10);
+    StoredEmbedded {
+        id: row.get(0),
+        sender: row.get(1),
+        recipient: row.get(2),
+        pending_spawn: row.get(3),
+        dispatch: row.get(4),
+        digest: row.get(5),
+        label: row.get(6),
+        body: row.get(7),
+        status: row.get(8),
+        read_call_id: row.get(9),
+        decision: decision.map(|value| value.to_string()),
+        expires_at: row.get(11),
+        read_arguments: row.get(12),
+    }
+}
+
+fn embedded_select(predicate: &str) -> String {
+    format!(
+        "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+         FROM openappa_embedded_peer_messages WHERE {predicate}"
+    )
+}
+
+fn embedded_lock(root: &str) -> String {
+    format!("openappa-embedded-peer:{root}")
+}
+
+#[cfg(feature = "fault-injection")]
+impl PostgresStore {
+    pub(crate) fn testing_clear_embedded_decision(&self, root: &str, id: &str) -> Result<(), EmbeddedError> {
+        let (root, id) = (root.to_owned(), id.to_owned());
+        self.query(move |client| {
+            client.execute(
+                "UPDATE openappa_embedded_peer_messages SET decision = NULL WHERE root = $1 AND id = $2",
+                &[&root, &id],
+            )?;
+            Ok(())
+        })
+        .map_err(EmbeddedError::from)
+    }
+
+    pub(crate) fn testing_expire_embedded(&self, root: &str, id: &str) -> Result<(), EmbeddedError> {
+        let (root, id) = (root.to_owned(), id.to_owned());
+        self.query(move |client| {
+            client.execute(
+                "UPDATE openappa_embedded_peer_messages SET expires_at = 0 WHERE root = $1 AND id = $2",
+                &[&root, &id],
+            )?;
+            Ok(())
+        })
+        .map_err(EmbeddedError::from)
+    }
+
+    pub(crate) fn testing_replace_embedded_body(&self, root: &str, id: &str, body: &str) -> Result<(), EmbeddedError> {
+        let (root, id, body) = (root.to_owned(), id.to_owned(), body.to_owned());
+        self.query(move |client| {
+            client.execute(
+                "UPDATE openappa_embedded_peer_messages SET body = $3 WHERE root = $1 AND id = $2",
+                &[&root, &id, &body],
+            )?;
+            Ok(())
+        })
+        .map_err(EmbeddedError::from)
+    }
+}
+
+impl From<PostgresError> for EmbeddedError {
+    fn from(error: PostgresError) -> Self {
+        Self::Storage(error.0)
+    }
+}
+
+impl From<::postgres::Error> for EmbeddedError {
     fn from(error: ::postgres::Error) -> Self {
         PostgresError::from(error).into()
     }

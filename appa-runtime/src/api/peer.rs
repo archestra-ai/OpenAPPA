@@ -276,7 +276,7 @@ impl Runtime {
         })
     }
 
-    fn current_label(&self, log: &Log, trajectory: &TrajectoryId) -> Result<Label, EventError> {
+    pub(crate) fn current_label(&self, log: &Log, trajectory: &TrajectoryId) -> Result<Label, EventError> {
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, log)?;
         let view = policy.engine().rebuild_view(log).map_err(EventError::from)?;

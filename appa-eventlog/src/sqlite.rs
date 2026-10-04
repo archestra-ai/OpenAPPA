@@ -14,6 +14,10 @@ use serde_json::Value;
 
 #[cfg(feature = "fault-injection")]
 use crate::HostObservation;
+use crate::embedded::{
+    DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
+    StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
+};
 #[cfg(feature = "fault-injection")]
 use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
@@ -96,11 +100,34 @@ const FILE_SCHEMA: &str = "CREATE TABLE file_events (
                                payload BLOB NOT NULL,
                                PRIMARY KEY (workspace, seq)
                            );
-                           CREATE TABLE file_roots (
-                               root TEXT PRIMARY KEY,
-                               workspace TEXT NOT NULL,
-                               seq INTEGER NOT NULL
-                           );";
+                            CREATE TABLE file_roots (
+                                root TEXT PRIMARY KEY,
+                                workspace TEXT NOT NULL,
+                                seq INTEGER NOT NULL
+                            );";
+
+const EMBEDDED_SCHEMA: &str = "CREATE TABLE embedded_peer_messages (
+         seq INTEGER PRIMARY KEY,
+         id TEXT NOT NULL UNIQUE,
+         root TEXT NOT NULL,
+         sender TEXT NOT NULL,
+         recipient TEXT NOT NULL,
+         pending_spawn TEXT,
+         dispatch TEXT NOT NULL,
+         digest TEXT NOT NULL,
+         label TEXT NOT NULL,
+         body TEXT,
+         status TEXT NOT NULL,
+         read_call_id TEXT,
+         read_arguments TEXT,
+         decision TEXT,
+         expires_at INTEGER NOT NULL,
+         created_at INTEGER NOT NULL,
+         UNIQUE (root, sender, dispatch)
+     );
+     CREATE INDEX embedded_peer_recipient ON embedded_peer_messages (root, recipient, status);
+     CREATE UNIQUE INDEX embedded_peer_read_call ON embedded_peer_messages (root, recipient, read_call_id)
+     WHERE read_call_id IS NOT NULL;";
 
 pub(crate) struct Sqlite(Mutex<Connection>);
 
@@ -664,6 +691,410 @@ impl Sqlite {
             }
         })
     }
+
+    pub(crate) fn ensure_embedded_schema(&self) -> Result<(), EmbeddedError> {
+        install_embedded_schema(&self.connection())?;
+        Ok(())
+    }
+
+    pub(crate) fn claim_embedded_peer(&self, fresh: &NewEmbedded) -> Result<EmbeddedClaim, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        let label_json = fresh.label.to_string();
+        immediate(&mut self.connection(), |transaction| {
+            claim_embedded_sqlite(transaction, fresh, &label_json)
+        })
+    }
+
+    pub(crate) fn load_embedded_peer(&self, root: &str, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        self.connection()
+            .query_row(
+                "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+                 FROM embedded_peer_messages WHERE root = ?1 AND id = ?2",
+                params![root, id],
+                embedded_row,
+            )
+            .optional()?
+            .map(decode_embedded)
+            .transpose()
+    }
+
+    pub(crate) fn expire_embedded_inbox(&self, root: &str, now: i64) -> Result<(), EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        self.connection().execute(
+            "UPDATE embedded_peer_messages SET body = NULL
+             WHERE root = ?1 AND status IN ('held', 'direct') AND expires_at <= ?2",
+            params![root, now],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn list_embedded_peer(
+        &self,
+        root: &str,
+        recipient: &str,
+        now: i64,
+    ) -> Result<Vec<EmbeddedRow>, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        let connection = self.connection();
+        connection.execute(
+            "UPDATE embedded_peer_messages SET body = NULL
+             WHERE root = ?1 AND recipient = ?2 AND status IN ('held', 'direct') AND expires_at <= ?3",
+            params![root, recipient, now],
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+             FROM embedded_peer_messages
+             WHERE root = ?1 AND recipient = ?2 AND status = 'held' AND body IS NOT NULL AND expires_at > ?3
+             ORDER BY seq ASC",
+        )?;
+        let rows = statement.query_map(params![root, recipient, now], embedded_row)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(decode_embedded)
+            .collect()
+    }
+
+    pub(crate) fn take_embedded_direct(
+        &self,
+        root: &str,
+        id: &str,
+        sender: &str,
+        recipient: &str,
+        digest: &str,
+    ) -> Result<DirectTake, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        immediate(&mut self.connection(), |transaction| {
+            let Some(row) = load_embedded_in(transaction, root, id)? else {
+                return Ok(DirectTake::Missing);
+            };
+            if row.sender != sender || row.recipient != recipient || row.digest != digest {
+                return Ok(DirectTake::Missing);
+            }
+            match row.status {
+                EmbeddedStatus::Direct => Ok(DirectTake::Already(row)),
+                EmbeddedStatus::Read => Ok(DirectTake::Busy),
+                EmbeddedStatus::Held => {
+                    transaction.execute(
+                        "UPDATE embedded_peer_messages SET status = 'direct'
+                         WHERE root = ?1 AND id = ?2 AND status = 'held'",
+                        params![root, id],
+                    )?;
+                    Ok(DirectTake::Taken(row))
+                }
+            }
+        })
+    }
+
+    pub(crate) fn claim_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        recipient: &str,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<ReadTake, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        immediate(&mut self.connection(), |transaction| {
+            claim_read_sqlite(transaction, root, id, recipient, call_id, arguments)
+        })
+    }
+
+    pub(crate) fn finish_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+        decision: &str,
+    ) -> Result<bool, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        let opening = read_ticket(TICKET_OPENING, generation);
+        let bound = read_ticket(TICKET_BOUND, generation);
+        let changed = immediate(&mut self.connection(), |transaction| {
+            transaction.execute(
+                "UPDATE embedded_peer_messages SET decision = ?4
+                 WHERE root = ?1 AND id = ?2 AND read_call_id = ?3 AND status = 'read'
+                   AND (decision = ?5 OR decision = ?6)",
+                params![root, id, call_id, decision, opening, bound],
+            )
+        })?;
+        Ok(changed == 1)
+    }
+
+    pub(crate) fn release_embedded_read(
+        &self,
+        root: &str,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+    ) -> Result<bool, EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        let ticket = read_ticket(TICKET_OPENING, generation);
+        let changed = immediate(&mut self.connection(), |transaction| {
+            transaction.execute(
+                "UPDATE embedded_peer_messages
+                 SET status = 'held', read_call_id = NULL, read_arguments = NULL, decision = NULL
+                 WHERE root = ?1 AND id = ?2 AND read_call_id = ?3 AND status = 'read' AND decision = ?4",
+                params![root, id, call_id, ticket],
+            )
+        })?;
+        Ok(changed == 1)
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+impl Sqlite {
+    pub(crate) fn testing_clear_embedded_decision(&self, root: &str, id: &str) -> Result<(), EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        self.connection().execute(
+            "UPDATE embedded_peer_messages SET decision = NULL WHERE root = ?1 AND id = ?2",
+            params![root, id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn testing_expire_embedded(&self, root: &str, id: &str) -> Result<(), EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        self.connection().execute(
+            "UPDATE embedded_peer_messages SET expires_at = 0 WHERE root = ?1 AND id = ?2",
+            params![root, id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn testing_replace_embedded_body(&self, root: &str, id: &str, body: &str) -> Result<(), EmbeddedError> {
+        self.ensure_embedded_schema()?;
+        self.connection().execute(
+            "UPDATE embedded_peer_messages SET body = ?3 WHERE root = ?1 AND id = ?2",
+            params![root, id, body],
+        )?;
+        Ok(())
+    }
+}
+
+fn claim_read_sqlite(
+    transaction: &Transaction<'_>,
+    root: &str,
+    id: &str,
+    recipient: &str,
+    call_id: &str,
+    arguments: &str,
+) -> Result<ReadTake, EmbeddedError> {
+    let Some(row) = load_embedded_in(transaction, root, id)? else {
+        return Ok(ReadTake::Missing);
+    };
+    if row.recipient != recipient {
+        return Ok(ReadTake::Missing);
+    }
+    if let Some(taken) = classify_read(&row, call_id, arguments) {
+        return Ok(taken);
+    }
+    match row.status {
+        EmbeddedStatus::Held => claim_held_read(transaction, root, id, recipient, call_id, arguments),
+        EmbeddedStatus::Read => resume_embedded_read(transaction, root, id, &row),
+        EmbeddedStatus::Direct => Ok(ReadTake::Busy),
+    }
+}
+
+fn claim_held_read(
+    transaction: &Transaction<'_>,
+    root: &str,
+    id: &str,
+    recipient: &str,
+    call_id: &str,
+    arguments: &str,
+) -> Result<ReadTake, EmbeddedError> {
+    if call_id_taken(transaction, root, recipient, call_id, id)? {
+        return Ok(ReadTake::Busy);
+    }
+    let ticket = read_ticket(TICKET_OPENING, 1);
+    let changed = match transaction.execute(
+        "UPDATE embedded_peer_messages
+         SET status = 'read', read_call_id = ?3, read_arguments = ?4, decision = ?5
+         WHERE root = ?1 AND id = ?2 AND status = 'held'",
+        params![root, id, call_id, arguments, ticket],
+    ) {
+        Ok(changed) => changed,
+        Err(error) if is_unique(&error) => return Ok(ReadTake::Busy),
+        Err(error) => return Err(error.into()),
+    };
+    if changed == 0 {
+        return Ok(ReadTake::Busy);
+    }
+    owned_read(transaction, root, id, 1)
+}
+
+fn resume_embedded_read(
+    transaction: &Transaction<'_>,
+    root: &str,
+    id: &str,
+    row: &EmbeddedRow,
+) -> Result<ReadTake, EmbeddedError> {
+    let (kind, next) = next_read_ticket(row.decision.as_deref())?;
+    let ticket = read_ticket(&kind, next);
+    let changed = if row.decision.is_none() {
+        transaction.execute(
+            "UPDATE embedded_peer_messages SET decision = ?3
+             WHERE root = ?1 AND id = ?2 AND status = 'read' AND decision IS NULL",
+            params![root, id, ticket],
+        )?
+    } else {
+        transaction.execute(
+            "UPDATE embedded_peer_messages SET decision = ?4
+             WHERE root = ?1 AND id = ?2 AND status = 'read' AND decision = ?3",
+            params![root, id, row.decision, ticket],
+        )?
+    };
+    if changed == 0 {
+        return Ok(ReadTake::Busy);
+    }
+    owned_read(transaction, root, id, next)
+}
+
+fn owned_read(transaction: &Transaction<'_>, root: &str, id: &str, generation: i64) -> Result<ReadTake, EmbeddedError> {
+    Ok(ReadTake::Ready(ReadClaim {
+        row: load_embedded_in(transaction, root, id)?
+            .ok_or_else(|| EmbeddedError::Storage("the claimed embedded peer row is missing".to_string()))?,
+        generation,
+    }))
+}
+
+fn call_id_taken(
+    transaction: &Transaction<'_>,
+    root: &str,
+    recipient: &str,
+    call_id: &str,
+    id: &str,
+) -> Result<bool, EmbeddedError> {
+    let found: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM embedded_peer_messages
+             WHERE root = ?1 AND recipient = ?2 AND read_call_id = ?3 AND id != ?4",
+            params![root, recipient, call_id, id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+fn is_unique(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+fn claim_embedded_sqlite(
+    transaction: &Transaction<'_>,
+    fresh: &NewEmbedded,
+    label_json: &str,
+) -> Result<EmbeddedClaim, EmbeddedError> {
+    transaction.execute(
+        "UPDATE embedded_peer_messages SET body = NULL
+         WHERE root = ?1 AND status IN ('held', 'direct') AND expires_at <= ?2",
+        params![fresh.root, fresh.created_at],
+    )?;
+    if let Some(existing) = load_embedded_dispatch(transaction, &fresh.root, &fresh.sender, &fresh.dispatch)? {
+        return Ok(if same_payload(&existing, fresh) {
+            EmbeddedClaim::Stored(existing)
+        } else {
+            EmbeddedClaim::Conflict
+        });
+    }
+    let unread_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM embedded_peer_messages
+         WHERE root = ?1 AND recipient = ?2 AND status = 'held' AND body IS NOT NULL AND expires_at > ?3",
+        params![fresh.root.as_str(), fresh.recipient.as_str(), fresh.created_at],
+        |row| row.get(0),
+    )?;
+    if unread_count >= crate::embedded::UNREAD_QUOTA as i64 {
+        return Ok(EmbeddedClaim::Quota);
+    }
+    transaction.execute(
+        "INSERT INTO embedded_peer_messages (
+            id, root, sender, recipient, pending_spawn, dispatch, digest, label, body, status, expires_at, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'held', ?10, ?11)",
+        params![
+            fresh.id.as_str(),
+            fresh.root.as_str(),
+            fresh.sender.as_str(),
+            fresh.recipient.as_str(),
+            fresh.pending_spawn.as_deref(),
+            fresh.dispatch.as_str(),
+            fresh.digest.as_str(),
+            label_json,
+            fresh.body.as_str(),
+            fresh.expires_at,
+            fresh.created_at
+        ],
+    )?;
+    Ok(EmbeddedClaim::Stored(
+        load_embedded_in(transaction, &fresh.root, &fresh.id)?
+            .ok_or_else(|| EmbeddedError::Storage("the inserted embedded peer row is missing".to_string()))?,
+    ))
+}
+
+fn load_embedded_dispatch(
+    transaction: &Transaction<'_>,
+    root: &str,
+    sender: &str,
+    dispatch: &str,
+) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+    transaction
+        .query_row(
+            "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+             FROM embedded_peer_messages WHERE root = ?1 AND sender = ?2 AND dispatch = ?3",
+            params![root, sender, dispatch],
+            embedded_row,
+        )
+        .optional()?
+        .map(decode_embedded)
+        .transpose()
+}
+
+fn load_embedded_in(transaction: &Transaction<'_>, root: &str, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+    transaction
+        .query_row(
+            "SELECT id, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments
+             FROM embedded_peer_messages WHERE root = ?1 AND id = ?2",
+            params![root, id],
+            embedded_row,
+        )
+        .optional()?
+        .map(decode_embedded)
+        .transpose()
+}
+
+fn embedded_row(row: &rusqlite::Row<'_>) -> Result<StoredEmbedded, rusqlite::Error> {
+    let label: String = row.get(6)?;
+    Ok(StoredEmbedded {
+        id: row.get(0)?,
+        sender: row.get(1)?,
+        recipient: row.get(2)?,
+        pending_spawn: row.get(3)?,
+        dispatch: row.get(4)?,
+        digest: row.get(5)?,
+        label: serde_json::from_str(&label).map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
+        })?,
+        body: row.get(7)?,
+        status: row.get(8)?,
+        read_call_id: row.get(9)?,
+        decision: row.get(10)?,
+        expires_at: row.get(11)?,
+        read_arguments: row.get(12)?,
+    })
+}
+
+fn decode_embedded(stored: StoredEmbedded) -> Result<EmbeddedRow, EmbeddedError> {
+    stored.decode()
+}
+
+impl From<rusqlite::Error> for EmbeddedError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.to_string())
+    }
 }
 
 /// A held connection that one append runs on.
@@ -687,6 +1118,49 @@ impl Appender<'_> {
             }
             insert_batch(transaction, root, current, bytes, key)?;
             before_commit()
+        })
+    }
+
+    /// Append the batch only while this read still owns its ticket. A batch that opens or admits
+    /// binds the ticket, so a later release cannot return the row to the inbox.
+    pub(crate) fn append_holding_read(
+        mut self,
+        root: &TrajectoryId,
+        basis: u64,
+        bytes: &[u8],
+        key: Option<&str>,
+        hold: &crate::embedded::EmbeddedAppendHold<'_>,
+    ) -> Result<(), AppendError> {
+        immediate(&mut self.0, |transaction| {
+            let current = position(transaction, root)?;
+            if current != basis {
+                return Err(AppendError::Conflict { current });
+            }
+            insert_batch(transaction, root, current, bytes, key)?;
+            let opening = read_ticket(TICKET_OPENING, hold.generation);
+            let bound = read_ticket(TICKET_BOUND, hold.generation);
+            let owned: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM embedded_peer_messages
+                 WHERE root = ?1 AND id = ?2 AND read_call_id = ?3 AND status = 'read'
+                   AND (decision = ?4 OR decision = ?5)",
+                params![root.as_str(), hold.id, hold.call_id, opening, bound],
+                |row| row.get(0),
+            )?;
+            if owned != 1 {
+                return Err(AppendError::ReadClaimLost);
+            }
+            if hold.bind {
+                let changed = transaction.execute(
+                    "UPDATE embedded_peer_messages SET decision = ?5
+                     WHERE root = ?1 AND id = ?2 AND read_call_id = ?3 AND status = 'read'
+                       AND (decision = ?4 OR decision = ?5)",
+                    params![root.as_str(), hold.id, hold.call_id, opening, bound],
+                )?;
+                if changed != 1 {
+                    return Err(AppendError::ReadClaimLost);
+                }
+            }
+            Ok(())
         })
     }
 
@@ -807,6 +1281,47 @@ fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
         |row| row.get(0),
     )?;
     Ok(found == TABLES.len() as i64)
+}
+
+fn install_embedded_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT name, sql FROM sqlite_master
+         WHERE name IN ('embedded_peer_messages', 'embedded_peer_recipient', 'embedded_peer_read_call')
+         ORDER BY name",
+    )?;
+    let found = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if found.is_empty() {
+        return connection.execute_batch(EMBEDDED_SCHEMA);
+    }
+    let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let expected = [
+        (
+            "embedded_peer_messages",
+            "CREATE TABLE embedded_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, root TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, pending_spawn TEXT, dispatch TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT, status TEXT NOT NULL, read_call_id TEXT, read_arguments TEXT, decision TEXT, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, UNIQUE (root, sender, dispatch) )",
+        ),
+        (
+            "embedded_peer_read_call",
+            "CREATE UNIQUE INDEX embedded_peer_read_call ON embedded_peer_messages (root, recipient, read_call_id) WHERE read_call_id IS NOT NULL",
+        ),
+        (
+            "embedded_peer_recipient",
+            "CREATE INDEX embedded_peer_recipient ON embedded_peer_messages (root, recipient, status)",
+        ),
+    ];
+    if found.len() == expected.len()
+        && found
+            .iter()
+            .zip(expected)
+            .all(|((name, sql), (expected_name, expected_sql))| name == expected_name && normalize(sql) == expected_sql)
+    {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some("the optional embedded peer schema is partial or incompatible".into()),
+    ))
 }
 
 fn install_file_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -1051,6 +1566,29 @@ mod tests {
                 .expect("every schema row reads");
             assert_eq!(found, expected);
         }
+    }
+
+    #[test]
+    fn embedded_peer_installs_beside_a_frozen_core_without_moving_its_version() {
+        let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+        let version_before: i64 = store
+            .lock()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the core version reads");
+        assert_eq!(version_before, 7);
+        {
+            let connection = store.lock();
+            install_embedded_schema(&connection).expect("the optional schema installs");
+            install_embedded_schema(&connection).expect("the exact optional schema is accepted again");
+        }
+        let connection = store.lock();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the core version still reads");
+        assert_eq!(
+            version, 7,
+            "the embedded side table does not move the frozen core version"
+        );
     }
 
     #[test]
