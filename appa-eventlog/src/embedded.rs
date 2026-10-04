@@ -184,6 +184,19 @@ pub(crate) fn ticket_kind(decision: Option<&str>) -> Option<(String, i64)> {
     Some((kind.to_string(), value.get("generation")?.as_i64()?))
 }
 
+pub(crate) fn next_read_ticket(decision: Option<&str>) -> Result<(String, i64), EmbeddedError> {
+    let Some(decision) = decision else {
+        return Ok((TICKET_OPENING.to_string(), 1));
+    };
+    let (kind, generation) = ticket_kind(Some(decision))
+        .filter(|(_, generation)| *generation > 0)
+        .ok_or_else(|| EmbeddedError::Storage("invalid embedded read ticket".to_string()))?;
+    let next = generation
+        .checked_add(1)
+        .ok_or_else(|| EmbeddedError::Storage("embedded read generation exhausted".to_string()))?;
+    Ok((kind, next))
+}
+
 pub(crate) fn classify_read(row: &EmbeddedRow, call_id: &str, arguments: &str) -> Option<ReadTake> {
     match row.status {
         EmbeddedStatus::Direct => Some(ReadTake::Busy),
@@ -254,6 +267,25 @@ mod tests {
     use crate::{Backend, LogStore};
 
     use super::*;
+
+    #[test]
+    fn resuming_a_read_refuses_corrupt_or_exhausted_tickets() {
+        assert_eq!(next_read_ticket(None).unwrap(), (TICKET_OPENING.to_string(), 1));
+        assert_eq!(
+            next_read_ticket(Some(&read_ticket(TICKET_BOUND, 3))).unwrap(),
+            (TICKET_BOUND.to_string(), 4)
+        );
+        for ticket in [
+            "not json".to_string(),
+            r#"{"kind":"unknown","generation":1}"#.to_string(),
+            r#"{"kind":"opening"}"#.to_string(),
+            read_ticket(TICKET_OPENING, 0),
+            read_ticket(TICKET_BOUND, -1),
+            read_ticket(TICKET_BOUND, i64::MAX),
+        ] {
+            assert!(next_read_ticket(Some(&ticket)).is_err(), "accepted {ticket}");
+        }
+    }
 
     fn claim(store: &LogStore, dispatch: &str, body: &str) -> Result<EmbeddedClaim, EmbeddedError> {
         store.claim_embedded_peer(

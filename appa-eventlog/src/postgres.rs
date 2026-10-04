@@ -26,7 +26,7 @@ use serde_json::Value;
 use super::*;
 use crate::embedded::{
     DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
-    StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, read_ticket, same_payload, ticket_kind,
+    StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
 };
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
@@ -1264,9 +1264,9 @@ fn resume_embedded_read_pg(
     id: &str,
     row: &EmbeddedRow,
 ) -> Result<ReadTake, EmbeddedError> {
-    let (kind, generation) = ticket_kind(row.decision.as_deref()).unwrap_or_else(|| (TICKET_OPENING.to_string(), 0));
-    let next = generation.saturating_add(1);
-    let ticket = serde_json::from_str::<serde_json::Value>(&read_ticket(&kind, next)).expect("the read ticket is json");
+    let (kind, next) = next_read_ticket(row.decision.as_deref())?;
+    let generation = next - 1;
+    let ticket = serde_json::json!({"generation": next, "kind": kind});
     let changed = if row.decision.is_none() {
         client.execute(
             "UPDATE openappa_embedded_peer_messages SET decision = $3

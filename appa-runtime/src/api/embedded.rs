@@ -331,7 +331,6 @@ impl Runtime {
         {
             return Ok(());
         }
-        let _ = row;
         Err(refused("this read no longer owns its claim"))
     }
 
