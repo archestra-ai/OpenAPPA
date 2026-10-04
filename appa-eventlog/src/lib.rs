@@ -69,6 +69,7 @@ use appa_engine::value::DispatchId;
 pub use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory};
 
+pub mod embedded;
 mod encoding;
 pub mod files;
 mod held;
@@ -80,6 +81,7 @@ mod sqlite;
 use encoding::encode;
 use sqlite::Sqlite;
 
+use embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, ReadTake};
 pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
 pub use receipts::{
     OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
@@ -398,6 +400,7 @@ impl From<&AppendError> for StoreErrorClass {
     fn from(error: &AppendError) -> Self {
         match error {
             AppendError::Conflict { .. } => StoreErrorClass::Conflict,
+            AppendError::ReadClaimLost => StoreErrorClass::Conflict,
             AppendError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             AppendError::Postgres(_) => StoreErrorClass::Storage,
@@ -475,6 +478,8 @@ pub enum ReadError {
 pub enum AppendError {
     #[error("the log is at {current}, not the position this decision was read at")]
     Conflict { current: u64 },
+    #[error("the embedded read no longer owns its claim")]
+    ReadClaimLost,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -842,6 +847,170 @@ impl LogStore {
         Ok(held.notice(digest, label))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_embedded_peer(
+        &self,
+        root: &TrajectoryId,
+        sender: &TrajectoryId,
+        recipient: &TrajectoryId,
+        pending_spawn: Option<&str>,
+        dispatch: &str,
+        digest: &PeerDigest,
+        label: &Label,
+        body: &str,
+        now: SystemTime,
+    ) -> Result<EmbeddedClaim, EmbeddedError> {
+        let fresh = embedded::NewEmbedded::fresh(
+            root.as_str(),
+            sender.as_str(),
+            recipient.as_str(),
+            pending_spawn,
+            dispatch,
+            digest,
+            label,
+            body,
+            now,
+        )?;
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.claim_embedded_peer(&fresh),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_embedded_peer(&fresh),
+        }
+    }
+
+    pub fn load_embedded_peer(&self, root: &TrajectoryId, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.load_embedded_peer(root.as_str(), id),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.load_embedded_peer(root.as_str(), id),
+        }
+    }
+
+    /// Null bodies of held and direct rows that can no longer be returned. Proof rows stay.
+    /// A completed read receipt is not unread inbox data and is left alone.
+    pub fn expire_embedded_inbox(&self, root: &TrajectoryId, now: SystemTime) -> Result<(), EmbeddedError> {
+        let now = embedded::millis(now);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.expire_embedded_inbox(root.as_str(), now),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.expire_embedded_inbox(root.as_str(), now),
+        }
+    }
+
+    pub fn list_embedded_peer(
+        &self,
+        root: &TrajectoryId,
+        recipient: &TrajectoryId,
+        now: SystemTime,
+    ) -> Result<Vec<EmbeddedRow>, EmbeddedError> {
+        let now = embedded::millis(now);
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.list_embedded_peer(root.as_str(), recipient.as_str(), now),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.list_embedded_peer(root.as_str(), recipient.as_str(), now),
+        }
+    }
+
+    pub fn take_embedded_direct(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        sender: &TrajectoryId,
+        recipient: &TrajectoryId,
+        digest: &PeerDigest,
+    ) -> Result<DirectTake, EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.take_embedded_direct(
+                root.as_str(),
+                id,
+                sender.as_str(),
+                recipient.as_str(),
+                &digest.to_string(),
+            ),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.take_embedded_direct(
+                root.as_str(),
+                id,
+                sender.as_str(),
+                recipient.as_str(),
+                &digest.to_string(),
+            ),
+        }
+    }
+
+    pub fn claim_embedded_read(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        recipient: &TrajectoryId,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<ReadTake, EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => {
+                sqlite.claim_embedded_read(root.as_str(), id, recipient.as_str(), call_id, arguments)
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.claim_embedded_read(root.as_str(), id, recipient.as_str(), call_id, arguments),
+        }
+    }
+
+    /// Store the receipt only if `generation` still owns the read. `false` means another
+    /// caller took the ticket or the row was released; nothing was written.
+    pub fn finish_embedded_read(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+        decision: &str,
+    ) -> Result<bool, EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.finish_embedded_read(root.as_str(), id, call_id, generation, decision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.finish_embedded_read(root.as_str(), id, call_id, generation, decision),
+        }
+    }
+
+    /// Return an unopened read to the inbox only if `generation` still holds the opening
+    /// ticket. A bound or finished read is left alone. `false` means this caller no longer owns it.
+    pub fn release_embedded_read(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        call_id: &str,
+        generation: i64,
+    ) -> Result<bool, EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.release_embedded_read(root.as_str(), id, call_id, generation),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.release_embedded_read(root.as_str(), id, call_id, generation),
+        }
+    }
+
+    /// Append engine facts only while this read owns its ticket. A batch that opens a dispatch
+    /// or admits a value binds the ticket in the same transaction, so a release cannot put the
+    /// row back in the inbox after the log has consumed the message.
+    pub fn append_holding_embedded_read(
+        &self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: Option<&HostObservation>,
+        hold: &embedded::EmbeddedAppendHold<'_>,
+    ) -> Result<(), AppendError> {
+        let bytes = encode(facts, observation);
+        let key = observation.and_then(HostObservation::key);
+        match &self.store {
+            Store::Sqlite(sqlite) => {
+                sqlite
+                    .appender()
+                    .append_holding_read(&based_on.root, based_on.basis, &bytes, key.as_deref(), hold)
+            }
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, bytes, key.as_deref(), hold),
+        }
+    }
+
     /// The receiver's unexpired messages it was not yet told of, oldest first. Each is told
     /// once: the same transaction marks them notified.
     pub fn peer_notices(&self, receiver: &TrajectoryId, now: SystemTime) -> Result<Vec<HeldNotice>, HeldError> {
@@ -884,6 +1053,41 @@ impl LogStore {
 
 #[cfg(feature = "fault-injection")]
 impl LogStore {
+    /// Drop a stored read receipt without touching the engine log. Tests use this to
+    /// simulate a crash after admission and before the receipt was written.
+    pub fn testing_clear_embedded_decision(&self, root: &TrajectoryId, id: &str) -> Result<(), EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.testing_clear_embedded_decision(root.as_str(), id),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.testing_clear_embedded_decision(root.as_str(), id),
+        }
+    }
+
+    /// Force a row past its TTL without waiting. The next list, send, or receive nulls a
+    /// held or direct body. A completed read receipt is left.
+    pub fn testing_expire_embedded(&self, root: &TrajectoryId, id: &str) -> Result<(), EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.testing_expire_embedded(root.as_str(), id),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.testing_expire_embedded(root.as_str(), id),
+        }
+    }
+
+    /// Replace the stored body. Tests use this to show recovery refuses an admission that
+    /// no longer matches the row.
+    pub fn testing_replace_embedded_body(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        body: &str,
+    ) -> Result<(), EmbeddedError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.testing_replace_embedded_body(root.as_str(), id, body),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.testing_replace_embedded_body(root.as_str(), id, body),
+        }
+    }
+
     /// A foreign writer wins the race in its own committed transaction, exactly as a second
     /// process would. It takes the position and records nothing, so this caller's append
     /// conflicts on position and replays, and an assertion reads whose write landed from the

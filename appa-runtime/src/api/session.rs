@@ -586,6 +586,15 @@ impl Session {
         decision
     }
 
+    pub(crate) async fn propose_with_basis(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        basis: appa_engine::value::FileBasis,
+    ) -> Result<ToolCallDecision, EventError> {
+        self.propose_tool_call(call, call_id, None, None, Some(basis)).await
+    }
+
     async fn propose_tool_call(
         &self,
         call: ProposedCall,
@@ -764,12 +773,68 @@ impl Session {
         self.on_tool_result_identified(call, None, o).await
     }
 
+    fn refuse_substituted_embedded_read(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        outcome: &ToolOutcome,
+    ) -> Result<(), EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.policy(&log)?;
+        let open = self.carried_calls()?;
+        let dispatch = match classify_report_identified(
+            call,
+            call_id,
+            || policy.engine().canonical_bytes(call),
+            &open,
+            log.call_bindings(),
+            &self.trajectory,
+        ) {
+            Ok(dispatch) => dispatch,
+            Err(_) => return Ok(()),
+        };
+        let Some(basis) = super::embedded::basis_of(&log, &self.trajectory, &dispatch) else {
+            return Ok(());
+        };
+        let appa_engine::value::FileBasis::Read(source) = &basis else {
+            return Ok(());
+        };
+        let Ok(id) = super::embedded::EmbeddedPeerId::parse(&source.version) else {
+            return Ok(());
+        };
+        let Some(row) = self
+            .inner
+            .store
+            .load_embedded_peer(&self.root, id.as_str())
+            .map_err(|error| EventError::Storage(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        if row.recipient != self.trajectory.as_str()
+            || row.status != appa_eventlog::embedded::EmbeddedStatus::Read
+            || super::embedded::message_basis(&row) != basis
+        {
+            return Ok(());
+        }
+        let reported = match outcome {
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(body),
+            } => Some(body.as_str()),
+            _ => None,
+        };
+        if reported != row.body.as_deref() {
+            return Err(EventError::OutcomeMismatch);
+        }
+        Ok(())
+    }
+
     pub async fn on_tool_result_identified(
         &self,
         call: ProposedCall,
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
+        self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
         if self.inner.shared.files.is_some() && super::files::owns(&call) {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
@@ -1427,8 +1492,18 @@ impl Session {
                 },
                 _ => None,
             };
-            let appended = match (opening.call_id, opens_dispatch) {
-                (Some(call_id), Some(dispatch)) => {
+            let binds_read = facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    appa_engine::fact::Fact::DispatchOpened { .. } | appa_engine::fact::Fact::ValueAdmitted { .. }
+                )
+            });
+            let hold = super::embedded::EMBEDDED_READ_HOLD
+                .try_with(|hold| hold.clone())
+                .ok()
+                .filter(|hold| hold.root == self.root.as_str());
+            let appended = if let Some(hold) = hold {
+                if let (Some(call_id), Some(dispatch)) = (opening.call_id, opens_dispatch) {
                     if call_id.is_empty()
                         || log
                             .call_bindings()
@@ -1436,21 +1511,64 @@ impl Session {
                     {
                         return Err(EventError::CallIdReused);
                     }
-                    self.inner.store.append_host(
+                    self.inner.store.append_holding_embedded_read(
                         &log,
                         facts,
-                        &appa_eventlog::HostObservation::CallBound {
+                        Some(&appa_eventlog::HostObservation::CallBound {
                             trajectory: self.trajectory.clone(),
                             call_id: call_id.to_string(),
                             dispatch,
                             prompt: fan_out_prompt,
+                        }),
+                        &appa_eventlog::embedded::EmbeddedAppendHold {
+                            id: &hold.id,
+                            call_id: &hold.call_id,
+                            generation: hold.generation,
+                            bind: binds_read,
+                        },
+                    )
+                } else {
+                    self.inner.store.append_holding_embedded_read(
+                        &log,
+                        facts,
+                        None,
+                        &appa_eventlog::embedded::EmbeddedAppendHold {
+                            id: &hold.id,
+                            call_id: &hold.call_id,
+                            generation: hold.generation,
+                            bind: binds_read,
                         },
                     )
                 }
-                _ => self.inner.store.append(&log, facts),
+            } else {
+                match (opening.call_id, opens_dispatch) {
+                    (Some(call_id), Some(dispatch)) => {
+                        if call_id.is_empty()
+                            || log
+                                .call_bindings()
+                                .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
+                        {
+                            return Err(EventError::CallIdReused);
+                        }
+                        self.inner.store.append_host(
+                            &log,
+                            facts,
+                            &appa_eventlog::HostObservation::CallBound {
+                                trajectory: self.trajectory.clone(),
+                                call_id: call_id.to_string(),
+                                dispatch,
+                                prompt: fan_out_prompt,
+                            },
+                        )
+                    }
+                    _ => self.inner.store.append(&log, facts),
+                }
             };
             match appended {
                 Ok(()) => return Ok(decision),
+                Err(appa_eventlog::AppendError::ReadClaimLost) => {
+                    return Err(EventError::OutcomeMismatch);
+                }
                 Err(appa_eventlog::AppendError::Conflict { .. }) => {
                     tracing::debug!(
                         root = %self.root.0,
