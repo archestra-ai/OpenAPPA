@@ -265,8 +265,9 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
     assert_eq!(
         fs::read_to_string(fixture.skill()).expect("the skill is written"),
         format!(
-            "{}\n\n{}",
+            "{}\n\n{}\n\n{}",
             fs::read_to_string(guide.join("SKILL.md")).unwrap(),
+            fs::read_to_string(guide.join("references/core.md")).unwrap(),
             fs::read_to_string(guide.join("references/claude-code.md")).unwrap()
         )
     );

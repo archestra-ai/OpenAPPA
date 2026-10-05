@@ -2,22 +2,24 @@
 //! compiled into this binary.
 //!
 //! Claude Code loads only SKILL.md when a slash command starts, and reading a
-//! reference beside it would itself be a gated `Read` call, so the Claude Code
-//! reference is inlined after the router. The policy-review guide the skill
+//! reference beside it would itself be a gated `Read` call, so the shared core
+//! rules and the Claude Code reference are inlined after the router. The
+//! policy-review guide the skill
 //! consults for syntax is written beside it, so the skill reads the guide of
 //! the version it runs with. The canonical package stays decomposed for hosts
 //! such as kagent that load their own reference through their native file tool.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use super::{Compensation, InitError, Undo, file_before, write_state};
+use crate::guide;
 
-pub(super) const TEXT: &str = concat!(
-    include_str!("../../../integrations/appa-guide/SKILL.md"),
-    "\n\n",
-    include_str!("../../../integrations/appa-guide/references/claude-code.md"),
-);
+const ROUTER: &str = include_str!("../../../integrations/appa-guide/SKILL.md");
+const CLAUDE_CODE: &str = include_str!("../../../integrations/appa-guide/references/claude-code.md");
+
+pub(super) static TEXT: LazyLock<String> = LazyLock::new(|| [ROUTER, guide::CORE, CLAUDE_CODE].join("\n\n"));
 
 const CONTRACTS: &str = include_str!("../../../website/content/docs/contracts.md");
 
@@ -59,7 +61,7 @@ pub(super) fn verify(claude_dir: &Path) -> Result<(), InitError> {
 pub(super) fn install(claude_dir: &Path, compensation: &mut Compensation) -> Result<(), InitError> {
     match current(claude_dir)? {
         Present::Current => {}
-        Present::Absent | Present::Earlier => write(&path(claude_dir), TEXT, compensation)?,
+        Present::Absent | Present::Earlier => write(&path(claude_dir), &TEXT, compensation)?,
     }
     let contracts = contracts_path(claude_dir);
     if file_before(&contracts)?.as_deref() != Some(CONTRACTS.as_bytes()) {
@@ -109,15 +111,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_compiled_skill_is_the_router_with_the_claude_code_reference_inlined() {
+    fn the_compiled_skill_is_the_router_with_the_core_and_claude_code_references_inlined() {
         assert!(TEXT.starts_with(OWNED_PREFIX));
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .join("integrations/appa-guide");
         let router = fs::read_to_string(root.join("SKILL.md")).unwrap();
+        let core = fs::read_to_string(root.join("references/core.md")).unwrap();
         let reference = fs::read_to_string(root.join("references/claude-code.md")).unwrap();
-        assert_eq!(TEXT, format!("{router}\n\n{reference}"));
+        assert_eq!(*TEXT, format!("{router}\n\n{core}\n\n{reference}"));
     }
 
     #[test]
@@ -129,7 +132,7 @@ mod tests {
 
         let mut compensation = Compensation::default();
         install(&claude_dir, &mut compensation).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), TEXT);
+        assert_eq!(fs::read_to_string(&path).unwrap(), *TEXT);
         assert_eq!(fs::read_to_string(&contracts).unwrap(), CONTRACTS);
         assert_eq!(compensation.done.len(), 2);
         install(&claude_dir, &mut compensation).unwrap();
@@ -139,7 +142,7 @@ mod tests {
         fs::write(&path, &earlier).unwrap();
         fs::remove_file(&contracts).unwrap();
         install(&claude_dir, &mut compensation).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), TEXT);
+        assert_eq!(fs::read_to_string(&path).unwrap(), *TEXT);
         assert_eq!(fs::read_to_string(&contracts).unwrap(), CONTRACTS);
         assert_eq!(compensation.done.len(), 4);
 

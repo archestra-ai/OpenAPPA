@@ -55,7 +55,7 @@ Do not execute cluster inventory tools before sending this plan message to the u
 Do not present an init result until all these steps succeed or their
 unavailable state is reported:
 
-1. Load the shared `appa-guide` skill rules.
+1. Load the shared `appa-guide` skill rules and `references/core.md`.
 2. Read this complete reference.
 3. List Agents across all namespaces with `output: json`. Record their
    environments, attached tools, delegations, and target runtimes.
@@ -132,10 +132,10 @@ error.
 ## Rules on this host
 
 - Do not configure this agent: skip the agent named `appa-guide`. The
-  router's rule on the reserved `appa/execute_remedy_plan` applies the
-  same way here.
+  runtime's remedy tool here is the reserved `appa/execute_remedy_plan`,
+  and its battery matcher is `appa_match_batteries`.
 - Never invent a battery. Propose only batteries `GET /batteries`
-  returns. Never edit a battery. Override with a root rule.
+  returns.
 - Never treat a demo policy template as active configuration or as a
   battery. Accept it only from the Helm release manifest of a verified
   `appa-kagent-demo` chart. Never copy a live ConfigMap that differs from
@@ -164,8 +164,7 @@ error.
   concise sentence stating the action and asking for card approval.
   Never narrate background checks or output multiple commentary sentences.
   Wait for its ruling. Never
-  summarize the offer as a substitute for opening the card. Never use
-  `human-approval` or any other word as an offer id.   If the operator
+  summarize the offer as a substitute for opening the card. If the operator
   rejects it, stop that operation. Report that it was rejected and did
   not run. Never say the card remains open, retry the call, or claim to
   await approval after a rejection. When the card approves the change
@@ -178,9 +177,8 @@ error.
   or approving the proposal from the previous turn), that proposal IS the
   waiting proposal: revalidate only that proposal's resource, then invoke
   its approved mutation tool. Do not rerun matching or choose another
-  operation. Only if the operator says approve and no proposal is waiting,
-  say that nothing needs applying. Never call `execute_remedy_plan` before
-  that mutation's immediately returned block.
+  operation. Never call `execute_remedy_plan` before that mutation's
+  immediately returned block.
 
 ## Find each live config
 
@@ -232,7 +230,7 @@ the same Kubernetes read with different capitalization or pluralization.
    discovered tools is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
-   ambiguity question below.
+   ambiguity question the core rules describe.
 5. Count these as installed tools: each Agent's declared `toolNames`,
    kagent's built-in `host/kagent/ask_user`, and the entrypoint's gates
    `host/kagent-gate/code_execution` and
@@ -392,14 +390,6 @@ For a matched battery, follow the recorded search path in order. Read
 the first `<directory>/<name>/appa.toml` that exists and its README. Do
 not run battery scripts while inspecting them.
 
-When proposing a battery, give it exactly one short sentence that says
-what it covers, what protection it adds, and any important assumption.
-Keep it under 20 words. Examples:
-
-> Slack battery — Keeps Slack data private and asks before publishing it.
->
-> GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
-
 For each suffix-only matched declaration, copy the complete
 `[[policy.tool]]` table into the proposed root policy. Replace only `name`
 with the exact installed kagent wire name. Preserve every other field and
@@ -441,30 +431,16 @@ because persistence is disabled.
 
 ## Cover the remaining tools
 
-Create general root rules only for installed tools that neither the
-root config nor a translated battery declaration covers.
+Apply **Cover the remaining tools** from the core rules only to installed
+tools that neither the root config nor a translated battery declaration
+covers. On this host also:
 
-- The built-in audience chain is `self` inside `internal` inside `public`.
-  A tool that reads the requester's private data uses static audience
-  `self`. A tool that reads organization-wide data uses static audience
-  `internal`. Static contracts need no audience source. Checking a literal
-  recipient against either audience requires an explicit audience source.
-  Never substitute `"private"`, `@company`, or another plausible reader
-  or group.
-- A tool that publishes, posts, sends, shares, or uploads requires data
-  that may be public: `requires = { audience = { contains = ["public"] } }`.
-- A tool that communicates only within the organization requires trusted
-  data whose audience contains `internal`. This keeps trusted internal
-  work autonomous while preventing requester-only data from leaking.
-- A tool that brings outside text into the session — logs, tickets,
-  pages — uses `delta = { trust = "suspicious" }`.
+- Never substitute `"private"`, `@company`, or another plausible reader
+  or group for `self` or `internal`.
 - A state-changing action does not require a person by default. Add
   `human-approval` only when the operator independently requests per-call
   review or existing root policy requires it. Never use attention as a
   substitute for an audience or trust boundary.
-- A clearly public read or a tool whose result carries no data uses
-  `delta = {}`. Every tool entry needs `delta`, including entries with
-  `requires`.
 - A delegation stays blocked until the operator names it.
 
 ### Cover unconfigured tools in init
@@ -483,14 +459,6 @@ The initial bootstrap policy only contains `appa-guide`'s internal inspection ac
    - **Policy recommendations**: explain what rules will be created (what's allowed, what's tagged suspicious, what needs approval).
    - **Next steps**: end with **Approve, or tell me what to change.**
 4. When the operator replies "Approve", call `appa_update_policy` with this complete root policy. Never conclude that no change is needed when discovered cluster tools remain undeclared in the bootstrap policy.
-
-## Ask about ambiguity
-
-Use tool names and descriptions when their behavior is clear. If you
-still cannot tell which servers can return data that should stay
-private, ask the operator once, every unclear server in one grouped
-question. Wait for the answer before proposing. If nothing is unclear,
-do not ask.
 
 ## Propose, then apply
 
@@ -647,10 +615,7 @@ is ambiguous, ask one focused question and wait.
 
 1. Call `appa_get_runtime_state`. Explain current and proposed behavior,
    with the **OpenAPPA pieces** line.
-2. For several rules with the same tool name, put a narrow
-   argument-specific rule before its general fallback. Do not reorder
-   unrelated rules.
-3. Propose and apply through `appa_update_policy` as in `init`.
+2. Propose and apply through `appa_update_policy` as in `init`.
 
 ## Reload and finish
 

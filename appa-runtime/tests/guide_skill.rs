@@ -1,7 +1,8 @@
 //! The shipped appa-guide skill is one composable package: a host-routing
-//! SKILL.md and one reference file per host. These checks keep the package
-//! whole: the router routes, the chart consumes this package rather than a
-//! second skill, and the kagent policies gate runtime management.
+//! SKILL.md, the shared core rules, and one reference file per host. These
+//! checks keep the package whole: the router routes, the chart consumes this
+//! package rather than a second skill, and the kagent policies gate runtime
+//! management.
 
 mod common;
 use common::repo_root;
@@ -57,7 +58,7 @@ fn the_chart_ships_a_byte_identical_copy_of_the_skill() {
     let root = repo_root();
     let chart = root.join("charts/appa-runtime/files/skill");
     let source = root.join("integrations/appa-guide");
-    for file in ["SKILL.md", "references/kagent.md"] {
+    for file in ["SKILL.md", "references/core.md", "references/kagent.md"] {
         let shipped = fs::read_to_string(chart.join(file)).expect("the chart ships the skill file");
         let canonical = fs::read_to_string(source.join(file)).expect("the skill file exists");
         assert!(

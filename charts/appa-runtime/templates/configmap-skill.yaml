@@ -9,6 +9,8 @@ metadata:
 data:
   SKILL.md: |
 {{ .Files.Get "files/skill/SKILL.md" | indent 4 }}
+  core.md: |
+{{ .Files.Get "files/skill/references/core.md" | indent 4 }}
   kagent.md: |
 {{ .Files.Get "files/skill/references/kagent.md" | indent 4 }}
 {{- end }}

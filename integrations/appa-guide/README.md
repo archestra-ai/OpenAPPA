@@ -1,10 +1,13 @@
 # appa-guide
 
-The canonical OpenAPPA configuration skill. `SKILL.md` owns the shared
-mode, proposal and approval rules. It routes to one host reference:
+The canonical OpenAPPA configuration skill. `SKILL.md` owns host detection
+and the modes. `references/core.md` owns the policy-writing, proposal and
+approval rules every host shares; it names operations, not host tools. The
+router sends each host to the core rules and then to one host reference:
 
 - `references/claude-code.md` — Claude Code tool discovery, installed
-  batteries and local runtime reload.
+  batteries, local runtime reload, and the commands for each core
+  operation.
 - `references/kagent.md` — kagent CR discovery, and policy changes through
   the runtime-owned `appa_update_policy` and `appa_include_battery` tools,
   which validate, publish and reload.
@@ -13,12 +16,14 @@ mode, proposal and approval rules. It routes to one host reference:
 and the limited platform-specific differences they may expose.
 
 kagent attaches this directory directly through `skills.gitRefs`.
-The `appa` binary compiles `SKILL.md` with the Claude reference appended,
-and `appa plugin install claude-code` writes that text to the user's
+The `appa` binary exposes the core rules as `appa_runtime::guide::CORE` and
+compiles `SKILL.md` with the core rules and the Claude reference appended, in
+that order. `appa plugin install claude-code` writes that text to the user's
 Claude Code skills directory beside the policy-review guide. Claude
 therefore needs no gated `Read` call to bootstrap the guide. The runtime
-chart mounts a ConfigMap copy of `SKILL.md` and `references/kagent.md`
-from `charts/appa-runtime/files/skill/` over the git checkout;
+chart mounts a ConfigMap copy of `SKILL.md`, `references/core.md` and
+`references/kagent.md` from `charts/appa-runtime/files/skill/` over the git
+checkout;
 `appa-runtime/tests/guide_skill.rs` keeps that copy byte-identical to this
 directory.
 

@@ -8,23 +8,25 @@ OpenAPPA configuration helper. Request: $ARGUMENTS
 
 You run inside a host. Every host follows the same flow — inspect the
 installed tools, propose contracts in plain English, wait for approval,
-apply, reload — but the mechanics differ. Detect the host, read the
-matching reference file beside this one, and follow it exactly. Do not
-guess its content.
+apply, reload — but the mechanics differ. The policy-writing rules every
+host shares live in `references/core.md`. Detect the host, read the core
+rules and then the matching host reference beside this one, and follow
+both exactly. Do not guess their content.
 
 ## Detect the host
 
 - **Claude Code**: this session provides the `/appa-guide` command and
-  Claude Code's own tools. Claude packaging appends
-  `references/claude-code.md` to this `SKILL.md`; continue at its
-  `# Claude Code` section below. Do not call `Read` to load the
-  reference.
+  Claude Code's own tools. Claude packaging appends `references/core.md`
+  and then `references/claude-code.md` to this `SKILL.md`; continue at
+  the `# Policy-writing rules` section below, then its `# Claude Code`
+  section. Do not call `Read` to load either reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
   are available, and this session is a kagent agent chat. Before any
   cluster action, call `read_file` for
-  `/skills/appa-guide/references/kagent.md` with `offset: 1` and
-  `limit: 0`. This exact call reads through end of file. Follow the
-  complete result.
+  `/skills/appa-guide/references/core.md` with `offset: 1` and
+  `limit: 0`, then for `/skills/appa-guide/references/kagent.md` with
+  `offset: 1` and `limit: 0`. Each exact call reads through end of file.
+  Follow both complete results.
   The `skills` tool is used only for `command: appa-guide`. Runtime
   management uses only the direct `appa_*` tools named in the kagent
   reference, including `appa_update_policy`. Never invoke an
@@ -54,110 +56,11 @@ makes clear, and ask only when two modes fit it equally. Do not run two
 modes together. Treat an explicit maintenance or lifecycle request, such
 as a battery refresh, health audit, Agent protection, or runtime upgrade,
 as `adjust` with a clear goal. Treat "why was this blocked", "show
-policy", or "what does the policy do" as `explain`, on the host's
-read-only tools (`appa describe` on Claude Code, `appa_get_runtime_state`
-on kagent). If the operator chooses `adjust` without describing the
+policy", or "what does the policy do" as `explain`, which only reads the
+policy. If the operator chooses `adjust` without describing the
 change, ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
 proposal. Do not ask whether to continue before the proposal. Start with one
 sentence saying what you will inspect.
 Invoke only the `appa-guide` skill name; never invent a mode-specific skill name.
-
-## Rules that apply on every host
-
-- The root config is the operator's source of truth. Root tool rules run
-  before battery rules, and the first matching rule applies. Keep every
-  root rule unless the operator explicitly approves changing or removing
-  it.
-- IFC monoids first: express boundaries with trust and audience labels.
-  Do not use effects or default human attention when labels can express
-  the same requirement. Trusted data flowing within its audience stays
-  autonomous.
-- The shipped defaults trade safety against interruptions, and the
-  operator may move that line either way. When they ask for stricter or
-  looser behavior, offer the matching options from the host reference,
-  each with what it changes and what it costs. Make every such change a
-  root rule marked with a comment naming the option, so undoing it means
-  removing that rule.
-- A battery supplies maintained defaults. Never edit a battery. Override
-  a tool contract with a root rule. Override an Annotator by copying its
-  complete declaration into the root config under the same name. Preserve
-  its implementation, inputs, and mandate unless the approved behavior
-  requires changing them.
-- A battery contract is also source material when a host classifier must
-  recognize equivalent use through another tool. Translate the contract's
-  policy intent, not its MCP enforcement mechanism. Use only facts the host
-  call or an actual context provider supplies. Never invent resource
-  visibility, readers, account identity, or provider context.
-- A battery is available when its files exist in an inspected battery
-  layer. It is included only when serving root policy includes its
-  `appa.toml`. Say "include" rather than "install" when proposing that
-  policy change. Never describe a catalog entry as an installed tool or
-  an included battery.
-- Read before proposing. Show the complete proposed behavior in plain
-  English and wait for approval before writing any file or reloading the
-  runtime. Ask for approval again if a correction changes that behavior.
-- An initial request for a change is not approval to execute it. End the
-  first turn with the proposal. Act only after a later message approves
-  that exact proposal.
-- If the current config already provides the complete proposed behavior,
-  report that no change is needed. Do not ask for approval, write, or
-  reload an unchanged config. Do not call the config updated or tell the
-  operator to start a new chat when nothing changed.
-- Make the smallest change that achieves the request. Preserve unrelated
-  entries, comments, reader names, external bindings, and batteries.
-- Use short sentences. Explain what data stays private, what can leave
-  the session, what needs approval, and what becomes blocked.
-- When asking for approval of a remedy, say in one sentence what the call
-  does and ask for approval on the card.
-- Talk about outcomes in plain words, not config machinery: say "Slack
-  messages need your approval," not "the config needs a HITL authority."
-  Say an agent is "protected with OpenAPPA" or "currently unprotected".
-  Mention include lists, rule ordering, TOML fields, reader names, labels,
-  or authority wiring only when the operator asks. Show TOML only when
-  asked.
-- Keep replies short and use everyday words. Explain the practical result and
-  next step; save technical details for when the user asks. If a host requires
-  an **OpenAPPA pieces** line, use plain words there too.
-- Tools in the config that this session did not detect: "These tools are
-  in your config but were not detected in this session: <names>. I'll
-  leave them unchanged."
-- Ask one focused question at a time. Do not make the operator classify
-  every tool when its name and description already make the answer
-  clear.
-- Configure the installed OpenAPPA only. Never propose changing OpenAPPA,
-  its policy language, runtime, or shipped batteries. If documented
-  configuration cannot express the requested behavior, say so and offer
-  only behaviors the current config format supports.
-- Do not configure the configuring actor: skip the agent running this
-  skill and the runtime-owned `execute_remedy_plan` and
-  `appa_match_batteries` tools.
-- Call `execute_remedy_plan` only when the immediately previous tool
-  result quoted `offer_id: "<hex>"`. Copy that hex string exactly. Never
-  invent an offer id. Never use `human-approval`, an authority name, a
-  tool name, or any other word as an offer id. Never ask the operator
-  for an offer id.
-- When the operator sends an approval (e.g. "Approve", "Approved", "yes",
-  or approving the proposal) after a proposal was presented, that proposal
-  is waiting: proceed immediately with applying it. Only if the operator
-  says approve and no proposal is waiting, say that nothing needs applying.
-  Do not write, reload, or call `execute_remedy_plan` before approval.
-- Inspection and proposal drafting never require approval. Never say
-  "awaiting approval to propose", "approval to refine", or equivalent.
-  End an inspection in exactly one state: present the complete change
-  proposal and ask for approval, or state that no change is required and
-  use no approval language.
-- Keep user-facing replies compact. Do not narrate inspection calls, Helm
-  releases, pod names, config paths, counts, or the complete tool or
-  battery catalog unless one changes the result. Group tools by server and
-  behavior. Use one short sentence or bullet per outcome, plus required
-  unavailable-resource and missing-support warnings. Offer technical
-  details only when the operator asks.
-
-After a successful reload, give a brief human-readable summary of the
-behavior now in effect: one to three short sentences on what information
-is private or suspicious and where private information can or cannot go.
-Do not lead with rule counts, file paths, TOML, backups, or primitive
-names. If the config changed, tell the operator that sessions keep the
-policy they started with and new ones pick up the new policy.

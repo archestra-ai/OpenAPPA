@@ -1,8 +1,9 @@
 # appa-guide host parity
 
 This document defines parity between appa-guide on Claude Code and
-kagent. The shared router in `SKILL.md` owns these invariants. Host
-references implement them through different tools.
+kagent. The shared core rules in `references/core.md` own these
+invariants, and the router in `SKILL.md` owns host detection and modes.
+Host references implement them through different tools.
 
 Parity does not require identical tool calls or prose. It requires the
 same policy meaning, operator decision points, fail-closed behavior, and
@@ -12,11 +13,11 @@ reported outcome for equivalent installed tools and configuration.
 
 | ID | Requirement | Claude Code mapping | kagent mapping |
 |---|---|---|---|
-| P01 | Load one canonical router and exactly one complete host reference. | Read `references/claude-code.md`. | Read `references/kagent.md`. |
+| P01 | Load one canonical router, the complete core rules, and exactly one complete host reference. | Packaging appends `references/core.md` and `references/claude-code.md` to the router. | Read `references/core.md`, then `references/kagent.md`. |
 | P02 | Complete host inventory before battery matching or policy proposals. | Pass the session's tool names to `appa describe --session-tools`, which adds the MCP servers configured on the machine, and read the live config. | Inspect Agents, resolved workloads, RemoteMCPServers, runtime Services, and live config. |
 | P03 | Treat the serving root config as truth. Never confuse available files, templates, or release manifests with serving policy. | Run `appa describe`; stop when a running runtime names another config path. | Use `appa_get_runtime_state`; runtime policy storage and reload stay behind typed vouched MCP operations. |
 | P04 | Distinguish available, matched, included, and refreshable batteries. Suggest only authoritative matches not already included. | Use the battery matches `appa describe --session-tools` prints for the deployment's installed version. | Call `appa_match_batteries` with observed wire names; use its `matches` and `included` fields unchanged. |
-| P05 | Generate IFC-first defaults. Static `self` and `internal` audiences need no source. Trusted internal work stays autonomous. | Apply the Claude Code uncovered-tool rules. | Apply the same rules to kagent wire names. |
+| P05 | Generate IFC-first defaults. Static `self` and `internal` audiences need no source. Trusted internal work stays autonomous. | Apply the uncovered-tool rules in `references/core.md`. | Apply the same core rules to kagent wire names. |
 | P06 | Inspection and proposal drafting are read-only. Present a complete proposal before asking approval. | Ask for approval only after the complete config proposal. | Ask in chat only after the complete per-runtime proposal. |
 | P07 | Approval applies only to the exact pending proposal. Never invent an offer id or ask the operator for one. | Use the host permission channel for the approved write. | Invoke the mutation, then use only the exact offer id returned by its blocked result to open the confirmation card. On an explicit approval turn, each plugin bridges one unambiguous pending review if the model tries to stop. |
 | P08 | Revalidate immediately before mutation. Apply only approved behavior, verify serving state, then reload. | Re-read config and tool inventory before write and verify the local runtime afterward. | Pass the observed policy key to one typed runtime management tool, which validates, publishes, reloads, and rolls back atomically. Agent CR changes remain complete-manifest applies. |

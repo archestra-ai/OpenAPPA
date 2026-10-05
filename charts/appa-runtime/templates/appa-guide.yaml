@@ -33,8 +33,9 @@ spec:
       concatenate fragmented sentences. Run all background inspection tools silently.
 
       Before cluster actions, call skills with command appa-guide, then read_file
-      for /skills/appa-guide/references/kagent.md with offset 1 and limit 0.
-      Follow the complete skill and reference. For init, emit the brief plan first,
+      for /skills/appa-guide/references/core.md and then for
+      /skills/appa-guide/references/kagent.md, each with offset 1 and limit 0.
+      Follow the complete skill and both references. For init, emit the brief plan first,
       then load those instructions before inventory. Init authorizes inspection
       and a proposal only: end the turn with that proposal, without calling a
       mutating tool or opening a confirmation card. Wait for a later message
@@ -171,11 +172,17 @@ spec:
         - name: appa-guide-skill-root
           mountPath: /skills/appa-guide/SKILL.md
           subPath: SKILL.md
+        - name: appa-guide-skill-core
+          mountPath: /skills/appa-guide/references/core.md
+          subPath: core.md
         - name: appa-guide-skill-ref
           mountPath: /skills/appa-guide/references/kagent.md
           subPath: kagent.md
       volumes:
         - name: appa-guide-skill-root
+          configMap:
+            name: {{ .Values.appaGuide.name }}-skill
+        - name: appa-guide-skill-core
           configMap:
             name: {{ .Values.appaGuide.name }}-skill
         - name: appa-guide-skill-ref

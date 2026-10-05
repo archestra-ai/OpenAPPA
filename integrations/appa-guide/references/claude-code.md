@@ -4,11 +4,21 @@ You run in a Claude Code session protected by APPA: the installed `appa`
 binary is registered in the user's Claude Code settings as the session's
 hooks, and its runtime serves the `appa` MCP server. This reference
 carries the Claude Code mechanics; the router skill you came from carries
-the mode and the shared rules.
+the mode, and the core rules above carry the shared policy-writing rules.
 
 The session started with advice not to read or change the policy outside
 this skill. This skill is where that work happens: follow this reference
 while it runs.
+
+## Operations
+
+The core rules name operations. On Claude Code they are:
+
+| Operation | On Claude Code |
+|---|---|
+| Read the policy | `appa describe --config <live-path>`, with `--session-tools` for the tools in question, then the root config and the relevant included files. |
+| Publish a change | Edit the root config, or run `appa battery install` or `appa battery remove`, then reload as **Reload and finish** shows. |
+| Run the runtime's remedy tool | Call `execute_remedy_plan` on the `appa` MCP server. |
 
 ## Read sources
 
@@ -83,10 +93,6 @@ at the first `__` after `mcp__`; a plugin-provided server is
 `host/claude-code/<name>`. `appa describe` prints canonical ids. Keep each
 exact tool description from the session.
 
-The command cannot see connector accounts. The user supplies an account
-identity when a connector does not expose one. Do not probe private mail,
-messages, or files merely to infer an identity.
-
 ### Batteries
 
 For each battery `appa describe` suggests, read only its `appa.toml`, `appa-package.toml`, and
@@ -94,14 +100,6 @@ README in the deployment's store, `<config-dir>/batteries/<name>/`, where
 `<config-dir>` holds the live config. Do not run its scripts directly; use the bounded `appa battery status --check` readiness checks. If that
 directory is missing, stop and report an incomplete installation. Never
 configure one APPA build with batteries fetched from another version.
-
-When proposing a battery, give it exactly one short sentence that says what it
-covers, what protection it adds, and any important assumption. Keep it under
-20 words. Examples:
-
-> Slack battery — Keeps Slack data private and asks before publishing it.
->
-> GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
 Name each credential variable `appa describe` reports. Before the proposal,
 run `appa battery status --config <live-path> --battery <name>,<name> --json --check`
@@ -151,85 +149,18 @@ hint edit. After approval, copy the complete existing
 `claude-code.bash-requirements` declaration into the root only when needed,
 change only its `hint`, and leave the included battery files unchanged.
 
-### Cover the remaining tools
+### Remaining tools
 
-Create root rules only for the tools `appa describe` reports as annotated call
-by call or refused, and that no suggested battery covers. For each tool, decide
-two things from its name and description:
-
-- As a source: can someone other than the requester write the text it returns?
-  Then it is `suspicious`.
-- As a sink: who can end up reading what the call sends? A reader the session
-  cannot see is `public`.
-
-Apply these rules:
-
-- The reserved `blocked` mark denies a call outright and no Authority can
-  permit it; use it only where a sanitizer that would make the flow safe does
-  not exist.
-- A tool whose result someone other than the requester can write (a web page,
-  a public issue, another session's message) uses
-  `delta = { trust = "suspicious" }`.
-- The built-in audience chain is `self` ⊆ `internal` ⊆ `public`: `self` is the
-  person running the session, `internal` their organization.
-- A tool that reads the requester's private data uses
-  `delta = { audience = ["self"] }`.
-- A tool that reads organization-wide data uses
-  `delta = { audience = ["internal"] }`.
-- Static contracts can reference `self` and `internal` without an audience
-  source. Checking a literal recipient against either audience requires an
-  explicit audience source.
-- A tool that reads or writes one resource whose readers a source can list
-  (a Slack channel, a GitHub repository, a Linear team) uses a selector
-  placeholder instead of `internal`: `delta = { audience = ["@slack:channel/$channel_id"] }`
-  for a read, `requires = { audience = { contains = ["@slack:channel/$channel_id"] } }`
-  for a write. The spelling must match a template the provider declares under
-  `selectors` on its `[externals.audience.<provider>]` binding; each
-  `$argument` becomes a required string argument of the contract, so no
-  `parameters` schema is needed for it. Use it whenever the matched battery
-  declares such a template.
-- An annotator's answer writes an audience as a static contract does: `self`,
-  `internal`, an `@` mention, or a literal reader, inside its mandate's
-  `audiences`. Omitted, the mandate admits every audience the policy writes.
-- A tool that publishes, posts, sends, shares, or uploads beyond the machine
-  requires data that may be public: `requires = { audience = { contains = ["public"] } }`.
-  A destination that stays private to the requester until they share it
-  themselves reaches `self` and needs no `requires`.
-- A tool that communicates within the organization (e.g. posting internal Slack
-  messages or workspace items) requires trusted data that includes `internal`:
-  `requires = { trust = "trusted", audience = { contains = ["internal"] } }`. This
-  keeps autonomous agent flow unblocked for public or internal data while preventing
-  requester secrets (`self`) from leaking.
-- A clearly public read or a tool whose result carries no data uses
-  `delta = {}`.
-- Every new tool entry needs `delta`, including entries with `requires`. Never
-  fabricate reader names, groups, or audiences.
-
-For public-audience requirements, reuse an appropriate `builtin hitl`
-Authority and extend its audience permit instead of adding attention solely
-to route reviews. Preserve hard denials when the operator requested them, a
-root rule or comment declares them, or a mark is intentionally unserved. If
-multiple Authorities can review a disclosure and the choice determines who
-reviews it, ask the operator.
-
-### Ask about ambiguity
-
-Use tool names and descriptions when their behavior is clear. If you still
-cannot tell which servers can return data that should stay private, ask the
-user once. Put every unclear server in one grouped question. Do not guess and
-do not ask about each tool separately.
-
-Wait for the answer before showing the proposal. This answer does not replace
-the approval required below. If nothing is unclear, do not ask.
+Draft rules for the remaining tools as **Cover the remaining tools** in the
+core rules describes. On this host, they are the tools `appa describe` reports
+as annotated call by call or refused, and that no suggested battery covers.
+Ask about unclear servers as **Ask about ambiguity** describes.
 
 For Gmail, match only exact tools visible in this session whose canonical ids
 start with `mcp/claude_ai_Gmail/`; do not assume a fixed connector tool list. Mail
 the requester reads is `self` data. Checking a named recipient against `self`
-or `internal` requires an audience source. An email domain is not an audience
-source: `internal` needs a directory-backed source that can enumerate its
-members. Without one, say recipient-checked sends are refused as unanswerable
-and leave them so. Do not invent a group. This boundary answer is separate
-from approval to write or install anything.
+or `internal` requires an audience source, and an email domain is not one.
+This boundary answer is separate from approval to write or install anything.
 
 ### Propose, then apply
 
@@ -337,22 +268,14 @@ After approval:
    reloads the runtime. Never copy a
    battery directory: the store beside the config already holds every battery
    of the installed version.
-4. Add any root support the battery requires, such as its human-approval
-   Authority. If an existing `builtin hitl` Authority handles the relevant
-   attention mark but cannot review public audiences, expand its permits
-   instead of adding another Authority. Do not modify an explicit hard denial.
-   Describe the resulting behavior, not this wiring.
-5. When the battery binds an Annotator or an audience source, name the
-   variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
-   states; the helper receives it through its environment, supplied by the runtime's
-   environment or local credential database, never the policy config.
-   Map `self` and `internal` onto the source's collections under
-   `[policy.audience]` as the README shows. Skip the mapping for a battery
-   whose token was skipped.
-6. Add the approved rules for the remaining tools to the root config. Do not
-   remove overlapping root rules; they intentionally override batteries. To
-   treat a battery's tool differently, add a root rule for it; never edit the
-   battery. Immediately before changing the Bash hint, re-read the root and
+4. Add the root support each battery requires, as **Battery support** in
+   the core rules describes.
+5. Name each battery's credential variable and add its audience mapping, as
+   **Battery support** describes. On this host the runtime supplies the
+   variable from its environment or the local credential database. Skip the
+   mapping for a battery whose token was skipped.
+6. Add the approved rules for the remaining tools to the root config.
+   Immediately before changing the Bash hint, re-read the root and
    replace only the exact complete `claude-code.bash-requirements` declaration
    used in the approved proposal. If it no longer matches, stop, preserve the
    current declaration, and revise the proposal instead of overwriting it.
@@ -381,8 +304,8 @@ not guess.
    for an OpenAPPA checkout, or inspect source code.
 4. Explain what happens now, what you propose, and the practical effect.
    Ask only for a decision that changes the result.
-5. If a battery would help, propose it with the same one-sentence rule used in
-   the checkup. Existing root rules still take priority.
+5. If a battery would help, propose it as **Propose a battery** in the core
+   rules describes. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
    Authorities, audience sources, or named audiences changed since the
@@ -396,13 +319,8 @@ not guess.
    add the root support, credential variable, and audience mapping it
    requires. To take one out, use
    `appa battery remove <name> --config <live-path>`.
-9. Apply only the approved root-rule changes. To change battery behavior, add
-   or edit a root rule; never modify the battery.
+9. Apply only the approved root-rule changes.
 10. Reload and report the result as described below.
-
-For several root rules with the same tool name, order matters. Put a narrow
-argument-specific rule before its general fallback. Do not reorder unrelated
-rules.
 
 For an exact Bash command pattern, add a narrow, ordered
 `host/claude-code/Bash(command:...)` root contract: root rules precede the
@@ -413,20 +331,12 @@ exact. For semantic command interpretation, declare
 replaces the battery's of the same name. Preserve its implementation, inputs,
 and mandate unless the approved behavior requires a change.
 
-To make an audience mismatch reviewable, permit the intended Authority to
-review that audience expansion. Do not add attention only to route the review.
-Keep an existing attention requirement when it represents an independent
-per-call review.
-
-## Tune the defaults
+## Tuning options
 
 The defaults are a middle ground: a normal coding session keeps running, and
 the common ways private data leaks or outside text steers the agent are
-caught. Offer these options when the user asks for a change they fit. Explain
-each option's behavior and cost in plain words. Each one is a root rule or
-a change to one root declaration. Mark it with a comment
-`# appa-guide: <option>` so a later "undo <option>" removes exactly that.
-Apply one through the `adjust` steps.
+caught. Offer these options when the user asks for a change they fit, as
+**Tune the defaults** in the core rules describes.
 
 Looser:
 
@@ -445,10 +355,6 @@ Stricter:
 | `private-folders <paths>` | Read, Grep and Bash selectors for the paths with `delta = { audience = ["self"] }`, before each bare rule. | After reading those folders, public sends need approval or are refused. |
 | `suspicious-server <server>` | Static rules with `delta = { trust = "suspicious" }` for the server's tools. | Once the agent reads that server, writes to its own instructions and other trusted-only actions ask the user. |
 
-When the user asks for something not in these tables, work it out from the
-source and sink questions in **Cover the remaining tools**, and name its cost
-the same way.
-
 ## Explain a block
 
 1. Find the blocked call: the `[appa] Blocked` text in this conversation, or
@@ -456,15 +362,7 @@ the same way.
    lines. If neither is available, ask the user to paste the block.
 2. Run `appa describe --config <live-path> --session-tools <tool>` to see
    whether a rule covers the tool, the Annotator judges it, or nothing covers it.
-3. Read the root config and the included batteries in include order. The first
-   rule whose name and argument selector match the call decides it. Selectors
-   match the argument as written, case-sensitively, and `*` spans `/`.
-4. In one to three sentences, say what the session had read that set its
-   label, what the rule requires, and why the two differ. Name the way forward
-   the block offered, if any.
-5. If the user wants the call to run in future, propose the narrowest change,
-   naming a **Tune the defaults** option when one fits, and continue as
-   `adjust`. Otherwise stop: explaining changes nothing.
+3. Continue with **Explain a block** in the core rules.
 
 ## Reload and finish
 
@@ -474,11 +372,6 @@ Reload only after an approved write:
 curl --fail-with-body -sS -X POST \
   "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
 ```
-
-The runtime checks the whole config
-before installing it. If reload is refused, the previous config keeps serving.
-Explain the error plainly and fix it. Ask for approval again if the fix changes
-the behavior the user approved.
 
 Briefly say what succeeded, what failed, and whether the file was restored.
 If the fix changes who may receive information, say how before asking for

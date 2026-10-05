@@ -11,6 +11,7 @@ pub mod claude_files;
 pub mod config;
 mod credentials;
 pub mod describe;
+pub mod guide;
 #[cfg(feature = "daemon")]
 pub mod hook_client;
 pub mod hooks;
