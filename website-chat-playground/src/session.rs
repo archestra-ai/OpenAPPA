@@ -208,10 +208,7 @@ impl Sessions {
         let rendered = toml::to_string(&document).map_err(Box::new)?;
         let config = Config::hosted(
             &rendered,
-            HostDefaults {
-                consult_timeout: CONSULT_TIMEOUT,
-                max_body_bytes: MAX_CONSULT_BYTES,
-            },
+            HostDefaults::new(CONSULT_TIMEOUT, MAX_CONSULT_BYTES),
             |var| std::env::var(var).ok(),
         )
         .map_err(Box::new)?;

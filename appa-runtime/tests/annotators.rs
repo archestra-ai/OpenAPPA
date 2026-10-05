@@ -1485,15 +1485,8 @@ url = "{url}"
 {token}"#
     );
     let host = |var: &str| (var == "APPA_TEST_TENANT_TOKEN").then(|| "tenant-secret".to_string());
-    Config::hosted(
-        &document,
-        HostDefaults {
-            consult_timeout: Duration::from_secs(2),
-            max_body_bytes: 65_536,
-        },
-        host,
-    )
-    .expect("the hosted document validates")
+    Config::hosted(&document, HostDefaults::new(Duration::from_secs(2), 65_536), host)
+        .expect("the hosted document validates")
 }
 
 async fn open_hosted(config: Config) -> Arc<Runtime> {
@@ -1655,10 +1648,7 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
 "#;
     let config = Config::hosted(
         document,
-        HostDefaults {
-            consult_timeout: Duration::from_secs(5),
-            max_body_bytes: 65_536,
-        },
+        HostDefaults::new(Duration::from_secs(5), 65_536),
         move |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| key.to_string()),
     )
     .expect("the hosted document validates");

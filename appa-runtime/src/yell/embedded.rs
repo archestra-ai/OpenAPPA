@@ -87,10 +87,7 @@ mod tests {
     fn runtime(enabled: bool) -> Arc<Runtime> {
         let mut config = Config::hosted(
             "[policy]\nversion=2\n[[policy.tool]]\nname='yell'\ndelta={}\n",
-            HostDefaults {
-                consult_timeout: Duration::from_secs(1),
-                max_body_bytes: 4096,
-            },
+            HostDefaults::new(Duration::from_secs(1), 4096),
             |_| None,
         )
         .unwrap();

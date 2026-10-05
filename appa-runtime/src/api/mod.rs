@@ -458,6 +458,9 @@ pub enum OpenError {
     },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
+    #[error("annotator {0} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
+    #[cfg(feature = "archestra")]
+    ArchestraNotConfigured(String),
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
@@ -3205,6 +3208,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
+            #[cfg(feature = "archestra")]
+            appa_policy::AnnotatorBuiltin::Archestra if externals.archestra.is_none() => {
+                return Err(OpenError::ArchestraNotConfigured(name.to_string()));
+            }
             // Jev judges the complete call and answers the lowest or the highest rank.
             appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {
                 return Err(OpenError::JevInputs(name.to_string()));
@@ -3221,6 +3228,8 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::Jev
             | appa_policy::AnnotatorBuiltin::Llm
             | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
+            #[cfg(feature = "archestra")]
+            appa_policy::AnnotatorBuiltin::Archestra => {}
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
@@ -3520,14 +3529,9 @@ mod deployment_tests {
 
     /// A hosted document whose host sets each of `keys`.
     fn hosted_with_keys(document: &str, keys: &[&str]) -> Config {
-        Config::hosted(
-            document,
-            HostDefaults {
-                consult_timeout: Duration::from_secs(30),
-                max_body_bytes: 65_536,
-            },
-            |var| keys.contains(&var).then(|| "sekret".to_string()),
-        )
+        Config::hosted(document, HostDefaults::new(Duration::from_secs(30), 65_536), |var| {
+            keys.contains(&var).then(|| "sekret".to_string())
+        })
         .expect("the hosted document validates")
     }
 
@@ -3871,14 +3875,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     /// A hosted document parsed without its keys.
     fn deferred(document: &str) -> Config {
-        Config::hosted_included_deferred(
-            document,
-            HostDefaults {
-                consult_timeout: Duration::from_secs(30),
-                max_body_bytes: 65_536,
-            },
-            |_| Err(crate::config::IncludeResolution::Unknown),
-        )
+        Config::hosted_included_deferred(document, HostDefaults::new(Duration::from_secs(30), 65_536), |_| {
+            Err(crate::config::IncludeResolution::Unknown)
+        })
         .expect("the deferred document validates")
     }
 

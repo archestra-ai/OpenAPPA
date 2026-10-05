@@ -1,8 +1,10 @@
-//! The model builtins: `claude-code` and `llm`, which answer a rendered [`ModelPrompt`],
-//! and `jev`, TypeSafe's classifier, which asks its own questions about the call.
+//! The model builtins: `claude-code`, `llm` and, with the `archestra` feature, `archestra`,
+//! which answer a rendered [`ModelPrompt`], and `jev`, TypeSafe's classifier, which asks its own questions about the call.
 //!
 //! [`ModelPrompt`]: crate::consult::ModelPrompt
 
+#[cfg(feature = "archestra")]
+pub(crate) mod archestra;
 pub(crate) mod claude_code;
 pub(crate) mod jev;
 pub(crate) mod llm;
@@ -27,6 +29,8 @@ pub(crate) const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 pub(crate) enum PromptModel {
     ClaudeCode(ClaudeCodeBackend),
     Llm(LlmBackend),
+    #[cfg(feature = "archestra")]
+    Archestra(archestra::ArchestraBackend),
 }
 
 /// One consult of an API model transport: `send` makes one request and returns the model's

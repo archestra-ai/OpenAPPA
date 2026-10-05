@@ -373,6 +373,17 @@ fn an_annotator_carries_the_stock_builtin_on_its_declaration() {
     ));
 }
 
+/// Only a runtime built with the `archestra` feature serves that builtin; any other build
+/// refuses the name as it refuses any builtin it does not know.
+#[cfg(not(feature = "archestra"))]
+#[test]
+fn the_archestra_builtin_is_unknown_without_its_feature() {
+    assert!(matches!(
+        load("version = 2\n[[annotator]]\nname = \"classify\"\nbuiltin = \"archestra\"\n"),
+        Err(ConfigError::UnknownAnnotatorBuiltin { name, builtin }) if name == "classify" && builtin == "archestra"
+    ));
+}
+
 #[test]
 fn a_tool_requires_a_registered_annotator() {
     assert!(matches!(

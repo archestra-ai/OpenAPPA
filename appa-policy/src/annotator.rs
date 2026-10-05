@@ -11,29 +11,43 @@ use crate::error::ConfigError;
 use crate::raw::RawAnnotator;
 
 /// The stock annotators an `[[annotator]]` may name on its declaration with `builtin`: the
-/// two model transports and TypeSafe's Jev classifier. Closed: the runtime compiles all three
-/// in. An Annotator that names one takes no deployment binding; every other Annotator is
-/// bound by the deployment.
+/// model transports and TypeSafe's Jev classifier. Closed: the runtime compiles each in. An
+/// Annotator that names one takes no deployment binding; every other Annotator is bound by
+/// the deployment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnnotatorBuiltin {
     ClaudeCode,
     Llm,
     Jev,
+    /// A model transport whose endpoint the embedding host supplies, never the policy.
+    /// Compiled only with the `archestra` feature.
+    #[cfg(feature = "archestra")]
+    Archestra,
 }
 
 impl AnnotatorBuiltin {
+    #[cfg(not(feature = "archestra"))]
     pub const ALL: [AnnotatorBuiltin; 3] = [
         AnnotatorBuiltin::ClaudeCode,
         AnnotatorBuiltin::Llm,
         AnnotatorBuiltin::Jev,
     ];
+    #[cfg(feature = "archestra")]
+    pub const ALL: [AnnotatorBuiltin; 4] = [
+        AnnotatorBuiltin::ClaudeCode,
+        AnnotatorBuiltin::Llm,
+        AnnotatorBuiltin::Jev,
+        AnnotatorBuiltin::Archestra,
+    ];
 
-    /// The name a policy writes: `claude-code`, `llm`, or `jev`.
+    /// The name a policy writes: `claude-code`, `llm`, `jev`, or `archestra`.
     pub const fn wire_name(self) -> &'static str {
         match self {
             AnnotatorBuiltin::ClaudeCode => "claude-code",
             AnnotatorBuiltin::Llm => "llm",
             AnnotatorBuiltin::Jev => "jev",
+            #[cfg(feature = "archestra")]
+            AnnotatorBuiltin::Archestra => "archestra",
         }
     }
 

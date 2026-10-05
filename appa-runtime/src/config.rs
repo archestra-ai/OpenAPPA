@@ -128,11 +128,49 @@ impl PolicyFile {
 }
 
 /// The two mandatory `[externals]` settings a host supplies for a hosted document that
-/// states neither. A document that states one keeps its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// states neither, and what the host itself serves. A document that states a setting keeps
+/// its own.
+#[derive(Debug, Clone)]
 pub struct HostDefaults {
     pub consult_timeout: Duration,
     pub max_body_bytes: usize,
+    /// The endpoint that serves the `archestra` annotator builtin. No policy text can name
+    /// one, so a document that declares the builtin opens only where the host supplies it.
+    #[cfg(feature = "archestra")]
+    pub archestra: Option<ArchestraEndpoint>,
+}
+
+impl HostDefaults {
+    /// The two settings, and nothing the host serves.
+    pub const fn new(consult_timeout: Duration, max_body_bytes: usize) -> HostDefaults {
+        HostDefaults {
+            consult_timeout,
+            max_body_bytes,
+            #[cfg(feature = "archestra")]
+            archestra: None,
+        }
+    }
+}
+
+/// Where the embedding host answers an `archestra` consult, and the bearer token it
+/// expects. Each attempt is one `POST` of `{"system", "input", "schema"}` — the rendered
+/// model prompt — whose 2xx body is the answer object itself. The URL follows every
+/// endpoint's rules: `https` anywhere, cleartext `http` only to loopback.
+#[cfg(feature = "archestra")]
+#[derive(Debug, Clone)]
+pub struct ArchestraEndpoint {
+    url: String,
+    token: Token,
+}
+
+#[cfg(feature = "archestra")]
+impl ArchestraEndpoint {
+    pub fn new(url: String, token: String) -> ArchestraEndpoint {
+        ArchestraEndpoint {
+            url,
+            token: Token::new(token),
+        }
+    }
 }
 
 /// One battery a host composes under its root document: the name the host lists it
@@ -229,6 +267,9 @@ pub struct Externals {
     pub llm: Option<LlmProfile>,
     /// The profile the stock `jev` annotator consults, where the deployment declares one.
     pub jev: Option<JevProfile>,
+    /// The host's endpoint for the `archestra` builtin, where the host supplies one.
+    #[cfg(feature = "archestra")]
+    pub archestra: Option<Endpoint>,
 }
 
 impl Externals {
@@ -238,6 +279,8 @@ impl Externals {
             AnnotatorBuiltin::ClaudeCode => Some(self.claude_code.limits),
             AnnotatorBuiltin::Llm => self.llm.as_ref().map(|llm| llm.limits),
             AnnotatorBuiltin::Jev => self.jev.as_ref().map(|jev| jev.limits),
+            #[cfg(feature = "archestra")]
+            AnnotatorBuiltin::Archestra => self.archestra.as_ref().map(|_| ModelLimits::MODEL_CALL),
         }
     }
 
@@ -591,6 +634,8 @@ pub struct ResolverCommand {
 pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
 pub const LLM_BUILTIN: &str = AnnotatorBuiltin::Llm.wire_name();
 pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
+#[cfg(feature = "archestra")]
+pub const ARCHESTRA_BUILTIN: &str = AnnotatorBuiltin::Archestra.wire_name();
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -1362,11 +1407,20 @@ impl Config {
                 .or_insert(toml::Value::Integer(max_body_bytes));
         }
 
+        #[cfg(feature = "archestra")]
+        let archestra = defaults
+            .archestra
+            .map(|ArchestraEndpoint { url, token }| {
+                let url = validated_url("archestra", ARCHESTRA_BUILTIN, url)?;
+                Ok::<_, ConfigError>(Endpoint::new(url, Some(EndpointToken::Set(token))))
+            })
+            .transpose()?;
+
         let rendered = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&rendered).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         refuse_hosted_commands(&raw.externals)?;
         // No command survives the refusal above, so no entry has a working directory.
-        Config::validate_composed(
+        let config = Config::validate_composed(
             rendered,
             raw,
             Reporting::default(),
@@ -1374,7 +1428,16 @@ impl Config {
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             keys,
-        )
+        )?;
+        #[cfg(feature = "archestra")]
+        let config = Config {
+            externals: Externals {
+                archestra,
+                ..config.externals
+            },
+            ..config
+        };
+        Ok(config)
     }
 
     pub(crate) fn keys_deferred(&self) -> bool {
@@ -1530,6 +1593,8 @@ impl Config {
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
                 jev,
+                #[cfg(feature = "archestra")]
+                archestra: None,
             },
         })
     }
@@ -2919,7 +2984,14 @@ mod tests {
         const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
         const CLAUDE: &str = "[externals.claude_code]\n";
-        let limits = |config: &Config| AnnotatorBuiltin::ALL.map(|builtin| config.externals.model_limits(builtin));
+        let limits = |config: &Config| {
+            [
+                AnnotatorBuiltin::ClaudeCode,
+                AnnotatorBuiltin::Llm,
+                AnnotatorBuiltin::Jev,
+            ]
+            .map(|builtin| config.externals.model_limits(builtin))
+        };
         let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{LLM}{JEV}")).expect("the model tables validate");
         assert_eq!(
             limits(&defaults),
@@ -3280,10 +3352,7 @@ mod tests {
         ));
     }
 
-    const HOST_DEFAULTS: HostDefaults = HostDefaults {
-        consult_timeout: Duration::from_millis(5000),
-        max_body_bytes: 65_536,
-    };
+    const HOST_DEFAULTS: HostDefaults = HostDefaults::new(Duration::from_millis(5000), 65_536);
 
     /// The secrets the host of these tests holds.
     fn host_secrets(var: &str) -> Option<String> {

@@ -4613,10 +4613,7 @@ context_control = true
     fn hosted_config(policy: &str, binding: Option<&str>) -> Config {
         Config::hosted(
             &attested_text(policy, binding),
-            crate::config::HostDefaults {
-                consult_timeout: std::time::Duration::from_millis(2000),
-                max_body_bytes: 65536,
-            },
+            crate::config::HostDefaults::new(std::time::Duration::from_millis(2000), 65536),
             |_| None,
         )
         .expect("the hosted document validates")

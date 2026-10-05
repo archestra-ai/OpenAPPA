@@ -21,6 +21,8 @@ use crate::config::{
 use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
+#[cfg(feature = "archestra")]
+use crate::model::archestra::ArchestraBackend;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
@@ -133,7 +135,7 @@ pub(crate) struct Transcript {
 }
 
 impl Transcript {
-    fn of(backend: ConsultBackend) -> Transcript {
+    pub(crate) fn of(backend: ConsultBackend) -> Transcript {
         Transcript {
             backend,
             raw_response: None,
@@ -192,6 +194,8 @@ impl Backend {
             Backend::Hitl => Some(ConsultBackend::Hitl),
             Backend::Model(PromptModel::ClaudeCode(_)) => Some(ConsultBackend::ClaudeCode),
             Backend::Model(PromptModel::Llm(_)) => Some(ConsultBackend::Llm),
+            #[cfg(feature = "archestra")]
+            Backend::Model(PromptModel::Archestra(_)) => Some(ConsultBackend::Archestra),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
             Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
         }
@@ -272,7 +276,7 @@ pub(crate) struct ConsultGates {
     /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
-    models: Arc<Mutex<[ModelGate; 3]>>,
+    models: Arc<Mutex<[ModelGate; AnnotatorBuiltin::ALL.len()]>>,
     pub(crate) jev: Arc<JevClients>,
 }
 
@@ -289,6 +293,8 @@ impl ConsultGates {
                 AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Llm => {
                     crate::config::ModelLimits::MODEL_CALL.max_concurrent
                 }
+                #[cfg(feature = "archestra")]
+                AnnotatorBuiltin::Archestra => crate::config::ModelLimits::MODEL_CALL.max_concurrent,
                 AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
             };
             (builtin, size, Arc::new(tokio::sync::Semaphore::new(size)))
@@ -300,7 +306,7 @@ impl ConsultGates {
         }
     }
 
-    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; 3]> {
+    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; AnnotatorBuiltin::ALL.len()]> {
         self.models
             .lock()
             .expect("the model gates mutex is never poisoned: no panic runs while it is held")
@@ -386,6 +392,10 @@ impl ExternalServices {
             .jev
             .as_ref()
             .and_then(|profile| JevBackend::new(profile, config.max_body_bytes, &gates, JevTiming::STANDARD));
+        #[cfg(feature = "archestra")]
+        let archestra = config
+            .archestra
+            .map(|endpoint| ArchestraBackend::new(endpoint, config.max_body_bytes, &gates));
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -420,15 +430,27 @@ impl ExternalServices {
         backends.insert(ConsultKind::Context, bound(config.context));
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
-            let backend = builtin_backend(
-                Section::Annotators,
-                &name,
-                builtin.wire_name().to_string(),
-                registry,
-                &claude,
-                llm.as_ref(),
-                jev.as_ref(),
-            )?;
+            let backend = match builtin {
+                // A host-supplied transport, never a binding's: only a declaration names it.
+                #[cfg(feature = "archestra")]
+                AnnotatorBuiltin::Archestra => archestra
+                    .clone()
+                    .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
+                    .ok_or_else(|| ModulesError::UnknownBuiltin {
+                        section: Section::Annotators.name(),
+                        name: name.clone(),
+                        builtin: builtin.wire_name().to_string(),
+                    })?,
+                _ => builtin_backend(
+                    Section::Annotators,
+                    &name,
+                    builtin.wire_name().to_string(),
+                    registry,
+                    &claude,
+                    llm.as_ref(),
+                    jev.as_ref(),
+                )?,
+            };
             annotators.insert(name, backend);
         }
         backends.insert(ConsultKind::Annotation, annotators);
@@ -634,6 +656,8 @@ impl ExternalServices {
         match model {
             PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
             PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
+            #[cfg(feature = "archestra")]
+            PromptModel::Archestra(archestra) => archestra.consult(&prompt, &consult.name, seen).await,
         }
     }
 
@@ -1264,6 +1288,8 @@ mod tests {
             claude_code: Default::default(),
             llm: None,
             jev: None,
+            #[cfg(feature = "archestra")]
+            archestra: None,
         }
     }
 

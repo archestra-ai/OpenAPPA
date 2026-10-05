@@ -184,10 +184,7 @@ mod tests {
 
     const AUTHORED: &str = "# my policy\n[policy]\nversion = 2\n# keep this order\n[[policy.tool]]\nname = 'Read'\n";
 
-    const HOST_DEFAULTS: HostDefaults = HostDefaults {
-        consult_timeout: std::time::Duration::from_millis(5000),
-        max_body_bytes: 65_536,
-    };
+    const HOST_DEFAULTS: HostDefaults = HostDefaults::new(std::time::Duration::from_millis(5000), 65_536);
 
     #[test]
     fn an_include_is_added_once_and_the_authored_text_stays() {

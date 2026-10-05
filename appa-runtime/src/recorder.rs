@@ -29,6 +29,8 @@ pub enum ConsultBackend {
     Jev,
     ClaudeCode,
     Hitl,
+    #[cfg(feature = "archestra")]
+    Archestra,
 }
 
 /// What a record joins on: the trajectory that raised the consult, and the host call id,

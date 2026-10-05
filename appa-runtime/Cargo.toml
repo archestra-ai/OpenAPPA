@@ -28,6 +28,9 @@ default = ["daemon"]
 daemon = ["dep:rmcp", "dep:axum", "dep:tower", "dep:clap", "dep:tracing-subscriber", "dep:opentelemetry-appender-tracing", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "tokio/signal"]
 # PostgreSQL storage for an embedding host whose migrations install the schema.
 postgres = ["appa-eventlog/postgres"]
+# The `archestra` annotator builtin: the rendered model prompt sent to an endpoint the
+# embedding host supplies through `HostDefaults`. The daemon never offers it.
+archestra = ["appa-policy/archestra"]
 
 # These integration tests drive the server stack: the MCP endpoint, the
 # installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
