@@ -42,7 +42,10 @@ reference maps each operation to the host's own tools.
 IFC monoids first: express boundaries with trust and audience labels.
 Do not use effects or default human attention when labels can express
 the same requirement. Trusted data flowing within its audience stays
-autonomous.
+autonomous. A state-changing action does not require a person by default.
+Require approval only when the operator independently requests per-call
+review or existing root policy requires it. Never use attention as a
+substitute for an audience or trust boundary.
 
 ## Proposal and approval
 
@@ -177,7 +180,9 @@ Apply these rules:
 - A clearly public read or a tool whose result carries no data uses
   `delta = {}`.
 - Every new tool entry needs `delta`, including entries with `requires`. Never
-  fabricate reader names, groups, or audiences.
+  fabricate reader names, groups, or audiences, and never substitute
+  `"private"`, `@company`, or another plausible reader or group for `self`
+  or `internal`.
 
 For public-audience requirements, reuse an appropriate `builtin hitl`
 Authority and extend its audience permit instead of adding attention solely

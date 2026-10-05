@@ -435,12 +435,6 @@ Apply **Cover the remaining tools** from the core rules only to installed
 tools that neither the root config nor a translated battery declaration
 covers. On this host also:
 
-- Never substitute `"private"`, `@company`, or another plausible reader
-  or group for `self` or `internal`.
-- A state-changing action does not require a person by default. Add
-  `human-approval` only when the operator independently requests per-call
-  review or existing root policy requires it. Never use attention as a
-  substitute for an audience or trust boundary.
 - A delegation stays blocked until the operator names it.
 
 ### Cover unconfigured tools in init
