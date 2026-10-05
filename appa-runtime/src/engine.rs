@@ -3423,15 +3423,22 @@ fn audience_count(audience: &Audience) -> String {
     clause_count(clause)
 }
 
-/// Summarizes a clause as atom counts only.
+/// Summarizes a clause: symbolic audiences by their policy names, readers as a count only.
 fn clause_count(clause: &Clause) -> String {
-    let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
-    match (clause.readers().len(), symbolic) {
-        (0, 0) => "nobody".to_string(),
-        (1, 0) => "1 reader".to_string(),
-        (count, 0) => format!("{count} readers"),
-        (0, _) => "a symbolic audience".to_string(),
-        (count, _) => format!("a symbolic audience and {count} reader(s)"),
+    let symbolic = clause
+        .chain()
+        .map(|chain| chain.as_str().to_string())
+        .into_iter()
+        .chain(clause.groups().map(|group| group.to_string()))
+        .map(|name| terminal_safe(&name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (clause.readers().len(), symbolic.is_empty()) {
+        (0, true) => "nobody".to_string(),
+        (1, true) => "1 reader".to_string(),
+        (count, true) => format!("{count} readers"),
+        (0, false) => symbolic,
+        (count, false) => format!("{symbolic} and {count} reader(s)"),
     }
 }
 
@@ -4756,6 +4763,21 @@ mod tests {
             "alice ∩ internal,@finance",
             "clauses intersect in canonical order; each clause unions its spelled atoms",
         );
+    }
+
+    #[test]
+    fn audience_count_names_symbolic_audiences_and_counts_readers() {
+        use crate::engine::audience_count;
+        use appa_engine::label::{ChainAudience, Clause, GroupRef};
+        let finance = GroupRef::Named(appa_engine::names::GroupName::new("finance"));
+        let symbolic = Clause::new([ChainAudience::Internal], [finance.clone()], []).expect("a symbolic clause");
+        assert_eq!(audience_count(&Audience::of_clauses([symbolic])), "internal, @finance");
+        let mixed = Clause::new([], [finance], [ReaderId::new("alice"), ReaderId::new("bob")]).expect("a mixed clause");
+        assert_eq!(
+            audience_count(&Audience::of_clauses([mixed])),
+            "@finance and 2 reader(s)"
+        );
+        assert_eq!(audience_count(&restricted(&["alice"])), "1 reader");
     }
 
     #[test]
