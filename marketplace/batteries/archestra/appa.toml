@@ -26,6 +26,12 @@
 [policy]
 version = 2
 
+# --- tool discovery: search_tools only lists tools, it reads no private data ---
+
+[[policy.tool]]
+name = "mcp/archestra/search_tools"
+delta = {}
+
 # --- projects ---
 
 [[policy.tool]]
