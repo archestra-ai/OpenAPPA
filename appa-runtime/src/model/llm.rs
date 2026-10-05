@@ -15,10 +15,10 @@ use rig_core::completion::{CompletionError, CompletionModel};
 
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
-use super::{MAX_ATTEMPTS, MIN_ATTEMPT};
+use super::consult_with_retries;
 use crate::config::{LlmProfile, LlmProvider, ProfileKey, Token};
 use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, Transcript};
 use appa_policy::AnnotatorBuiltin;
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
@@ -26,7 +26,6 @@ use appa_policy::AnnotatorBuiltin;
 const MIN_ANSWER_TOKENS: u64 = 4096;
 const MAX_ANSWER_TOKENS: u64 = 32_768;
 const ANSWER_OVERHEAD_TOKENS: u64 = 1024;
-const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// The output tokens one consult may spend: sized from the input, and never more than
 /// the deployment accepts as an answer body — a token is at least one byte, so an answer
@@ -114,78 +113,32 @@ impl LlmBackend {
         })
     }
 
-    /// One consult. The deadline covers every permit wait and every attempt: queueing behind
-    /// the gate spends the same budget the consult itself would. A transport failure, a
-    /// 429 or a 5xx is retried after [`RETRY_BACKOFF`] while the budget leaves room for
-    /// another attempt; each attempt holds a permit, the backoff none.
+    /// One consult, retried as [`consult_with_retries`] retries a transient failure.
     pub(crate) async fn consult(
         &self,
         prompt: &ModelPrompt,
         name: &str,
-        mut seen: Option<&mut Transcript>,
+        seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let Some(client) = &self.client else {
             return Err(NoAnswerReason::Unregistered);
         };
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        let gate = self.gates.model(AnnotatorBuiltin::Llm);
-        let mut attempts = 1;
-        loop {
-            let permit = acquire_within(&gate, deadline, "llm", name).await?;
-            let answered = self.attempt(client, prompt, deadline, seen.as_deref_mut()).await;
-            drop(permit);
-            let retryable = matches!(
-                answered,
-                Err(NoAnswerReason::Transport
-                    | NoAnswerReason::NonSuccess {
-                        status: 429 | 500..,
-                        ..
-                    })
-            );
-            if !retryable
-                || attempts == MAX_ATTEMPTS
-                || tokio::time::Instant::now() + RETRY_BACKOFF + MIN_ATTEMPT > deadline
-            {
-                return answered;
-            }
-            attempts += 1;
-            tokio::time::sleep(RETRY_BACKOFF).await;
-        }
-    }
-
-    /// One request; `seen` keeps the model's answer text, capped, or the provider's status.
-    async fn attempt(
-        &self,
-        client: &LlmClient,
-        prompt: &ModelPrompt,
-        deadline: tokio::time::Instant,
-        seen: Option<&mut Transcript>,
-    ) -> Result<serde_json::Value, NoAnswerReason> {
-        let mut raw_response = None;
-        let answered = match tokio::time::timeout_at(deadline, self.prompt(client, prompt)).await {
-            Err(_) => Err(NoAnswerReason::Timeout),
-            Ok(Err(error)) => {
+        let send = || async {
+            self.prompt(client, prompt).await.map_err(|error| {
                 tracing::debug!(%error, "the llm consult failed");
-                Err(no_answer(error))
-            }
-            Ok(Ok(text)) if text.len() > self.max_body_bytes => {
-                raw_response = Some(text.as_bytes()[..self.max_body_bytes].to_vec());
-                Err(NoAnswerReason::Oversized)
-            }
-            Ok(Ok(text)) => {
-                let answered = serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed);
-                raw_response = Some(text.into_bytes());
-                answered
-            }
+                no_answer(error)
+            })
         };
-        if let Some(seen) = seen {
-            seen.raw_response = raw_response;
-            seen.http_status = match answered {
-                Err(NoAnswerReason::NonSuccess { status, .. }) => Some(status),
-                _ => None,
-            };
-        }
-        answered
+        consult_with_retries(
+            &self.gates,
+            AnnotatorBuiltin::Llm,
+            self.timeout,
+            self.max_body_bytes,
+            name,
+            seen,
+            send,
+        )
+        .await
     }
 
     async fn prompt(&self, client: &LlmClient, prompt: &ModelPrompt) -> Result<String, PromptError> {
@@ -248,6 +201,7 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
+    use crate::model::{MAX_ATTEMPTS, MIN_ATTEMPT, RETRY_BACKOFF};
 
     #[derive(Clone)]
     enum StubAnswer {
