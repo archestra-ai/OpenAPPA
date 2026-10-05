@@ -464,7 +464,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Rust lint
-        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres,appa/postgres --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked -- -D warnings
 
       - name: Rust lint (runtime without the daemon feature)
         run: cargo clippy -p appa --lib --tests --no-default-features --locked -- -D warnings
@@ -512,7 +512,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
-        run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres --locked
+        run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked
+
+      # The workspace run above unifies the archestra feature into appa-policy; this run
+      # checks a build without it refuses the builtin.
+      - name: Rust tests (policy without the archestra builtin)
+        run: cargo test -p appa-policy --locked
 
       - name: Install the host schema
         run: psql "$OPENAPPA_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f appa-eventlog/tests/fixtures/host_schema.sql
