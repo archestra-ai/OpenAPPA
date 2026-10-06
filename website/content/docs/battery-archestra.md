@@ -21,9 +21,9 @@ A share makes something readable by more people, so it needs trusted data those 
 
 This covers projects, apps, knowledge bases, knowledge connectors, plugins, agents, and MCP gateways, including a personal plugin shared with named members. An update that sends a team or member list is checked against that list even when it names no scope, since it replaces who the resource is shared with. A connector that mirrors its source system's permissions has readers no source here can list; they are assumed to be within the organization, so it requires data sharable with `internal`. Keeping a resource personal or private requires nothing. A call may name at most 100 teams.
 
-## Tool discovery
+## Discovery
 
-`search_tools` lists the tools an agent can call. It reads no private data, so it adds no label and requires nothing. An agent can look up tools at any point in a session.
+`search_tools` lists the tools an agent can call. `search_files` lists the files an agent can reach. `load_skill` loads a skill's instructions and bundled files. These tools add no label and require nothing. An agent can look up tools, files, and skills at any point in a session.
 
 ## Audiences
 

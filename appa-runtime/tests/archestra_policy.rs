@@ -99,6 +99,8 @@ async fn a_share_runs_only_when_everyone_it_reaches_may_already_read() {
 
     let allowed = [
         archestra("search_tools", serde_json::json!({ "query": "github" })),
+        archestra("search_files", serde_json::json!({ "query": "notes" })),
+        archestra("load_skill", serde_json::json!({ "name": "release" })),
         archestra(
             "set_project_share",
             serde_json::json!({ "visibility": "team", "team_ids": ["t1"] }),

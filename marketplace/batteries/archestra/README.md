@@ -19,7 +19,7 @@ wins:
 | `create_plugin`, `update_plugin` | `scope: org` / `team` or a sent `teamIds` / a sent `userIds` / both lists | `internal` / `@archestra:team/$teamIds` / `@archestra:user/$userIds` / `internal` |
 | `edit_agent`, `edit_mcp_gateway` | `scope: org` / `team` or a sent `teams` | `internal` / `@archestra:team/$teams` |
 | `add_team_member` | the added member | `@archestra:user/$user` |
-| `search_tools` | nothing: it lists tools and reads no private data | nothing |
+| `search_tools`, `search_files`, `load_skill` | nothing: they list tools and files, and load a skill | nothing |
 
 Every widening share also requires `trusted` data. Values that keep a
 resource personal or private, and updates that send no scope and no

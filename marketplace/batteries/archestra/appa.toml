@@ -26,10 +26,19 @@
 [policy]
 version = 2
 
-# --- tool discovery: search_tools only lists tools, it reads no private data ---
+# --- discovery: search_tools lists tools, search_files lists files, and
+# load_skill loads a skill's instructions and bundled files ---
 
 [[policy.tool]]
 name = "mcp/archestra/search_tools"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/search_files"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/load_skill"
 delta = {}
 
 # --- projects ---
