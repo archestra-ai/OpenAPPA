@@ -95,6 +95,8 @@ async fn start(runtime: &Runtime) {
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             },
         )
         .await,

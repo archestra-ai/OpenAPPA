@@ -15,9 +15,13 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, PeerAddress, WireDecision, WireEvent};
+use appa_runtime_api::{
+    AdapterName, Codec, HookDecision, HookEvent, LaunchStart, LaunchToken, PeerAddress, StartKind, WireDecision,
+    WireEvent,
+};
 
 use crate::api::refusal_detail;
+use crate::hooks::{is_withheld_return, withheld_return_instruction};
 use crate::loopback_http::{Answer, Deadline, Endpoint, request};
 use crate::runtime_start::{self, Deployment};
 use crate::runtime_url::RuntimeTarget;
@@ -152,33 +156,75 @@ pub(crate) fn session_is_gated() -> bool {
 /// process. It stays out of the session's tool environment.
 pub(crate) const PEER_ADDRESS_VAR: &str = "APPA_PEER_ADDRESS";
 
-/// A session start names the address its launcher bound. A value that is no peer address
-/// leaves the session unaddressed, and the hook says so on stderr rather than refusing the
-/// start.
-fn with_peer_address(event: HookEvent, bound: Option<OsString>) -> HookEvent {
-    match event {
-        HookEvent::SessionStart {
-            root,
-            principal,
-            address: None,
-            title,
-        } => HookEvent::SessionStart {
-            root,
-            principal,
-            address: bound.and_then(peer_address),
-            title,
-        },
-        other => other,
+/// The identity the protected launcher minted for the host process it started.
+pub(crate) const LAUNCH_VAR: &str = "APPA_LAUNCH";
+
+/// The host session a protected launch was asked to fork, as its launcher read it.
+pub(crate) const FORKED_FROM_VAR: &str = "APPA_FORKED_FROM";
+
+/// What the protected launcher put in this hook process's environment.
+struct Launcher {
+    address: Option<OsString>,
+    launch: Option<OsString>,
+    forked_from: Option<OsString>,
+}
+
+impl Launcher {
+    fn inherited() -> Self {
+        Self {
+            address: std::env::var_os(PEER_ADDRESS_VAR),
+            launch: std::env::var_os(LAUNCH_VAR),
+            forked_from: std::env::var_os(FORKED_FROM_VAR),
+        }
+    }
+
+    /// A session start names the address and the launch its launcher bound, and a fork
+    /// names the session it copied. A value that does not parse is left off, and the hook
+    /// says so on stderr rather than refusing the start: the runtime refuses a fork that
+    /// names no parent itself.
+    fn attach(self, event: HookEvent) -> HookEvent {
+        match event {
+            HookEvent::SessionStart {
+                root,
+                principal,
+                address: None,
+                title,
+                start,
+                launch: None,
+            } => {
+                let launch = self
+                    .launch
+                    .and_then(|token| parsed(LAUNCH_VAR, token, LaunchToken::parse));
+                let forked_from = match start {
+                    Some(StartKind::Fork) => self
+                        .forked_from
+                        .and_then(|host| parsed(FORKED_FROM_VAR, host, |id| Ok::<_, String>(HOST.root(id)))),
+                    _ => None,
+                };
+                HookEvent::SessionStart {
+                    root,
+                    principal,
+                    address: self
+                        .address
+                        .and_then(|bound| parsed(PEER_ADDRESS_VAR, bound, PeerAddress::parse)),
+                    title,
+                    start,
+                    launch: launch.map(|launch| LaunchStart { launch, forked_from }),
+                }
+            }
+            other => other,
+        }
     }
 }
 
-fn peer_address(bound: OsString) -> Option<PeerAddress> {
-    let parsed = match bound.to_str() {
-        Some(text) => PeerAddress::parse(text).map_err(|error| error.to_string()),
+fn parsed<T, E: std::fmt::Display>(var: &str, value: OsString, parse: impl FnOnce(&str) -> Result<T, E>) -> Option<T> {
+    let parsed = match value.to_str() {
+        Some("") => Err("the value is empty".to_string()),
+        Some(text) => parse(text).map_err(|error| error.to_string()),
         None => Err("the value is not UTF-8".to_string()),
     };
     parsed
-        .inspect_err(|error| eprintln!("OpenAPPA hook ignored {PEER_ADDRESS_VAR}: {error}"))
+        .inspect_err(|error| eprintln!("OpenAPPA hook ignored {var}: {error}"))
         .ok()
 }
 
@@ -221,7 +267,7 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
             }
             return ExitCode::SUCCESS;
         }
-        Ok(Some(event)) => with_peer_address(event, std::env::var_os(PEER_ADDRESS_VAR)),
+        Ok(Some(event)) => Launcher::inherited().attach(event),
         // Bytes this codec cannot read at all are still a hook: where they report a result
         // the harness has already produced, the codec renders the withholding for it, so
         // the output the tool produced does not stay in front of the model.
@@ -261,6 +307,15 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         // refusal carries — a decision, a refusal that decides nothing, or a body that
         // is no wire decision at all. Every other refusal is what the exit code stops,
         // and the rendering only reports it.
+        // The runtime refused the stop that carries the withheld return: it carries nothing
+        // to check, and holding it would hold the subagent in a stop no return can pass.
+        (_, false) if ends_unchecked(&event) => {
+            eprintln!(
+                "OpenAPPA hook let the withheld return end the subagent: {}",
+                refusal(&answer)
+            );
+            ExitCode::SUCCESS
+        }
         (answered, false) => {
             let failure = refusal(&answer);
             carry_out(
@@ -298,7 +353,7 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
         true => Refused::Withheld(match answered {
             Some(decision) if stands_in_for_a_result(&decision) => decision,
             _ => HookDecision::Block {
-                reason: format!("the runtime refused this hook: {failure}"),
+                reason: unchecked_reason(event, &format!("the runtime refused this hook: {failure}")),
             },
         }),
     }
@@ -353,6 +408,12 @@ fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decid
         eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         return ExitCode::SUCCESS;
     }
+    if let Unanswered::Event(_, event) = hook
+        && ends_unchecked(event)
+    {
+        eprintln!("OpenAPPA hook let the withheld return end the subagent: {failure}");
+        return ExitCode::SUCCESS;
+    }
     match withholding(codec, hook, failure) {
         Some(withholding) => withhold(&withholding, failure),
         None => block(failure),
@@ -369,7 +430,7 @@ fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<ser
                 host,
                 event,
                 &HookDecision::Block {
-                    reason: format!("the runtime did not answer this hook: {failure}"),
+                    reason: unchecked_reason(event, &format!("the runtime did not answer this hook: {failure}")),
                 },
             )
         }),
@@ -388,6 +449,20 @@ fn reports_a_result(event: &HookEvent) -> bool {
         event,
         HookEvent::ToolResult { .. } | HookEvent::SpawnResult { .. } | HookEvent::ChildEnd { .. }
     )
+}
+
+/// A subagent's stop on the withheld return, which ends it when its return cannot be checked.
+fn ends_unchecked(event: &HookEvent) -> bool {
+    matches!(event, HookEvent::ChildEnd { value, .. } if is_withheld_return(value.as_deref()))
+}
+
+/// Why a result is withheld. A subagent's stop is held by the withholding, so it is told the
+/// one return that ends it.
+fn unchecked_reason(event: &HookEvent, cause: &str) -> String {
+    match event {
+        HookEvent::ChildEnd { .. } => withheld_return_instruction(cause),
+        _ => cause.to_string(),
+    }
 }
 
 /// Whether this decision is one the harness can put in a result's place.

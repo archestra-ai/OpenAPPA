@@ -419,6 +419,8 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await

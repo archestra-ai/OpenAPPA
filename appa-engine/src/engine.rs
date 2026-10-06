@@ -472,6 +472,13 @@ impl Engine {
         }
     }
 
+    /// Whether the family has nothing in flight or owed — no open dispatch, no unsettled
+    /// reservation, no child still on an errand — so a host that clears its context may start
+    /// an independent family without any of this one's values reaching it.
+    pub fn is_quiescent(&self, view: &EngineView) -> bool {
+        view.projection().is_quiescent()
+    }
+
     /// The family's forks in flight: prepared, bound to no child yet, their
     /// spawn dispatch still open, and their parent still live — the spawns whose child the host
     /// may still name. A fork whose parent ended with the spawn dispatch open can

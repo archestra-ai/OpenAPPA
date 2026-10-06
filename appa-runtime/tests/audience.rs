@@ -177,6 +177,8 @@ async fn narrowed_under(dir: &tempfile::TempDir, policy: &str, audience_url: &st
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,
@@ -324,6 +326,8 @@ max_body_bytes = 4096
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

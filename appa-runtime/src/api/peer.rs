@@ -94,13 +94,15 @@ fn unattributed() -> Label {
     Label::new(Trust::new(0), Audience::public())
 }
 
-/// The family's current address and title, the latest of each it recorded.
+/// The family's current address and title, the latest of each it recorded. A family its
+/// launch left answers at no address: the launch's address went with it.
 fn identity(log: &Log) -> (Option<&PeerAddress>, Option<&SessionTitle>) {
     log.host_records()
         .iter()
         .fold((None, None), |(address, title), record| match &record.observation {
             HostObservation::Addressed { address } => (Some(address), title),
             HostObservation::Titled { title } => (address, Some(title)),
+            HostObservation::LaunchMoved { .. } => (None, title),
             _ => (address, title),
         })
 }

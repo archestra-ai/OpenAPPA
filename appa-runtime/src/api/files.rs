@@ -141,6 +141,20 @@ impl FileTracking {
         )?))
     }
 
+    /// Bind `root` to the workspace `parent` is bound to, so a fork does not start without
+    /// the binding that refuses its parent the native filesystem and shell tools.
+    pub(super) fn bind_as(
+        &self,
+        authority: &std::sync::Arc<appa_eventlog::LogStore>,
+        root: &super::TrajectoryId,
+        parent: &super::TrajectoryId,
+    ) -> Result<(), appa_eventlog::files::FileStoreError> {
+        match FileStore::bound_workspace(authority, parent)? {
+            Some(workspace) => self.bind(authority, root, &workspace).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
     pub(super) fn root_is_bound(
         &self,
         authority: &appa_eventlog::LogStore,

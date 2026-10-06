@@ -45,6 +45,8 @@ async fn start(runtime: &Arc<Runtime>, principal: Option<&str>) -> HookDecision 
             principal: principal.map(str::to_string),
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await

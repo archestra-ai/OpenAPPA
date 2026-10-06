@@ -152,7 +152,7 @@ A `trajectory family` contains one root and its spawned subagents in the same ev
 
 A root fork keeps the source family's opening policy, the source trajectory's label and authority denials, and the family's committed effects and unsettled effect reservations. Parent and fork then evolve independently. A reservation inherited while a parent call was unfinished remains conservative in the fork; a later parent result does not settle it there. Active dispatches and remedy offers are not copied.
 
-This is an explicit embedding operation, `Runtime::open_root_fork`, not automatic parent discovery in the native Claude Code hooks. The integration must establish which trajectory supplied the copied context. A new session ID alone does not prove that it is a fork.
+An embedding opens a root fork explicitly with `Runtime::open_root_fork`. It must establish which trajectory supplied the copied context: a new session ID alone does not prove that it is a fork. The Claude Code integration establishes it from the protected launch. `clappa --resume <id> --fork-session` names the source, and the new root forks from it. A session ID change inside one launch continues the same family. See [Session ID changes](/claude-code#session-id-changes).
 
 ## Example: sharing information from a private customer ticket
 

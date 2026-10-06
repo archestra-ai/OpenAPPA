@@ -6,7 +6,7 @@ use std::path::Path;
 use appa_runtime::api::{AuditEvent, LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime, TrajectoryId};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent};
+use appa_runtime_api::{Actor, AdapterName, HookDecision, HookEvent, LaunchStart, LaunchToken, WireEvent};
 
 /// One recorded Claude Code session: the hook bodies it delivered, in
 /// order, scrubbed of local paths.
@@ -426,8 +426,10 @@ async fn a_stop_with_no_spawn_at_all_is_blocked() {
         let (status, answer) = call(&runtime, &attempt).await;
         assert_eq!(status, 200, "{answer}");
         blocked(&answer);
-        assert!(returns(&runtime, &root).is_empty(), "nothing crossed");
-        assert_eq!(forks(&runtime, &root), 0, "a stop never opens a child");
+        assert!(
+            runtime.audit(&root).is_none(),
+            "a stop opens neither a child nor its family"
+        );
     }
 }
 
@@ -730,7 +732,7 @@ async fn a_start_with_no_spawn_in_flight_refuses_and_its_calls_are_denied() {
     let (status, answer) = call(&runtime, &hook(&events, "PreToolUse", Some("Bash"), true)).await;
     assert_eq!(status, 200);
     assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
-    assert_eq!(forks(&runtime, &root), 0);
+    assert!(runtime.audit(&root).is_none(), "a child's events open no family");
 }
 
 fn structured_output(events: &[serde_json::Value]) -> usize {
@@ -855,4 +857,214 @@ permits = { audience = { from = ["internal"], to = ["public"] } }
         "the exact sanitized input crosses: {answer}"
     );
     assert_eq!(returns(&runtime, &root), vec![Some("redactor".to_string())]);
+}
+
+const LAUNCH: &str = "0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10";
+const OTHER_LAUNCH: &str = "5d0f7b2a-4c1e-4f3b-8a9d-6e2c1b0a7f34";
+const CLEARED: &str = "9ca30274-2b1e-4c4f-9d0a-1f2e3d4c5b6a";
+
+/// A session start as `appa hook` posts it inside a protected launch: Claude Code's own
+/// start, with the launch (and a fork's parent) the launcher put in its environment. The
+/// answer is the wire decision.
+async fn launched_start(
+    runtime: &Runtime,
+    session: &str,
+    source: &str,
+    launch: &str,
+    forked_from: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": source});
+    let HookEvent::SessionStart {
+        root,
+        principal,
+        address,
+        title,
+        start,
+        launch: None,
+    } = parsed(&host)
+    else {
+        panic!("a session start parses as one");
+    };
+    let event = HookEvent::SessionStart {
+        root,
+        principal,
+        address,
+        title,
+        start,
+        launch: Some(LaunchStart {
+            launch: LaunchToken::parse(launch).expect("the token parses"),
+            forked_from: forked_from.map(|session| TrajectoryId(format!("cc:{session}"))),
+        }),
+    };
+    let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the start translates");
+    let wire = serde_json::to_vec(&wire).expect("the start serializes");
+    hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await
+}
+
+fn decision(answer: &serde_json::Value) -> &str {
+    answer["decision"].as_str().expect("a wire decision names itself")
+}
+
+/// The recorded events as Claude Code delivers them after it moved the session to `session`.
+fn under(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            event["session_id"] = serde_json::json!(session);
+            event
+        })
+        .collect()
+}
+
+fn cc(session: &str) -> TrajectoryId {
+    TrajectoryId(format!("cc:{session}"))
+}
+
+fn trust(runtime: &Runtime, root: &TrajectoryId) -> String {
+    runtime.status(root).expect("the family has a status").trust
+}
+
+fn family_of(runtime: &Runtime, host: &TrajectoryId) -> Option<String> {
+    runtime.status(host).map(|status| status.trajectory)
+}
+
+/// The root runs the recorded subagent's narrowing `Bash` call itself, accepting the
+/// narrowing it is offered, so the family's label falls.
+async fn root_bash(runtime: &Runtime, events: &[serde_json::Value]) {
+    let call_event = as_root(hook(events, "PreToolUse", Some("Bash"), true));
+    let (_, answer) = call(runtime, &call_event).await;
+    let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the narrowing call is denied with its offers");
+    let offer = offers(reason).pop().expect("the narrowing is offered for acceptance");
+    let accepted = runtime
+        .execute_remedy(
+            &Actor {
+                root: ASYNC.root(),
+                child: None,
+            },
+            offer,
+        )
+        .await;
+    assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+    replay(
+        runtime,
+        &[call_event, as_root(hook(events, "PostToolUse", Some("Bash"), true))],
+    )
+    .await;
+}
+
+/// Claude Code keeps a subagent running across `/clear` and reports its later hooks under
+/// the cleared session's new id. The family it started in is still owed its return, so the
+/// clear keeps the family, and the subagent's calls and return are that family's.
+#[tokio::test]
+async fn a_subagent_running_across_a_clear_stays_its_familys_child() {
+    let runtime = deployment("", "", "delta = {}");
+    let family = ASYNC.root();
+    let events = ASYNC.events();
+    let ack = index_of(&events, &hook(&events, "PostToolUse", Some("Agent"), false));
+    let stop = index_of(&events, &child_stop(&events));
+
+    let (status, _) = launched_start(&runtime, ASYNC.session, "startup", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    replay(&runtime, &events[..=ack]).await;
+
+    let (status, answer) = launched_start(&runtime, CLEARED, "clear", LAUNCH, None).await;
+    assert_eq!(
+        (status, decision(&answer)),
+        (200, "context"),
+        "the session is told its label stayed"
+    );
+
+    replay(&runtime, &under(&events[ack + 1..=stop], CLEARED)).await;
+    let cleared = cc(CLEARED);
+    assert!(
+        runtime.audit(&cleared).is_none(),
+        "the clear opened no family of its own"
+    );
+    assert_eq!(
+        returns(&runtime, &family),
+        vec![None],
+        "the subagent's return crossed in its family"
+    );
+    assert_eq!(family_of(&runtime, &cleared), Some(family.0.clone()));
+
+    // A later launch that resumes the cleared id reopens the family it continued.
+    let (status, _) = launched_start(&runtime, CLEARED, "resume", OTHER_LAUNCH, None).await;
+    assert_eq!(status, 200);
+    assert!(
+        runtime.audit(&cleared).is_none(),
+        "the resume reopened the family, not a new one"
+    );
+}
+
+/// A clear with nothing in flight or owed starts a family that carries none of the old one,
+/// and the launch runs that family from then on.
+#[tokio::test]
+async fn a_clear_with_nothing_owed_starts_a_clean_family() {
+    let runtime = deployment("", "", "delta = { trust = \"suspicious\" }");
+    let family = ASYNC.root();
+    let events = ASYNC.events();
+
+    let (status, _) = launched_start(&runtime, ASYNC.session, "startup", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    let clean = trust(&runtime, &family);
+    root_bash(&runtime, &events).await;
+    assert_ne!(trust(&runtime, &family), clean, "the call narrowed the family");
+
+    let (status, answer) = launched_start(&runtime, CLEARED, "clear", LAUNCH, None).await;
+    assert_eq!((status, decision(&answer)), (200, "ack"));
+    assert_eq!(trust(&runtime, &cc(CLEARED)), clean, "the cleared session starts clean");
+
+    let branched = cc("7194365e-0c1d-4e2f-8a3b-5c6d7e8f9a0b");
+    let (status, _) = launched_start(&runtime, &branched.0[3..], "fork", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(family_of(&runtime, &branched), Some(cc(CLEARED).0));
+}
+
+/// `clappa --resume <id> --fork-session` copies a conversation APPA holds: the fork starts
+/// from that family's label. A fork of a conversation APPA never held starts fresh, as a
+/// resume of it does.
+#[tokio::test]
+async fn a_launched_fork_starts_from_its_parents_label() {
+    let runtime = deployment("", "", "delta = { trust = \"suspicious\" }");
+    let family = ASYNC.root();
+    let events = ASYNC.events();
+    let (status, _) = launched_start(&runtime, ASYNC.session, "startup", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    let clean = trust(&runtime, &family);
+    root_bash(&runtime, &events).await;
+    let narrowed = trust(&runtime, &family);
+    assert_ne!(narrowed, clean, "the call narrowed the family");
+
+    let fork = "3172ca61-5e4d-4c3b-9a2f-1e0d9c8b7a65";
+    let (status, _) = launched_start(&runtime, fork, "fork", OTHER_LAUNCH, Some(ASYNC.session)).await;
+    assert_eq!(status, 200);
+    assert_eq!(trust(&runtime, &cc(fork)), narrowed);
+
+    let stranger = "a2637ad1-6f5e-4d4c-8b3a-2f1e0d9c8b7a";
+    let (status, _) = launched_start(&runtime, stranger, "fork", THIRD_LAUNCH, Some("never-seen")).await;
+    assert_eq!(status, 200);
+    assert_eq!(trust(&runtime, &cc(stranger)), clean);
+}
+
+const THIRD_LAUNCH: &str = "c4e9a1b7-2d3f-4a5b-9c8d-7e6f5a4b3c2d";
+
+/// A subagent's stop whose return APPA cannot check is held, and the stop that carries the
+/// withheld return ends it.
+#[tokio::test]
+async fn a_stop_appa_cannot_check_ends_on_the_withheld_return() {
+    let runtime = deployment("", "", "delta = {}");
+    let events = ASYNC.events();
+    replay(&runtime, &events[..1]).await;
+
+    let stop = child_stop(&events);
+    let (status, answer) = call(&runtime, &stop).await;
+    assert_eq!(status, 200, "{answer}");
+    blocked(&answer);
+
+    let mut withheld = re_fired(stop);
+    withheld["last_assistant_message"] = serde_json::json!(format!("{}\n", hooks::WITHHELD_RETURN));
+    assert_eq!(call(&runtime, &withheld).await, (200, serde_json::json!({})));
 }

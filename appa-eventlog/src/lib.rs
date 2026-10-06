@@ -67,7 +67,9 @@ use appa_engine::label::Label;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::DispatchId;
 pub use appa_engine::value::TrajectoryId;
-use appa_runtime_api::{AdapterName, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory};
+use appa_runtime_api::{
+    AdapterName, LaunchToken, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory,
+};
 
 pub mod embedded;
 mod encoding;
@@ -210,6 +212,13 @@ pub enum HostObservation {
     },
     /// This root admitted the peer message whose body digests to `digest`.
     PeerAdmitted { digest: PeerDigest },
+    /// This root is the family of the protected launch `launch`.
+    Launched { launch: LaunchToken },
+    /// The launch left this family for `to` when its host cleared the conversation. The
+    /// family keeps its history and stops answering for the launch and its address.
+    LaunchMoved { launch: LaunchToken, to: TrajectoryId },
+    /// The host continues this family under `host`, another of its own session ids.
+    Aliased { host: TrajectoryId },
 }
 
 impl HostObservation {
@@ -222,13 +231,16 @@ impl HostObservation {
             Self::Addressed { address } => Some(peer_address_key(address)),
             Self::Titled { title } => Some(peer_title_key(title)),
             Self::PeerSent { digest, .. } => Some(peer_sent_key(digest)),
+            Self::Launched { launch } => Some(launch_key(launch)),
+            Self::Aliased { host } => Some(host_alias_key(host)),
             Self::Inventory { .. }
             | Self::CallBound { .. }
             | Self::CallSettled { .. }
             | Self::PromptSeen { .. }
             | Self::PromptSettled { .. }
             | Self::TurnEnded { .. }
-            | Self::PeerAdmitted { .. } => None,
+            | Self::PeerAdmitted { .. }
+            | Self::LaunchMoved { .. } => None,
         }
     }
 }
@@ -236,6 +248,16 @@ impl HostObservation {
 /// The key a [`HostObservation::Addressed`] record names, for [`LogStore::roots_mentioning`].
 pub fn peer_address_key(address: &PeerAddress) -> String {
     format!("peer-address:{address}")
+}
+
+/// The key a [`HostObservation::Launched`] record names.
+pub fn launch_key(launch: &LaunchToken) -> String {
+    format!("launch:{launch}")
+}
+
+/// The key a [`HostObservation::Aliased`] record names.
+pub fn host_alias_key(host: &TrajectoryId) -> String {
+    format!("host-alias:{}", host.0)
 }
 
 /// The key a [`HostObservation::Titled`] record names.

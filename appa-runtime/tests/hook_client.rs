@@ -826,6 +826,89 @@ async fn an_unanswered_child_end_withholds_the_return_it_reports() {
     );
 }
 
+/// A start inside a protected launch carries the launch, and a fork the session the
+/// launcher was asked to fork; any other start carries no parent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launched_start_carries_its_launch_and_a_fork_its_parent() {
+    let posted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let sink = std::sync::Arc::clone(&posted);
+    let url = serve(Router::new().route(
+        "/hook",
+        post(move |body: axum::body::Bytes| {
+            let sink = std::sync::Arc::clone(&sink);
+            async move {
+                sink.lock()
+                    .expect("the sink locks")
+                    .push(serde_json::from_slice(&body).expect("the client posts JSON"));
+                r#"{"protocol":1,"decision":"ack"}"#
+            }
+        }),
+    ))
+    .await;
+    for source in ["fork", "clear"] {
+        let url = url.clone();
+        let start = format!(r#"{{"hook_event_name":"SessionStart","session_id":"client-test","source":"{source}"}}"#);
+        let code = tokio::task::spawn_blocking(move || {
+            let child = client(&url)
+                .env("APPA_LAUNCH", "0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10")
+                .env("APPA_FORKED_FROM", "parent-session")
+                .spawn()
+                .expect("the hook client spawns");
+            finish(child, &start).0
+        })
+        .await
+        .expect("the blocking task joins");
+        assert_eq!(code, 0);
+    }
+    let posted = posted.lock().expect("the sink locks");
+    let fields = |event: &serde_json::Value| {
+        (
+            event["launch"].clone(),
+            event["start"].clone(),
+            event["forked_from"].clone(),
+        )
+    };
+    let launch = serde_json::json!("0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10");
+    assert_eq!(
+        posted.iter().map(fields).collect::<Vec<_>>(),
+        vec![
+            (
+                launch.clone(),
+                serde_json::json!("fork"),
+                serde_json::json!("parent-session")
+            ),
+            (launch, serde_json::json!("clear"), serde_json::Value::Null),
+        ]
+    );
+}
+
+/// A held stop ends on the withheld return: the stop that carries it is let through whether
+/// the runtime refuses it or does not answer at all, and prints no answer to hold it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_on_the_withheld_return_ends_the_subagent_the_runtime_cannot_check() {
+    let mut stop: serde_json::Value = serde_json::from_str(SUBAGENT_STOP).expect("the stop is JSON");
+    stop["last_assistant_message"] = serde_json::json!(appa_runtime::hooks::WITHHELD_RETURN);
+    stop["stop_hook_active"] = serde_json::json!(true);
+    let stop = stop.to_string();
+    let refusing = serve(Router::new().route(
+        "/hook",
+        post(|| async {
+            (
+                axum::http::StatusCode::CONFLICT,
+                r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+            )
+        }),
+    ))
+    .await;
+    for url in [refusing, refused_url().await] {
+        let stop = stop.clone();
+        let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, &stop))
+            .await
+            .expect("the blocking task joins");
+        assert_eq!((code, stdout.as_str()), (0, ""), "the stop ends the subagent");
+    }
+}
+
 /// A stop whose bytes this codec cannot read takes the other channel. Nothing has been put
 /// in front of the parent yet — the stop is where a return would cross — so the blocking
 /// exit is what holds the child, and there is no replacement to print.

@@ -222,6 +222,8 @@ impl SessionInner {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         })?;
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),

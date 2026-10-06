@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedInputSanitizer, OfferedRemedy, OfferedReturn,
-    OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, Review, ReviewChannel, Ruling,
-    SessionTitle, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
+    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, Review,
+    ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -153,10 +153,13 @@ enum Field {
     Peer,
     Title,
     Address,
+    Launch,
+    Start,
+    ForkedFrom,
 }
 
 impl Field {
-    const ALL: [Field; 17] = [
+    const ALL: [Field; 20] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -174,6 +177,9 @@ impl Field {
         Field::Peer,
         Field::Title,
         Field::Address,
+        Field::Launch,
+        Field::Start,
+        Field::ForkedFrom,
     ];
 
     fn spelling(self) -> &'static str {
@@ -195,6 +201,9 @@ impl Field {
             Field::Peer => "peer",
             Field::Title => "title",
             Field::Address => "address",
+            Field::Launch => "launch",
+            Field::Start => "start",
+            Field::ForkedFrom => "forked_from",
         }
     }
 }
@@ -212,7 +221,14 @@ fn fields_read(name: EventName) -> &'static [Field] {
         // no reader and is admitted. What a probe may not carry is a
         // dispatch — no call, no result, no ruling.
         EventName::Ping => &[Field::RootId, Field::ChildId],
-        EventName::SessionStart => &[Field::RootId, Field::Address, Field::Title],
+        EventName::SessionStart => &[
+            Field::RootId,
+            Field::Address,
+            Field::Title,
+            Field::Launch,
+            Field::Start,
+            Field::ForkedFrom,
+        ],
         EventName::Prompt => &[
             Field::RootId,
             Field::ChildId,
@@ -464,6 +480,16 @@ pub struct WireEvent {
     /// Where a starting session receives peer messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<PeerAddress>,
+    /// The protected launch a starting session belongs to; `forked_from` is read only
+    /// beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchToken>,
+    /// Why the host started this session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<StartKind>,
+    /// The host id of the session a fork copied, unprefixed like `root_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -504,6 +530,9 @@ impl WireEvent {
             peer: None,
             title: None,
             address: None,
+            launch: None,
+            start: None,
+            forked_from: None,
         }
     }
 
@@ -528,6 +557,9 @@ impl WireEvent {
             Field::Peer => self.peer.is_some(),
             Field::Title => self.title.is_some(),
             Field::Address => self.address.is_some(),
+            Field::Launch => self.launch.is_some(),
+            Field::Start => self.start.is_some(),
+            Field::ForkedFrom => self.forked_from.is_some(),
         }
     }
 
@@ -560,15 +592,30 @@ impl WireEvent {
                 principal: None,
                 address,
                 title,
+                start,
+                launch,
             } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
                 })?;
+                let forked_from = match launch.as_ref().and_then(|launch| launch.forked_from.as_ref()) {
+                    Some(parent) => Some(
+                        ids(&Actor {
+                            root: parent.clone(),
+                            child: None,
+                        })?
+                        .0,
+                    ),
+                    None => None,
+                };
                 Self {
                     root_id: Some(root_id),
                     address: address.clone(),
                     title: title.clone(),
+                    launch: launch.as_ref().map(|launch| launch.launch.clone()),
+                    start: *start,
+                    forked_from,
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
@@ -758,6 +805,11 @@ impl WireEvent {
                 )));
             }
         }
+        // A launched start decides which family it opens; an inventory beside it would open
+        // one before that decision.
+        if self.launch.is_some() && self.inventory.is_some() {
+            return Err(malformed("a launched session start carries no inventory"));
+        }
         // Whether this host can assert a person's ruling at all is
         // settled here, on the envelope, before any event exists.
         let ruling = checked_ruling(served.name, self.ruling)?;
@@ -783,6 +835,9 @@ impl WireEvent {
             peer,
             title,
             address,
+            launch,
+            start,
+            forked_from,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -843,6 +898,8 @@ impl WireEvent {
                 principal: None,
                 address,
                 title,
+                start,
+                launch: launch_start(served.name, launch, start, forked_from)?,
             }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt {
@@ -1007,6 +1064,26 @@ impl WireEvent {
 
 fn child_of(root: &TrajectoryId, child_id: &str) -> TrajectoryId {
     TrajectoryId(format!("{}:{child_id}", root.0))
+}
+
+/// A start's launch fields read together: a fork's parent is a claim about a launch, so it
+/// crosses only beside one, and only on a fork.
+fn launch_start(
+    adapter: AdapterName,
+    launch: Option<LaunchToken>,
+    start: Option<StartKind>,
+    forked_from: Option<String>,
+) -> Result<Option<LaunchStart>, ParseRefusal> {
+    let forked_from = forked_from.filter(|id| !id.is_empty()).map(|id| adapter.root(&id));
+    match (launch, start, forked_from) {
+        (launch, _, None) => Ok(launch.map(|launch| LaunchStart {
+            launch,
+            forked_from: None,
+        })),
+        (Some(launch), Some(StartKind::Fork), forked_from) => Ok(Some(LaunchStart { launch, forked_from })),
+        (Some(_), _, Some(_)) => Err(malformed("forked_from on a start that is no fork")),
+        (None, _, Some(_)) => Err(malformed("forked_from without a launch")),
+    }
 }
 
 /// The host's own ids from an actor the client already prefixed.
@@ -1599,6 +1676,8 @@ mod tests {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
         let principal = HookEvent::SessionStart {
@@ -1606,6 +1685,8 @@ mod tests {
             principal: Some("alice@corp.example".to_string()),
             address: None,
             title: None,
+            launch: None,
+            start: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
@@ -1740,8 +1821,66 @@ mod tests {
                 principal: None,
                 address,
                 title,
+                launch: None,
+                start: None,
             };
             assert_eq!(through(&start), start);
+        }
+    }
+
+    /// A start's launch, kind, and a fork's parent cross the wire; a parent crosses only on a
+    /// launched fork, and a launched start carries no inventory.
+    #[test]
+    fn launch_fields_round_trip_and_a_parent_crosses_only_on_a_launched_fork() {
+        let through = |event: &HookEvent| {
+            let wire = WireEvent::from_event(AdapterName::ClaudeCode, event).expect("translates");
+            let bytes = serde_json::to_vec(&wire).expect("serializes");
+            WireEvent::read(&bytes)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE)
+                .expect("parses")
+                .expect("event")
+                .event
+        };
+        let launch = LaunchToken::parse("0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10").expect("a token");
+        for (start, forked_from) in [
+            (Some(StartKind::Fork), Some(TrajectoryId("cc:parent".to_string()))),
+            (Some(StartKind::Clear), None),
+            (None, None),
+        ] {
+            let event = HookEvent::SessionStart {
+                root: TrajectoryId("cc:s1".to_string()),
+                principal: None,
+                address: None,
+                title: None,
+                start,
+                launch: Some(LaunchStart {
+                    launch: launch.clone(),
+                    forked_from,
+                }),
+            };
+            assert_eq!(through(&event), event);
+        }
+
+        let posted = |fields: &str| {
+            let row =
+                format!(r#"{{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1",{fields}}}"#);
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE))
+        };
+        let token = r#""launch":"0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10""#;
+        for fields in [
+            r#""start":"fork","forked_from":"parent""#.to_string(),
+            format!(r#"{token},"start":"clear","forked_from":"parent""#),
+            format!(r#"{token},"forked_from":"parent""#),
+            format!(r#"{token},"inventory":{{"servers":[],"tools":[]}}"#),
+            r#""launch":"not a token""#.to_string(),
+            r#""start":"rebooted""#.to_string(),
+        ] {
+            let read = posted(&fields);
+            assert!(
+                matches!(read, Err(ParseRefusal::Malformed { .. })),
+                "{fields} must be refused, got {read:?}"
+            );
         }
     }
 

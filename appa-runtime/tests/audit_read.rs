@@ -104,6 +104,8 @@ async fn deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await;
@@ -425,6 +427,8 @@ async fn attest_deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await;

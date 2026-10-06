@@ -102,6 +102,22 @@ clappa --resume 01234567-89ab-4cde-8012-3456789abcde
 
 The OpenAPPA block appears only when Claude Code saved a transcript that can be resumed.
 
+### Session ID changes
+
+Claude Code can move a running conversation to a new session ID. OpenAPPA ties each ID to the `clappa` launch that started it, so a new ID does not reset the label.
+
+| Action | Result |
+|---|---|
+| `/clear` with no subagent running and no call owed | A new root opens with a clean label. |
+| `/clear` while a subagent runs or a call is owed | The session keeps its label. The subagent's later calls and its return stay checked. Run `/clear` again after it finishes. |
+| `/branch` | The new ID continues the same family and label. |
+| `clappa --resume <id> --fork-session` | A root fork opens from that session's label. `--fork-session` MUST name its source with `--resume <id>`. |
+| `--resume`, `--continue`, `/compact` | The session ID does not change. The existing root reopens. |
+
+`clappa` disables Claude Code's agent view (`CLAUDE_CODE_DISABLE_AGENT_VIEW=1`). A backgrounded session runs under a daemon that does not carry the protected launch, so OpenAPPA cannot check it.
+
+When OpenAPPA cannot check a subagent's return, it holds the subagent's stop and tells the subagent to reply with one fixed line. That stop ends the subagent, and the parent receives only that line.
+
 :::claude-session-choice:::
 
 Projects configured with `disableAllHooks: true` disable all hooks, preventing `clappa` from enforcing policy in that session.

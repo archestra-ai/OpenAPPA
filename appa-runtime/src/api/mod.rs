@@ -4,6 +4,7 @@
 mod embedded;
 pub(crate) mod files;
 mod host;
+mod launch;
 pub(crate) mod peer;
 mod session;
 
@@ -26,6 +27,7 @@ pub use appa_runtime_api::{
     TrajectoryId,
 };
 pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
+pub(crate) use launch::LaunchedStart;
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 /// Why a host could not read a root's current status.
@@ -2139,7 +2141,10 @@ impl Runtime {
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         match self.try_status(id) {
             Ok(status) => Some(status),
-            Err(StatusReadError::UnknownRoot { .. }) => None,
+            Err(StatusReadError::UnknownRoot { .. }) => match self.alias_of(id) {
+                Ok(Some(family)) => self.status(&family),
+                Ok(None) | Err(_) => None,
+            },
             Err(error) => {
                 tracing::warn!(trajectory = %id.0, %error, "status read refused the persisted log");
                 None
@@ -4100,6 +4105,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -4122,6 +4129,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
@@ -4230,6 +4239,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -4322,6 +4333,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         principal: None,
                         address: None,
                         title: None,
+                        launch: None,
+                        start: None,
                     }
                 )
                 .await,
@@ -4943,6 +4956,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -4998,6 +5013,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -5045,6 +5062,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
             )
             .await;
@@ -5090,6 +5109,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
             )
             .await;
@@ -5135,6 +5156,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
@@ -5185,6 +5208,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
             )
             .await;
@@ -5252,6 +5277,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
@@ -5305,6 +5332,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
@@ -5342,6 +5371,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
             )
             .await;
@@ -5419,6 +5450,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
             )
             .await;
@@ -5497,6 +5530,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
@@ -5554,6 +5589,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -5677,6 +5714,8 @@ url = "{url}"
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
