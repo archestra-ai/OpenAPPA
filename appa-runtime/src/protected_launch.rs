@@ -9,11 +9,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 use uuid::Uuid;
 
-use crate::hook_client::{PEER_ADDRESS_VAR, session_is_gated};
+use crate::hook_client::{FORKED_FROM_VAR, LAUNCH_VAR as LAUNCH, PEER_ADDRESS_VAR, session_is_gated};
 
 const GATE: &str = "APPA_GATE";
-const LAUNCH: &str = "APPA_LAUNCH";
 const MESSAGING_FLAG: &str = "--messaging-socket-path";
+/// Agent view moves a session into a background daemon whose environment is not this
+/// launch's, so a protected session would run on without the gate or under another launch.
+const DISABLE_AGENT_VIEW: &str = "CLAUDE_CODE_DISABLE_AGENT_VIEW";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Event {
@@ -24,6 +26,13 @@ pub enum Event {
 /// Run Claude in the foreground. This function terminates the host process so
 /// it can preserve a child's signal death as well as an ordinary exit code.
 pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
+    let fork = match Fork::of(arguments) {
+        Ok(fork) => fork,
+        Err(refusal) => {
+            eprintln!("clappa: {refusal}");
+            std::process::exit(2);
+        }
+    };
     let token = Uuid::new_v4();
     let launches = data_dir.join("launches");
     let session = launches.join(token.to_string());
@@ -44,10 +53,15 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
             .arg(&messaging.socket)
             .env(PEER_ADDRESS_VAR, &messaging.address);
     }
+    match &fork {
+        Fork::Of(session) => command.env(FORKED_FROM_VAR, session),
+        Fork::None => command.env_remove(FORKED_FROM_VAR),
+    };
     let child = command
         .args(arguments)
         .env(GATE, "1")
         .env(LAUNCH, token.to_string())
+        .env(DISABLE_AGENT_VIEW, "1")
         .spawn();
     let mut child = match child {
         Ok(child) => child,
@@ -78,6 +92,36 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     cleanup(&session);
     close(messaging.as_ref());
     terminate_as(status)
+}
+
+/// The session a launch forks, as Claude Code's own arguments name it.
+#[derive(Debug, PartialEq, Eq)]
+enum Fork {
+    None,
+    Of(String),
+}
+
+impl Fork {
+    /// A fork copies a conversation APPA can carry the label of only when the launch names
+    /// it: `--continue` and the resume picker pick it inside Claude Code, out of this
+    /// launcher's sight.
+    fn of(arguments: &[OsString]) -> Result<Self, String> {
+        let arguments: Vec<&str> = arguments.iter().filter_map(|argument| argument.to_str()).collect();
+        if !arguments.contains(&"--fork-session") {
+            return Ok(Self::None);
+        }
+        let resumed = arguments.iter().enumerate().find_map(|(at, argument)| match *argument {
+            "--resume" | "-r" => arguments
+                .get(at + 1)
+                .filter(|id| !id.starts_with('-'))
+                .map(|id| id.to_string()),
+            argument => argument.strip_prefix("--resume=").map(str::to_string),
+        });
+        match resumed.filter(|id| !id.is_empty()) {
+            Some(session) => Ok(Self::Of(session)),
+            None => Err("--fork-session under OpenAPPA needs the session it forks: --resume <session-id>".to_string()),
+        }
+    }
 }
 
 /// The messaging endpoint `clappa` gives one Claude process, and the address
@@ -312,6 +356,34 @@ impl Drop for Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arguments(spelled: &[&str]) -> Vec<OsString> {
+        spelled.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_fork_names_the_session_it_resumes_or_is_refused() {
+        assert_eq!(Fork::of(&arguments(&["--resume", "abc"])), Ok(Fork::None));
+        assert_eq!(
+            Fork::of(&arguments(&["--resume", "abc", "--fork-session"])),
+            Ok(Fork::Of("abc".to_string()))
+        );
+        assert_eq!(
+            Fork::of(&arguments(&["--fork-session", "-r", "abc"])),
+            Ok(Fork::Of("abc".to_string()))
+        );
+        assert_eq!(
+            Fork::of(&arguments(&["--resume=abc", "--fork-session", "-p", "hi"])),
+            Ok(Fork::Of("abc".to_string()))
+        );
+        for refused in [
+            &["--continue", "--fork-session"][..],
+            &["--resume", "--fork-session"],
+            &["--fork-session"],
+        ] {
+            assert!(Fork::of(&arguments(refused)).is_err(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn end_records_only_a_session_with_an_existing_transcript() {

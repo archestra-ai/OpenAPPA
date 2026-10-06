@@ -53,6 +53,8 @@ async fn a_remedy_naming_an_unbound_authority_gives_no_answer_and_the_offer_stan
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

@@ -67,6 +67,8 @@ async fn start(runtime: &Runtime, session: &str, address: &str, principal: Optio
         principal: principal.map(str::to_string),
         address: Some(PeerAddress::parse(address).expect("the fixture address parses")),
         title,
+        launch: None,
+        start: None,
     };
     match principal {
         Some(_) => assert_eq!(hooks::handle(runtime, event).await, HookDecision::Ack),

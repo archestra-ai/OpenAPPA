@@ -776,6 +776,19 @@ impl Projection {
         self.open.contains(dispatch)
     }
 
+    /// Nothing the family started is still in flight or owed: no open dispatch (a spawn in
+    /// flight holds its dispatch open), no unsettled reservation, and every bound child has
+    /// ended or answered its latest errand.
+    pub(crate) fn is_quiescent(&self) -> bool {
+        self.open.is_empty()
+            && self.origin_reservations.is_empty()
+            && self.reservations.values().all(EffectSet::is_empty)
+            && self.bound.values().all(|child| {
+                self.ended.contains(child)
+                    || (self.returns_by.contains_key(child) && !self.resumed_since_return.contains(child))
+            })
+    }
+
     /// Which trajectory surfaced this offer. Family-wide, because the caller that
     /// needs it has only the offer's identity.
     pub(crate) fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {

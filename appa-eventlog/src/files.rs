@@ -409,6 +409,14 @@ impl FileStore {
         Ok(true)
     }
 
+    /// The workspace this root is bound to, where the authoritative history binds it.
+    pub fn bound_workspace(authority: &LogStore, root: &TrajectoryId) -> Result<Option<String>, FileStoreError> {
+        match Self::root_is_bound(authority, root)? {
+            true => authority.workspace_for_root(root),
+            false => Ok(None),
+        }
+    }
+
     pub fn prepare(
         &self,
         actor: &str,

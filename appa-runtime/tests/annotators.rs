@@ -113,6 +113,8 @@ async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,
@@ -476,6 +478,8 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,
@@ -709,6 +713,8 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 }
             )
             .await,
@@ -1501,6 +1507,8 @@ async fn open_hosted(config: Config) -> Arc<Runtime> {
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

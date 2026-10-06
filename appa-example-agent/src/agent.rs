@@ -203,6 +203,8 @@ impl Agent {
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             })
             .await
         {

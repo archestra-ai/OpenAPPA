@@ -150,6 +150,8 @@ async fn narrowed_under(
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

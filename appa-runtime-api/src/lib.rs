@@ -3,9 +3,11 @@
 //! it between a host's adapter and the runtime.
 
 pub mod inventory;
+mod launch;
 mod peer;
 mod wire;
 
+pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
 
 pub use wire::{
@@ -468,6 +470,10 @@ pub enum HookEvent {
         address: Option<PeerAddress>,
         /// The title the host shows for this session.
         title: Option<SessionTitle>,
+        /// Why the host started this session id, where it says.
+        start: Option<StartKind>,
+        /// The protected launch this start belongs to, when a launcher started the host.
+        launch: Option<LaunchStart>,
     },
     Prompt {
         actor: Actor,

@@ -61,7 +61,10 @@ impl HostState {
                 | HostObservation::Addressed { .. }
                 | HostObservation::Titled { .. }
                 | HostObservation::PeerSent { .. }
-                | HostObservation::PeerAdmitted { .. } => {}
+                | HostObservation::PeerAdmitted { .. }
+                | HostObservation::Launched { .. }
+                | HostObservation::LaunchMoved { .. }
+                | HostObservation::Aliased { .. } => {}
                 HostObservation::Vouched { actor, key, ruling } => {
                     let (Some(key), actor) = (recorded_key(key), actor_of(actor)) else {
                         continue;

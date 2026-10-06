@@ -291,6 +291,8 @@ pub async fn session_runtime(dir: &Path, config: &Path) -> Arc<Runtime> {
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

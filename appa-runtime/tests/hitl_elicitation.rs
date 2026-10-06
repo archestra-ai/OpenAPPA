@@ -144,6 +144,8 @@ async fn deployment_from(policy: String) -> Deployment {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await;
@@ -269,6 +271,8 @@ builtin = "hitl"
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await;
@@ -622,6 +626,8 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
             principal: None,
             address: None,
             title: None,
+            launch: None,
+            start: None,
         },
     )
     .await;

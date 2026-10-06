@@ -985,6 +985,10 @@ impl RuntimeEngine {
         self.engine.forks_in_flight(view)
     }
 
+    pub(crate) fn is_quiescent(&self, view: &EngineView) -> bool {
+        self.engine.is_quiescent(view)
+    }
+
     /// The fork one child was bound to, or `None` for a trajectory
     /// the family never forked — for a child start the harness
     /// delivers again: it names the fork it already bound.

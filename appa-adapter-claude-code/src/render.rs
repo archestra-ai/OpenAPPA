@@ -539,6 +539,8 @@ mod tests {
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
                 &HookDecision::Context {
                     text: "available file tools".into()
@@ -705,6 +707,8 @@ mod tests {
                     principal: None,
                     address: None,
                     title: None,
+                    launch: None,
+                    start: None,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",

@@ -127,6 +127,8 @@ async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             }
         )
         .await,

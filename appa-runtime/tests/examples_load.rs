@@ -227,6 +227,8 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             }
         )
         .await,
@@ -386,6 +388,8 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             }
         )
         .await,
@@ -488,6 +492,8 @@ command = ["/bin/sh", "annotator.sh"]
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             }
         )
         .await,
@@ -549,6 +555,8 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             }
         )
         .await,

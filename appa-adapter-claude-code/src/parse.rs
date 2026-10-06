@@ -80,7 +80,7 @@ use serde::Deserialize;
 
 use appa_runtime_api::{
     Actor, HookEvent, OutcomeBody, ParseRefusal, PeerFrame, PromptKey, ProposedCall, SessionTitle, SpawnKind, SpawnRef,
-    ToolOutcome, TrajectoryId,
+    StartKind, ToolOutcome, TrajectoryId,
 };
 
 use crate::identity::spawn_kind;
@@ -120,6 +120,22 @@ pub(crate) struct WireEvent {
     /// The title Claude Code shows for the session.
     #[serde(default)]
     session_title: Option<String>,
+    /// Why Claude Code started this session id.
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// A `source` this build does not know names no kind, which the runtime reads as the one
+/// that changes nothing: the start continues whatever family its launch already has.
+fn start_kind(source: Option<&str>) -> Option<StartKind> {
+    match source? {
+        "startup" => Some(StartKind::Startup),
+        "resume" => Some(StartKind::Resume),
+        "clear" => Some(StartKind::Clear),
+        "compact" => Some(StartKind::Compact),
+        "fork" => Some(StartKind::Fork),
+        _ => None,
+    }
 }
 
 /// The `agent_type` of an agent a `Workflow` script started.
@@ -256,6 +272,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             principal: None,
             address: None,
             title: session_title(&event),
+            launch: None,
+            start: start_kind(event.source.as_deref()),
         })),
         "UserPromptSubmit" => match event.prompt.clone() {
             Some(text) => Ok(Some(HookEvent::Prompt {

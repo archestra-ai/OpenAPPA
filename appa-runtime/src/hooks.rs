@@ -4,14 +4,16 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall,
-    Ruling, SessionTitle, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, LaunchStart, ParseRefusal, PeerAddress, PeerFrame, PromptKey,
+    ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision,
+    WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
 use crate::api::{
-    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, OfferId,
-    RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision, is_control_tool,
+    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart,
+    OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision,
+    is_control_tool,
 };
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
@@ -35,6 +37,10 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
     } = match accepted(runtime, adapter, body) {
         Ok(accepted) => accepted,
         Err(answered) => return answered,
+    };
+    let (event, names_children) = match continued(runtime, event, names_children) {
+        Ok(continued) => continued,
+        Err(error) => return (409, wire(&refuse(error.to_string()))),
     };
     let root = hook_root(&event).clone();
     if let Some(inventory) = inventory
@@ -83,6 +89,125 @@ fn accepted(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Result<Accepte
             Err((409, serde_json::json!({ "error": detail })))
         }
     }
+}
+
+/// The event as the family its host id continues: an aliased host id names that family's
+/// root, and its children are that family's children.
+fn continued(
+    runtime: &Runtime,
+    event: HookEvent,
+    names_children: Vec<TrajectoryId>,
+) -> Result<(HookEvent, Vec<TrajectoryId>), EventError> {
+    let host = hook_root(&event).clone();
+    let Some(family) = runtime.alias_of(&host)? else {
+        return Ok((event, names_children));
+    };
+    let id = |id: TrajectoryId| match id.0.strip_prefix(&host.0) {
+        Some("") => family.clone(),
+        Some(rest) if rest.starts_with(':') => TrajectoryId(format!("{}{rest}", family.0)),
+        _ => id,
+    };
+    let actor = |actor: Actor| Actor {
+        root: id(actor.root),
+        child: actor.child.map(id),
+    };
+    let event = match event {
+        HookEvent::SessionStart {
+            root,
+            principal,
+            address,
+            title,
+            start,
+            launch,
+        } => HookEvent::SessionStart {
+            root: id(root),
+            principal,
+            address,
+            title,
+            start,
+            launch,
+        },
+        HookEvent::Prompt {
+            actor: who,
+            text,
+            settles,
+            peer,
+            title,
+        } => HookEvent::Prompt {
+            actor: actor(who),
+            text,
+            settles,
+            peer,
+            title,
+        },
+        HookEvent::TurnEnd { actor: who } => HookEvent::TurnEnd { actor: actor(who) },
+        HookEvent::ToolCall {
+            actor: who,
+            call,
+            call_id,
+            spawn,
+            prompt,
+            ruling,
+        } => HookEvent::ToolCall {
+            actor: actor(who),
+            call,
+            call_id,
+            spawn,
+            prompt,
+            ruling,
+        },
+        HookEvent::SpawnResume {
+            actor: who,
+            call,
+            child,
+        } => HookEvent::SpawnResume {
+            actor: actor(who),
+            call,
+            child: id(child),
+        },
+        HookEvent::ToolResult {
+            actor: who,
+            call,
+            call_id,
+            outcome,
+        } => HookEvent::ToolResult {
+            actor: actor(who),
+            call,
+            call_id,
+            outcome,
+        },
+        HookEvent::SpawnResult {
+            actor: who,
+            call,
+            call_id,
+            outcome,
+            child,
+            value,
+        } => HookEvent::SpawnResult {
+            actor: actor(who),
+            call,
+            call_id,
+            outcome,
+            child: child.map(id),
+            value,
+        },
+        HookEvent::ChildStart { root, child, spawn } => HookEvent::ChildStart {
+            root: id(root),
+            child: id(child),
+            spawn,
+        },
+        HookEvent::ChildEnd { root, child, value } => HookEvent::ChildEnd {
+            root: id(root),
+            child: id(child),
+            value,
+        },
+        HookEvent::ChildReturn { root, child, value } => HookEvent::ChildReturn {
+            root: id(root),
+            child: id(child),
+            value,
+        },
+    };
+    Ok((event, names_children.into_iter().map(id).collect()))
 }
 
 /// Take in what a start or a call observed of the harness's tools. A child's start is
@@ -220,6 +345,42 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
     }
 }
 
+/// The one return a subagent whose return APPA cannot check may end on. It carries nothing,
+/// so letting its stop through ends the subagent rather than holding it in a stop no return
+/// can pass.
+pub const WITHHELD_RETURN: &str = "[OpenAPPA withheld this subagent's return]";
+
+pub(crate) fn is_withheld_return(said: Option<&str>) -> bool {
+    said.map(str::trim) == Some(WITHHELD_RETURN)
+}
+
+pub(crate) fn withheld_return_instruction(cause: &str) -> String {
+    format!(
+        "APPA cannot check this subagent's return ({cause}). Stop now: reply with exactly this line and nothing \
+         else: {WITHHELD_RETURN}"
+    )
+}
+
+/// What a cleared session is told when its family could not start over.
+const CLEAR_KEPT: &str = "APPA kept this session's label across /clear: a subagent or a call it started is still \
+                          running or owed. Run /clear again after it finishes to start with a clean label.";
+
+fn file_tracking_context(runtime: &Runtime) -> String {
+    "APPA file tracking is enabled. Use appa_read_file(file_path), appa_write_file(file_path, content), \
+     appa_edit_file(file_path, old_string, new_string), and \
+     appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
+     Paths resolve within this root session's working directory. The first file call binds the root \
+     and its subagents to that shared workspace. After binding, APPA refuses the harness's native \
+     filesystem and shell tools. Other policy-approved tools remain available. APPA does not track \
+     observations that the harness makes before a call."
+        .to_owned()
+        + if runtime.file_process_enabled() {
+            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
+        } else {
+            ""
+        }
+}
+
 /// A subagent's words reach its parent through the checked return only; a call that
 /// names the file the harness keeps them in is refused before it runs.
 const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
@@ -355,7 +516,9 @@ async fn dispatch_event(
             principal,
             address,
             title,
-        } => dispatcher.session_start(root, principal, address, title),
+            start,
+            launch,
+        } => dispatcher.session_start(root, principal, address, title, start, launch),
         HookEvent::Prompt {
             actor,
             text,
@@ -412,15 +575,28 @@ struct Dispatcher<'a> {
 impl Dispatcher<'_> {
     /// A start that names the address its launcher bound makes the family reachable by peer
     /// messages. An identity that did not land leaves the family unreachable, which only
-    /// refuses sends to it, so the start goes on.
+    /// refuses sends to it, so the start goes on. A launched start opens the family its
+    /// launch runs, which a host id the launch continues under does not change.
     fn session_start(
         &mut self,
         root: TrajectoryId,
         principal: Option<String>,
         address: Option<PeerAddress>,
         title: Option<SessionTitle>,
+        start: Option<StartKind>,
+        launch: Option<LaunchStart>,
     ) -> HookDecision {
         let runtime = self.runtime;
+        let launched = match (&principal, &launch) {
+            (_, None) => Ok(LaunchedStart::Opened(root)),
+            (None, Some(launch)) => runtime.launched_start(&root, start, launch),
+            (Some(_), Some(_)) => Err(EventError::PrincipalMismatch),
+        };
+        let launched = match launched {
+            Ok(launched) => launched,
+            Err(error) => return refuse(error.to_string()),
+        };
+        let root = launched.root().clone();
         let opened = session_principal(principal.as_deref())
             .and_then(|principal| open_or_reopen(runtime, &root, principal, self.options.clone()));
         if opened.is_ok()
@@ -428,25 +604,17 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %root.0, %error, "the session's peer identity was not recorded");
         }
-        match opened {
-            Ok(_) => match runtime.live(&root, &root) {
-                Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
-                    text: "APPA file tracking is enabled. Use appa_read_file(file_path), appa_write_file(file_path, content), \
-                           appa_edit_file(file_path, old_string, new_string), and \
-                           appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-                           Paths resolve within this root session's working directory. The first file call binds the root \
-                           and its subagents to that shared workspace. After binding, APPA refuses the harness's native \
-                           filesystem and shell tools. Other policy-approved tools remain available. APPA does not track \
-                           observations that the harness makes before a call."
-                        .to_owned()
-                        + if runtime.file_process_enabled() {
-                            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
-                        } else {
-                            ""
-                        },
-                },
-                Ok(()) => HookDecision::Ack,
-                Err(error) => refuse(error.to_string()),
+        let context = [
+            matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned()),
+            runtime.file_tracking_enabled().then(|| file_tracking_context(runtime)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        match opened.and_then(|_| runtime.live(&root, &root)) {
+            Ok(()) if context.is_empty() => HookDecision::Ack,
+            Ok(()) => HookDecision::Context {
+                text: context.join("\n\n"),
             },
             Err(error) => refuse(error.to_string()),
         }
@@ -714,7 +882,10 @@ impl Dispatcher<'_> {
     /// The child is told what its return must look like where the fork's policy shapes it;
     /// a return that crosses as spoken needs no word.
     fn child_start(&mut self, root: TrajectoryId, child: TrajectoryId, spawn: SpawnRef) -> HookDecision {
-        let root = match open_or_reopen(self.runtime, &root, None, self.options.clone()) {
+        let root = match self
+            .runtime
+            .session_with_presentation(&root, &root, self.options.clone())
+        {
             Ok(session) => session,
             Err(error) => return refuse(error.to_string()),
         };
@@ -758,7 +929,9 @@ impl Dispatcher<'_> {
                 }
                 return_decision(said, decision)
             }
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) if error.is_operational() => refuse(error.to_string()),
+            Err(_) if is_withheld_return(said.as_deref()) => HookDecision::Ack,
+            Err(error) => block(withheld_return_instruction(&error.to_string())),
         }
     }
 
@@ -963,7 +1136,8 @@ async fn on_child<T, Run>(
 where
     Run: Future<Output = Result<T, EventError>>,
 {
-    let root_session = open_or_reopen(runtime, root, None, presentation.clone())?;
+    // A child names a family that exists: its root opened before any spawn could start it.
+    let root_session = runtime.session_with_presentation(root, root, presentation.clone())?;
     match (
         event(runtime.session_with_presentation(root, child, presentation.clone())?).await,
         missing_start,
@@ -2088,6 +2262,8 @@ mod tests {
                 principal: None,
                 address: None,
                 title: None,
+                launch: None,
+                start: None,
             },
         )
         .await;
