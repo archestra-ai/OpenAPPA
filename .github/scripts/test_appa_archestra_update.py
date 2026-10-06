@@ -12,6 +12,7 @@ spec = importlib.util.spec_from_file_location("updater", Path(__file__).with_nam
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 BOT = "openappa-archestra-updater[bot]"
+CORE = "# Core\r\nNon-ASCII: żółw — ✓\r\nno trailing newline".encode()
 
 
 def command(root, *args):
@@ -44,7 +45,7 @@ class API:
     """In-memory GitHub boundary; repository and ancestry checks use real Git."""
     def __init__(self, source, candidate, files):
         self.source, self.candidate, self.files = source, candidate, files
-        self.prs, self.writes, self.ref = [], [], None
+        self.prs, self.writes, self.ref, self.refs = [], [], None, {}
         self.release_record = {"id": candidate["id"], "tag_name": candidate["tag"], "draft": False,
                                "prerelease": False, "published_at": "2026-10-02T12:00:00Z", "html_url": candidate["url"]}
 
@@ -82,8 +83,9 @@ class API:
         return [p for p in self.prs if (state == "all" or p["state"] == state)
                 and (head is None or head == "archestra-ai:" + p["head"]["ref"])]
 
-    def content(self, path, ref):
-        return self.files[path]
+    def content(self, path, ref, missing_ok=False):
+        files = self.refs.get(ref, self.files)
+        return None if missing_ok and path not in files else files[path]
 
 
 class UpdaterTests(unittest.TestCase):
@@ -96,10 +98,18 @@ class UpdaterTests(unittest.TestCase):
         command(self.origin, "init", "-b", "main")
         command(self.origin, "config", "user.email", "test@example.invalid")
         command(self.origin, "config", "user.name", "Test")
+        command(self.origin, "config", "core.autocrlf", "false")
         commits = []
+        core = self.origin / updater.CORE
+        core.parent.mkdir(parents=True)
         for number in (1, 2, 3):
             (self.origin / "Cargo.toml").write_text(f'[workspace.package]\nversion = "1.2.{number}"\n')
-            command(self.origin, "add", ".")
+            # Only the v1.2.2 release ships the appa-guide core.
+            if number == 2:
+                core.write_bytes(CORE)
+            else:
+                core.unlink(missing_ok=True)
+            command(self.origin, "add", "-A")
             command(self.origin, "commit", "-m", f"release {number}")
             commits.append(command(self.origin, "rev-parse", "HEAD"))
             command(self.origin, "tag", f"v1.2.{number}")
@@ -119,6 +129,44 @@ class UpdaterTests(unittest.TestCase):
     def publish(self):
         with patch.object(updater, "GitHub", return_value=self.api), patch.dict(os.environ, {"GH_TOKEN": "test-only"}):
             updater.publish(self.args)
+
+    def with_guide(self, original, prepared=CORE.decode()):
+        self.files[updater.GUIDE] = original
+        bundle = json.loads(self.bundle.read_text())
+        bundle["original_hashes"][updater.GUIDE] = updater.digest(original)
+        bundle["files"][updater.GUIDE] = prepared
+        self.bundle.write_text(json.dumps(bundle))
+
+    def tree_paths(self):
+        tree = next(data for _, path, data in self.api.writes if path.endswith("/git/trees"))
+        return {entry["path"]: entry["content"] for entry in tree["tree"]}
+
+    def run_prepare(self, guide=None):
+        target = self.root / "target"
+        target.mkdir()
+        command(target, "init", "-b", "main")
+        command(target, "config", "user.email", "test@example.invalid")
+        command(target, "config", "user.name", "Test")
+        command(target, "config", "core.autocrlf", "false")
+        installed = {p: t.encode() for p, t in self.files.items()} | ({updater.GUIDE: guide} if guide is not None else {})
+        for path, data in installed.items():
+            (target / path).parent.mkdir(parents=True, exist_ok=True)
+            (target / path).write_bytes(data)
+        command(target, "add", ".")
+        command(target, "commit", "-m", "installed runtime")
+        real_run = subprocess.run
+        self.cargo_calls = []
+        def run(args, **kwargs):
+            if args[0] == "cargo":
+                self.cargo_calls.append((args, kwargs["cwd"]))
+                (target / updater.LOCK).write_text(lock(self.api.candidate))
+                return subprocess.CompletedProcess(args, 0)
+            return real_run(args, **kwargs)
+        args = argparse.Namespace(source=self.source, target=target, bundle=self.bundle,
+                                  tag=self.api.candidate["tag"], expected_sha=self.api.candidate["sha"])
+        with patch.object(updater, "GitHub", return_value=self.api), patch.object(subprocess, "run", side_effect=run):
+            updater.prepare(args)
+        return target, json.loads(self.bundle.read_text())
 
     def test_release_verification_and_annotated_tag(self):
         command(self.origin, "tag", "-f", "-a", "v1.2.2", self.candidate["sha"], "-m", "annotated release")
@@ -287,32 +335,62 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.api.prs[0]["state"], "closed")
 
     def test_prepare_executes_targeted_cargo_regeneration(self):
-        target = self.root / "target"
-        target.mkdir()
-        command(target, "init", "-b", "main")
-        command(target, "config", "user.email", "test@example.invalid")
-        command(target, "config", "user.name", "Test")
-        for path, text in self.files.items():
-            (target / path).parent.mkdir(parents=True, exist_ok=True)
-            (target / path).write_text(text)
-        command(target, "add", ".")
-        command(target, "commit", "-m", "installed runtime")
-        real_run = subprocess.run
-        cargo_calls = []
-        def run(args, **kwargs):
-            if args[0] == "cargo":
-                cargo_calls.append((args, kwargs["cwd"]))
-                (target / updater.LOCK).write_text(lock(self.candidate))
-                return subprocess.CompletedProcess(args, 0)
-            return real_run(args, **kwargs)
-        args = argparse.Namespace(source=self.source, target=target, bundle=self.bundle,
-                                  tag=self.candidate["tag"], expected_sha=self.candidate["sha"])
-        with patch.object(updater, "GitHub", return_value=self.api), patch.object(subprocess, "run", side_effect=run):
-            updater.prepare(args)
-        self.assertEqual(cargo_calls, [(["cargo", "update", "--manifest-path", "archestra-rs/Cargo.toml", "-p", "appa"], target / "platform")])
-        bundle = json.loads(self.bundle.read_text())
+        target, bundle = self.run_prepare()
+        self.assertEqual(self.cargo_calls, [(["cargo", "update", "--manifest-path", "archestra-rs/Cargo.toml", "-p", "appa"], target / "platform")])
+        self.assertEqual(set(bundle["files"]), set(updater.FILES))
+        self.assertEqual(set(bundle["original_hashes"]), set(updater.FILES))
         self.assertEqual(updater.pin(bundle["files"][updater.MANIFEST]), self.candidate["sha"])
         updater.validate_lock(bundle["files"][updater.LOCK], self.candidate)
+
+    def test_prepare_copies_release_core_byte_for_byte(self):
+        target, bundle = self.run_prepare(guide=b"stale\n")
+        self.assertEqual((target / updater.GUIDE).read_bytes(), CORE)
+        self.assertEqual(bundle["files"][updater.GUIDE].encode(), CORE)
+        self.assertEqual(bundle["original_hashes"][updater.GUIDE], updater.digest("stale\n"))
+        self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), {*updater.FILES, updater.GUIDE})
+
+    def test_prepare_accepts_unchanged_core(self):
+        target, bundle = self.run_prepare(guide=CORE)
+        self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), set(updater.FILES))
+        self.assertEqual(bundle["files"][updater.GUIDE].encode(), CORE)
+        self.assertEqual(bundle["original_hashes"][updater.GUIDE], updater.digest(CORE.decode()))
+
+    def test_prepare_refuses_release_without_core(self):
+        self.api.candidate = self.future
+        self.api.release_record.update(id=self.future["id"], tag_name=self.future["tag"], html_url=self.future["url"])
+        with self.assertRaisesRegex(ValueError, "no integrations/appa-guide/references/core.md"):
+            self.run_prepare(guide=b"stale\n")
+
+    def test_publish_refreshes_changed_core_only(self):
+        self.with_guide("stale\n")
+        self.publish()
+        self.assertEqual(self.tree_paths()[updater.GUIDE].encode(), CORE)
+        self.api.prs, self.api.writes, self.api.ref = [], [], None
+        self.with_guide(CORE.decode())
+        self.publish()
+        self.assertEqual(set(self.tree_paths()), set(updater.FILES))
+
+    def test_publish_refuses_tampered_core(self):
+        self.with_guide("stale\n", prepared=CORE.decode() + "\ninjected")
+        with self.assertRaisesRegex(ValueError, "not the verified release"):
+            self.publish()
+        self.assertEqual(self.api.writes, [])
+
+    def test_publish_refuses_core_changed_appeared_or_removed_on_main(self):
+        self.with_guide("stale\n")
+        for main in ({**self.files, updater.GUIDE: "edited\n"}, {p: self.files[p] for p in updater.FILES}):
+            with self.subTest(main=main.get(updater.GUIDE)):
+                self.api.refs["main"] = main
+                with self.assertRaisesRegex(ValueError, "rerun"):
+                    self.publish()
+        bundle = json.loads(self.bundle.read_text())
+        for field in ("files", "original_hashes"):
+            del bundle[field][updater.GUIDE]
+        self.bundle.write_text(json.dumps(bundle))
+        self.api.refs = {"a" * 40: {p: self.files[p] for p in updater.FILES}, "main": self.files}
+        with self.assertRaisesRegex(ValueError, "rerun"):
+            self.publish()
+        self.assertEqual(self.api.writes, [])
 
     def test_github_pull_list_paginates_before_filtering(self):
         api = updater.GitHub()
