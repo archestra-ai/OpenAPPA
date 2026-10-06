@@ -95,6 +95,8 @@ mod served {
                 principal: None,
                 address: None,
                 title: None,
+                start: None,
+                launch: None,
             },
         )
         .await;
