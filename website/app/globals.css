@@ -3273,8 +3273,9 @@ samp {
 
 /* ————————————————————————————————————————————————
    Song ship — the music video, playing in the middle of the page while
-   the song does. The scene is one SVG; the sail's slides are HTML inside
-   a foreignObject, styled as in the video.
+   the song does. The scene is two SVGs with the sail's slides, the video's
+   HTML styled as in the video, as a layer between them (SongShip.tsx says
+   why not a foreignObject).
    ———————————————————————————————————————————————— */
 .song-ship {
   position: fixed;
@@ -3288,12 +3289,26 @@ samp {
 
 /* The frame takes clicks so a click outside it can be told apart; the
    rest of the overlay lets them through to the page. */
-.song-ship > svg {
+.song-ship-frame {
+  position: relative;
   pointer-events: auto;
   width: min(80vw, 80vh);
-  height: auto;
-  overflow: hidden;
+  aspect-ratio: 1;
   filter: drop-shadow(0 24px 40px rgba(0, 0, 0, 0.35));
+}
+/* On a phone the scene takes the whole width; the night's pixel fade
+   reaches the screen edges. */
+@media (max-width: 768px) {
+  .song-ship-frame {
+    width: min(100vw, 80vh);
+  }
+}
+.song-ship-frame > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 .song-ship-lanterns rect:last-child {
@@ -3325,7 +3340,11 @@ samp {
   --s-green: #1f8a57;
   --s-red: #c8372d;
   --s-card: #fbf3df;
-  position: relative;
+  /* At the video's size; the per-frame transform puts it on the sail. */
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
   width: 660px;
   height: 420px;
   overflow: hidden;

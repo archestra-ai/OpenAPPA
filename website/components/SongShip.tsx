@@ -10,9 +10,14 @@ import { songPosition, subscribeSong } from "@/lib/song";
    lyric is drawn on it as a small diagram, so the song stays a literal
    explanation of the product. Like the header mascot's dance, every pose is
    computed from the audio clock on each frame with the video's own
-   choreography and timings. The scene is one SVG so it scales with the
-   viewport; the sail's slides are HTML inside a foreignObject so the video's
-   markup carries over as is. */
+   choreography and timings. The scene is SVG so it scales with the
+   viewport; the sail's slides are the video's HTML as is, laid over the
+   scene as a plain HTML layer and transformed each frame onto the sail's
+   place in the SVG. Not a foreignObject: WebKit paints any positioned
+   element inside one without the SVG's transforms, which left the sail
+   unscaled and off the ship on Safari. The scene is split into two SVGs
+   around the sail so the paint order stays: the sail in front of the mast
+   and rigging, behind the crew, the confetti and the fade to black. */
 
 const STAGE = 1080;
 /* The night fades out around the frame in pixel steps rather than a blur. */
@@ -727,9 +732,18 @@ function sail(root: HTMLElement, t: number) {
 
 /* ---------- the frame ---------- */
 
-function render(svg: SVGSVGElement, t: number) {
-  const by = (id: string) => svg.querySelector<SVGElement>(`[data-ship="${id}"]`);
-  const set = (id: string, attr: string, value: string) => by(id)?.setAttribute(attr, value);
+/* The sail's place in the scene, in stage units: where the HTML layer lands. */
+const SAIL_X = 210;
+const SAIL_Y = 100;
+const SAIL_W = 660;
+const SAIL_H = 420;
+
+function render(frame: HTMLElement, t: number) {
+  const by = (id: string) => frame.querySelector<SVGElement>(`[data-ship="${id}"]`);
+  // The ship's hull and rigging live in different SVGs and rock as one.
+  const set = (id: string, attr: string, value: string) => {
+    for (const el of frame.querySelectorAll<SVGElement>(`[data-ship="${id}"]`)) el.setAttribute(attr, value);
+  };
   const P = pos(t);
   const hit = Math.exp(-P.ph * 5);
 
@@ -738,7 +752,7 @@ function render(svg: SVGSVGElement, t: number) {
   const bob = 5 * Math.sin((P.b / 4) * 2 * Math.PI + 1);
   set("ship", "transform", `translate(0 ${bob.toFixed(2)}) rotate(${roll.toFixed(3)} ${PIVOT_X} ${PIVOT_Y})`);
   // the sail puffs from its head, where it hangs off the yard
-  set("sail", "transform", `translate(540 100) scale(${(1 + 0.006 * hit * P.k).toFixed(4)} ${(1 + 0.012 * hit * P.k).toFixed(4)}) translate(-540 -100)`);
+  set("sail", "transform", `translate(${PIVOT_X} ${SAIL_Y}) scale(${(1 + 0.006 * hit * P.k).toFixed(4)} ${(1 + 0.012 * hit * P.k).toFixed(4)}) translate(${-PIVOT_X} ${-SAIL_Y})`);
   set("lanterns", "opacity", (0.75 + 0.25 * hit).toFixed(3));
   const fstep = Math.floor(P.b * 2) % 2;
   set("flag-1", "y", fstep ? "43" : "40");
@@ -834,9 +848,18 @@ function render(svg: SVGSVGElement, t: number) {
     sh.setAttribute("opacity", y < -200 ? "0" : (1 - 0.5 * lift).toFixed(3));
   }
 
-  // the sail's slides
-  const sailRoot = svg.querySelector<HTMLElement>(".song-sail");
-  if (sailRoot) sail(sailRoot, t);
+  // the sail's slides: the HTML layer follows the anchor rect through the
+  // stage's scale and the ship's roll and puff, read back from the SVG
+  const sailRoot = frame.querySelector<HTMLElement>(".song-sail");
+  const anchor = by("sail-anchor") as SVGGraphicsElement | null;
+  if (sailRoot && anchor) {
+    const m = anchor.getCTM();
+    if (m) {
+      const { a, b, c, d, e, f } = m.translate(SAIL_X, SAIL_Y);
+      sailRoot.style.transform = `matrix(${a}, ${b}, ${c}, ${d}, ${e}, ${f})`;
+    }
+    sail(sailRoot, t);
+  }
 
   // fade in from black, and out at the end
   set("black", "opacity", Math.max(1 - seg(t, 0, 0.5), seg(t, 124.9, 125.9)).toFixed(3));
@@ -858,7 +881,7 @@ type Phase = "hidden" | "sailing" | "leaving";
 
 export function SongShip() {
   const [phase, setPhase] = useState<Phase>("hidden");
-  const stage = useRef<SVGSVGElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -891,11 +914,11 @@ export function SongShip() {
       setPhase("sailing");
       document.addEventListener("pointerdown", onPointerDown, true);
       const tick = () => {
-        const svg = stage.current;
-        if (svg) {
-          render(svg, audio.currentTime);
+        const scene = stage.current;
+        if (scene) {
+          render(scene, audio.currentTime);
           const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : SONG_SECONDS;
-          svg.style.opacity = fade(audio.currentTime, duration).toFixed(3);
+          scene.style.opacity = fade(audio.currentTime, duration).toFixed(3);
         }
         frame = requestAnimationFrame(tick);
       };
@@ -910,117 +933,130 @@ export function SongShip() {
   if (phase === "hidden") return null;
 
   const outer = { x: -FRAME, y: -FRAME, width: STAGE + 2 * FRAME, height: STAGE + 2 * FRAME };
+  const viewBox = `${outer.x} ${outer.y} ${outer.width} ${outer.height}`;
   return (
     <div className={`song-ship${phase === "leaving" ? " is-leaving" : ""}`} aria-hidden="true">
-      <svg ref={stage} viewBox={`${outer.x} ${outer.y} ${outer.width} ${outer.height}`} shapeRendering="crispEdges">
-        <defs>
-          {WAVES.map((wave, j) => (
-            <pattern key={j} id={`song-wave-${j}`} width="72" height="36" patternUnits="userSpaceOnUse">
-              <rect x="0" y="12" width="72" height="24" fill={wave.color} />
-              <rect x="6" y="6" width="36" height="6" fill={wave.color} />
-              <rect x="12" y="0" width="18" height="6" fill={wave.color} />
-            </pattern>
-          ))}
-          <linearGradient id="song-sky" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#0d1a2b" />
-            <stop offset="1" stopColor="#1b3a5c" />
-          </linearGradient>
-          {/* The night steps out around the frame: sky and sea alike fade
-              through the same pixel steps. */}
-          <mask id="song-frame" maskUnits="userSpaceOnUse" {...outer}>
-            {Array.from({ length: FRAME_STEPS }, (_, i) => {
-              const d = (FRAME_STEPS - i) * FRAME_STEP;
-              return <rect key={i} x={-d} y={-d} width={STAGE + 2 * d} height={STAGE + 2 * d} fill="#fff" fillOpacity={((i + 1) / (FRAME_STEPS + 1)) ** 2} />;
-            })}
-            <rect x="0" y="0" width={STAGE} height={STAGE} fill="#fff" />
-          </mask>
-        </defs>
+      {/* The frame fades with the song from the first rendered frame on. */}
+      <div ref={stage} className="song-ship-frame" style={{ opacity: 0 }}>
+        {/* the night and the rigging, behind the sail */}
+        <svg className="song-ship-sky" viewBox={viewBox} shapeRendering="crispEdges">
+          <defs>
+            {WAVES.map((wave, j) => (
+              <pattern key={j} id={`song-wave-${j}`} width="72" height="36" patternUnits="userSpaceOnUse">
+                <rect x="0" y="12" width="72" height="24" fill={wave.color} />
+                <rect x="6" y="6" width="36" height="6" fill={wave.color} />
+                <rect x="12" y="0" width="18" height="6" fill={wave.color} />
+              </pattern>
+            ))}
+            <linearGradient id="song-sky" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor="#0d1a2b" />
+              <stop offset="1" stopColor="#1b3a5c" />
+            </linearGradient>
+            {/* The night steps out around the frame: sky and sea alike fade
+                through the same pixel steps. */}
+            <mask id="song-frame" maskUnits="userSpaceOnUse" {...outer}>
+              {Array.from({ length: FRAME_STEPS }, (_, i) => {
+                const d = (FRAME_STEPS - i) * FRAME_STEP;
+                return <rect key={i} x={-d} y={-d} width={STAGE + 2 * d} height={STAGE + 2 * d} fill="#fff" fillOpacity={((i + 1) / (FRAME_STEPS + 1)) ** 2} />;
+              })}
+              <rect x="0" y="0" width={STAGE} height={STAGE} fill="#fff" />
+            </mask>
+          </defs>
 
-        <g mask="url(#song-frame)">
-          {/* the night */}
-          <rect {...outer} fill="url(#song-sky)" />
-          {STARS.map((s, i) => (
-            <rect key={i} data-ship={`star-${i}`} x={s.x} y={s.y} width={s.sz} height={s.sz} fill="#f2e5c9" opacity="0.3" />
-          ))}
-          {MOON.rows.map((row, i) => (
-            <rect key={i} x={row.x} y={row.y} width={row.w} height={MOON.px} fill="#f2e5c9" />
-          ))}
-          <rect x={MOON.cx - 28} y={MOON.cy - 28} width="14" height="14" fill="#d9caa6" />
-          <rect x={MOON.cx + 7} y={MOON.cy + 7} width="21" height="14" fill="#d9caa6" />
-          <rect x={MOON.cx - 21} y={MOON.cy + 21} width="7" height="7" fill="#d9caa6" />
+          <g mask="url(#song-frame)">
+            {/* the night */}
+            <rect {...outer} fill="url(#song-sky)" />
+            {STARS.map((s, i) => (
+              <rect key={i} data-ship={`star-${i}`} x={s.x} y={s.y} width={s.sz} height={s.sz} fill="#f2e5c9" opacity="0.3" />
+            ))}
+            {MOON.rows.map((row, i) => (
+              <rect key={i} x={row.x} y={row.y} width={row.w} height={MOON.px} fill="#f2e5c9" />
+            ))}
+            <rect x={MOON.cx - 28} y={MOON.cy - 28} width="14" height="14" fill="#d9caa6" />
+            <rect x={MOON.cx + 7} y={MOON.cy + 7} width="21" height="14" fill="#d9caa6" />
+            <rect x={MOON.cx - 21} y={MOON.cy + 21} width="7" height="7" fill="#d9caa6" />
 
-          <g data-ship="ship">
-            {/* rigging, mast and yard */}
-            <line x1="540" y1="52" x2="44" y2="770" stroke="#2a251e" strokeWidth="3" />
-            <line x1="540" y1="52" x2="1036" y2="770" stroke="#2a251e" strokeWidth="3" />
-            <rect x="533" y="40" width="14" height="732" fill="#3d372d" />
-            <rect x="186" y="88" width="708" height="12" fill="#4a4236" />
-            <rect x="547" y="40" width="18" height="14" fill="#7fd8a8" />
-            <rect data-ship="flag-1" x="565" y="40" width="18" height="14" fill="#7fd8a8" />
-            <rect data-ship="flag-2" x="583" y="40" width="16" height="14" fill="#5cc091" />
+            <g data-ship="ship">
+              {/* rigging, mast and yard */}
+              <line x1="540" y1="52" x2="44" y2="770" stroke="#2a251e" strokeWidth="3" />
+              <line x1="540" y1="52" x2="1036" y2="770" stroke="#2a251e" strokeWidth="3" />
+              <rect x="533" y="40" width="14" height="732" fill="#3d372d" />
+              <rect x="186" y="88" width="708" height="12" fill="#4a4236" />
+              <rect x="547" y="40" width="18" height="14" fill="#7fd8a8" />
+              <rect data-ship="flag-1" x="565" y="40" width="18" height="14" fill="#7fd8a8" />
+              <rect data-ship="flag-2" x="583" y="40" width="16" height="14" fill="#5cc091" />
 
-            <g data-ship="lanterns" className="song-ship-lanterns">
-              {[182, 882].map((x) => (
-                <g key={x}>
-                  <rect x={x + 6} y="90" width="4" height="10" fill="#3d372d" />
-                  <rect x={x} y="100" width="16" height="22" fill="#f2c94c" />
+              <g data-ship="lanterns" className="song-ship-lanterns">
+                {[182, 882].map((x) => (
+                  <g key={x}>
+                    <rect x={x + 6} y="90" width="4" height="10" fill="#3d372d" />
+                    <rect x={x} y="100" width="16" height="22" fill="#f2c94c" />
+                  </g>
+                ))}
+              </g>
+
+              {/* where the sail hangs: the HTML layer is transformed onto this rect */}
+              <g data-ship="sail">
+                <rect data-ship="sail-anchor" x={SAIL_X} y={SAIL_Y} width={SAIL_W} height={SAIL_H} fill="none" />
+              </g>
+            </g>
+          </g>
+        </svg>
+
+        {/* the sail is the screen */}
+        <div className="song-sail" dangerouslySetInnerHTML={{ __html: SAIL_HTML }} />
+
+        {/* the deck and the sea, in front of the sail */}
+        <svg className="song-ship-deck" viewBox={viewBox} shapeRendering="crispEdges">
+          <g mask="url(#song-frame)">
+            <g data-ship="ship">
+              {/* hull */}
+              <rect x="24" y="770" width="1032" height="10" fill="#7a6648" />
+              <rect x="24" y="780" width="1032" height="14" fill="#4a3d2b" />
+              <rect x="40" y="794" width="1000" height="22" fill="#2b2319" />
+              <rect x="40" y="794" width="1000" height="4" fill="#f2e5c9" fillOpacity="0.45" />
+              <rect x="64" y="816" width="952" height="22" fill="#241d15" />
+              <rect x="92" y="838" width="896" height="30" fill="#1d1711" />
+              {PORTHOLES.map((i) => (
+                <rect key={i} data-ship={`porthole-${i}`} x={118 + i * 138} y="808" width="16" height="16" fill="#f2c94c" />
+              ))}
+
+              {/* crew on deck */}
+              {CREW_HATS.map((hat, i) => (
+                <g key={i}>
+                  <rect data-ship={`shadow-${i}`} y={SHADOW_Y} height="8" fill="#000" fillOpacity="0.45" display="none" />
+                  <g transform={`translate(${slotX(i) - MASCOT_W / 2} ${DECK_Y})`}>
+                    <g data-ship={`crew-${i}`} display="none" dangerouslySetInnerHTML={{ __html: mascot(MASCOT_W, "cream", hat) }} />
+                  </g>
                 </g>
               ))}
             </g>
 
-            {/* the sail is the screen */}
-            <g data-ship="sail">
-              <foreignObject x="210" y="100" width="660" height="420">
-                <div className="song-sail" dangerouslySetInnerHTML={{ __html: SAIL_HTML }} />
-              </foreignObject>
-            </g>
-
-            {/* hull */}
-            <rect x="24" y="770" width="1032" height="10" fill="#7a6648" />
-            <rect x="24" y="780" width="1032" height="14" fill="#4a3d2b" />
-            <rect x="40" y="794" width="1000" height="22" fill="#2b2319" />
-            <rect x="40" y="794" width="1000" height="4" fill="#f2e5c9" fillOpacity="0.45" />
-            <rect x="64" y="816" width="952" height="22" fill="#241d15" />
-            <rect x="92" y="838" width="896" height="30" fill="#1d1711" />
-            {PORTHOLES.map((i) => (
-              <rect key={i} data-ship={`porthole-${i}`} x={118 + i * 138} y="808" width="16" height="16" fill="#f2c94c" />
-            ))}
-
-            {/* crew on deck */}
-            {CREW_HATS.map((hat, i) => (
-              <g key={i}>
-                <rect data-ship={`shadow-${i}`} y={SHADOW_Y} height="8" fill="#000" fillOpacity="0.45" display="none" />
-                <g transform={`translate(${slotX(i) - MASCOT_W / 2} ${DECK_Y})`}>
-                  <g data-ship={`crew-${i}`} display="none" dangerouslySetInnerHTML={{ __html: mascot(MASCOT_W, "cream", hat) }} />
+            {/* sea */}
+            {[0, 1].map((j) => (
+              <g key={j} data-ship={`fish-${j}`} display="none">
+                {/* a 12x7 pixel fish at 5 units a pixel, the second one facing left */}
+                <g transform={j ? "translate(60 0) scale(-5 5)" : "scale(5)"}>
+                  <path fill="#7fd8a8" d="M3 1h5v1H3zM2 2h8v3H2zM3 5h5v1H3zM10 1h2v2H10zM10 4h2v2H10zM1 3h1v1H1z" />
+                  <rect x="3" y="2.5" width="1" height="1" fill="#0f1e2e" />
                 </g>
               </g>
             ))}
-          </g>
-
-          {/* sea */}
-          {[0, 1].map((j) => (
-            <g key={j} data-ship={`fish-${j}`} display="none">
-              {/* a 12x7 pixel fish at 5 units a pixel, the second one facing left */}
-              <g transform={j ? "translate(60 0) scale(-5 5)" : "scale(5)"}>
-                <path fill="#7fd8a8" d="M3 1h5v1H3zM2 2h8v3H2zM3 5h5v1H3zM10 1h2v2H10zM10 4h2v2H10zM1 3h1v1H1z" />
-                <rect x="3" y="2.5" width="1" height="1" fill="#0f1e2e" />
+            {WAVES.map((wave, j) => (
+              <g key={j} data-ship={`wave-${j}`}>
+                <rect x={outer.x - 72} y={wave.y} width={outer.width + 144} height="36" fill={`url(#song-wave-${j})`} />
               </g>
-            </g>
-          ))}
-          {WAVES.map((wave, j) => (
-            <g key={j} data-ship={`wave-${j}`}>
-              <rect x={outer.x - 72} y={wave.y} width={outer.width + 144} height="36" fill={`url(#song-wave-${j})`} />
-            </g>
-          ))}
-          <rect x={outer.x} y={SEA_Y} width={outer.width} height={outer.y + outer.height - SEA_Y} fill="#0f1e2e" />
+            ))}
+            <rect x={outer.x} y={SEA_Y} width={outer.width} height={outer.y + outer.height - SEA_Y} fill="#0f1e2e" />
 
-          {/* confetti, over everything */}
-          {CONFETTI.map((_, i) => (
-            <rect key={i} data-ship={`confetti-${i}`} width={i % 3 ? 10 : 14} height={i % 3 ? 10 : 6} fill={CONFETTI_COLORS[i % 5]} opacity="0" />
-          ))}
-          <rect data-ship="black" {...outer} fill="#000" opacity="1" />
-        </g>
-      </svg>
+            {/* confetti, over everything */}
+            {CONFETTI.map((_, i) => (
+              <rect key={i} data-ship={`confetti-${i}`} width={i % 3 ? 10 : 14} height={i % 3 ? 10 : 6} fill={CONFETTI_COLORS[i % 5]} opacity="0" />
+            ))}
+            <rect data-ship="black" {...outer} fill="#000" opacity="1" />
+          </g>
+        </svg>
+      </div>
     </div>
   );
 }
