@@ -43,7 +43,8 @@ pub enum NoAnswerReason {
     #[cfg(feature = "daemon")]
     Dismissed,
     /// A non-success exit or HTTP status. `detail` is the last line a command wrote to
-    /// stderr — its own error, never its answer — where one was read.
+    /// stderr, or what the host said about an `archestra` consult it refused — its own
+    /// error, never its answer — where one was read.
     NonSuccess {
         status: u16,
         detail: Option<String>,
@@ -109,7 +110,7 @@ pub struct Diagnostics {
 }
 
 impl Diagnostics {
-    fn head(bytes: &[u8]) -> Diagnostics {
+    pub(crate) fn head(bytes: &[u8]) -> Diagnostics {
         Diagnostics {
             bytes: bytes[..bytes.len().min(MAX_DIAGNOSTIC_BYTES)].to_vec(),
             truncated: bytes.len() > MAX_DIAGNOSTIC_BYTES,
@@ -1070,7 +1071,7 @@ impl StderrTail {
 
 /// How long a read made for the record alone may extend a consult whose outcome is known:
 /// a failed `url` consult's body, or the stderr a command that answered keeps open.
-const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
+pub(crate) const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
