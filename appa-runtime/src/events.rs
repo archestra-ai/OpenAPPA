@@ -395,9 +395,9 @@ impl EventLog {
         self.deployment.bytes + self.roots.values().map(|events| events.bytes).sum::<usize>()
     }
 
-    /// Drop the oldest entry anywhere until the whole account is under budget. A list that
-    /// empties is removed, so this terminates: every pass either drops an entry or runs out
-    /// of lists holding one.
+    /// Drop the oldest entry anywhere until the whole account is under budget. A pass that
+    /// finds no entry to drop stops, so this terminates. A list that empties stays, carrying
+    /// its drop count, until it is the coldest root.
     fn enforce_byte_budget(&mut self) {
         while self.bytes() > MAX_TOTAL_BYTES {
             let oldest_root = self
@@ -417,8 +417,6 @@ impl EventLog {
             if !dropped {
                 break;
             }
-            self.roots
-                .retain(|_, events| !events.entries.is_empty() || events.dropped > 0);
         }
     }
 }
