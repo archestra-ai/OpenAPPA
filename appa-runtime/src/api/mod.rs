@@ -1825,7 +1825,7 @@ impl Runtime {
     ) -> Result<(), EventError> {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
-        let scope = actor.child.as_ref().unwrap_or(&actor.root);
+        let scope = acting_trajectory(actor);
         self.inner.append_host_with(&actor.root, |log| {
             let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
@@ -2604,7 +2604,7 @@ impl Runtime {
             reason: RemedyRefusal::UnknownOffer,
         };
         let root = acting.root.clone();
-        let trajectory = acting.child.clone().unwrap_or_else(|| root.clone());
+        let trajectory = acting_trajectory(acting).clone();
         let Some((offer, pursuer)) = self.resolve_in(&root, &quoted) else {
             return unknown();
         };
@@ -2662,7 +2662,7 @@ impl Runtime {
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
         let root = &acting.root;
-        let pursuer = acting.child.as_ref().unwrap_or(root);
+        let pursuer = acting_trajectory(acting);
         let session = match self.session_with_presentation(root, pursuer, presentation) {
             Ok(session) => session,
             Err(error) => {
