@@ -38,9 +38,12 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
         Ok(accepted) => accepted,
         Err(answered) => return answered,
     };
-    let (event, names_children) = match continued(runtime, event, names_children) {
-        Ok(continued) => continued,
-        Err(error) => return (409, wire(&refuse(error.to_string()))),
+    let (event, names_children) = match runtime.alias_of(hook_root(&event)) {
+        Ok(family) => continued(event, names_children, family),
+        Err(error) => {
+            let host = hook_root(&event).clone();
+            return refused_hook(runtime, &host, &event, error);
+        }
     };
     let root = hook_root(&event).clone();
     if let Some(inventory) = inventory
@@ -94,13 +97,13 @@ fn accepted(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Result<Accepte
 /// The event as the family its host id continues: an aliased host id names that family's
 /// root, and its children are that family's children.
 fn continued(
-    runtime: &Runtime,
     event: HookEvent,
     names_children: Vec<TrajectoryId>,
-) -> Result<(HookEvent, Vec<TrajectoryId>), EventError> {
+    family: Option<TrajectoryId>,
+) -> (HookEvent, Vec<TrajectoryId>) {
     let host = hook_root(&event).clone();
-    let Some(family) = runtime.alias_of(&host)? else {
-        return Ok((event, names_children));
+    let Some(family) = family else {
+        return (event, names_children);
     };
     let id = |id: TrajectoryId| match id.0.strip_prefix(&host.0) {
         Some("") => family.clone(),
@@ -207,7 +210,7 @@ fn continued(
             value,
         },
     };
-    Ok((event, names_children.into_iter().map(id).collect()))
+    (event, names_children.into_iter().map(id).collect())
 }
 
 /// Take in what a start or a call observed of the harness's tools. A child's start is
@@ -1917,6 +1920,33 @@ mod tests {
         let served = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
         assert_eq!(answer(&runtime, &adapter, served).await.0, 200);
         assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
+    }
+
+    /// A hook refused while its host id is resolved still leaves its one entry.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn a_hook_refused_while_resolving_its_host_id_leaves_an_entry() {
+        use crate::events::{HookOutcome, RecordedEvent, RuntimeEvent};
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let call = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"Bash","spawn":false,"arguments":{"command":"ls"}}"#;
+        runtime.store().fail_next_reads(1);
+        let (status, reply) = answer(&runtime, &appa_adapter_claude_code::adapter(), call).await;
+        assert_eq!(status, 409, "{reply}");
+        let recorded = runtime.recorded_events(&TrajectoryId("cc:s1".to_string()));
+        assert!(
+            matches!(
+                recorded.entries.as_slice(),
+                [RecordedEvent {
+                    event: RuntimeEvent::Hook {
+                        outcome: HookOutcome::Refused,
+                        ..
+                    },
+                    ..
+                }]
+            ),
+            "{recorded:?}"
+        );
     }
 
     /// Whether a call is a spawn comes from tool identification, never from the

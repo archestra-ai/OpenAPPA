@@ -3053,6 +3053,11 @@ impl Runtime {
         &self.inner.store
     }
 
+    #[cfg(all(test, feature = "daemon"))]
+    pub(crate) fn recorded_events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.inner.events(root)
+    }
+
     /// Leave the claim an execution that never returned would have left, for the tests
     /// that pin how one is read back.
     #[cfg(all(test, feature = "daemon"))]
