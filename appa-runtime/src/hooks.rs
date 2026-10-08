@@ -40,9 +40,11 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
     };
     let (event, names_children) = match runtime.alias_of(hook_root(&event)) {
         Ok(family) => continued(event, names_children, family),
+        // No family is known yet, and filing under the host id would invent one.
         Err(error) => {
-            let host = hook_root(&event).clone();
-            return refused_hook(runtime, &host, &event, error);
+            let (kind, tool) = hook_shape(&event);
+            runtime.record(None, bare_hook(kind, crate::events::HookOutcome::Refused, tool));
+            return (409, wire(&refuse(error.to_string())));
         }
     };
     let root = hook_root(&event).clone();
@@ -1922,29 +1924,38 @@ mod tests {
         assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
     }
 
-    /// A hook refused while its host id is resolved still leaves its one entry.
+    /// A hook refused while its host id is resolved still leaves its one entry, filed
+    /// deployment-wide: no family is known yet to file it under.
     #[cfg(feature = "daemon")]
     #[tokio::test]
-    async fn a_hook_refused_while_resolving_its_host_id_leaves_an_entry() {
+    async fn a_hook_refused_while_resolving_its_host_id_leaves_a_deployment_entry() {
         use crate::events::{HookOutcome, RecordedEvent, RuntimeEvent};
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        // An earlier family, whose account shows the deployment-wide entries after its start.
+        let earlier = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s0","tool":"Bash","spawn":false,"arguments":{"command":"ls"}}"#;
+        assert_eq!(answer(&runtime, &adapter, earlier).await.0, 200);
         let call = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"Bash","spawn":false,"arguments":{"command":"ls"}}"#;
         runtime.store().fail_next_reads(1);
-        let (status, reply) = answer(&runtime, &appa_adapter_claude_code::adapter(), call).await;
+        let (status, reply) = answer(&runtime, &adapter, call).await;
         assert_eq!(status, 409, "{reply}");
-        let recorded = runtime.recorded_events(&TrajectoryId("cc:s1".to_string()));
-        assert!(
+        let unresolved = runtime.recorded_events(&TrajectoryId("cc:s1".to_string()));
+        assert!(unresolved.entries.is_empty(), "no family is invented: {unresolved:?}");
+        let recorded = runtime.recorded_events(&TrajectoryId("cc:s0".to_string()));
+        let refused = |entry: &RecordedEvent| {
             matches!(
-                recorded.entries.as_slice(),
-                [RecordedEvent {
-                    event: RuntimeEvent::Hook {
-                        outcome: HookOutcome::Refused,
-                        ..
-                    },
+                entry.event,
+                RuntimeEvent::Hook {
+                    outcome: HookOutcome::Refused,
                     ..
-                }]
-            ),
+                }
+            )
+        };
+        assert!(!recorded.entries.iter().any(refused), "{recorded:?}");
+        assert_eq!(
+            recorded.deployment.iter().filter(|entry| refused(entry)).count(),
+            1,
             "{recorded:?}"
         );
     }
