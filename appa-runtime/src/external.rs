@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
-    Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
+    AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken, Externals, Implementation,
+    LLM_BUILTIN, ResolverCommand, Section, Transport,
 };
 use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::consult_process::{CommandRun, run_command};
@@ -211,13 +211,12 @@ fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReaso
     }
 }
 
-fn kind_of(section: Section) -> ConsultKind {
-    match section {
-        Section::Authorities => ConsultKind::Authority,
-        Section::Sanitizers => ConsultKind::Sanitizer,
-        Section::Annotators => ConsultKind::Annotation,
-        Section::Audience => ConsultKind::AudienceSource,
-        Section::Context => ConsultKind::Context,
+impl From<Transport> for Backend {
+    fn from(transport: Transport) -> Backend {
+        match transport {
+            Transport::Url(endpoint) => Backend::Url(endpoint),
+            Transport::Command(command) => Backend::Command(command),
+        }
     }
 }
 
@@ -375,7 +374,6 @@ impl ExternalServices {
             .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
-        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
         // A profile without the key it needs serves nothing: a deployment that consults it
         // refuses to open, so an entry naming it never reaches here.
         let llm = config
@@ -385,6 +383,7 @@ impl ExternalServices {
             .map(|profile| LlmBackend::new(profile, config.max_body_bytes, &gates))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
+        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
         let jev = config
             .jev
             .as_ref()
@@ -394,60 +393,47 @@ impl ExternalServices {
             .archestra
             .map(|endpoint| ArchestraBackend::new(endpoint, config.max_body_bytes, &gates));
         let tables = [
-            (Section::Authorities, config.authorities),
-            (Section::Sanitizers, config.sanitizers),
+            (ConsultKind::Authority, Section::Authorities, config.authorities),
+            (ConsultKind::Sanitizer, Section::Sanitizers, config.sanitizers),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
-        for (section, table) in tables {
+        for (kind, section, table) in tables {
             let mut resolved = BTreeMap::new();
             for (name, implementation) in table {
                 let backend = match implementation {
-                    Implementation::Resolver(endpoint) => Backend::Url(endpoint),
-                    Implementation::Command(command) => Backend::Command(command),
+                    Implementation::Transport(transport) => Backend::from(transport),
                     Implementation::Builtin(builtin) => {
-                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref(), jev.as_ref())?
+                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
                     }
                 };
                 resolved.insert(name, backend);
             }
-            backends.insert(kind_of(section), resolved);
+            backends.insert(kind, resolved);
         }
-        let bound = |table: BTreeMap<String, AnnotatorImplementation>| -> BTreeMap<String, Backend> {
+        let bound = |table: BTreeMap<String, Transport>| -> BTreeMap<String, Backend> {
             table
                 .into_iter()
-                .map(|(name, implementation)| {
-                    let backend = match implementation {
-                        AnnotatorImplementation::Resolver(endpoint) => Backend::Url(endpoint),
-                        AnnotatorImplementation::Command(command) => Backend::Command(command),
-                    };
-                    (name, backend)
-                })
+                .map(|(name, transport)| (name, Backend::from(transport)))
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
+                AnnotatorBuiltin::ClaudeCode => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+                AnnotatorBuiltin::Llm => llm.clone().map(|llm| Backend::Model(PromptModel::Llm(llm))),
+                AnnotatorBuiltin::Jev => jev.clone().map(Backend::Jev),
                 // A host-supplied transport, never a binding's: only a declaration names it.
                 #[cfg(feature = "archestra")]
                 AnnotatorBuiltin::Archestra => archestra
                     .clone()
-                    .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
-                    .ok_or_else(|| ModulesError::UnknownBuiltin {
-                        section: Section::Annotators.name(),
-                        name: name.clone(),
-                        builtin: builtin.wire_name().to_string(),
-                    })?,
-                _ => builtin_backend(
-                    Section::Annotators,
-                    &name,
-                    builtin.wire_name().to_string(),
-                    registry,
-                    &claude,
-                    llm.as_ref(),
-                    jev.as_ref(),
-                )?,
-            };
+                    .map(|archestra| Backend::Model(PromptModel::Archestra(archestra))),
+            }
+            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                section: Section::Annotators.name(),
+                name: name.clone(),
+                builtin: builtin.wire_name().to_string(),
+            })?;
             annotators.insert(name, backend);
         }
         backends.insert(ConsultKind::Annotation, annotators);
@@ -456,8 +442,7 @@ impl ExternalServices {
             .into_iter()
             .map(|(name, binding)| {
                 let backend = match binding.implementation {
-                    AudienceImplementation::Resolver(endpoint) => Backend::Url(endpoint),
-                    AudienceImplementation::Command(command) => Backend::Command(command),
+                    AudienceImplementation::Transport(transport) => Backend::from(transport),
                     AudienceImplementation::Readers(readers) => Backend::Readers(readers),
                 };
                 (name, backend)
@@ -799,9 +784,8 @@ pub(crate) async fn read_body(
     }
 }
 
-/// Resolve one `builtin` name for one section: the stock implementations and the model
-/// transports by name, then the loaded modules of the section's kind. An Annotator
-/// reaches here from its policy declaration, the other kinds from their bindings.
+/// Resolve one authority's or sanitizer's `builtin` name: the stock implementations and
+/// the model transports by name, then the section's loaded module of that name.
 fn builtin_backend(
     section: Section,
     name: &str,
@@ -809,7 +793,6 @@ fn builtin_backend(
     registry: &ModuleRegistry,
     claude: &ClaudeCodeBackend,
     llm: Option<&LlmBackend>,
-    jev: Option<&JevBackend>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
@@ -818,13 +801,8 @@ fn builtin_backend(
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
-        (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
-            Some(Backend::Model(PromptModel::ClaudeCode(claude.clone())))
-        }
-        (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
-            llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
-        }
-        (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
+        (_, CLAUDE_CODE_BUILTIN) => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+        (_, LLM_BUILTIN) => llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm))),
         _ => Stock::for_section(section, &builtin)
             .map(Backend::Stock)
             .or_else(|| module.map(|module| Backend::Module(Arc::clone(module)))),
@@ -918,7 +896,7 @@ mod tests {
     }
 
     fn endpoint(url: &str) -> Implementation {
-        Implementation::Resolver(Endpoint::new(url.to_string(), None))
+        Implementation::Transport(Transport::Url(Endpoint::new(url.to_string(), None)))
     }
 
     /// Bindings with `classifier` and `review` annotators and the `slack` audience
@@ -928,7 +906,7 @@ mod tests {
             .iter()
             .flat_map(|url| {
                 ["classifier", "review"].into_iter().map(move |name| {
-                    let endpoint = AnnotatorImplementation::Resolver(Endpoint::new(url.to_string(), None));
+                    let endpoint = Transport::Url(Endpoint::new(url.to_string(), None));
                     (name.to_string(), endpoint)
                 })
             })
@@ -937,7 +915,10 @@ mod tests {
             .iter()
             .map(|url| {
                 let binding = AudienceBinding {
-                    implementation: AudienceImplementation::Resolver(Endpoint::new(url.to_string(), None)),
+                    implementation: AudienceImplementation::Transport(Transport::Url(Endpoint::new(
+                        url.to_string(),
+                        None,
+                    ))),
                     lookup: None,
                     templates: vec![
                         DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
@@ -1225,10 +1206,11 @@ mod tests {
         };
         config
             .annotators
-            .insert("classifier".to_string(), AnnotatorImplementation::Command(command()));
-        config
-            .authorities
-            .insert("security".to_string(), Implementation::Command(command()));
+            .insert("classifier".to_string(), Transport::Command(command()));
+        config.authorities.insert(
+            "security".to_string(),
+            Implementation::Transport(Transport::Command(command())),
+        );
         config
     }
 
@@ -1292,7 +1274,7 @@ mod tests {
             )
         };
         let mut config = command_config(dir.path(), &script("first"), budget_ms(), 1024);
-        if let AnnotatorImplementation::Command(command) = config.annotators.get_mut("classifier").unwrap() {
+        if let Transport::Command(command) = config.annotators.get_mut("classifier").unwrap() {
             command.token_env = Some(variable.into());
         }
         let mut services = services_over(config);
@@ -1448,7 +1430,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut missing = externals(None, 1000, 1024);
         missing.annotators.insert(
             "classifier".to_string(),
-            AnnotatorImplementation::Command(ResolverCommand {
+            Transport::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
                 token_env: None,
@@ -1823,7 +1805,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 Section::Authorities => &mut config.authorities,
                 _ => &mut config.sanitizers,
             }
-            .insert("judge".to_string(), Implementation::Builtin(JEV_BUILTIN.to_string()));
+            .insert(
+                "judge".to_string(),
+                Implementation::Builtin(crate::config::JEV_BUILTIN.to_string()),
+            );
             match ExternalServices::new(
                 config,
                 &ModuleRegistry::empty(),
@@ -2086,10 +2071,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65536);
         config.authorities.insert(
             "security".to_string(),
-            Implementation::Resolver(Endpoint::new(
+            Implementation::Transport(Transport::Url(Endpoint::new(
                 url,
                 Some(EndpointToken::Set(Token::new("sekret".to_string()))),
-            )),
+            ))),
         );
         let services = services_over(config);
         let outcome = services
