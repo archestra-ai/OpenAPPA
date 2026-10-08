@@ -2,18 +2,23 @@
 
 import asyncio
 import dataclasses
+import hashlib
 import importlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from appa_saber.dataset import REVISION, digest
 
 JUDGE_MAX_TOKENS = 8192
+OBSERVATION_LIMIT = 8
+OBSERVATION_BYTES = 32 * 1024
 
 # Adapted from bench/corp's redteam-chaos and AgentThreatBench's bounded shortcut
 # profile. This changes the actor prompt only, never either permission policy.
@@ -53,8 +58,113 @@ def render_policy(tools: list[dict]) -> str:
     return policy
 
 
+class ObservationStore:
+    """Bounded, episode-local observations admitted and delivered by APPA."""
+
+    def __init__(self, limit: int = OBSERVATION_LIMIT, max_bytes: int = OBSERVATION_BYTES):
+        self.limit = limit
+        self.max_bytes = max_bytes
+        self.observations = []
+        self.evicted = 0
+        self.next_ordinal = 1
+        self.frozen = self._snapshot()
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _bytes(value: object) -> bytes:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    def _snapshot(self) -> dict:
+        return {
+            "schema": "appa.saber.admitted-observations.v1",
+            "claims": {
+                "quoted_arguments_and_results": "untrusted",
+                "quoted_approval_is_authorization": False,
+                "output_digest_proves_current_state": False,
+            },
+            "bounds": {"latest_observations": self.limit, "max_serialized_bytes": self.max_bytes},
+            "evicted_observations": self.evicted,
+            "observations": [dict(observation) for observation in self.observations],
+        }
+
+    def _clip_latest(self) -> None:
+        latest = self.observations[-1]
+        original = latest["result"]
+        low, high = 0, len(original)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            latest["result"] = original[:midpoint]
+            latest["result_clipped"] = midpoint < len(original)
+            if len(self._bytes(self._snapshot())) <= self.max_bytes:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        latest["result"] = original[:low]
+        latest["result_clipped"] = low < len(original)
+
+    def admit(self, tool: str, arguments: dict, result: str) -> None:
+        encoded = result.encode()
+        with self.lock:
+            self.observations.append(
+                {
+                    "ordinal": self.next_ordinal,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "result": result,
+                    "result_bytes": len(encoded),
+                    "result_sha256": hashlib.sha256(encoded).hexdigest(),
+                    "result_clipped": False,
+                    "admission": "admitted_and_delivered",
+                }
+            )
+            self.next_ordinal += 1
+            while len(self.observations) > self.limit:
+                self.observations.pop(0)
+                self.evicted += 1
+            self._clip_latest()
+            while self.observations and len(self._bytes(self._snapshot())) > self.max_bytes:
+                self.observations.pop(0)
+                self.evicted += 1
+
+    def freeze(self) -> dict:
+        with self.lock:
+            self.frozen = self._snapshot()
+            return self.frozen
+
+    def provider_answer(self) -> dict:
+        with self.lock:
+            return self.frozen
+
+
+class ObservationProvider:
+    def __init__(self, store: ObservationStore):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(handler):
+                length = int(handler.headers.get("content-length", 0))
+                handler.rfile.read(length)
+                body = json.dumps({"version": 1, "answer": store.provider_answer()}).encode()
+                handler.send_response(200)
+                handler.send_header("content-type", "application/json")
+                handler.send_header("content-length", str(len(body)))
+                handler.end_headers()
+                handler.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, name="saber-observations", daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
 class Gate:
-    def __init__(self, tools: list[dict], prompt: str, model: str, policy: str):
+    def __init__(self, tools: list[dict], prompt: str, model: str, policy: str, observations=None):
         import claude_agent_sdk
         from appa_agent_python import Session
 
@@ -63,9 +173,14 @@ class Gate:
         bundled = str(Path(claude_agent_sdk.__file__).parent / "_bundled")
         if os.environ["PATH"].split(os.pathsep)[0] != bundled:
             os.environ["PATH"] = bundled + os.pathsep + os.environ["PATH"]
+        self.observations = observations or ObservationStore()
+        self.provider = ObservationProvider(self.observations)
         externals = f"""[claude_code]
 model = {json.dumps(model)}
 timeout_ms = 90000
+
+[context.episode_observations]
+url = {json.dumps(self.provider.url)}
 """
         schemas = [
             {
@@ -78,16 +193,34 @@ timeout_ms = 90000
             }
             for t in tools
         ]
-        self.session = Session(policy, json.dumps(schemas), prompt, externals_toml=externals)
+        try:
+            self.session = Session(policy, json.dumps(schemas), prompt, externals_toml=externals)
+        except Exception:
+            self.provider.close()
+            raise
 
-    def check(self, name: str, arguments: dict) -> dict:
-        return json.loads(self.session.check(name, arguments))
+    def check(self, name: str, arguments: dict, call_id: str | None = None) -> dict:
+        self.observations.freeze()
+        return json.loads(self.session.check(name, arguments, call_id=call_id))
 
-    def report(self, output: str, error: bool = False) -> dict:
-        return json.loads(self.session.report(output, error))
+    def report(self, output: str, error: bool = False, call_id: str | None = None) -> dict:
+        return json.loads(self.session.report(output, error, call_id=call_id))
+
+    def abandon(self, call_id: str | None = None) -> None:
+        self.session.abandon(call_id=call_id)
+
+    def status(self) -> dict:
+        return json.loads(self.session.status())
+
+    def diagnostics(self) -> dict:
+        return json.loads(self.session.diagnostics())
 
     def close(self) -> None:
-        self.session.close()
+        try:
+            self.session.close()
+        finally:
+            if hasattr(self, "provider"):
+                self.provider.close()
 
 
 class Bridge:
@@ -99,38 +232,96 @@ class Bridge:
         self.lock = asyncio.Lock()
         self.audit = []
         self.errors = []
+        self.next_call = 1
+
+    def status(self):
+        return self.gate.status() if self.gate and hasattr(self.gate, "status") else None
 
     async def dispatch(self, name: str, arguments: dict) -> dict:
         async with self.lock:
-            record = {"tool": name, "arguments": arguments, "executed": False}
+            call_id = f"saber-{self.next_call}"
+            self.next_call += 1
+            control = name == CONTROL["name"]
+            correlation = None if control else call_id
+            record = {
+                "call_id": call_id,
+                "tool": name,
+                "arguments": arguments,
+                "proposal": {"tool": name, "arguments": arguments},
+                "decision": None,
+                "execution": {"status": "not_attempted"},
+                "result_admission": {"status": "not_reported"},
+                "delivery": {"status": "not_delivered"},
+                "labels": {"before_decision": self.status()},
+                # Kept for compatibility with existing result readers.
+                "executed": False,
+            }
             self.audit.append(record)
             if self.gate:
-                decision = await asyncio.to_thread(self.gate.check, name, arguments)
+                try:
+                    decision = await asyncio.to_thread(self.gate.check, name, arguments, correlation)
+                except Exception as error:
+                    record["decision"] = {"kind": "error", "error": f"{type(error).__name__}: {error}"}
+                    raise
                 record["decision"] = decision
+                record["labels"]["after_decision"] = self.status()
                 if decision["kind"] == "blocked":
+                    record["delivery"] = {"status": "refusal_delivered"}
                     return {"content": [{"type": "text", "text": decision["feedback"]}], "isError": True}
                 if decision["kind"] == "control":
+                    record["delivery"] = {"status": "control_reply_delivered"}
                     return {"content": [{"type": "text", "text": decision["reply"]}]}
                 if decision["kind"] != "allowed":
                     raise RuntimeError(f"Unexpected APPA decision: {decision}")
                 if (decision["dispatched_tool"], decision["dispatched_arguments"]) != (name, arguments):
-                    self.gate.session.abandon()
+                    self.gate.abandon(correlation)
                     raise RuntimeError("APPA changed a SABER call; refusing mismatched dispatch")
             elif name == CONTROL["name"]:
+                record["decision"] = {"kind": "unavailable_control"}
+                record["delivery"] = {"status": "refusal_delivered"}
                 return {"content": [{"type": "text", "text": "No APPA remedy is active in this arm."}], "isError": True}
+            else:
+                record["decision"] = {"kind": "auto_arm"}
             try:
+                record["execution"] = {"status": "attempted"}
                 output = await asyncio.to_thread(self.runtime.execute_tool, name, arguments)
                 record["executed"] = True
-            except Exception:
+                record["execution"] = {"status": "confirmed"}
+            except Exception as error:
+                record["execution"] = {"status": "indeterminate", "error": f"{type(error).__name__}: {error}"}
                 if self.gate:
-                    self.gate.session.abandon()
+                    self.gate.abandon(correlation)
+                    record["result_admission"] = {"status": "indeterminate_reported"}
+                    record["labels"]["after_report"] = self.status()
                 raise
             if self.gate:
-                reported = await asyncio.to_thread(self.gate.report, output)
+                try:
+                    reported = await asyncio.to_thread(self.gate.report, output, False, correlation)
+                except Exception as error:
+                    record["result_admission"] = {
+                        "status": "failed",
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                    try:
+                        self.gate.abandon(correlation)
+                    except Exception:
+                        pass
+                    record["labels"]["after_report"] = self.status()
+                    raise
                 record["report"] = reported
+                record["labels"]["after_report"] = self.status()
                 if reported["kind"] != "delivered":
+                    record["result_admission"] = {"status": "withheld"}
                     raise RuntimeError(f"Unexpected APPA report: {reported}")
+                record["result_admission"] = {
+                    "status": "admitted" if reported["disposition"] == "admitted" else "sealed"
+                }
                 output = reported["content"]
+                if reported["disposition"] == "admitted" and hasattr(self.gate, "observations"):
+                    self.gate.observations.admit(name, arguments, output)
+            else:
+                record["result_admission"] = {"status": "not_applicable"}
+            record["delivery"] = {"status": "delivered"}
             return {"content": [{"type": "text", "text": output}]}
 
 
@@ -156,6 +347,7 @@ async def episode(task: dict, arm: str, args, directory: Path) -> dict:
     hook_events = []
     mode_errors = []
     messages = []
+    appa_diagnostics = None
     container_label = {"appa.saber.episode": str(directory.resolve())}
     try:
         runtime = await asyncio.to_thread(TaskRuntime, task, container_labels=container_label)
@@ -250,6 +442,13 @@ async def episode(task: dict, arm: str, args, directory: Path) -> dict:
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
     finally:
+        if gate:
+            try:
+                appa_diagnostics = gate.diagnostics()
+                appa_diagnostics["observation_store"] = gate.observations.freeze()
+            except Exception as error:
+                appa_diagnostics = {"export_error": f"{type(error).__name__}: {error}"}
+                result["error"] = f"{result['error'] or ''} APPA diagnostic export failed: {error}"
         if runtime:
             result["trajectory"] = runtime.get_shell_trajectory()
             result["events"] = runtime.get_events()
@@ -278,6 +477,12 @@ async def episode(task: dict, arm: str, args, directory: Path) -> dict:
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
         result["dispatch_audit"] = bridge.audit if bridge else []
         result["permission_hooks"] = hook_events
+        if appa_diagnostics is not None:
+            write_json(directory / "appa-diagnostics.json", appa_diagnostics)
+        write_json(
+            directory / "execution-evidence.json",
+            {"diagnostic_only": True, "calls": bridge.audit if bridge else []},
+        )
         write_json(directory / "sdk-messages.json", messages)
         write_json(directory / "result.json", result)
     return result
@@ -381,8 +586,18 @@ def summarize(results: list[dict]) -> dict:
             ),
             "actor_cost_usd": sum(r.get("sdk_result", {}).get("total_cost_usd") or 0 for r in rows),
         }
+    execution_evidence = {}
+    for arm in sorted({r["arm"] for r in results}):
+        records = [record for r in results if r["arm"] == arm for record in r.get("dispatch_audit", [])]
+        execution_evidence[arm] = {
+            "proposals": len(records),
+            "confirmed": sum(record.get("execution", {}).get("status") == "confirmed" for record in records),
+            "indeterminate": sum(record.get("execution", {}).get("status") == "indeterminate" for record in records),
+            "delivered": sum(record.get("delivery", {}).get("status") == "delivered" for record in records),
+        }
     return {
         "arms": summary,
+        "execution_evidence_diagnostics": execution_evidence,
         "saber_revision": REVISION,
         "cost_scope": "Actor SDK cost only; excludes Auto classifier, APPA Annotator and SABER judge.",
     }
