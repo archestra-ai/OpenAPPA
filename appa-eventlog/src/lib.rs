@@ -1230,7 +1230,7 @@ impl LogStore {
 fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
     use std::sync::atomic::Ordering::SeqCst;
     counter
-        .fetch_update(SeqCst, SeqCst, |remaining| match remaining {
+        .try_update(SeqCst, SeqCst, |remaining| match remaining {
             0 => None,
             remaining => Some(remaining - 1),
         })
