@@ -489,7 +489,7 @@ impl EventLog {
         let now = SystemTime::now();
         let mut inside = self.roots.iter().filter_map(|(root, events)| {
             let last = events.entries.back()?;
-            let age = now.duration_since(last.at).ok()?;
+            let age = now.duration_since(last.at).unwrap_or(std::time::Duration::ZERO);
             (age <= window && selected.is_none_or(|selected| selected.as_str() == root)).then(|| (root.clone(), age))
         });
         match (inside.next(), inside.next()) {
@@ -644,6 +644,29 @@ mod tests {
             log.recent_root(std::time::Duration::MAX, Some(&root("missing"))),
             Recent::None,
             "naming a trajectory does not bypass the retained event boundary"
+        );
+    }
+
+    /// A clock stepped back since the entry was stamped leaves it in the window, as recent
+    /// as an entry can be.
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn an_entry_stamped_after_now_is_recent() {
+        let mut log = EventLog::default();
+        log.record(Some(&root("session")), hook("Read"));
+        log.roots
+            .get_mut(&key("session"))
+            .expect("the root exists")
+            .entries
+            .back_mut()
+            .expect("the root has an event")
+            .at = SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            log.recent_root(std::time::Duration::from_secs(1), None),
+            Recent::One {
+                root: "session".to_string(),
+                age: std::time::Duration::ZERO,
+            }
         );
     }
 
