@@ -60,10 +60,15 @@ these selectors over the Slack Web API:
   is read by every full member, since any of them may join it and read
   its history, plus the guests and Slack Connect participants already in
   it. A private channel, group DM, or DM is read by its members exactly
-  as Slack reports them, deactivated accounts left out. A user id (`U…`
-  or `W…`, which the connector accepts as a `channel_id` for a DM)
-  names exactly the viewer and that user. A channel name, a `#` spelling,
-  or a URL is refused, never guessed. The battery's contracts name this
+  as Slack reports them, deactivated accounts left out. Slack shows a
+  DM (`D…`) only to its two ends, so a token of any other account —
+  a bot's included — cannot answer for it, and the source refuses with
+  a diagnostic that says so. A user id (`U…` or `W…`, which the
+  connector accepts as a `channel_id` for a DM) names the DM with that
+  user: that user and the viewer when the token is a person's, that
+  user alone when it is a bot's, because an app takes part in no
+  person's DM. A channel name, a `#` spelling, or a URL is refused,
+  never guessed. The battery's contracts name this
   collection through the placeholder `@slack:channel/$channel_id`.
 
 A member is the account's profile email where Slack marks the address

@@ -72,7 +72,7 @@ digest = "sha256:4a8acfb0f38fc5db64b8caa522689412c57b4e304cfb5753591998494ff31ed
 
 [packages.battery.slack]
 path = "batteries/slack"
-digest = "sha256:250edcf400a322985fb777afe523a235d84a56692400c81245555da75062d964"
+digest = "sha256:bf6a630e6fb6858291ddb5f3cc6b00d09d8a9cbb1eb973793b396901bae08e1a"
 
 [packages.battery.xmemory]
 path = "batteries/xmemory"
