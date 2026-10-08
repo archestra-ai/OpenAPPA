@@ -429,6 +429,62 @@ fn a_tool_names_an_annotator_or_declares_static_semantics_never_both() {
 }
 
 #[test]
+fn an_annotated_route_can_declare_a_human_reviewed_no_answer_fallback() {
+    let policy = r#"
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[annotator]]
+name = "classifier"
+
+[[authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[[tool]]
+name = "fetch"
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, requires = { attention = ["annotator-unavailable"] } }
+"#;
+    let config = load(policy).expect("a reviewed no-answer fallback loads");
+    let declaration = config
+        .engine()
+        .registry()
+        .declaration(
+            &config
+                .engine()
+                .resolve_call(ToolName::new("fetch"), b"{}")
+                .expect("the call resolves"),
+        )
+        .expect("fetch is declared");
+    let fallback = declaration.on_no_answer().expect("the route carries its fallback");
+    assert_eq!(fallback.delta.trust, Some(Trust::new(0)));
+    assert_eq!(
+        fallback
+            .requires
+            .attention_marks()
+            .iter()
+            .map(|mark| mark.as_str())
+            .collect::<Vec<_>>(),
+        ["annotator-unavailable"]
+    );
+}
+
+#[test]
+fn a_no_answer_fallback_requires_an_annotator_and_human_attention() {
+    assert!(matches!(
+        load("version = 2\n[[tool]]\nname = \"fetch\"\non_no_answer = { requires = { attention = [\"review\"] } }\n"),
+        Err(ConfigError::FallbackWithoutAnnotator { tool }) if tool == "fetch"
+    ));
+    assert!(matches!(
+        load(
+            "version = 2\n[[annotator]]\nname = \"classifier\"\n[[tool]]\nname = \"fetch\"\nannotator = \"classifier\"\non_no_answer = { requires = { attention = [] } }\n"
+        ),
+        Err(ConfigError::FallbackWithoutAttention { tool }) if tool == "fetch"
+    ));
+}
+
+#[test]
 fn the_wildcard_tool_loads_with_an_annotator_and_nothing_else() {
     let policy = "version = 2\n[[annotator]]\nname = \"any\"\n\
                   [[tool]]\nname = \"*\"\nannotator = \"any\"\n";

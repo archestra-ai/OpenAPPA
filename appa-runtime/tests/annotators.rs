@@ -588,6 +588,71 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
     assert!(audit_len(&runtime) > baseline);
 }
 
+fn reviewed_fallback_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+
+[[policy.authority]]
+name = "operator"
+permits = {{ attention = ["annotator-unavailable"] }}
+
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+annotator = "classifier"
+on_no_answer = {{ delta = {{ trust = "suspicious" }}, requires = {{ attention = ["annotator-unavailable"] }} }}
+
+[externals]
+timeout_ms = 2000
+review_timeout_ms = 1000
+max_body_bytes = 65536
+
+[externals.annotators.classifier]
+url = "{url}"
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#
+    )
+}
+
+#[tokio::test]
+async fn a_route_can_turn_an_annotation_failure_into_human_approval() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Down);
+    let runtime = open_runtime(&dir, &reviewed_fallback_policy(&url)).await;
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    let HookDecision::DenyCall { offers, review, .. } = &decision else {
+        panic!("the fallback must request approval instead of refusing the hook: {decision:?}");
+    };
+    assert!(!offers.is_empty(), "the human authority supplies an approval path");
+    assert!(!review.is_empty(), "the harness receives a human review request");
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the Annotator is attempted before fallback"
+    );
+
+    let repeated = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(repeated, HookDecision::DenyCall { .. }),
+        "the fallback pin still requires approval"
+    );
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the prepared fallback is pinned to the exact call instead of reconsulting"
+    );
+}
+
 #[cfg(unix)]
 fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(

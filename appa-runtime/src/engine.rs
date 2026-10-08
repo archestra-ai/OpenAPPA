@@ -147,6 +147,8 @@ pub enum ExternalRequest {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
+        /// This route has policy-declared semantics for an Annotator no-answer.
+        fallback: bool,
         /// The consult artifact: the complete call, or one value per declared input that
         /// reads the call.
         args: serde_json::Value,
@@ -200,6 +202,12 @@ pub enum ExternalEvidence {
         call: appa_engine::value::CanonicalDigest,
         answer: AnnotationAnswer,
         /// What the context providers answered before the Annotator judged the call.
+        context: AnnotationContext,
+    },
+    /// The Annotator produced no usable answer for a route whose policy declares a fallback.
+    AnnotationNoAnswer {
+        annotator: String,
+        call: appa_engine::value::CanonicalDigest,
         context: AnnotationContext,
     },
     AudienceSource {
@@ -2187,18 +2195,32 @@ impl RuntimeEngine {
             } if answered_by == annotator.as_str() && *call == digest => Some((answer, context)),
             _ => None,
         });
-        let Some((answer, context)) = answer else {
-            return Err(Resolution(vec![self.annotation_request(
-                annotator,
-                declaration,
-                resolved,
-                cwd,
-            )]));
-        };
-        Ok(
-            PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
-                .with_context(context.clone()),
-        )
+        if let Some((answer, context)) = answer {
+            return Ok(
+                PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
+                    .with_context(context.clone()),
+            );
+        }
+        let no_answer = evidence.iter().find_map(|entry| match entry {
+            ExternalEvidence::AnnotationNoAnswer {
+                annotator: answered_by,
+                call,
+                context,
+            } if answered_by == annotator.as_str() && *call == digest => Some(context),
+            _ => None,
+        });
+        if let (Some(context), Some(fallback)) = (no_answer, declaration.on_no_answer()) {
+            return Ok(
+                PinnedAnnotation::no_answer_fallback(annotator.clone(), digest, fallback.clone())
+                    .with_context(context.clone()),
+            );
+        }
+        Err(Resolution(vec![self.annotation_request(
+            annotator,
+            declaration,
+            resolved,
+            cwd,
+        )]))
     }
 
     /// `cwd` is the directory the harness proposed the call from, when it reports one; only
@@ -2218,6 +2240,7 @@ impl RuntimeEngine {
             annotator: annotator.as_str().to_string(),
             call: resolved.digest(),
             declaration: self.annotation_declaration(annotator, binding, resolved),
+            fallback: declaration.on_no_answer().is_some(),
             args: annotation_args(&binding.inputs, declaration, resolved),
             context: ContextArtifact {
                 tool: resolved.tool().as_str().to_string(),

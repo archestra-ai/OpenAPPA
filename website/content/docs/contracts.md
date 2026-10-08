@@ -68,6 +68,7 @@ effects = ["egress"]
 | `requires` | Audience, trust, effects, or attention requirements for the call. |
 | `effects` | Effect names recorded after successful execution. Declare all relevant side effects. |
 | `annotator` | A registered component that supplies the complete annotation for each call. |
+| `on_no_answer` | Optional static annotation used when the selected annotator gives no answer; it must require attention. |
 
 An omitted `delta` adds no restriction. An omitted `requires` adds no requirement.
 
@@ -226,7 +227,7 @@ name = "*"
 annotator = "classify_unknown_tool"
 ```
 
-Declare and bind `classify_unknown_tool` as shown in [Annotators](#annotators). The wildcard cannot contain static `delta`, `requires`, or `effects` fields. It also cannot contain metadata or argument selectors.
+Declare and bind `classify_unknown_tool` as shown in [Annotators](#annotators). The wildcard cannot contain static `delta`, `requires`, or `effects` fields. It can declare `on_no_answer`. It cannot contain metadata or argument selectors.
 
 A policy can contain one wildcard entry. Explicit tool contracts take precedence over it, regardless of where the wildcard appears in the policy. If none of a tool's argument selectors match, the call falls through to the wildcard annotator. A matched contract's schema error still refuses the call; it does not fall through. Without a wildcard, a call with no matching contract is refused before execution.
 
@@ -644,6 +645,36 @@ annotator = "classify-command"
 ```
 
 This configuration sends the tool name, description, and arguments to Claude Code. It does not require a `parameters` schema. If the tool has no description, the request omits it.
+
+### Fallback to human review
+
+An annotator timeout, failed request, or invalid answer refuses the call by default. The policy records no decision. A later proposal asks again.
+
+An annotated tool can instead declare `on_no_answer`. This is a complete static annotation for that route. It MUST contain a `requires.attention` mark.
+
+Declare an authority that permits the mark. Bind it to `hitl` to ask a person before the exact call can run:
+
+```toml
+[[policy.annotator]]
+name = "classify-command"
+ranks = ["suspicious", "trusted"]
+
+[[policy.tool]]
+name = "Bash"
+annotator = "classify-command"
+on_no_answer = { delta = { trust = "suspicious" }, requires = { attention = ["annotator-unavailable"] } }
+
+[[policy.authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[externals.authorities.operator]
+builtin = "hitl"
+```
+
+The fallback supplies the restrictions, requirements, and effects that the annotator did not produce. Set them conservatively for the route.
+
+OpenAPPA pins the fallback to the exact call and presents its normal remedy plans. A route without `on_no_answer` still refuses the call.
 
 ### Inputs
 

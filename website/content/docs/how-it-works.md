@@ -129,7 +129,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository, and `gh pr view` names a number, not who wrote the comments — a context provider of the deployment finds the facts first, and the annotator classifies from them. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository, and `gh pr view` names a number, not who wrote the comments — a context provider of the deployment finds the facts first, and the annotator classifies from them. A route can declare conservative static semantics with an attention requirement for an annotator no-answer; without that opt-in, the call is refused operationally. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagent Reads
 

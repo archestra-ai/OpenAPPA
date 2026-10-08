@@ -32,8 +32,10 @@
 //! to the producing Annotator and the call's canonical digest, so a rewrite is annotated
 //! afresh and replay never consults again. The
 //! wildcard declaration (`"*"`) routes every call without a matching explicit contract through an
-//! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
-//! to arrive is an operational refusal, never a policy denial.
+//! Annotator; a call nothing covers is refused before it runs. An annotation that fails to arrive
+//! is an operational refusal by default. An annotated declaration may instead supply a static
+//! no-answer annotation with an attention requirement. That annotation is pinned to the call and
+//! follows the ordinary policy approval path.
 //!
 //! ## Two fork lifecycles
 //!
