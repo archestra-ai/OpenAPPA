@@ -706,8 +706,8 @@ impl std::fmt::Debug for Token {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("local credential database is unavailable")]
-    CredentialStore,
+    #[error("local credential database is unavailable: {reason}")]
+    CredentialStore { reason: String },
     #[error("cannot read {path}: {source}")]
     Unreadable { path: String, source: std::io::Error },
     #[error("cannot parse {path}: {source}")]
@@ -1125,8 +1125,9 @@ impl Config {
     /// Standalone configuration only: embedding hosts keep their existing environment interface.
     #[cfg(feature = "daemon")]
     pub(crate) fn load_local(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        let store = crate::credentials::CredentialStore::for_config(path).map_err(|_| ConfigError::CredentialStore)?;
-        let saved = store.values().map_err(|_| ConfigError::CredentialStore)?;
+        let unavailable = |reason| ConfigError::CredentialStore { reason };
+        let store = crate::credentials::CredentialStore::for_config(path).map_err(unavailable)?;
+        let saved = store.values().map_err(unavailable)?;
         let lookup = |var: &str| std::env::var(var).ok().or_else(|| saved.get(var).cloned());
         let mut config = Self::load_with_keys(path, battery_dirs, KeySource::Lookup(&lookup))?;
         config.credential_store = Some(store);
@@ -2469,6 +2470,24 @@ mod tests {
     use super::*;
 
     const BUNDLE_ROOT: &str = "[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n";
+
+    /// The store's own reason survives into the load error, not just that it failed.
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn an_unavailable_credential_store_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, BUNDLE_ROOT).unwrap();
+        std::fs::create_dir(dir.path().join("credentials.db")).unwrap();
+        let expected = crate::credentials::CredentialStore::for_config(&path)
+            .unwrap()
+            .values()
+            .unwrap_err();
+        match Config::load_local(&path, &[]) {
+            Err(ConfigError::CredentialStore { reason }) => assert_eq!(reason, expected),
+            other => panic!("expected the store's refusal, got {other:?}"),
+        }
+    }
 
     #[test]
     fn bundle_files_do_not_change_policy_identity() {
