@@ -56,13 +56,44 @@ def hub_root(environ):
     return (environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")
 
 
+def _expand_tilde(path, environ):
+    path = str(path)
+    if not path.startswith("~"):
+        return path
+    if len(path) > 1 and path[1] not in (("/", "\\") if os.name == "nt" else ("/",)):
+        return path
+
+    home = None
+    if os.name == "nt":
+        if environ.get("USERPROFILE"):
+            home = environ["USERPROFILE"]
+        elif environ.get("HOMEDRIVE") and environ.get("HOMEPATH"):
+            home = environ["HOMEDRIVE"] + environ["HOMEPATH"]
+
+    if not home and environ.get("HOME"):
+        home = environ["HOME"]
+
+    if not home:
+        return path
+
+    if len(path) == 1:
+        return home
+    return home + path[1:]
+
+
 def token_path(environ):
     if path := environ.get("HF_TOKEN_PATH"):
-        return Path(path)
+        return Path(_expand_tilde(path, environ))
     if home := environ.get("HF_HOME"):
-        return Path(home) / "token"
-    cache = environ.get("XDG_CACHE_HOME") or Path(environ.get("HOME") or "/nonexistent") / ".cache"
-    return Path(cache) / "huggingface" / "token"
+        return Path(_expand_tilde(home, environ)) / "token"
+    if cache := environ.get("XDG_CACHE_HOME"):
+        cache_dir = Path(_expand_tilde(cache, environ))
+    else:
+        home = _expand_tilde("~", environ)
+        if home == "~":
+            home = "/nonexistent"
+        cache_dir = Path(home) / ".cache"
+    return cache_dir / "huggingface" / "token"
 
 
 def stored_token(environ):

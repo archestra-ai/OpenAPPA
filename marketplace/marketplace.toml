@@ -32,7 +32,7 @@ digest = "sha256:f31063bdaa32bb92ff6b6c18c0c70f6340be565d991d21ba6de224d28373062
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:7344d3a3ecbbcf92aea634c1ff6546ec8848c79f1658b2429f0df70b90d47c92"
+digest = "sha256:d39f83ceb467e411b5a6f7d10a97336533db75b65fded3b853d9249c4d438a58"
 
 [packages.battery.jev]
 path = "batteries/jev"

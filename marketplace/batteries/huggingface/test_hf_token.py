@@ -1,7 +1,10 @@
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
+import contextlib
+from unittest.mock import patch
 
 
 MODULE = Path(__file__).with_name("hf_token.py")
@@ -54,6 +57,100 @@ class ResolveToken(unittest.TestCase):
     def test_the_hub_root_is_hf_endpoint(self):
         self.assertEqual(HF_TOKEN.hub_root({}), "https://huggingface.co")
         self.assertEqual(HF_TOKEN.hub_root({"HF_ENDPOINT": "http://127.0.0.1:9/"}), "http://127.0.0.1:9")
+
+    def test_tilde_expansion_in_paths(self):
+        self.stored("from_token_path")
+
+        token = HF_TOKEN.resolve_token({
+            "HOME": self.home.name,
+            "HF_TOKEN_PATH": "~/.cache/huggingface/token"
+        })
+        self.assertEqual(token, "from_token_path")
+
+        token = HF_TOKEN.resolve_token({
+            "HOME": self.home.name,
+            "HF_HOME": "~/.cache/huggingface"
+        })
+        self.assertEqual(token, "from_token_path")
+
+        token = HF_TOKEN.resolve_token({
+            "HOME": self.home.name,
+            "XDG_CACHE_HOME": "~/.cache"
+        })
+        self.assertEqual(token, "from_token_path")
+
+    def test_unresolved_explicit_tilde_remains_literal(self):
+        with contextlib.chdir(self.home.name):
+            with self.assertRaises(RuntimeError) as exc:
+                HF_TOKEN.resolve_token({
+                    "HF_TOKEN_PATH": "~/token"
+                })
+            self.assertIn("~/token", str(exc.exception).replace("\\", "/"))
+
+    def test_unchanged_relative_path(self):
+        with self.assertRaises(RuntimeError) as exc:
+            HF_TOKEN.resolve_token({
+                "HF_TOKEN_PATH": "./relative/token"
+            })
+        self.assertIn("relative/token", str(exc.exception).replace("\\", "/"))
+
+    def test_empty_home_must_not_load_working_directory_token(self):
+        with contextlib.chdir(self.home.name):
+            fake_token_path = Path(".cache") / "huggingface" / "token"
+            fake_token_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_token_path.write_text("cwd_token")
+
+            with self.assertRaises(RuntimeError) as exc:
+                HF_TOKEN.resolve_token({"HOME": ""})
+            self.assertIn("APPA_PROVIDER_HUGGINGFACE_TOKEN is not set", str(exc.exception))
+
+
+class ExpandTildeTests(unittest.TestCase):
+    def check_expand(self, os_name, environ, path, expected):
+        with patch.object(HF_TOKEN.os, "name", os_name):
+            self.assertEqual(HF_TOKEN._expand_tilde(path, environ), expected)
+
+    def test_windows_precedence(self):
+        cases = [
+            ({"USERPROFILE": "C:\\Users\\profile", "HOMEDRIVE": "D:", "HOMEPATH": "\\Users\\home", "HOME": "E:\\home"}, "~", "C:\\Users\\profile"),
+            ({"HOMEDRIVE": "D:", "HOMEPATH": "\\Users\\home", "HOME": "E:\\home"}, "~", "D:\\Users\\home"),
+            ({"HOME": "E:\\home"}, "~", "E:\\home"),
+            ({"USERPROFILE": "", "HOME": "E:\\home"}, "~", "E:\\home"),
+            ({"HOMEDRIVE": "", "HOMEPATH": "\\Users\\test", "HOME": "E:\\home"}, "~", "E:\\home"),
+            ({"HOMEDRIVE": "C:", "HOMEPATH": "", "HOME": "E:\\home"}, "~", "E:\\home"),
+            ({"USERPROFILE": "", "HOME": ""}, "~/foo", "~/foo"),
+            ({"USERPROFILE": "C:\\Users\\test"}, "~/foo", "C:\\Users\\test/foo"),
+            ({"USERPROFILE": "C:\\Users\\test"}, "~\\foo", "C:\\Users\\test\\foo"),
+        ]
+        for env, path, expected in cases:
+            with self.subTest(env=env, path=path):
+                self.check_expand("nt", env, path, expected)
+
+    def test_unix_precedence(self):
+        cases = [
+            ({"HOME": "/home/test"}, "~", "/home/test"),
+            ({"USERPROFILE": "/home/windows", "HOME": "/home/test"}, "~", "/home/test"),
+            ({"HOME": ""}, "~/foo", "~/foo"),
+            ({}, "~/foo", "~/foo"),
+            ({"HOME": "/home/test"}, "~\\foo", "~\\foo"),
+        ]
+        for env, path, expected in cases:
+            with self.subTest(env=env, path=path):
+                self.check_expand("posix", env, path, expected)
+
+    def test_shared_behavior(self):
+        cases = [
+            ({"HOME": "/home/test"}, "/absolute/path", "/absolute/path"),
+            ({"HOME": "/home/test"}, "relative/path", "relative/path"),
+            ({"HOME": "/home/test"}, "~", "/home/test"),
+            ({"HOME": "/home/test"}, "~username/foo", "~username/foo"),
+            ({"HOME": "/home/ test "}, "~", "/home/ test "),
+            ({"HOME": " "}, "~", " "),
+        ]
+        for os_name in ("nt", "posix"):
+            for env, path, expected in cases:
+                with self.subTest(os_name=os_name, env=env, path=path):
+                    self.check_expand(os_name, env, path, expected)
 
 
 if __name__ == "__main__":
