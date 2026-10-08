@@ -337,8 +337,26 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projectio
         });
     }
 
-    let mut runtime_events = Vec::new();
-    for entry in source.events.entries.iter().chain(source.events.deployment.iter()) {
+    let mut recorded: Vec<_> = source
+        .events
+        .entries
+        .iter()
+        .chain(source.events.deployment.iter())
+        .collect();
+    recorded.sort_by_key(|entry| entry.seq);
+    // The oldest go before anything is numbered, so a dropped event takes no token with it;
+    // and the document says so. The last dropped sequence rather than the first surviving
+    // one: a budget of zero drops everything and still has to leave a mark.
+    let events_trimmed = match budget.events {
+        Some(cap) => recorded.len().saturating_sub(cap),
+        None => 0,
+    };
+    let events_trimmed_through_seq = match events_trimmed {
+        0 => None,
+        trimmed => recorded.get(trimmed - 1).map(|entry| entry.seq),
+    };
+    let mut runtime_events = Vec::with_capacity(recorded.len() - events_trimmed);
+    for entry in recorded.into_iter().skip(events_trimmed) {
         let event = serialized(&entry.event);
         let stripped = match tables::event_table(&event) {
             Some(table) => strip(&event, table, &mut tokens, mode, &source.vouched),
@@ -359,18 +377,6 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projectio
             event: stripped.value,
         });
     }
-    runtime_events.sort_by_key(|entry| entry.seq);
-    // The oldest go, and the document says so. The last dropped sequence rather than the first
-    // surviving one: a budget of zero drops everything and still has to leave a mark.
-    let events_trimmed = match budget.events {
-        Some(cap) => runtime_events.len().saturating_sub(cap),
-        None => 0,
-    };
-    let events_trimmed_through_seq = match events_trimmed {
-        0 => None,
-        trimmed => runtime_events.get(trimmed - 1).map(|entry| entry.seq),
-    };
-    runtime_events.drain(..events_trimmed);
 
     let export = Export {
         branches,
@@ -834,6 +840,55 @@ mod tests {
         for spelled in [invented, "id_rsa", "alice"] {
             assert!(!rendered.contains(spelled), "{spelled} survived baseline: {rendered}");
         }
+    }
+
+    /// A trimmed export numbers what it keeps exactly as an export that only ever held those
+    /// events would: a name seen only in a dropped event takes no token.
+    #[test]
+    fn a_trimmed_event_takes_no_token_with_it() {
+        use crate::events::{Events, HookKind, HookOutcome, RecordedEvent, RuntimeEvent};
+        let hook = |seq, tool: &str| RecordedEvent {
+            seq,
+            at: std::time::SystemTime::now(),
+            event: RuntimeEvent::Hook {
+                event: HookKind::ToolCall,
+                tool: Some(tool.to_string()),
+                dispatch: None,
+                outcome: HookOutcome::Allowed,
+                offers: Vec::new(),
+            },
+        };
+        let events = |entries| {
+            let source = Source {
+                facts: &[],
+                events: Events {
+                    entries,
+                    ..Events::default()
+                },
+                trust_chain: Vec::new(),
+                policy: None,
+                vouched: BTreeSet::new(),
+                parents: Vec::new(),
+                replay_refused: None,
+                yelling: None,
+            };
+            let budget = Budget {
+                facts: None,
+                events: Some(1),
+            };
+            match build(source, Mode::Pseudonymized, budget).trajectory {
+                Diagnostic::Present(export) => export
+                    .runtime_events
+                    .into_iter()
+                    .map(|entry| entry.event)
+                    .collect::<Vec<_>>(),
+                Diagnostic::Omitted { omitted_reason } => panic!("the source exports, got {omitted_reason:?}"),
+            }
+        };
+        assert_eq!(
+            events(vec![hook(0, "dropped"), hook(1, "kept")]),
+            events(vec![hook(1, "kept")])
+        );
     }
 
     /// A caller that cannot fit an export asks for less of it, and the runtime rebuilds under
