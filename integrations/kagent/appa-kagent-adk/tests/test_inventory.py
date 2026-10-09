@@ -13,6 +13,8 @@ from appa_kagent_adk.inventory import (
     GUIDE_ENV,
     SKILLS_FOLDER_ENV,
     ToolInventory,
+    _char,
+    _continues,
     builtin_manifest,
     is_spawn,
     mcp_source_id,
@@ -254,6 +256,15 @@ LOG_ANALYST = "agent:kagent/log-analyst"
         pytest.param(f"x{LIST_PODS}", f"x{LIST_PODS}", id="a-longer-first-segment"),
         pytest.param(f"notes/{LIST_PODS}", f"notes/{LIST_PODS}", id="preceded-by-a-path"),
         pytest.param(f"a/{LIST_PODS}/b", f"a/{LIST_PODS}/b", id="inside-a-longer-identifier"),
+        # Separator dots the scan absorbs do not glue a whole spelling to
+        # what follows: the spelling is replaced and the rest rescanned.
+        pytest.param(f"called {LIST_PODS}..retrying", "called list_pods..retrying", id="a-glued-dot-run"),
+        pytest.param(f"{LIST_PODS}..json", "list_pods..json", id="a-glued-dotted-suffix"),
+        pytest.param(
+            f"{LIST_PODS}..{LOG_ANALYST}",
+            "list_pods..kagent__NS__log_analyst",
+            id="a-glued-second-spelling",
+        ),
         # A spelling of the right shape this inventory never gave out.
         pytest.param("mcp:other/list_pods", "mcp:other/list_pods", id="never-issued"),
     ],
@@ -264,6 +275,66 @@ def test_despell_replaces_a_whole_spelling_and_leaves_every_longer_identifier(te
         remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
     )
     assert built.despell(text) == expected
+
+
+def test_a_stood_run_ending_on_a_bare_class_still_despells_what_follows():
+    """A run that stands can end on a bare class name whose colon stands
+    just past it (``..mcp:``): the spelling opening there is still whole
+    and despells, while the run itself stands."""
+    built = inventory(
+        http_tools=[DEMO_TOOLS],
+        remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
+    )
+    text = f"notes/{LIST_PODS}..{LOG_ANALYST}"
+    assert built.despell(text) == f"notes/{LIST_PODS}..kagent__NS__log_analyst"
+
+
+def _oracle(names, text):
+    """Brute-force whole-spelling substitution, independent of the scan:
+    the longest inventory spelling starting at each position, replaced
+    only where the identifier continues on neither side."""
+    out, pos = [], 0
+    while pos < len(text):
+        hit = next((sp for sp in sorted(names, key=len, reverse=True) if text.startswith(sp, pos)), None)
+        if (
+            hit is None
+            or _continues(_char(text, pos - 1), _char(text, pos - 2))
+            or _continues(_char(text, pos + len(hit)), _char(text, pos + len(hit) + 1))
+        ):
+            out.append(text[pos])
+            pos += 1
+        else:
+            out.append(names[hit])
+            pos += len(hit)
+    return "".join(out)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("no spellings here", id="plain"),
+        pytest.param(f"call {LIST_PODS} now", id="sentence"),
+        pytest.param(f"called {LIST_PODS}..retrying", id="glued-dots"),
+        pytest.param(f"{LIST_PODS}..json", id="glued-dotted-tail"),
+        pytest.param(f"{LIST_PODS}..{LOG_ANALYST}", id="glued-second-spelling"),
+        pytest.param(f"notes/{LIST_PODS}..{LOG_ANALYST}", id="stood-run-bare-class-tail"),
+        pytest.param(f"{LIST_PODS}/response", id="longer-path"),
+        pytest.param(f"{LIST_PODS}.json", id="dotted-suffix"),
+        pytest.param(f"{LIST_PODS}x", id="longer-segment"),
+        pytest.param(f"x{LIST_PODS}", id="longer-opening"),
+        pytest.param(f"Retry {LIST_PODS}. Then {LOG_ANALYST}!", id="punctuation"),
+        pytest.param(f"{LOG_ANALYST}:{LIST_PODS}", id="colon-joined"),
+        pytest.param(f"[{LIST_PODS}]({LOG_ANALYST})", id="bracketed-pair"),
+        pytest.param("mcp:other/list_pods", id="never-issued"),
+    ],
+)
+def test_despell_matches_the_whole_spelling_oracle(text):
+    built = inventory(
+        http_tools=[DEMO_TOOLS],
+        remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
+    )
+    assert built.despell(text) == _oracle(built.names, text)
 
 
 def test_the_builtin_groups_follow_the_config_and_the_environment():
