@@ -100,7 +100,7 @@ pub(crate) async fn run(
     config: Config,
     modules: Option<std::path::PathBuf>,
     repeat: u32,
-    concurrency: usize,
+    concurrency: std::num::NonZeroUsize,
 ) -> ExitCode {
     let runtime = match Runtime::open_in_memory(config, modules) {
         Ok(runtime) => runtime,
@@ -127,7 +127,7 @@ pub(crate) async fn run(
         .flat_map(|call| (0..repeat).map(move |repeat| (call, repeat)))
         .map(|(call, repeat)| ask(&runtime, call, repeat));
     futures_util::stream::iter(asks)
-        .buffer_unordered(concurrency)
+        .buffer_unordered(concurrency.get())
         .collect::<()>()
         .await;
     ExitCode::SUCCESS

@@ -4,7 +4,7 @@
 //! exact wiring `appa-corp-agent` performs at startup.
 
 use appa_runtime::api::Runtime;
-use appa_runtime::config::{Config, Implementation};
+use appa_runtime::config::{Config, Implementation, Transport};
 use corp_systems::systems::System;
 use corporate_agent_demo::catalogue;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -38,7 +38,7 @@ async fn hosted(dir: &tempfile::TempDir, config: &mut Config) -> String {
     .expect("the shim binds");
     let origin = format!("http://{address}");
     for implementation in config.externals.sanitizers.values_mut() {
-        if let Implementation::Resolver(endpoint) = implementation
+        if let Implementation::Transport(Transport::Url(endpoint)) = implementation
             && let Some(path) = endpoint.url.strip_prefix("http://127.0.0.1:0")
             && shim::serves(path)
         {
@@ -58,7 +58,7 @@ async fn the_guarded_policy_opens_with_its_redactor_hosted_by_the_agents_own_shi
     );
     let origin = hosted(&dir, &mut config).await;
     match config.externals.sanitizers.get("pii-redactor") {
-        Some(Implementation::Resolver(endpoint)) => assert_eq!(
+        Some(Implementation::Transport(Transport::Url(endpoint))) => assert_eq!(
             endpoint.url,
             format!("{origin}{}", shim::REDACTOR_PATH),
             "the shim's origin replaces the unbound one and the path survives",

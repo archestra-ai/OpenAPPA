@@ -373,9 +373,10 @@ fn headline(artifact: &AuthorityArtifact) -> String {
 /// breaks included, become one space, and a cut shows as `…`.
 fn one_line(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(HEADLINE_WIDTH - 1) {
-        Some((cut, _)) => format!("{}…", &flat[..cut]),
-        None => flat,
+    let mut cuts = flat.char_indices().skip(HEADLINE_WIDTH - 1).map(|(at, _)| at);
+    match (cuts.next(), cuts.next()) {
+        (Some(cut), Some(_)) => format!("{}…", &flat[..cut]),
+        _ => flat,
     }
 }
 
@@ -437,5 +438,14 @@ mod tests {
         assert!(call.ends_with('…'), "a cut shows: {call}");
         assert_eq!(call.chars().count(), "██▄█▄██   ▄   ".chars().count() + HEADLINE_WIDTH);
         assert_eq!(headline.lines().count(), 2, "no description row: {headline}");
+    }
+
+    /// A text of exactly the row's width fits and is not cut; one character more is.
+    #[test]
+    fn a_text_that_fills_the_row_is_not_cut() {
+        let full = "é".repeat(HEADLINE_WIDTH);
+        assert_eq!(one_line(&full), full);
+        let over = "é".repeat(HEADLINE_WIDTH + 1);
+        assert_eq!(one_line(&over), format!("{}…", "é".repeat(HEADLINE_WIDTH - 1)));
     }
 }

@@ -15,10 +15,11 @@ use serde::Deserialize;
 
 use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken,
-    Externals, Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
+    AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken, Externals, Implementation,
+    LLM_BUILTIN, ResolverCommand, Section, Transport,
 };
 use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult_process::{CommandRun, run_command};
 use crate::elicit::Elicitation;
 use crate::model::PromptModel;
 #[cfg(feature = "archestra")]
@@ -26,7 +27,6 @@ use crate::model::archestra::ArchestraBackend;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
-use crate::process_tree::ProcessTree;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
@@ -97,7 +97,7 @@ pub enum ConsultOutcome {
 const DIAGNOSTICS_HEADER: &str = "x-appa-diagnostics";
 
 /// The most bytes of an external's self-description a consult record keeps.
-const MAX_DIAGNOSTIC_BYTES: usize = 8192;
+pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 
 /// What an external wrote about itself beside its answer: a `url` external's
 /// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
@@ -211,13 +211,12 @@ fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReaso
     }
 }
 
-fn kind_of(section: Section) -> ConsultKind {
-    match section {
-        Section::Authorities => ConsultKind::Authority,
-        Section::Sanitizers => ConsultKind::Sanitizer,
-        Section::Annotators => ConsultKind::Annotation,
-        Section::Audience => ConsultKind::AudienceSource,
-        Section::Context => ConsultKind::Context,
+impl From<Transport> for Backend {
+    fn from(transport: Transport) -> Backend {
+        match transport {
+            Transport::Url(endpoint) => Backend::Url(endpoint),
+            Transport::Command(command) => Backend::Command(command),
+        }
     }
 }
 
@@ -236,18 +235,6 @@ pub struct ExternalServices {
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
     gates: ConsultGates,
-}
-
-impl ExternalServices {
-    /// One context consult per bound provider, each asking about the same call.
-    pub(crate) fn context_consults(&self, artifact: &crate::consult::ContextArtifact) -> Vec<Consult> {
-        self.backends
-            .get(&ConsultKind::Context)
-            .into_iter()
-            .flat_map(BTreeMap::keys)
-            .map(|provider| Consult::context(provider, artifact.clone()))
-            .collect()
-    }
 }
 
 /// How many `command` consults may run at once across a runtime: every trajectory's
@@ -281,7 +268,11 @@ pub(crate) struct ConsultGates {
     pub(crate) jev: Arc<JevClients>,
 }
 
-type ModelGate = (AnnotatorBuiltin, usize, Arc<tokio::sync::Semaphore>);
+struct ModelGate {
+    builtin: AnnotatorBuiltin,
+    size: usize,
+    gate: Arc<tokio::sync::Semaphore>,
+}
 
 impl ConsultGates {
     pub(crate) fn per_runtime() -> ConsultGates {
@@ -298,7 +289,11 @@ impl ConsultGates {
                 AnnotatorBuiltin::Archestra => crate::config::ModelLimits::MODEL_CALL.max_concurrent,
                 AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
             };
-            (builtin, size, Arc::new(tokio::sync::Semaphore::new(size)))
+            ModelGate {
+                builtin,
+                size,
+                gate: Arc::new(tokio::sync::Semaphore::new(size)),
+            }
         };
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
@@ -315,11 +310,11 @@ impl ConsultGates {
 
     pub(crate) fn model(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
         let models = self.models();
-        let (_, _, gate) = models
+        let model = models
             .iter()
-            .find(|(of, ..)| *of == builtin)
+            .find(|model| model.builtin == builtin)
             .expect("every builtin has a gate");
-        Arc::clone(gate)
+        Arc::clone(&model.gate)
     }
 
     /// Size the model gates by the serving deployment's tables. A table the deployment does
@@ -334,13 +329,13 @@ impl ConsultGates {
 
     pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
         let mut models = self.models();
-        let (_, size, gate) = models
+        let model = models
             .iter_mut()
-            .find(|(of, ..)| *of == builtin)
+            .find(|model| model.builtin == builtin)
             .expect("every builtin has a gate");
-        if *size != max_concurrent {
-            *size = max_concurrent;
-            *gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        if model.size != max_concurrent {
+            model.size = max_concurrent;
+            model.gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         }
     }
 }
@@ -379,7 +374,6 @@ impl ExternalServices {
             .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
-        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
         // A profile without the key it needs serves nothing: a deployment that consults it
         // refuses to open, so an entry naming it never reaches here.
         let llm = config
@@ -389,6 +383,7 @@ impl ExternalServices {
             .map(|profile| LlmBackend::new(profile, config.max_body_bytes, &gates))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
+        let claude = ClaudeCodeBackend::new(&config.claude_code, config.max_body_bytes, &gates);
         let jev = config
             .jev
             .as_ref()
@@ -398,60 +393,47 @@ impl ExternalServices {
             .archestra
             .map(|endpoint| ArchestraBackend::new(endpoint, config.max_body_bytes, &gates));
         let tables = [
-            (Section::Authorities, config.authorities),
-            (Section::Sanitizers, config.sanitizers),
+            (ConsultKind::Authority, Section::Authorities, config.authorities),
+            (ConsultKind::Sanitizer, Section::Sanitizers, config.sanitizers),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
-        for (section, table) in tables {
+        for (kind, section, table) in tables {
             let mut resolved = BTreeMap::new();
             for (name, implementation) in table {
                 let backend = match implementation {
-                    Implementation::Resolver(endpoint) => Backend::Url(endpoint),
-                    Implementation::Command(command) => Backend::Command(command),
+                    Implementation::Transport(transport) => Backend::from(transport),
                     Implementation::Builtin(builtin) => {
-                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref(), jev.as_ref())?
+                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
                     }
                 };
                 resolved.insert(name, backend);
             }
-            backends.insert(kind_of(section), resolved);
+            backends.insert(kind, resolved);
         }
-        let bound = |table: BTreeMap<String, AnnotatorImplementation>| -> BTreeMap<String, Backend> {
+        let bound = |table: BTreeMap<String, Transport>| -> BTreeMap<String, Backend> {
             table
                 .into_iter()
-                .map(|(name, implementation)| {
-                    let backend = match implementation {
-                        AnnotatorImplementation::Resolver(endpoint) => Backend::Url(endpoint),
-                        AnnotatorImplementation::Command(command) => Backend::Command(command),
-                    };
-                    (name, backend)
-                })
+                .map(|(name, transport)| (name, Backend::from(transport)))
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
+                AnnotatorBuiltin::ClaudeCode => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+                AnnotatorBuiltin::Llm => llm.clone().map(|llm| Backend::Model(PromptModel::Llm(llm))),
+                AnnotatorBuiltin::Jev => jev.clone().map(Backend::Jev),
                 // A host-supplied transport, never a binding's: only a declaration names it.
                 #[cfg(feature = "archestra")]
                 AnnotatorBuiltin::Archestra => archestra
                     .clone()
-                    .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
-                    .ok_or_else(|| ModulesError::UnknownBuiltin {
-                        section: Section::Annotators.name(),
-                        name: name.clone(),
-                        builtin: builtin.wire_name().to_string(),
-                    })?,
-                _ => builtin_backend(
-                    Section::Annotators,
-                    &name,
-                    builtin.wire_name().to_string(),
-                    registry,
-                    &claude,
-                    llm.as_ref(),
-                    jev.as_ref(),
-                )?,
-            };
+                    .map(|archestra| Backend::Model(PromptModel::Archestra(archestra))),
+            }
+            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                section: Section::Annotators.name(),
+                name: name.clone(),
+                builtin: builtin.wire_name().to_string(),
+            })?;
             annotators.insert(name, backend);
         }
         backends.insert(ConsultKind::Annotation, annotators);
@@ -460,8 +442,7 @@ impl ExternalServices {
             .into_iter()
             .map(|(name, binding)| {
                 let backend = match binding.implementation {
-                    AudienceImplementation::Resolver(endpoint) => Backend::Url(endpoint),
-                    AudienceImplementation::Command(command) => Backend::Command(command),
+                    AudienceImplementation::Transport(transport) => Backend::from(transport),
                     AudienceImplementation::Readers(readers) => Backend::Readers(readers),
                 };
                 (name, backend)
@@ -477,6 +458,16 @@ impl ExternalServices {
             backends,
             gates,
         })
+    }
+
+    /// One context consult per bound provider, each asking about the same call.
+    pub(crate) fn context_consults(&self, artifact: &crate::consult::ContextArtifact) -> Vec<Consult> {
+        self.backends
+            .get(&ConsultKind::Context)
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .map(|provider| Consult::context(provider, artifact.clone()))
+            .collect()
     }
 
     /// Whether this authority is the `hitl` builtin — the one consult a harness with
@@ -638,7 +629,7 @@ impl ExternalServices {
                 .map(|value| (std::ffi::OsString::from(var), value)),
             None => None,
         };
-        let (output, transcript) =
+        let CommandRun { output, transcript } =
             run_command(command, input, deadline, self.max_body_bytes, transcript, credential).await;
         drop(permit);
         if let (Some(seen), Some(transcript)) = (seen, transcript) {
@@ -793,9 +784,8 @@ pub(crate) async fn read_body(
     }
 }
 
-/// Resolve one `builtin` name for one section: the stock implementations and the model
-/// transports by name, then the loaded modules of the section's kind. An Annotator
-/// reaches here from its policy declaration, the other kinds from their bindings.
+/// Resolve one authority's or sanitizer's `builtin` name: the stock implementations and
+/// the model transports by name, then the section's loaded module of that name.
 fn builtin_backend(
     section: Section,
     name: &str,
@@ -803,7 +793,6 @@ fn builtin_backend(
     registry: &ModuleRegistry,
     claude: &ClaudeCodeBackend,
     llm: Option<&LlmBackend>,
-    jev: Option<&JevBackend>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
@@ -812,13 +801,8 @@ fn builtin_backend(
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
-        (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
-            Some(Backend::Model(PromptModel::ClaudeCode(claude.clone())))
-        }
-        (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
-            llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm)))
-        }
-        (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
+        (_, CLAUDE_CODE_BUILTIN) => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+        (_, LLM_BUILTIN) => llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm))),
         _ => Stock::for_section(section, &builtin)
             .map(Backend::Stock)
             .or_else(|| module.map(|module| Backend::Module(Arc::clone(module)))),
@@ -828,245 +812,6 @@ fn builtin_backend(
         name: name.to_string(),
         builtin,
     })
-}
-
-/// A command consult's stdout on a successful exit, and the transcript a record asked for.
-type CommandRun = (Result<Vec<u8>, NoAnswerReason>, Option<Transcript>);
-
-async fn run_command(
-    command: &ResolverCommand,
-    input: Vec<u8>,
-    deadline: tokio::time::Instant,
-    max_body_bytes: usize,
-    mut transcript: Option<Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
-) -> CommandRun {
-    let (cancel, cancelled) = tokio::sync::oneshot::channel();
-    let command = command.clone();
-    let task = tokio::spawn(async move {
-        let output = run_command_process(
-            command,
-            input,
-            max_body_bytes,
-            deadline,
-            cancelled,
-            transcript.as_mut(),
-            credential,
-        )
-        .await;
-        (output, transcript)
-    });
-    CommandTask {
-        cancel: Some(cancel),
-        task,
-    }
-    .wait()
-    .await
-}
-
-struct CommandTask {
-    cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<CommandRun>,
-}
-
-impl CommandTask {
-    async fn wait(mut self) -> CommandRun {
-        let run = (&mut self.task).await.unwrap_or((Err(NoAnswerReason::Transport), None));
-        self.cancel.take();
-        run
-    }
-}
-
-impl Drop for CommandTask {
-    fn drop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
-    }
-}
-
-/// A consult's subprocess, adopted as a [`ProcessTree`], and the promise that the tree
-/// ends with the consult: every outcome, and a dropped future, terminate it.
-pub(crate) struct CommandProcess {
-    child: Option<tokio::process::Child>,
-    tree: Option<ProcessTree>,
-}
-
-impl CommandProcess {
-    pub(crate) fn spawn(command: &mut tokio::process::Command) -> Result<CommandProcess, NoAnswerReason> {
-        let (child, tree) = crate::process_tree::spawn(command)?;
-        Ok(CommandProcess {
-            child: Some(child),
-            tree: Some(tree),
-        })
-    }
-
-    /// The child to exchange with, and the tree that ends it.
-    pub(crate) fn parts(&mut self) -> (&mut tokio::process::Child, &ProcessTree) {
-        (
-            self.child.as_mut().expect("a live command process owns its child"),
-            self.tree.as_ref().expect("a live command process owns its tree"),
-        )
-    }
-
-    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
-        self.child.as_mut().expect("a live command process owns its child")
-    }
-
-    fn terminate_tree(&mut self) {
-        if let Some(tree) = self.tree.take() {
-            tree.kill();
-        }
-    }
-
-    pub(crate) async fn terminate_and_reap(&mut self) -> Result<std::process::ExitStatus, NoAnswerReason> {
-        self.terminate_tree();
-        self.child_mut().wait().await.map_err(|_| NoAnswerReason::Transport)
-    }
-
-    /// Do not let a child stuck in uninterruptible I/O extend the caller's deadline: the
-    /// tree is ended now, and a detached task keeps the reaping responsibility.
-    pub(crate) fn terminate_and_reap_later(mut self) {
-        self.terminate_tree();
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-    }
-}
-
-impl Drop for CommandProcess {
-    fn drop(&mut self) {
-        // Covers runtime shutdown or task abortion. `kill_on_drop` also targets the direct
-        // child; Tokio's orphan queue reaps it when an async wait cannot run.
-        self.terminate_tree();
-    }
-}
-
-/// One subprocess exchange, shared by every transport that runs a local process: the
-/// input on stdin, the answer read off stdout under `max_body_bytes`, and the child seen
-/// out — unreaped — before returning. A helper the child left behind may hold the pipe
-/// open after the child itself exited: seeing the exit first ends the tree, so the
-/// answer already written is read out instead of lost to the timeout.
-pub(crate) async fn exchange_with_child(
-    child: &mut tokio::process::Child,
-    tree: &ProcessTree,
-    input: &[u8],
-    max_body_bytes: usize,
-) -> Result<Vec<u8>, NoAnswerReason> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
-    let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
-    // A child may answer without reading its input and close stdin first. A broken pipe
-    // here is that early close, not a transport fault: the exit and the answer still decide.
-    let write = async {
-        let written = match stdin.write_all(input).await {
-            Ok(()) => stdin.shutdown().await,
-            Err(error) => Err(error),
-        };
-        drop(stdin);
-        match written {
-            Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(NoAnswerReason::Transport),
-            _ => Ok(()),
-        }
-    };
-    // Read under the cap before anything waits: a child writing past it is reported
-    // oversized at once, so a full pipe can never wedge the exchange into the timeout.
-    let read = async {
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
-            if read == 0 {
-                return Ok(bytes);
-            }
-            if bytes.len().saturating_add(read) > max_body_bytes {
-                return Err(NoAnswerReason::Oversized);
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-        }
-    };
-    // The write and the read run together: a child that answers past the pipe's capacity
-    // before draining its input would otherwise block the parent's write, and the two
-    // would wait on each other until the deadline. The read ending — answer, EOF, or
-    // oversized — settles the exchange whatever the write is doing.
-    let output = async {
-        tokio::pin!(write);
-        tokio::pin!(read);
-        tokio::select! {
-            bytes = &mut read => bytes,
-            written = &mut write => {
-                written?;
-                read.await
-            }
-        }
-    };
-    tokio::pin!(output);
-    tokio::select! {
-        biased;
-        bytes = &mut output => {
-            let bytes = bytes?;
-            // The answer is already complete here, so an unobservable exit must not
-            // discard it: a child something else reaped says nothing about the answer.
-            // Whether the child exited well is still decided by the status
-            // `terminate_and_reap` returns to the caller.
-            let _ = tree.root_exited().await;
-            Ok(bytes)
-        }
-        exited = tree.root_exited() => {
-            exited?;
-            tree.kill();
-            output.await
-        }
-    }
-}
-
-/// The tail of what a child wrote to stderr, read to its end so the pipe never fills: the
-/// command's own error, whose last line goes to the log and the no-answer diagnostic.
-pub(crate) struct StderrTail {
-    read: Arc<std::sync::Mutex<Diagnostics>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
-    let read = Arc::new(std::sync::Mutex::new(Diagnostics::default()));
-    let task = tokio::spawn({
-        let read = Arc::clone(&read);
-        async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut stderr = stderr;
-            let mut chunk = [0u8; 1024];
-            while let Ok(count) = stderr.read(&mut chunk).await {
-                if count == 0 {
-                    break;
-                }
-                let Ok(mut tail) = read.lock() else { break };
-                tail.bytes.extend_from_slice(&chunk[..count]);
-                if tail.bytes.len() > MAX_DIAGNOSTIC_BYTES {
-                    let excess = tail.bytes.len() - MAX_DIAGNOSTIC_BYTES;
-                    tail.bytes.drain(..excess);
-                    tail.truncated = true;
-                }
-            }
-        }
-    });
-    StderrTail { read, task }
-}
-
-impl StderrTail {
-    /// What the child wrote once it closed the pipe, or once `wait` passed — a helper that
-    /// kept the pipe open leaves the tail read so far. Nothing where it wrote nothing.
-    /// A reader still waiting is aborted, so a helper holding the pipe keeps no task here.
-    async fn within(&mut self, wait: Duration) -> Option<Diagnostics> {
-        if tokio::time::timeout(wait, &mut self.task).await.is_err() {
-            self.task.abort();
-        }
-        let tail = std::mem::take(&mut *self.read.lock().ok()?);
-        Some(tail).filter(|tail| !tail.bytes.is_empty())
-    }
 }
 
 /// How long a read made for the record alone may extend a consult whose outcome is known:
@@ -1088,102 +833,6 @@ pub(crate) fn error_line(text: &str) -> String {
         .collect();
     let cut = line.char_indices().nth(MAX_LINE).map_or(line.len(), |(index, _)| index);
     line[..cut].to_string()
-}
-
-/// The stderr tail of a child that failed, given a second to close the pipe.
-pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
-    tail.within(Duration::from_secs(1)).await
-}
-
-/// `parent` without the runtime's own namespace. A consult child starts from exactly this,
-/// its environment cleared first: filtering one read of the environment, rather than
-/// removing names from the live one, leaves no gap for a variable set in between.
-pub(crate) fn without_runtime_variables(
-    parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
-    parent.into_iter().filter(|(key, _)| {
-        !key.to_string_lossy()
-            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
-    })
-}
-
-async fn run_command_process(
-    command: ResolverCommand,
-    input: Vec<u8>,
-    max_body_bytes: usize,
-    deadline: tokio::time::Instant,
-    mut cancelled: tokio::sync::oneshot::Receiver<()>,
-    seen: Option<&mut Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
-) -> Result<Vec<u8>, NoAnswerReason> {
-    use std::process::Stdio;
-
-    let Some((executable, arguments)) = command.argv.split_first() else {
-        return Err(NoAnswerReason::Unregistered);
-    };
-    let mut configured = tokio::process::Command::new(executable);
-    configured
-        .args(arguments)
-        .current_dir(&command.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // The runtime's own namespace stops here: no bearer token it sends, and no wiring
-    // variable, reaches the child. The binding's own provider credential is put back
-    // afterwards, so a command inherits the one variable it reads and no other's.
-    let parent: Vec<_> = std::env::vars_os().collect();
-    configured
-        .env_clear()
-        .envs(without_runtime_variables(parent))
-        .envs(credential);
-
-    let mut process = CommandProcess::spawn(&mut configured)?;
-    let tail = process.child_mut().stderr.take().map(stderr_tail);
-    let outcome = {
-        let (child, tree) = process.parts();
-        let exchange = exchange_with_child(child, tree, &input, max_body_bytes);
-        tokio::select! {
-            biased;
-            _ = &mut cancelled => Err(NoAnswerReason::Transport),
-            _ = tokio::time::sleep_until(deadline) => Err(NoAnswerReason::Timeout),
-            outcome = exchange => outcome,
-        }
-    };
-    let exited = match outcome {
-        Ok(output) => process.terminate_and_reap().await.map(|status| (status, output)),
-        Err(reason) => {
-            process.terminate_and_reap_later();
-            Err(reason)
-        }
-    };
-    // A failed exit's tail is read for the log too; an answer's only for the record, and
-    // only briefly, so the outcome's time is taken before that wait.
-    let (stderr, settled) = match (&exited, tail) {
-        (Ok((status, _)), Some(tail)) if !status.success() => (finished_tail(tail).await, std::time::Instant::now()),
-        (Ok(_), Some(mut tail)) if seen.is_some() => {
-            let settled = std::time::Instant::now();
-            (tail.within(RECORD_READ_GRACE).await, settled)
-        }
-        _ => (None, std::time::Instant::now()),
-    };
-    if let Some(seen) = seen {
-        seen.settled = Some(settled);
-        seen.raw_response = exited.as_ref().ok().map(|(_, output)| output.clone());
-        seen.diagnostics = stderr.clone();
-    }
-    let (status, output) = exited?;
-    if status.success() {
-        return Ok(output);
-    }
-    let stderr = stderr.and_then(|stderr| stderr.error_line()).unwrap_or_default();
-    tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
-    match status.code().and_then(|code| u16::try_from(code).ok()) {
-        Some(status) => Err(NoAnswerReason::NonSuccess { status, detail: None }),
-        // A signal or another platform-specific status establishes no useful failure
-        // classification. The stderr tail remains confined to logs and the recorder.
-        None => Err(NoAnswerReason::Transport),
-    }
 }
 
 fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
@@ -1247,7 +896,7 @@ mod tests {
     }
 
     fn endpoint(url: &str) -> Implementation {
-        Implementation::Resolver(Endpoint::new(url.to_string(), None))
+        Implementation::Transport(Transport::Url(Endpoint::new(url.to_string(), None)))
     }
 
     /// Bindings with `classifier` and `review` annotators and the `slack` audience
@@ -1257,7 +906,7 @@ mod tests {
             .iter()
             .flat_map(|url| {
                 ["classifier", "review"].into_iter().map(move |name| {
-                    let endpoint = AnnotatorImplementation::Resolver(Endpoint::new(url.to_string(), None));
+                    let endpoint = Transport::Url(Endpoint::new(url.to_string(), None));
                     (name.to_string(), endpoint)
                 })
             })
@@ -1266,7 +915,10 @@ mod tests {
             .iter()
             .map(|url| {
                 let binding = AudienceBinding {
-                    implementation: AudienceImplementation::Resolver(Endpoint::new(url.to_string(), None)),
+                    implementation: AudienceImplementation::Transport(Transport::Url(Endpoint::new(
+                        url.to_string(),
+                        None,
+                    ))),
                     lookup: None,
                     templates: vec![
                         DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)).expect("a well-formed template"),
@@ -1554,10 +1206,11 @@ mod tests {
         };
         config
             .annotators
-            .insert("classifier".to_string(), AnnotatorImplementation::Command(command()));
-        config
-            .authorities
-            .insert("security".to_string(), Implementation::Command(command()));
+            .insert("classifier".to_string(), Transport::Command(command()));
+        config.authorities.insert(
+            "security".to_string(),
+            Implementation::Transport(Transport::Command(command())),
+        );
         config
     }
 
@@ -1621,7 +1274,7 @@ mod tests {
             )
         };
         let mut config = command_config(dir.path(), &script("first"), budget_ms(), 1024);
-        if let AnnotatorImplementation::Command(command) = config.annotators.get_mut("classifier").unwrap() {
+        if let Transport::Command(command) = config.annotators.get_mut("classifier").unwrap() {
             command.token_env = Some(variable.into());
         }
         let mut services = services_over(config);
@@ -1777,7 +1430,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut missing = externals(None, 1000, 1024);
         missing.annotators.insert(
             "classifier".to_string(),
-            AnnotatorImplementation::Command(ResolverCommand {
+            Transport::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
                 token_env: None,
@@ -2152,7 +1805,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 Section::Authorities => &mut config.authorities,
                 _ => &mut config.sanitizers,
             }
-            .insert("judge".to_string(), Implementation::Builtin(JEV_BUILTIN.to_string()));
+            .insert(
+                "judge".to_string(),
+                Implementation::Builtin(crate::config::JEV_BUILTIN.to_string()),
+            );
             match ExternalServices::new(
                 config,
                 &ModuleRegistry::empty(),
@@ -2415,10 +2071,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65536);
         config.authorities.insert(
             "security".to_string(),
-            Implementation::Resolver(Endpoint::new(
+            Implementation::Transport(Transport::Url(Endpoint::new(
                 url,
                 Some(EndpointToken::Set(Token::new("sekret".to_string()))),
-            )),
+            ))),
         );
         let services = services_over(config);
         let outcome = services
@@ -2900,28 +2556,6 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             stretched < RECORD_READ_GRACE + Duration::from_millis(600),
             "the helper stretched the consult by {stretched:?} past its answer"
         );
-    }
-
-    /// A reader still pending when the wait runs out is aborted rather than left holding
-    /// the pipe for as long as the writer lives.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_tail_reader_past_its_wait_is_aborted() {
-        let mut child = crate::child_process::spawn_async(
-            tokio::process::Command::new("sleep")
-                .arg("10")
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true),
-        )
-        .expect("sleep starts");
-        let mut tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
-
-        assert_eq!(tail.within(Duration::from_millis(20)).await, None);
-        let joined = tokio::time::timeout(Duration::from_secs(5), &mut tail.task)
-            .await
-            .expect("an aborted reader ends at once");
-        assert!(joined.expect_err("the reader was aborted").is_cancelled());
-        child.kill().await.expect("sleep is killed");
     }
 
     /// A failed `url` consult whose body stalls part-way: the record keeps the part read, and
