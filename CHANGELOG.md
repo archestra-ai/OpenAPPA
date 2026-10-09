@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.32.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.31.1...v0.32.0) (2026-10-09)
+
+
+### Features
+
+* **ci:** carry the appa-guide core into Archestra update PRs ([#603](https://github.com/archestra-ai/OpenAPPA/issues/603)) ([023cab7](https://github.com/archestra-ai/OpenAPPA/commit/023cab77ef298873a8e2318cf546ce42b679c9a7))
+* **guide:** share host-neutral policy rules across appa-guide hosts ([#598](https://github.com/archestra-ai/OpenAPPA/issues/598)) ([f727718](https://github.com/archestra-ai/OpenAPPA/commit/f72771800d3347f1a2fef8b9bdd2e1a6ef49c2c3))
+* **runtime:** add actor-scoped peer messages for embedded hosts ([#593](https://github.com/archestra-ai/OpenAPPA/issues/593)) ([c7c1e1e](https://github.com/archestra-ai/OpenAPPA/commit/c7c1e1ef36aa07604b421c48be266d7397557656))
+* **runtime:** archestra annotator builtin for embedded hosts ([#595](https://github.com/archestra-ai/OpenAPPA/issues/595)) ([26cf1b9](https://github.com/archestra-ai/OpenAPPA/commit/26cf1b91286073c77e104f8c0fdd5644cac7a553))
+
+
+### Bug Fixes
+
+* **battery:** let archestra search_files and load_skill run in any session ([#601](https://github.com/archestra-ai/OpenAPPA/issues/601)) ([a525cf4](https://github.com/archestra-ai/OpenAPPA/commit/a525cf4d72066ccc4b2814508d2394e6a1ee96b9))
+* **battery:** let archestra search_tools run in any session ([#596](https://github.com/archestra-ai/OpenAPPA/issues/596)) ([85465fe](https://github.com/archestra-ai/OpenAPPA/commit/85465feb8214f662dd21d40df2c01964e5b099fa))
+* **battery:** slack DMs with a bot token name the person, not the bot ([#609](https://github.com/archestra-ai/OpenAPPA/issues/609)) ([596f8a6](https://github.com/archestra-ai/OpenAPPA/commit/596f8a656bfd65f9d13a41f02f5de9b1b0902afe))
+* **engine:** name symbolic audiences in narrowing feedback ([#597](https://github.com/archestra-ai/OpenAPPA/issues/597)) ([2823bd2](https://github.com/archestra-ai/OpenAPPA/commit/2823bd2884c9b06a8f3944b106ad471d3a5ad0cc))
+* **eventlog:** rename the atomic fetch_update to try_update for the current stable ([#610](https://github.com/archestra-ai/OpenAPPA/issues/610)) ([e49c443](https://github.com/archestra-ai/OpenAPPA/commit/e49c4434344777e601586e20e1ac8573ef6d5289))
+* **policy:** name both remedies for an undeclared audience source ([#611](https://github.com/archestra-ai/OpenAPPA/issues/611)) ([f5d4b50](https://github.com/archestra-ai/OpenAPPA/commit/f5d4b50ac2a30f627987c156bbb2402f08f1b24c))
+* **runtime:** file an unresolved host's refusal deployment-wide ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** hook dispatcher and event-log edge cases ([#613](https://github.com/archestra-ai/OpenAPPA/issues/613)) ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** keep a future-stamped trajectory in the recent window ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** keep a protected launch's family across session id changes ([#602](https://github.com/archestra-ai/OpenAPPA/issues/602)) ([9a5dbe3](https://github.com/archestra-ai/OpenAPPA/commit/9a5dbe351f67cbc54ea5ff6c66d98c45a2e00219))
+* **runtime:** keep an approval-card row that exactly fills its width ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** keep what the host said when an archestra consult is refused ([#608](https://github.com/archestra-ai/OpenAPPA/issues/608)) ([10aa0e0](https://github.com/archestra-ai/OpenAPPA/commit/10aa0e09e32d8c6704bdb030dc3c66140bf81915))
+* **runtime:** record a hook refused while resolving its host id ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** refuse annotate --concurrency 0 ([#614](https://github.com/archestra-ai/OpenAPPA/issues/614)) ([cc2a72f](https://github.com/archestra-ai/OpenAPPA/commit/cc2a72fa1588d426adde22fc3921582feaff71f7))
+* **runtime:** say why the local credential database is unavailable ([#615](https://github.com/archestra-ai/OpenAPPA/issues/615)) ([8b496b8](https://github.com/archestra-ai/OpenAPPA/commit/8b496b85942c403ee7e7d2bdd228a202b58cc081))
+* **runtime:** trim yell export events before numbering their tokens ([4cdda27](https://github.com/archestra-ai/OpenAPPA/commit/4cdda27585e4da9df667152b38a3de41108ce4ec))
+* **runtime:** validate an embedded yell before spending its release ([4cdda27](https://github.com/archestra-ai/OpenAPPA/commit/4cdda27585e4da9df667152b38a3de41108ce4ec))
+* **runtime:** yell release and export trimming ([#616](https://github.com/archestra-ai/OpenAPPA/issues/616)) ([4cdda27](https://github.com/archestra-ai/OpenAPPA/commit/4cdda27585e4da9df667152b38a3de41108ce4ec))
+* **website:** render the song's sail as an HTML layer so Safari shows it ([#607](https://github.com/archestra-ai/OpenAPPA/issues/607)) ([acfe2f3](https://github.com/archestra-ai/OpenAPPA/commit/acfe2f39af6119733585422d8440d446cc2cf453))
+
+
+### Code Refactoring
+
+* **runtime:** drop the byte budget's retain that never removes a root ([200b153](https://github.com/archestra-ai/OpenAPPA/commit/200b153d611926cca99b91854b12c89d7d2de6a1))
+* **runtime:** split the consult subprocess out of external.rs; one Transport for bound components ([#612](https://github.com/archestra-ai/OpenAPPA/issues/612)) ([a481925](https://github.com/archestra-ai/OpenAPPA/commit/a4819257d12bc2777bdd84784379a8bfe4944978))
+* **runtime:** use append_host and acting_trajectory where spelled out ([#617](https://github.com/archestra-ai/OpenAPPA/issues/617)) ([1c52575](https://github.com/archestra-ai/OpenAPPA/commit/1c52575176330bc88a3c346abe678af5d42083b3))
+
 ## [0.31.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.31.0...v0.31.1) (2026-10-02)
 
 
