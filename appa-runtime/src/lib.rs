@@ -55,6 +55,7 @@ mod batteries_staging;
 mod builtins;
 pub mod child_process;
 mod consult;
+mod consult_process;
 mod elicit;
 mod engine;
 mod events;
