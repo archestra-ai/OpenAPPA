@@ -395,9 +395,9 @@ impl EventLog {
         self.deployment.bytes + self.roots.values().map(|events| events.bytes).sum::<usize>()
     }
 
-    /// Drop the oldest entry anywhere until the whole account is under budget. A list that
-    /// empties is removed, so this terminates: every pass either drops an entry or runs out
-    /// of lists holding one.
+    /// Drop the oldest entry anywhere until the whole account is under budget. A pass that
+    /// finds no entry to drop stops, so this terminates. A list that empties stays, carrying
+    /// its drop count, until it is the coldest root.
     fn enforce_byte_budget(&mut self) {
         while self.bytes() > MAX_TOTAL_BYTES {
             let oldest_root = self
@@ -417,8 +417,6 @@ impl EventLog {
             if !dropped {
                 break;
             }
-            self.roots
-                .retain(|_, events| !events.entries.is_empty() || events.dropped > 0);
         }
     }
 }
@@ -489,7 +487,7 @@ impl EventLog {
         let now = SystemTime::now();
         let mut inside = self.roots.iter().filter_map(|(root, events)| {
             let last = events.entries.back()?;
-            let age = now.duration_since(last.at).ok()?;
+            let age = now.duration_since(last.at).unwrap_or(std::time::Duration::ZERO);
             (age <= window && selected.is_none_or(|selected| selected.as_str() == root)).then(|| (root.clone(), age))
         });
         match (inside.next(), inside.next()) {
@@ -644,6 +642,29 @@ mod tests {
             log.recent_root(std::time::Duration::MAX, Some(&root("missing"))),
             Recent::None,
             "naming a trajectory does not bypass the retained event boundary"
+        );
+    }
+
+    /// A clock stepped back since the entry was stamped leaves it in the window, as recent
+    /// as an entry can be.
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn an_entry_stamped_after_now_is_recent() {
+        let mut log = EventLog::default();
+        log.record(Some(&root("session")), hook("Read"));
+        log.roots
+            .get_mut(&key("session"))
+            .expect("the root exists")
+            .entries
+            .back_mut()
+            .expect("the root has an event")
+            .at = SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            log.recent_root(std::time::Duration::from_secs(1), None),
+            Recent::One {
+                root: "session".to_string(),
+                age: std::time::Duration::ZERO,
+            }
         );
     }
 

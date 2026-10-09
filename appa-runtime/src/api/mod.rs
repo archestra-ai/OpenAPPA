@@ -3053,6 +3053,11 @@ impl Runtime {
         &self.inner.store
     }
 
+    #[cfg(all(test, feature = "daemon"))]
+    pub(crate) fn recorded_events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.inner.events(root)
+    }
+
     /// Leave the claim an execution that never returned would have left, for the tests
     /// that pin how one is read back.
     #[cfg(all(test, feature = "daemon"))]
@@ -3478,7 +3483,7 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{AnnotatorImplementation, Endpoint, HostDefaults};
+    use crate::config::{Endpoint, HostDefaults, Transport};
 
     #[test]
     fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
@@ -3540,8 +3545,8 @@ mod deployment_tests {
         .expect("the hosted document validates")
     }
 
-    fn endpoint() -> AnnotatorImplementation {
-        AnnotatorImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
+    fn endpoint() -> Transport {
+        Transport::Url(Endpoint::new("https://resolver.example".to_string(), None))
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
@@ -3693,7 +3698,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut extra = claude_config(policy);
         extra.externals.authorities.insert(
             "auditor".to_string(),
-            crate::config::Implementation::Resolver(Endpoint::new("https://auditor.example".to_string(), None)),
+            crate::config::Implementation::Transport(Transport::Url(Endpoint::new(
+                "https://auditor.example".to_string(),
+                None,
+            ))),
         );
         assert!(matches!(
             load(extra),

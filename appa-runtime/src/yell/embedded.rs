@@ -41,15 +41,16 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         message: request.message,
         with_trajectory: request.with_trajectory,
     };
+    let message = YellMessage::new(&args.message).map_err(|error| error.to_string())?;
+    let receiver = client::Receiver::parse(&request.endpoint).ok_or_else(|| {
+        "The reporting receiver must be HTTPS, or HTTP to a loopback address, without credentials".to_string()
+    })?;
     let (acting, _) = runtime
         .take_vouched(&args.ticket())
         .map_err(|_| "No unambiguous released yell call exists for this request".to_string())?;
     if acting != request.actor {
         return Err("The yell call belongs to a different session".into());
     }
-    let message = YellMessage::new(&args.message).map_err(|error| error.to_string())?;
-    let receiver = client::Receiver::parse(&request.endpoint)
-        .ok_or_else(|| "The reporting receiver must use HTTPS".to_string())?;
     let report = ReportRequest {
         message,
         author: Author::Agent,
@@ -164,6 +165,22 @@ mod tests {
         release(&runtime, &request).await;
         request.actor.root = TrajectoryId("other-session".into());
         assert!(send(&runtime, request).await.is_err());
+    }
+
+    /// A request refused for its endpoint leaves the release for a correct one.
+    #[tokio::test]
+    async fn an_invalid_endpoint_leaves_the_release_unspent() {
+        let runtime = runtime(true);
+        let mut request = request();
+        release(&runtime, &request).await;
+        let ticket = YellArgs {
+            message: request.message.clone(),
+            with_trajectory: request.with_trajectory,
+        }
+        .ticket();
+        request.endpoint = "http://example.com/".into();
+        assert!(send(&runtime, request).await.is_err());
+        assert!(runtime.take_vouched(&ticket).is_ok(), "the release is still there");
     }
 
     #[tokio::test]

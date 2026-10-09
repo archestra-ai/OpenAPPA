@@ -123,7 +123,7 @@ pub(super) async fn check(dir: &Path, battery: &appa_package::Battery, store: &C
         .args(&readiness.command[1..])
         .current_dir(dir)
         .env_clear()
-        .envs(crate::external::without_runtime_variables(
+        .envs(crate::consult_process::without_runtime_variables(
             std::env::vars_os().collect(),
         ))
         .envs(environment)

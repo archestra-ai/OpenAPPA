@@ -171,7 +171,7 @@ Mechanics:
 - No `dyn`/`Box` in engine state; no trait without at least two real
   implementations or a real boundary. External backends are closed enums
   dispatched by match (`Stock`, `Implementation`,
-  `AnnotatorImplementation`) beside a serializable descriptor — no capturing
+  `Transport`) beside a serializable descriptor — no capturing
   closures, no registry of callbacks.
 - Minimize the public API surface: a few coarse operations over many tiny
   exported helpers. In core, keep state mutators `pub(crate)` (as
