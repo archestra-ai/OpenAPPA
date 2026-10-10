@@ -34,6 +34,7 @@ import { Oversimplified } from "@/components/Oversimplified";
 import { IntegrationPaths } from "@/components/IntegrationPaths";
 import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
+import { CommunityNote } from "@/components/CommunityNote";
 import { Term } from "@/components/Term";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
 import { BATTERY_REVIEW_CHECKLIST, BENCHMARK_HIGHLIGHT } from "@/lib/directive-content";
@@ -122,6 +123,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "mascot-board": () => <MascotBoard />,
   "integration-paths": () => <IntegrationPaths />,
   "sponsor-note": () => <SponsorNote />,
+  "community-note": () => <CommunityNote />,
   "video-fireship": () => (
     <YouTubeEmbed title="Fireship: Did a 50 year old military secret just solve agent prompt injection?" videoId="I_KVMFrUtPk" />
   ),
