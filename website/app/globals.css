@@ -2395,6 +2395,34 @@ samp {
   text-underline-offset: 3px;
 }
 
+/* ————————————————————————————————————————————————
+   Community note — integrations the community maintains
+   ———————————————————————————————————————————————— */
+.community-note {
+  margin: 1.5rem 0 2rem;
+  padding: 18px 22px;
+  border: 1px solid var(--accent-border);
+  border-left: 4px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent-bg);
+}
+
+.community-note-label {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.community-note-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
 .under-construction {
   display: flex;
   flex-direction: column;
