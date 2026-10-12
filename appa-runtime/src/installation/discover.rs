@@ -333,7 +333,8 @@ mod tests {
         (
             PackageName::parse(name).unwrap(),
             Battery {
-                policy: RelativePath::parse("appa.toml").unwrap(),
+                base: RelativePath::parse("appa.toml").unwrap(),
+                targets: BTreeMap::new(),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: namespaces.iter().map(|text| namespace(text)).collect(),
                 helpers: vec![],

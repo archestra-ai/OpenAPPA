@@ -222,7 +222,7 @@ fn every_battery_composes_into_each_host_it_declares() {
             let path = composed.path().join("appa.toml");
             std::fs::write(
                 &path,
-                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.policy),
+                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.base),
             )
             .expect("the composed config is writable");
 
@@ -264,7 +264,7 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
         let installed = tempfile::tempdir().expect("a temp dir is creatable");
         copy_tree(&directory, installed.path());
         let policy: toml::Value = toml::from_str(
-            &std::fs::read_to_string(installed.path().join(battery.policy.as_str())).expect("the battery policy reads"),
+            &std::fs::read_to_string(installed.path().join(battery.base.as_str())).expect("the battery policy reads"),
         )
         .expect("the battery policy is TOML");
         for source in appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")

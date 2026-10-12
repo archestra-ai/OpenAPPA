@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use thiserror::Error;
 
 use crate::manifest::{ManifestError, SCHEMA};
 use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
@@ -64,11 +65,66 @@ impl fmt::Display for ImageReference {
     }
 }
 
-/// A battery: one policy file, the hosts it is written for, the namespaces its
-/// contracts may name, and the helper programs its externals may run.
+/// The deployment shape a battery add-on is written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BatteryTarget {
+    SingleUser,
+    MultiUser,
+}
+
+impl BatteryTarget {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "single-user" => Some(Self::SingleUser),
+            "multi-user" => Some(Self::MultiUser),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleUser => "single-user",
+            Self::MultiUser => "multi-user",
+        }
+    }
+
+    /// The manifest field that names this target's add-on policy.
+    pub(crate) fn policy_field(self) -> &'static str {
+        match self {
+            Self::SingleUser => "battery.targets.single-user.policy",
+            Self::MultiUser => "battery.targets.multi-user.policy",
+        }
+    }
+}
+
+impl fmt::Display for BatteryTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A policy composed over a battery's base for one target. Its audiences and
+/// credentials are read from its own policy by `validate_package`, as the
+/// base's are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryAddon {
+    pub policy: RelativePath,
+    pub audiences: Vec<String>,
+    pub credentials: Vec<String>,
+}
+
+/// A battery that declares targets has no add-on for the one requested.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("the battery declares no add-on for the `{0}` target")]
+pub struct MissingTarget(pub BatteryTarget);
+
+/// A battery: a base policy file with optional per-target add-ons, the hosts
+/// it is written for, the namespaces its contracts may name, and the helper
+/// programs its externals may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Battery {
-    pub policy: RelativePath,
+    pub base: RelativePath,
+    pub targets: BTreeMap<BatteryTarget, BatteryAddon>,
     pub hosts: Vec<Host>,
     /// The tool namespaces this battery covers. A battery usually covers the
     /// one namespace its own name spells, which is why the field defaults to
@@ -99,6 +155,21 @@ pub struct Battery {
     /// on this machine: a Claude Code install includes it when one is found.
     pub detect: Vec<ExecutableName>,
     pub readiness: Option<Readiness>,
+}
+
+impl Battery {
+    /// The policies a deployment of `target` includes, add-on first. A battery
+    /// without targets, or a deployment that names none, includes the base alone.
+    pub fn compose_order(&self, target: Option<BatteryTarget>) -> Result<Vec<&RelativePath>, MissingTarget> {
+        match target {
+            Some(target) if !self.targets.is_empty() => self
+                .targets
+                .get(&target)
+                .map(|addon| vec![&addon.policy, &self.base])
+                .ok_or(MissingTarget(target)),
+            _ => Ok(vec![&self.base]),
+        }
+    }
 }
 
 /// Optional, bounded, read-only battery authentication check.
@@ -257,7 +328,10 @@ struct RawPackage {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBattery {
-    policy: String,
+    policy: Option<String>,
+    base: Option<String>,
+    #[serde(default)]
+    targets: BTreeMap<String, RawAddon>,
     hosts: Vec<String>,
     #[serde(default)]
     namespaces: Vec<String>,
@@ -271,9 +345,36 @@ struct RawBattery {
     detect: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAddon {
+    policy: String,
+}
+
 impl RawBattery {
     fn validate(self, name: &PackageName, path: &Path) -> Result<Battery, ManifestError> {
-        let policy = relative(&self.policy, "battery.policy", path)?;
+        let base = match (&self.policy, &self.base) {
+            (Some(policy), None) => relative(policy, "battery.policy", path)?,
+            (None, Some(base)) => relative(base, "battery.base", path)?,
+            _ => {
+                return Err(ManifestError::BatteryBase {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
+        let mut targets = BTreeMap::new();
+        for (target, addon) in self.targets {
+            let parsed = BatteryTarget::parse(&target).ok_or_else(|| ManifestError::Target {
+                path: path.to_path_buf(),
+                target,
+            })?;
+            let addon = BatteryAddon {
+                policy: relative(&addon.policy, parsed.policy_field(), path)?,
+                audiences: Vec::new(),
+                credentials: Vec::new(),
+            };
+            targets.insert(parsed, addon);
+        }
         let mut hosts = Vec::new();
         for host in self.hosts {
             hosts.push(Host::parse(&host).ok_or(ManifestError::Host {
@@ -341,7 +442,8 @@ impl RawBattery {
             detect.push(parsed);
         }
         Ok(Battery {
-            policy,
+            base,
+            targets,
             hosts,
             namespaces,
             helpers,
@@ -489,7 +591,8 @@ mod tests {
         assert_eq!(
             package.battery().unwrap(),
             &Battery {
-                policy: RelativePath::parse("appa.toml").unwrap(),
+                base: RelativePath::parse("appa.toml").unwrap(),
+                targets: BTreeMap::new(),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
@@ -501,6 +604,93 @@ mod tests {
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
+    }
+
+    const TARGETED: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
+         [battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n\
+         [battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
+
+    #[test]
+    fn a_battery_parses_its_base_and_target_add_ons() {
+        let package = manifest(TARGETED).unwrap();
+        let battery = package.battery().unwrap();
+
+        assert_eq!(battery.base.as_str(), "appa.toml");
+        assert_eq!(
+            battery.targets.keys().copied().collect::<Vec<_>>(),
+            vec![BatteryTarget::MultiUser]
+        );
+        assert_eq!(
+            battery.targets[&BatteryTarget::MultiUser].policy.as_str(),
+            "multi-user.toml"
+        );
+    }
+
+    #[test]
+    fn a_legacy_policy_reads_as_the_base_with_no_targets() {
+        let battery = manifest(BATTERY).unwrap().battery().unwrap().clone();
+
+        assert_eq!(battery.base.as_str(), "appa.toml");
+        assert!(battery.targets.is_empty());
+    }
+
+    #[test]
+    fn a_battery_declares_exactly_one_base_and_only_known_targets() {
+        assert!(matches!(
+            manifest(&TARGETED.replace("base = \"appa.toml\"", "base = \"appa.toml\"\npolicy = \"appa.toml\"")),
+            Err(ManifestError::BatteryBase { .. })
+        ));
+        assert!(matches!(
+            manifest(&TARGETED.replace("base = \"appa.toml\"\n", "")),
+            Err(ManifestError::BatteryBase { .. })
+        ));
+        assert!(matches!(
+            manifest(&TARGETED.replace("targets.multi-user", "targets.team")),
+            Err(ManifestError::Target { target, .. }) if target == "team"
+        ));
+        assert!(matches!(
+            manifest(&TARGETED.replace("\"multi-user.toml\"", "\"../multi-user.toml\"")),
+            Err(ManifestError::Path { .. })
+        ));
+    }
+
+    #[test]
+    fn compose_order_puts_the_target_add_on_before_the_base() {
+        let targeted = manifest(TARGETED).unwrap();
+        let targeted = targeted.battery().unwrap();
+        fn names(order: Vec<&RelativePath>) -> Vec<&str> {
+            order.into_iter().map(RelativePath::as_str).collect()
+        }
+
+        assert_eq!(
+            names(targeted.compose_order(Some(BatteryTarget::MultiUser)).unwrap()),
+            vec!["multi-user.toml", "appa.toml"]
+        );
+        assert_eq!(
+            targeted.compose_order(Some(BatteryTarget::SingleUser)),
+            Err(MissingTarget(BatteryTarget::SingleUser))
+        );
+        assert_eq!(names(targeted.compose_order(None).unwrap()), vec!["appa.toml"]);
+
+        let plain = manifest(BATTERY).unwrap();
+        assert_eq!(
+            names(
+                plain
+                    .battery()
+                    .unwrap()
+                    .compose_order(Some(BatteryTarget::SingleUser))
+                    .unwrap()
+            ),
+            vec!["appa.toml"]
+        );
+    }
+
+    #[test]
+    fn a_battery_target_round_trips_its_kebab_name() {
+        for target in [BatteryTarget::SingleUser, BatteryTarget::MultiUser] {
+            assert_eq!(BatteryTarget::parse(&target.to_string()), Some(target));
+        }
+        assert_eq!(BatteryTarget::parse("single_user"), None);
     }
 
     /// `detect` names programs a shell finds on `PATH`: bare names, each once.
