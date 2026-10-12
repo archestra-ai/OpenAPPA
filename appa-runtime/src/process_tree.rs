@@ -243,7 +243,7 @@ mod tests {
 
     use tokio::io::AsyncReadExt as _;
 
-    use crate::external::{CommandProcess, exchange_with_child};
+    use crate::consult_process::{CommandProcess, exchange_with_child};
 
     /// Starts a helper that holds the shell's stdout open for a minute.
     #[cfg(unix)]

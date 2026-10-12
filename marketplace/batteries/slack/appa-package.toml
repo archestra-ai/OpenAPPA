@@ -12,7 +12,7 @@ setup = [
   "Create a Slack app at https://api.slack.com/apps: click Create New App, then From scratch, and pick your workspace.",
   "In OAuth & Permissions, add these User Token Scopes: `users:read`, `users:read.email`, `usergroups:read`, `channels:read`, `groups:read`, `im:read`, `mpim:read`.",
   "Click Install to Workspace and copy the User OAuth Token. It starts with `xoxp-`.",
-  "A bot token (`xoxb-`) also works, but APPA then treats the bot, not you, as `self`.",
+  "A bot token (`xoxb-`) also works, but APPA then treats the bot, not you, as `self`, and the agent must name a DM by the recipient's user id (`U…`), since Slack shows a DM conversation (`D…`) only to its two ends.",
 ]
 
 [battery.readiness]

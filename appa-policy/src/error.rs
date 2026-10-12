@@ -86,7 +86,7 @@ pub enum ConfigError {
     #[error("bad named audience {name:?}: {reason}")]
     BadNamedAudience { name: String, reason: String },
     #[error(
-        "audience source {provider:?} in {context} declares no selectors: bind it under [externals.audience.{provider}] with `selectors`"
+        "audience source {provider:?} in {context} declares no selectors: include the config that declares [externals.audience.{provider}], or declare it here with `selectors` — not both"
     )]
     UndeclaredProvider { context: String, provider: String },
     #[error("registry rejected: {0}")]

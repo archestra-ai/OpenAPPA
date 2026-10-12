@@ -29,7 +29,7 @@ use appa_example_agent::{
     TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
-use appa_runtime::config::{AnnotatorImplementation, AudienceImplementation, Config, Endpoint, Implementation};
+use appa_runtime::config::{AudienceImplementation, Config, Endpoint, Implementation, Transport};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -305,23 +305,23 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .annotators
         .values_mut()
         .filter_map(|implementation| match implementation {
-            AnnotatorImplementation::Resolver(endpoint) => Some(endpoint),
-            AnnotatorImplementation::Command(_) => None,
+            Transport::Url(endpoint) => Some(endpoint),
+            Transport::Command(_) => None,
         });
     let audience = externals
         .audience
         .values_mut()
         .filter_map(|binding| match &mut binding.implementation {
-            AudienceImplementation::Resolver(endpoint) => Some(endpoint),
-            AudienceImplementation::Command(_) | AudienceImplementation::Readers(_) => None,
+            AudienceImplementation::Transport(Transport::Url(endpoint)) => Some(endpoint),
+            AudienceImplementation::Transport(Transport::Command(_)) | AudienceImplementation::Readers(_) => None,
         });
     let endpoints = externals
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
         .filter_map(|implementation| match implementation {
-            Implementation::Resolver(endpoint) => Some(endpoint),
-            Implementation::Builtin(_) | Implementation::Command(_) => None,
+            Implementation::Transport(Transport::Url(endpoint)) => Some(endpoint),
+            Implementation::Builtin(_) | Implementation::Transport(Transport::Command(_)) => None,
         })
         .chain(audience)
         .chain(annotators);

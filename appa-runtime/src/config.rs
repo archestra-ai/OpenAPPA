@@ -254,13 +254,13 @@ pub struct Externals {
     pub sanitizers: BTreeMap<String, Implementation>,
     /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
     /// its declaration. An Annotator that carries a stock builtin takes no entry here.
-    pub annotators: BTreeMap<String, AnnotatorImplementation>,
+    pub annotators: BTreeMap<String, Transport>,
     /// One entry per audience source provider the policy's `[audience]` table references,
     /// under the provider's name, plus one per entry a provider's `lookup` names.
     pub audience: BTreeMap<String, AudienceBinding>,
     /// One context provider per `[externals.context.<name>]`, under its name: asked about
     /// every call an Annotator judges, before the Annotator.
-    pub context: BTreeMap<String, AnnotatorImplementation>,
+    pub context: BTreeMap<String, Transport>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -582,21 +582,21 @@ pub(crate) const JEV_URL_VARIABLE: &str = "APPA_PROVIDER_JEV_API_URL";
 /// The `[externals]` table of the `jev` profile.
 const JEV_SECTION: &str = "jev";
 
-/// How one bound component is served — an HTTP endpoint, a local command, or a builtin
-/// name — a closed choice per entry, the same for every kind.
+/// How a bound component the runtime does not answer itself is reached: an HTTP endpoint
+/// or a local command. Every section accepts both; an Annotator and a context provider
+/// accept nothing else, since a stock Annotator is named on its policy declaration.
 #[derive(Debug, Clone)]
-pub enum Implementation {
-    Resolver(Endpoint),
+pub enum Transport {
+    Url(Endpoint),
     Command(ResolverCommand),
-    Builtin(String),
 }
 
-/// How one deployment-bound Annotator runs: an HTTP endpoint or a local command. A stock
-/// builtin is named on the policy declaration, never bound here.
+/// How one authority or sanitizer is served — a transport or a builtin name — a closed
+/// choice per entry.
 #[derive(Debug, Clone)]
-pub enum AnnotatorImplementation {
-    Resolver(Endpoint),
-    Command(ResolverCommand),
+pub enum Implementation {
+    Transport(Transport),
+    Builtin(String),
 }
 
 /// One `[externals.audience.<name>]` entry: how it answers, and — for a provider whose
@@ -616,8 +616,7 @@ pub struct AudienceBinding {
 /// member lookups only, so it binds a `lookup` target and never a policy provider.
 #[derive(Debug, Clone)]
 pub enum AudienceImplementation {
-    Resolver(Endpoint),
-    Command(ResolverCommand),
+    Transport(Transport),
     Readers(BTreeMap<ReaderId, ReaderId>),
 }
 
@@ -706,8 +705,8 @@ impl std::fmt::Debug for Token {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("local credential database is unavailable")]
-    CredentialStore,
+    #[error("local credential database is unavailable: {reason}")]
+    CredentialStore { reason: String },
     #[error("cannot read {path}: {source}")]
     Unreadable { path: String, source: std::io::Error },
     #[error("cannot parse {path}: {source}")]
@@ -1125,8 +1124,9 @@ impl Config {
     /// Standalone configuration only: embedding hosts keep their existing environment interface.
     #[cfg(feature = "daemon")]
     pub(crate) fn load_local(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
-        let store = crate::credentials::CredentialStore::for_config(path).map_err(|_| ConfigError::CredentialStore)?;
-        let saved = store.values().map_err(|_| ConfigError::CredentialStore)?;
+        let unavailable = |reason| ConfigError::CredentialStore { reason };
+        let store = crate::credentials::CredentialStore::for_config(path).map_err(unavailable)?;
+        let saved = store.values().map_err(unavailable)?;
         let lookup = |var: &str| std::env::var(var).ok().or_else(|| saved.get(var).cloned());
         let mut config = Self::load_with_keys(path, battery_dirs, KeySource::Lookup(&lookup))?;
         config.credential_store = Some(store);
@@ -1583,12 +1583,12 @@ impl Config {
                 sanitizers: resolve(Section::Sanitizers, sanitizers)?,
                 annotators: resolve(Section::Annotators, annotators)?
                     .into_iter()
-                    .map(|(name, implementation)| (name, annotator_implementation(implementation)))
+                    .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
                 audience: resolve_audience_bindings(audience, &origins, keys)?,
                 context: resolve(Section::Context, context)?
                     .into_iter()
-                    .map(|(name, implementation)| (name, annotator_implementation(implementation)))
+                    .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
@@ -2067,10 +2067,9 @@ fn compose_included_confinement(
 }
 
 /// An annotator or context-provider binding after its section refused every `builtin` at parse.
-fn annotator_implementation(implementation: Implementation) -> AnnotatorImplementation {
+fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
-        Implementation::Resolver(endpoint) => AnnotatorImplementation::Resolver(endpoint),
-        Implementation::Command(command) => AnnotatorImplementation::Command(command),
+        Implementation::Transport(transport) => transport,
         Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
     }
 }
@@ -2110,7 +2109,7 @@ fn resolve_binding(
         (Some(url), None, None) => {
             let url = validated_url(section.name(), name, url)?;
             let token = resolve_token(section.name(), name, token_env, keys)?;
-            Ok(Implementation::Resolver(Endpoint::new(url, token)))
+            Ok(Implementation::Transport(Transport::Url(Endpoint::new(url, token))))
         }
         (None, Some(builtin), None) if token_env.is_none() => {
             section.check_builtin(name, &builtin)?;
@@ -2122,9 +2121,9 @@ fn resolve_binding(
             }
             Ok(Implementation::Builtin(builtin))
         }
-        (None, None, Some(argv)) => Ok(Implementation::Command(resolve_command(
+        (None, None, Some(argv)) => Ok(Implementation::Transport(Transport::Command(resolve_command(
             section, name, argv, token_env, origins,
-        )?)),
+        )?))),
         _ => Err(ConfigError::ImplementationChoice {
             section: section.name(),
             name: name.to_string(),
@@ -2162,11 +2161,11 @@ fn resolve_audience_bindings(
             (Some(url), None, None) => {
                 let url = validated_url(section.name(), &name, url)?;
                 let token = resolve_token(section.name(), &name, token_env, keys)?;
-                AudienceImplementation::Resolver(Endpoint::new(url, token))
+                AudienceImplementation::Transport(Transport::Url(Endpoint::new(url, token)))
             }
-            (None, Some(argv), None) => {
-                AudienceImplementation::Command(resolve_command(section, &name, argv, token_env, origins)?)
-            }
+            (None, Some(argv), None) => AudienceImplementation::Transport(Transport::Command(resolve_command(
+                section, &name, argv, token_env, origins,
+            )?)),
             (None, None, Some(readers)) if token_env.is_none() && templates.is_empty() => {
                 AudienceImplementation::Readers(resolve_readers(&name, readers)?)
             }
@@ -2470,6 +2469,24 @@ mod tests {
 
     const BUNDLE_ROOT: &str = "[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n";
 
+    /// The store's own reason survives into the load error, not just that it failed.
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn an_unavailable_credential_store_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, BUNDLE_ROOT).unwrap();
+        std::fs::create_dir(dir.path().join("credentials.db")).unwrap();
+        let expected = crate::credentials::CredentialStore::for_config(&path)
+            .unwrap()
+            .values()
+            .unwrap_err();
+        match Config::load_local(&path, &[]) {
+            Err(ConfigError::CredentialStore { reason }) => assert_eq!(reason, expected),
+            other => panic!("expected the store's refusal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn bundle_files_do_not_change_policy_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -2545,10 +2562,10 @@ mod tests {
         assert!(!command_dir.exists());
         std::fs::write(root_dir.join("appa.toml"), &text).unwrap();
         let config = Config::load(&root_dir.join("appa.toml")).unwrap();
-        let AnnotatorImplementation::Command(root) = &config.externals.annotators["root"] else {
+        let Transport::Command(root) = &config.externals.annotators["root"] else {
             panic!("root command missing")
         };
-        let Implementation::Command(shared) = &config.externals.sanitizers["shared"] else {
+        let Implementation::Transport(Transport::Command(shared)) = &config.externals.sanitizers["shared"] else {
             panic!("included command missing")
         };
         assert_eq!(root.cwd, command_dir);
@@ -2588,6 +2605,15 @@ mod tests {
         Readers,
     }
 
+    impl<'a> Bound<'a> {
+        fn of(transport: &'a Transport) -> Bound<'a> {
+            match transport {
+                Transport::Url(_) => Bound::Url,
+                Transport::Command(command) => Bound::Command(command),
+            }
+        }
+    }
+
     fn bound<'a>(section: Section, config: &'a Config, name: &str) -> Option<Bound<'a>> {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
@@ -2598,8 +2624,7 @@ mod tests {
                     .audience
                     .get(name)
                     .map(|binding| match &binding.implementation {
-                        AudienceImplementation::Resolver(_) => Bound::Url,
-                        AudienceImplementation::Command(command) => Bound::Command(command),
+                        AudienceImplementation::Transport(transport) => Bound::of(transport),
                         AudienceImplementation::Readers(_) => Bound::Readers,
                     });
             }
@@ -2608,15 +2633,11 @@ mod tests {
                     Section::Context => &config.externals.context,
                     _ => &config.externals.annotators,
                 };
-                return table.get(name).map(|implementation| match implementation {
-                    AnnotatorImplementation::Resolver(_) => Bound::Url,
-                    AnnotatorImplementation::Command(command) => Bound::Command(command),
-                });
+                return table.get(name).map(Bound::of);
             }
         };
         table.get(name).map(|implementation| match implementation {
-            Implementation::Resolver(_) => Bound::Url,
-            Implementation::Command(command) => Bound::Command(command),
+            Implementation::Transport(transport) => Bound::of(transport),
             Implementation::Builtin(builtin) => Bound::Builtin(builtin),
         })
     }
@@ -2733,7 +2754,7 @@ mod tests {
         );
 
         let config = parse_with(&with("APPA_PROVIDER_SLACK_TOKEN"), set).expect("the bound credential validates");
-        let Some(AudienceImplementation::Command(command)) = config
+        let Some(AudienceImplementation::Transport(Transport::Command(command))) = config
             .externals
             .audience
             .get("slack")
@@ -2758,7 +2779,7 @@ mod tests {
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let Some(AnnotatorImplementation::Resolver(annotator)) = config.externals.annotators.get("classifier") else {
+        let Some(Transport::Url(annotator)) = config.externals.annotators.get("classifier") else {
             panic!("the named annotator endpoint is set")
         };
         let Some(EndpointToken::Set(token)) = &annotator.token else {
@@ -2833,16 +2854,16 @@ mod tests {
                 accepts(section, builtin);
             }
         }
-        // An Annotator names a stock builtin on its policy declaration, never here; an
-        // audience entry has no builtin key at all.
+        // An Annotator names a stock builtin on its policy declaration, never here, and a
+        // context provider takes none; an audience entry has no builtin key at all.
         for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
-            assert!(
-                matches!(
-                    cell(Section::Annotators, builtin),
-                    Err(ConfigError::BuiltinNotAllowed { .. })
-                ),
-                "annotators must refuse builtin {builtin}"
-            );
+            for section in [Section::Annotators, Section::Context] {
+                assert!(
+                    matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
+                    "{} must refuse builtin {builtin}",
+                    section.name()
+                );
+            }
             assert!(
                 toml::from_str::<RawConfig>(&entry(Section::Audience, &format!("builtin = \"{builtin}\""))).is_err(),
                 "audience must refuse builtin {builtin}"
@@ -3337,7 +3358,8 @@ mod tests {
         let standalone_path = standalone_dir.path().join("appa.toml");
         std::fs::write(&standalone_path, config.policy_file().bytes()).expect("write stored config");
         let standalone = Config::load(&standalone_path).expect("stored command config reloads");
-        let Some(Implementation::Command(command)) = standalone.externals.sanitizers.get("scrub") else {
+        let Some(Implementation::Transport(Transport::Command(command))) = standalone.externals.sanitizers.get("scrub")
+        else {
             panic!("stored scrub binding is a command")
         };
         assert_eq!(command.cwd, canonical.join("battery"));
@@ -3761,8 +3783,7 @@ mod tests {
         let config =
             Config::hosted_included_deferred(ROOT, HOST_DEFAULTS, granting(&["APPA_HOSTED_TEST_BRIDGE_TOKEN"]))
                 .expect("the granted battery validates without its key");
-        let Some(AnnotatorImplementation::Resolver(endpoint)) = config.externals.annotators.get("github.visibility")
-        else {
+        let Some(Transport::Url(endpoint)) = config.externals.annotators.get("github.visibility") else {
             panic!("the battery binds its annotator to an endpoint")
         };
         assert!(matches!(endpoint.token, Some(EndpointToken::Deferred)));
@@ -3855,7 +3876,10 @@ mod tests {
         assert_eq!(llm.model, "llama");
         assert_eq!(config.externals.claude_code.model, "pinned");
         let slack = &config.externals.audience["slack"];
-        assert!(matches!(slack.implementation, AudienceImplementation::Resolver(_)));
+        assert!(matches!(
+            slack.implementation,
+            AudienceImplementation::Transport(Transport::Url(_))
+        ));
         assert_eq!(slack.lookup.as_deref(), Some("people"));
         assert_eq!(slack.templates.len(), 1);
         assert!(matches!(
@@ -4091,7 +4115,7 @@ mod tests {
         let from_file = Config::load(&path).expect("the file config loads");
         unsafe { std::env::remove_var(VAR) };
 
-        let Some(Implementation::Resolver(endpoint)) = config.externals.authorities.get("desk") else {
+        let Some(Implementation::Transport(Transport::Url(endpoint))) = config.externals.authorities.get("desk") else {
             panic!("desk is an endpoint")
         };
         let Some(EndpointToken::Set(token)) = &endpoint.token else {

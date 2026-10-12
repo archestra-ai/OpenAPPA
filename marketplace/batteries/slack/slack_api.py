@@ -34,6 +34,29 @@ def api_ok(call, method, **params):
     return response
 
 
+def conversation_info(call, channel_id):
+    """`conversations.info` for one conversation. Slack answers
+    `channel_not_found` both for an id it does not know and for a private
+    conversation the token's account is not in; a DM is visible only to
+    its two ends, so the error names what the deployment can change."""
+    try:
+        return api_ok(call, "conversations.info", channel=channel_id)["channel"]
+    except RuntimeError as error:
+        if not str(error).endswith("failed: channel_not_found"):
+            raise
+        if channel_id.startswith("D"):
+            raise RuntimeError(
+                f"DM {channel_id} is not visible to the token's account: a DM is visible only to its two ends. "
+                "Name the DM by the other person's user id instead, or bind the user token of the account that sends"
+            ) from None
+        raise RuntimeError(f"conversation {channel_id} does not exist or is not visible to the token's account") from None
+
+
+def is_person(user):
+    """Whether a directory entry is a person's account rather than an app's."""
+    return not (user.get("is_bot") or user.get("is_app_user") or user.get("id") == "USLACKBOT")
+
+
 def conversation_kind(channel_id):
     """What a channel id names, from the id Slack issued: a conversation
     Slack lists members for, or a user standing for the DM with that user.

@@ -222,7 +222,7 @@ impl Runtime {
         call: ProposedCall,
     ) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
         let call_id = bounded(call_id, "call id")?;
-        let recipient = actor.child.as_ref().unwrap_or(&actor.root);
+        let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
         self.read_tool_preserves_source_label(&actor.root, &call)?;
         let arguments = call_fingerprint(&call);
@@ -449,7 +449,7 @@ impl Runtime {
         call: ProposedCall,
     ) -> Result<(), EmbeddedPeerError> {
         let call_id = bounded(call_id, "call id")?;
-        let recipient = actor.child.as_ref().unwrap_or(&actor.root);
+        let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
         self.read_tool_preserves_source_label(&actor.root, &call)?;
         let arguments = call_fingerprint(&call);

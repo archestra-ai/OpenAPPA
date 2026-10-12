@@ -26,7 +26,7 @@ import time
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from slack_api import TOKEN_VAR, api_ok, conversation_kind, web_api  # noqa: E402
+from slack_api import TOKEN_VAR, api_ok, conversation_info, conversation_kind, web_api  # noqa: E402
 
 
 NAME = "slack.conversation-trust"
@@ -69,8 +69,8 @@ def is_external(call, channel_id):
         case "user":
             return bool(api_ok(call, "users.info", user=channel_id).get("user", {}).get("is_stranger"))
         case "conversation":
-            conversation = api_ok(call, "conversations.info", channel=channel_id).get("channel", {})
-            if not isinstance(conversation.get("is_ext_shared"), bool):
+            conversation = conversation_info(call, channel_id)
+            if not isinstance(conversation, dict) or not isinstance(conversation.get("is_ext_shared"), bool):
                 raise RuntimeError("conversations.info reports no is_ext_shared")
             return conversation["is_ext_shared"] or conversation.get("is_pending_ext_shared") is True
 

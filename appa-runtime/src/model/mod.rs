@@ -15,7 +15,7 @@ use appa_policy::AnnotatorBuiltin;
 use claude_code::ClaudeCodeBackend;
 use llm::LlmBackend;
 
-use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
+use crate::external::{ConsultGates, Diagnostics, NoAnswerReason, Transcript, acquire_within};
 
 /// No retry or hedge starts with less of the consult's budget left than this.
 pub(crate) const MIN_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(300);
@@ -102,6 +102,13 @@ async fn attempt(
         seen.raw_response = raw_response;
         seen.http_status = match answered {
             Err(NoAnswerReason::NonSuccess { status, .. }) => Some(status),
+            _ => None,
+        };
+        // What the transport said about its refusal is the consult's diagnostics.
+        seen.diagnostics = match &answered {
+            Err(NoAnswerReason::NonSuccess {
+                detail: Some(detail), ..
+            }) => Some(Diagnostics::head(detail.as_bytes())),
             _ => None,
         };
     }

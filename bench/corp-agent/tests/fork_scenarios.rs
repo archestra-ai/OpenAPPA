@@ -24,7 +24,7 @@ use appa_example_agent::{
     TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, Runtime, TrajectoryId};
-use appa_runtime::config::{Config, Implementation};
+use appa_runtime::config::{Config, Implementation, Transport};
 use corp_systems::systems::System;
 use corporate_agent_demo::catalogue;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -88,7 +88,7 @@ async fn episode(policy: &str, provider: &Provider) -> Episode {
     .expect("the shim binds");
     let origin = format!("http://{address}");
     for implementation in config.externals.sanitizers.values_mut() {
-        if let Implementation::Resolver(endpoint) = implementation
+        if let Implementation::Transport(Transport::Url(endpoint)) = implementation
             && let Some(path) = endpoint.url.strip_prefix("http://127.0.0.1:0")
             && shim::serves(path)
         {

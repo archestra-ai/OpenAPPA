@@ -75,7 +75,7 @@ pub(crate) async fn run_claude_code(
 ) -> Result<serde_json::Value, NoAnswerReason> {
     use std::process::Stdio;
 
-    use crate::external::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
+    use crate::consult_process::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -177,7 +177,7 @@ fn isolate_claude_environment(
     // `command` external inherits either, which this consult never reads.
     command
         .env_clear()
-        .envs(crate::external::without_runtime_variables(parent));
+        .envs(crate::consult_process::without_runtime_variables(parent));
     // Claude Code marks its own process tree and refuses to start a nested CLI
     // while that marker is present. This consult is deliberately isolated,
     // tool-less, and non-persistent, so it is safe and necessary to clear the

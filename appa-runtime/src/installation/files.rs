@@ -606,7 +606,9 @@ mod tests {
     fn execute_helpers(config: &Path) {
         let config = crate::config::Config::load(config).unwrap();
         for name in ["root", "shared"] {
-            let crate::config::Implementation::Command(command) = &config.externals.authorities[name] else {
+            let crate::config::Implementation::Transport(crate::config::Transport::Command(command)) =
+                &config.externals.authorities[name]
+            else {
                 panic!("expected command")
             };
             let result = crate::child_process::output(

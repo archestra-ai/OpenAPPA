@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::consult_with_retries;
 use crate::config::{Endpoint, EndpointHost, EndpointToken, ModelLimits};
 use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, NoAnswerReason, Transcript};
+use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, error_line, read_body};
 use appa_policy::AnnotatorBuiltin;
 
 /// One client for the host's endpoint, shared by every `builtin = "archestra"` Annotator of
@@ -80,9 +80,16 @@ impl ArchestraBackend {
         })?;
         let status = response.status();
         if !status.is_success() {
+            // The host says why it could not answer; read it for the record alone.
+            let mut body = Vec::new();
+            let _ = tokio::time::timeout(
+                RECORD_READ_GRACE,
+                read_body(&mut response, self.max_body_bytes as u64, &mut body),
+            )
+            .await;
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
-                detail: None,
+                detail: host_message(&body),
             });
         }
         let mut text = Vec::new();
@@ -98,6 +105,17 @@ impl ArchestraBackend {
         }
         String::from_utf8(text).map_err(|_| NoAnswerReason::Malformed)
     }
+}
+
+/// What the host said about a consult it refused: the `message` of its error envelope
+/// (`{"error":{"message":…}}`), else the last line of whatever it wrote; none when it
+/// wrote nothing.
+fn host_message(body: &[u8]) -> Option<String> {
+    let envelope: Option<String> = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.get("message")?.as_str().map(str::to_string));
+    let line = error_line(envelope.as_deref().unwrap_or(&String::from_utf8_lossy(body)));
+    (!line.is_empty()).then_some(line)
 }
 
 #[cfg(test)]
@@ -171,6 +189,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refusing_host_s_message_is_the_detail_and_the_diagnostics() {
+        let (url, _) = serve(
+            StatusCode::BAD_GATEWAY,
+            "{\"error\":{\"message\":\"The model call failed: anthropic/claude-sonnet-5 was rejected upstream with 401: API key is invalid.\",\"type\":\"api_internal_server_error\"}}",
+        )
+        .await;
+        let mut seen = Transcript::of(ConsultBackend::Archestra);
+
+        let answer = backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await;
+
+        let message =
+            "The model call failed: anthropic/claude-sonnet-5 was rejected upstream with 401: API key is invalid.";
+        assert_eq!(
+            answer,
+            Err(NoAnswerReason::NonSuccess {
+                status: 502,
+                detail: Some(message.to_string())
+            })
+        );
+        assert_eq!(seen.http_status, Some(502));
+        assert_eq!(
+            seen.diagnostics.map(|diagnostics| diagnostics.bytes),
+            Some(message.as_bytes().to_vec())
+        );
+
+        let (url, _) = serve(StatusCode::BAD_GATEWAY, "").await;
+        let mut seen = Transcript::of(ConsultBackend::Archestra);
+        assert_eq!(
+            backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 502,
+                detail: None
+            })
+        );
+        assert_eq!(seen.diagnostics, None, "a silent host leaves no diagnostics");
+    }
+
+    #[tokio::test]
     async fn every_endpoint_failure_is_no_answer() {
         let (url, requests) = serve(StatusCode::INTERNAL_SERVER_ERROR, "boom").await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
@@ -178,7 +234,7 @@ mod tests {
             backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await,
             Err(NoAnswerReason::NonSuccess {
                 status: 500,
-                detail: None
+                detail: Some("boom".to_string())
             })
         );
         assert_eq!(requests.lock().unwrap().len(), MAX_ATTEMPTS, "a 5xx is retried");
@@ -189,7 +245,7 @@ mod tests {
             backend(url, 65_536).consult(&prompt(), "judge", None).await,
             Err(NoAnswerReason::NonSuccess {
                 status: 400,
-                detail: None
+                detail: Some("no".to_string())
             })
         );
         assert_eq!(requests.lock().unwrap().len(), 1, "a 4xx is not retried");

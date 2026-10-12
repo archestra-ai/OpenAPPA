@@ -145,3 +145,33 @@ fn the_annotator_asked_by_the_cli_sees_what_the_context_providers_answered() {
     );
     assert_eq!(page["answer"]["delta"]["trust"], "trusted");
 }
+
+#[test]
+fn zero_concurrency_is_refused_rather_than_hanging() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
+    std::fs::write(dir.path().join("classifier.sh"), CLASSIFIER).expect("the annotator is written");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "annotate", "--concurrency", "0", "--config"])
+        .arg(dir.path().join("appa.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("appa starts");
+    // A refused flag exits before reading, so the write may meet a closed pipe.
+    let _ = child.stdin.take().expect("stdin is piped").write_all(CALLS.as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("appa is waitable") {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().expect("a hung appa is killable");
+            child.wait().expect("a killed appa is reaped");
+            panic!("annotate with zero concurrency never exited");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(!status.success());
+}

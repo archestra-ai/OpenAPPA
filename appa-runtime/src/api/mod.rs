@@ -1825,7 +1825,7 @@ impl Runtime {
     ) -> Result<(), EventError> {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
-        let scope = actor.child.as_ref().unwrap_or(&actor.root);
+        let scope = acting_trajectory(actor);
         self.inner.append_host_with(&actor.root, |log| {
             let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
@@ -2604,7 +2604,7 @@ impl Runtime {
             reason: RemedyRefusal::UnknownOffer,
         };
         let root = acting.root.clone();
-        let trajectory = acting.child.clone().unwrap_or_else(|| root.clone());
+        let trajectory = acting_trajectory(acting).clone();
         let Some((offer, pursuer)) = self.resolve_in(&root, &quoted) else {
             return unknown();
         };
@@ -2662,7 +2662,7 @@ impl Runtime {
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
         let root = &acting.root;
-        let pursuer = acting.child.as_ref().unwrap_or(root);
+        let pursuer = acting_trajectory(acting);
         let session = match self.session_with_presentation(root, pursuer, presentation) {
             Ok(session) => session,
             Err(error) => {
@@ -3051,6 +3051,11 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn store(&self) -> &LogStore {
         &self.inner.store
+    }
+
+    #[cfg(all(test, feature = "daemon"))]
+    pub(crate) fn recorded_events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.inner.events(root)
     }
 
     /// Leave the claim an execution that never returned would have left, for the tests
@@ -3478,7 +3483,7 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{AnnotatorImplementation, Endpoint, HostDefaults};
+    use crate::config::{Endpoint, HostDefaults, Transport};
 
     #[test]
     fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
@@ -3540,8 +3545,8 @@ mod deployment_tests {
         .expect("the hosted document validates")
     }
 
-    fn endpoint() -> AnnotatorImplementation {
-        AnnotatorImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
+    fn endpoint() -> Transport {
+        Transport::Url(Endpoint::new("https://resolver.example".to_string(), None))
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
@@ -3693,7 +3698,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut extra = claude_config(policy);
         extra.externals.authorities.insert(
             "auditor".to_string(),
-            crate::config::Implementation::Resolver(Endpoint::new("https://auditor.example".to_string(), None)),
+            crate::config::Implementation::Transport(Transport::Url(Endpoint::new(
+                "https://auditor.example".to_string(),
+                None,
+            ))),
         );
         assert!(matches!(
             load(extra),

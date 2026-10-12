@@ -64,6 +64,10 @@ class Established(unittest.TestCase):
         with self.assertRaises(OSError):
             self.established("conversations.info", OSError("timed out"), OSError("timed out"), OSError("timed out"))
 
+    def test_a_dm_the_token_cannot_see_is_refused_naming_its_two_ends(self):
+        with self.assertRaisesRegex(RuntimeError, "DM D1 is not visible .* two ends"):
+            self.established("conversations.info", {"ok": False, "error": "channel_not_found"}, channel_id="D1")
+
     def test_a_definite_slack_error_is_raised_without_retrying(self):
         for response in (
             {"ok": False, "error": "channel_not_found"},

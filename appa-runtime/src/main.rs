@@ -107,8 +107,8 @@ enum RuntimeCommand {
         repeat: u32,
 
         /// How many calls are in flight at once.
-        #[arg(long, default_value_t = 4)]
-        concurrency: usize,
+        #[arg(long, default_value = "4")]
+        concurrency: std::num::NonZeroUsize,
     },
 }
 
@@ -473,7 +473,7 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
 }
 
 /// `appa runtime annotate`: see [`crate::annotate`].
-async fn annotate(args: Args, repeat: u32, concurrency: usize) -> ExitCode {
+async fn annotate(args: Args, repeat: u32, concurrency: std::num::NonZeroUsize) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
     match load_config(&config_path, &args.batteries_dir) {
         Ok((config, _)) => crate::annotate::run(config, args.modules_dir, repeat, concurrency).await,

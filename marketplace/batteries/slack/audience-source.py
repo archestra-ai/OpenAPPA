@@ -11,8 +11,12 @@ Serves these selector templates over the Slack Web API:
                        channel every full member (any of them may join
                        it) plus its current members; for a private
                        channel, group DM, or DM its members as Slack
-                       reports them; a user id (U... or W...) is the DM
-                       with that user, exactly the viewer and that user
+                       reports them, and Slack shows a DM only to its
+                       two ends; a user id (U... or W...) is the DM
+                       with that user: that user and the viewer when
+                       the token is a person's, that user alone when it
+                       is a bot's, since an app takes part in no
+                       person's DM
 
 and the member lookup that resolves one `slack:U...` member to its
 reader.
@@ -36,7 +40,7 @@ import sys
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from slack_api import TOKEN_VAR, api_ok, conversation_kind, web_api  # noqa: E402
+from slack_api import TOKEN_VAR, api_ok, conversation_info, conversation_kind, is_person, web_api  # noqa: E402
 
 
 SOURCE_NAME = "slack"
@@ -99,10 +103,13 @@ def is_full_member(user, team_id):
     return user.get("team_id") == team_id
 
 
-def viewer_members(call):
+def viewer_user(call):
     auth = api_ok(call, "auth.test")
-    user = api_ok(call, "users.info", user=auth["user_id"])["user"]
-    return [reader_of(user)]
+    return api_ok(call, "users.info", user=auth["user_id"])["user"]
+
+
+def viewer_members(call):
+    return [reader_of(viewer_user(call))]
 
 
 def full_members(call):
@@ -167,13 +174,17 @@ def is_private_conversation(conversation):
 def channel_members(call, channel_id):
     match conversation_kind(channel_id):
         case "user":
-            # The DM with one user is read by exactly the viewer and that user.
+            # The DM with one user is between that user and whoever acts
+            # through the connector. A person's token names that person as
+            # the viewer; a bot token's account takes part in no person's
+            # DM, so only the named user is known to read it.
             other = api_ok(call, "users.info", user=channel_id)["user"]
-            members = viewer_members(call)
+            viewer = viewer_user(call)
+            members = [reader_of(viewer)] if is_person(viewer) else []
             reader = reader_of(other)
             return members if reader in members else members + [reader]
         case "conversation":
-            conversation = api_ok(call, "conversations.info", channel=channel_id)["channel"]
+            conversation = conversation_info(call, channel_id)
             user_ids = conversation_member_ids(call, channel_id)
             if is_private_conversation(conversation):
                 users = users_by_id(call, user_ids)

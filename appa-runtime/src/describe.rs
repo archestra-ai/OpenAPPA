@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use appa_runtime_api::AdapterName;
 
-use crate::config::{Config, ConfigError, Externals, Implementation, Section};
+use crate::config::{Config, ConfigError, Externals, Implementation, Section, Transport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConfigDescription {
@@ -149,8 +149,8 @@ impl Bindings<'_> {
     fn authority_implementation(self, name: &str) -> AuthorityImplementation {
         match self {
             Bindings::Loaded(externals) => match externals.authorities.get(name) {
-                Some(Implementation::Resolver(_)) => AuthorityImplementation::Url,
-                Some(Implementation::Command(_)) => AuthorityImplementation::Command,
+                Some(Implementation::Transport(Transport::Url(_))) => AuthorityImplementation::Url,
+                Some(Implementation::Transport(Transport::Command(_))) => AuthorityImplementation::Command,
                 Some(Implementation::Builtin(builtin)) => AuthorityImplementation::Builtin(builtin.clone()),
                 None => AuthorityImplementation::Unbound,
             },

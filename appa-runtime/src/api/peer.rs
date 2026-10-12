@@ -266,16 +266,14 @@ impl Runtime {
     ) -> Result<(), EventError> {
         let log = self.inner.log(&actor.root)?;
         let label = self.current_label(&log, acting_trajectory(actor))?;
-        self.inner.append_host_with::<EventError, _>(&actor.root, |_| {
-            Ok((
-                Some(HostObservation::PeerSent {
-                    digest,
-                    label: label.clone(),
-                    dispatch: dispatch.clone(),
-                }),
-                (),
-            ))
-        })
+        self.inner.append_host(
+            &actor.root,
+            &HostObservation::PeerSent {
+                digest,
+                label,
+                dispatch,
+            },
+        )
     }
 
     pub(crate) fn current_label(&self, log: &Log, trajectory: &TrajectoryId) -> Result<Label, EventError> {
@@ -332,9 +330,8 @@ impl Runtime {
         if let Some(label) = &attributed
             && current.combine(label) == current
         {
-            self.inner.append_host_with::<EventError, _>(root, |_| {
-                Ok((Some(HostObservation::PeerAdmitted { digest }), ()))
-            })?;
+            self.inner
+                .append_host(root, &HostObservation::PeerAdmitted { digest })?;
             return Ok(Received::Direct);
         }
         let label = attributed.unwrap_or_else(unattributed);

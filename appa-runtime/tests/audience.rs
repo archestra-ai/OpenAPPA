@@ -579,6 +579,51 @@ fn a_referenced_audience_source_must_be_bound() {
     ));
 }
 
+/// A source that only an included battery declares is undeclared while that battery is
+/// absent or declares nothing; including it again composes, and declaring it in the root
+/// as well collides with the battery's own declaration.
+#[test]
+fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
+    use appa_runtime::config::{ConfigError, HostDefaults, HostedBattery};
+
+    const ROOT: &str = "[policy]\nversion = 2\n\n[policy.audience]\ninternal = [\"team:members\"]\n";
+    const ROOT_BINDING: &str = "\n[externals.audience.team]\nurl = \"http://127.0.0.1:9/audience\"\nselectors = [{ template = \"members\", feeds = \"internal\" }]\n";
+    let declaring = format!("[policy]\nversion = 2\n{ROOT_BINDING}");
+    let battery = |policy| HostedBattery {
+        name: "team",
+        policy,
+        token_env: &[],
+    };
+    let compose = |root: &str, batteries: &[HostedBattery<'_>]| {
+        Config::hosted_composed(
+            root,
+            batteries,
+            HostDefaults::new(std::time::Duration::from_millis(1000), 4096),
+            |_| None,
+        )
+    };
+
+    for batteries in [vec![], vec![battery("[policy]\nversion = 2\n")]] {
+        let config = compose(ROOT, &batteries).expect("the document composes");
+        let Err(appa_runtime::api::OpenError::Policy(error)) = Runtime::open_in_memory(config, None) else {
+            panic!("an undeclared audience source must not open");
+        };
+        let appa_policy::ConfigError::UndeclaredProvider { context, provider } = *error else {
+            panic!("expected an undeclared audience source, got {error}");
+        };
+        assert_eq!((context.as_str(), provider.as_str()), ("[audience] internal", "team"));
+    }
+
+    let restored = compose(ROOT, &[battery(&declaring)]).expect("the restored include composes");
+    Runtime::open_in_memory(restored, None).expect("the restored include declares the source");
+
+    let doubled = format!("{ROOT}{ROOT_BINDING}");
+    assert!(matches!(
+        compose(&doubled, &[battery(&declaring)]),
+        Err(ConfigError::DuplicateExternal { section, name, .. }) if section == "audience" && name == "team"
+    ));
+}
+
 #[tokio::test]
 async fn a_qualified_recipient_is_checked_through_a_member_lookup() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

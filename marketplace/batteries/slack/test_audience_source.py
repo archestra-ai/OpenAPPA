@@ -179,6 +179,34 @@ class SelectorTests(unittest.TestCase):
         for channel_id in ["U0ABC123", "W0ABC123"]:
             self.assertEqual(AUDIENCE_SOURCE.conversation_kind(channel_id), "user")
 
+    def test_a_dm_named_by_user_id_is_read_by_the_viewer_and_that_user(self):
+        call = fixture_api(
+            [
+                ("users.info", {"user": "U2"}, {"ok": True, "user": user("U2", "bob@corp.com")}),
+                ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
+                ("users.info", {"user": "U1"}, {"ok": True, "user": user("U1", "alice@corp.com")}),
+            ]
+        )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(call, {"selector": "channel/U2"}),
+            {"members": ["alice@corp.com", "bob@corp.com"]},
+        )
+
+    def test_a_bot_token_is_no_end_of_a_dm_named_by_user_id(self):
+        call = fixture_api(
+            [
+                ("users.info", {"user": "U2"}, {"ok": True, "user": user("U2", "bob@corp.com")}),
+                ("auth.test", {}, {"ok": True, "user_id": "U8", "team_id": "T1", "bot_id": "B1"}),
+                ("users.info", {"user": "U8"}, {"ok": True, "user": user("U8", is_bot=True)}),
+            ]
+        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "channel/U2"}), {"members": ["bob@corp.com"]})
+
+    def test_a_dm_the_token_cannot_see_names_its_two_ends_as_the_cause(self):
+        call = fixture_api([("conversations.info", {"channel": "D1"}, {"ok": False, "error": "channel_not_found"})])
+        with self.assertRaisesRegex(RuntimeError, "DM D1 is not visible .* two ends"):
+            AUDIENCE_SOURCE.answer(call, {"selector": "channel/D1"})
+
     def test_a_public_channel_is_read_by_every_full_member_and_whoever_is_in_it(self):
         call = fixture_api(
             [
