@@ -930,3 +930,132 @@ async fn a_selector_placeholder_asks_the_source_for_the_collection_the_call_spel
     assert_eq!(requests[1]["artifact"], serde_json::json!({ "selector": "channel/C2" }));
     assert!(audit_len(&runtime) > 0, "the decided acts read back");
 }
+
+/// A battery that binds a GitHub source and sends its member lookups to `host-members`, an
+/// entry only the including root declares.
+const HOSTED_BATTERY: &str = r#"
+[policy]
+version = 2
+
+[externals.audience.github]
+url = "AUDIENCE_URL"
+selectors = [{ template = "org/<org>/members" }]
+lookup = "host-members"
+"#;
+
+/// The root that includes `HOSTED_BATTERY` and answers its lookups from a roster.
+const HOSTED_ROOT: &str = r#"
+include = ["batteries/hosted/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.audience.group.team]
+from = ["github:org/acme/members"]
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = ["alice@corp.example", "bob@corp.example"] }
+
+[[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["$to"] } }
+effects = ["egress"]
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.audience.host-members]
+readers = READERS
+"#;
+
+fn write_hosted_battery(dir: &tempfile::TempDir, battery: &str, audience_url: &str) {
+    let battery_dir = dir.path().join("batteries/hosted");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory creates");
+    std::fs::write(
+        battery_dir.join("appa.toml"),
+        battery.replace("AUDIENCE_URL", audience_url),
+    )
+    .expect("the battery writes");
+}
+
+/// A battery's lookups seat through the roster the including root declares.
+#[tokio::test]
+async fn a_batterys_lookups_seat_through_the_roots_roster() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    write_hosted_battery(&dir, HOSTED_BATTERY, &url);
+    let root = HOSTED_ROOT.replace("READERS", r#"{ "github:12345" = "bob@corp.example" }"#);
+    let runtime = narrowed_under(&dir, &root, &url).await;
+
+    source.members(Some(vec!["github:12345"]));
+    runtime.probe_sources().await.expect("the roster answers the probe");
+    assert_eq!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(
+        source.requests().iter().all(|request| request["name"] == "github"),
+        "a roster lookup reaches no service"
+    );
+}
+
+/// An empty roster loads and passes the probe; the member it does not map keeps its
+/// qualified identity, which the narrowed audience does not hold, so the call is denied.
+#[tokio::test]
+async fn an_empty_root_roster_denies_a_batterys_member_as_a_decision() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    write_hosted_battery(&dir, HOSTED_BATTERY, &url);
+    let root = HOSTED_ROOT.replace("READERS", "{}");
+    let runtime = narrowed_under(&dir, &root, &url).await;
+
+    source.members(Some(vec!["github:12345"]));
+    runtime
+        .probe_sources()
+        .await
+        .expect("an empty roster answers the probe");
+    assert!(matches!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::DenyCall { offers, .. } if offers.is_empty()
+    ));
+
+    // The same source and roster still seat a member that needs no lookup: the denial
+    // above was the unmapped identity, not a failed consult.
+    source.members(Some(vec!["bob@corp.example"]));
+    assert_eq!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(
+        source.requests().iter().all(|request| request["name"] == "github"),
+        "a roster lookup reaches no service"
+    );
+}
+
+/// The roster's name is the root's alone: a battery that declares it too is refused at load,
+/// whether its entry conflicts with the root's or repeats it.
+#[test]
+fn a_battery_redeclaring_the_roots_roster_is_refused() {
+    use appa_runtime::config::ConfigError;
+
+    let readers = r#"{ "github:12345" = "bob@corp.example" }"#;
+    for entry in [
+        "url = \"http://127.0.0.1:9/audience\"".to_string(),
+        format!("readers = {readers}"),
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let battery = format!("{HOSTED_BATTERY}\n[externals.audience.host-members]\n{entry}\n");
+        write_hosted_battery(&dir, &battery, "http://127.0.0.1:9/audience");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, HOSTED_ROOT.replace("READERS", readers)).expect("the root writes");
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::DuplicateExternal { section, name, .. })
+                if section == "audience" && name == "host-members"
+        ));
+    }
+}
