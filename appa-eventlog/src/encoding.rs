@@ -152,6 +152,11 @@ mod tests {
                 trajectory: root(),
                 call_id: "toolu_1".to_string(),
             },
+            HostObservation::CallDenied {
+                trajectory: root(),
+                call_id: "toolu_2".to_string(),
+                batch: "cd".repeat(32),
+            },
             HostObservation::Vouched {
                 actor: actor.clone(),
                 key: "offer:one".to_string(),
@@ -186,6 +191,7 @@ mod tests {
             r#"{"kind":"inventory","actor":"cc:root","adapter":"kagent","inventory":{"tools":[{"name":"read","tool":"mcp:demo/read"}],"sources":[]}}"#,
             r#"{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{"trajectory":"cc:root","digest":"abababababababababababababababababababababababababababababababab","occurrence":7},"prompt":"prompt-1"}"#,
             r#"{"kind":"call_settled","trajectory":"cc:root","call_id":"toolu_1"}"#,
+            r#"{"kind":"call_denied","trajectory":"cc:root","call_id":"toolu_2","batch":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}"#,
             r#"{"kind":"vouched","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","ruling":"approve"}"#,
             r#"{"kind":"claimed","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one","until":{"secs_since_epoch":1700000000,"nanos_since_epoch":5}}"#,
             r#"{"kind":"released","actor":{"root":"cc:root","child":"cc:child"},"key":"offer:one"}"#,

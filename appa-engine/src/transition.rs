@@ -39,6 +39,18 @@ impl ProposalBatchId {
     }
 }
 
+/// The record a decided proposal batch answers a repeat from: the trajectory that decided
+/// it, its proposals as the validator resolved them (annotation included, so a repeat is
+/// judged on the payload that was decided, never a fresh consult), its spawn mark, and the
+/// pinned audience evidence the decision consumed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedBatch {
+    pub trajectory: TrajectoryId,
+    pub proposals: Vec<ResolvedCall>,
+    pub spawn: Option<SpawnMark>,
+    pub evidence: AudienceEvidence,
+}
+
 /// One model response's complete policy content: every exposed provider-run
 /// result, the ordered calls it proposed for one trajectory, and at most one spawn mark — under
 /// the identity that makes the act repeatable. Nothing else in a response is policy content, and

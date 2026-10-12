@@ -918,6 +918,16 @@ impl Views<'_> {
         self.projection.decided.get(batch)
     }
 
+    /// The batch identity whose decision released this dispatch, if one did: how a repeat
+    /// of the released call names the decision it is answered from.
+    pub(crate) fn batch_of_dispatch(&self, dispatch: &DispatchId) -> Option<&crate::transition::ProposalBatchId> {
+        self.projection
+            .decided
+            .iter()
+            .find(|(_, decided)| decided.released.contains(dispatch))
+            .map(|(batch, _)| batch)
+    }
+
     /// The exposed provider-run results this batch identity has already admitted, in order:
     /// the trajectory that admitted each, its originating tool and its body,
     /// which together are the whole of what a repeat is compared against. The trajectory is part of

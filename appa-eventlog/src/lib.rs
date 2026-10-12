@@ -177,6 +177,15 @@ pub enum HostObservation {
     /// The host reported this bound call finished. A fan-out spawn's fork binds no new child
     /// after it.
     CallSettled { trajectory: TrajectoryId, call_id: String },
+    /// The host's opaque identity for one call the engine denied, bound to the batch identity
+    /// the denial was decided under. Written in the same batch as the denial's facts, so a
+    /// repeat of the call — the delivery retry a restart produces — is answered from the
+    /// recorded decision rather than decided again with fresh offer identities.
+    CallDenied {
+        trajectory: TrajectoryId,
+        call_id: String,
+        batch: String,
+    },
     /// This actor stands behind this key, with the ruling its harness attached where it
     /// reviewed through a channel of its own.
     Vouched {
@@ -236,6 +245,7 @@ impl HostObservation {
             Self::Inventory { .. }
             | Self::CallBound { .. }
             | Self::CallSettled { .. }
+            | Self::CallDenied { .. }
             | Self::PromptSeen { .. }
             | Self::PromptSettled { .. }
             | Self::TurnEnded { .. }
@@ -336,6 +346,20 @@ impl Log {
                 dispatch,
                 prompt: prompt.as_deref(),
             }),
+            _ => None,
+        })
+    }
+
+    /// The batch identity a denied call was decided under, so its repeat is answered from
+    /// the record. The latest record wins: a call id denied again after the state moved
+    /// names the denial that still stands.
+    pub fn denied_call_batch(&self, trajectory: &TrajectoryId, call_id: &str) -> Option<&str> {
+        self.host.iter().rev().find_map(|record| match &record.observation {
+            HostObservation::CallDenied {
+                trajectory: owner,
+                call_id: id,
+                batch,
+            } if owner == trajectory && id == call_id => Some(batch.as_str()),
             _ => None,
         })
     }

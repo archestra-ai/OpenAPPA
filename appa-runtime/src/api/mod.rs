@@ -644,6 +644,8 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
+            EngineRefusal::CallIdReused => EventError::CallIdReused,
+            EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
             EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
         }
@@ -2445,6 +2447,8 @@ impl Runtime {
         };
         let arguments = RemedyArguments::from(args);
         let key = PermitKey::offer(&quoted);
+        // Replay an ended offer only for its recorded pursuer. Do not spend another vouch.
+        let mut replaying = false;
         if let Some(expected) = expected_actor {
             match self.peek_vouched(&key) {
                 Ok((actor, _)) if actor != *expected => {
@@ -2452,24 +2456,29 @@ impl Runtime {
                         reason: RemedyRefusal::ActorMismatch,
                     };
                 }
+                Ok(_) => {}
+                Err(_) if self.replays_ended_offer(expected, &quoted) => replaying = true,
                 Err(_) => {
                     return RemedyOutcome::Refused {
                         reason: RemedyRefusal::Unvouched,
                     };
                 }
-                Ok(_) => {}
             }
         }
-        let (acting, ruling) = match self.take_vouched(&key) {
-            Ok(consumed) => consumed,
-            Err(_) => {
-                return RemedyOutcome::Refused {
-                    reason: RemedyRefusal::Unvouched,
-                };
+        let (acting, ruling) = if replaying {
+            (expected_actor.expect("a replay authenticates its actor").clone(), None)
+        } else {
+            match self.take_vouched(&key) {
+                Ok(consumed) => consumed,
+                Err(_) => {
+                    return RemedyOutcome::Refused {
+                        reason: RemedyRefusal::Unvouched,
+                    };
+                }
             }
         };
         let started = std::time::Instant::now();
-        let outcome = if strict_freshness && self.offer_kind(&acting.root, &quoted).is_none() {
+        let outcome = if strict_freshness && !replaying && self.offer_kind(&acting.root, &quoted).is_none() {
             RemedyOutcome::Refused {
                 reason: RemedyRefusal::UnknownOffer,
             }
@@ -2757,6 +2766,22 @@ impl Runtime {
     /// trajectory that may execute it.
     pub(crate) fn resolve_in(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<(OfferId, TrajectoryId)> {
         self.read_offer(root, quoted, |standing| Some((standing.offer, standing.pursuer)))
+    }
+
+    /// Is this quoted offer one the family records as ended, pursued by this actor?
+    /// Executing an ended offer re-answers from the record and spends nothing, which is what
+    /// a delivery retry of it needs; anything else — a live offer, another actor's offer —
+    /// still stands behind its vouch.
+    fn replays_ended_offer(&self, actor: &Actor, quoted: &OfferId) -> bool {
+        self.read_offer(&actor.root, quoted, |standing| {
+            Some(
+                standing.pursuer == *acting_trajectory(actor)
+                    && standing
+                        .engine
+                        .offer_replays(standing.view, &standing.pursuer, &standing.offer),
+            )
+        })
+        .unwrap_or(false)
     }
 
     /// Record that this trajectory stands behind this key, for the request

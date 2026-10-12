@@ -56,6 +56,7 @@ impl HostState {
                 HostObservation::Inventory { .. }
                 | HostObservation::CallBound { .. }
                 | HostObservation::CallSettled { .. }
+                | HostObservation::CallDenied { .. }
                 | HostObservation::PromptSeen { .. }
                 | HostObservation::PromptSettled { .. }
                 | HostObservation::Addressed { .. }

@@ -21,8 +21,8 @@ use crate::registry::{LoadError, Registry, ToolKind};
 use crate::transition::{
     Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
-    ProposalBatch, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport, TransitionError,
-    TransitionRefusal, ValidatedFactBatch,
+    ProposalBatch, ProposalBatchId, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport,
+    TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
@@ -396,6 +396,54 @@ impl Engine {
             },
             crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
         }
+    }
+
+    /// The record a decided proposal batch answers a repeat from, or `None` for an identity
+    /// the log has not decided. Read-only: the repeat itself goes through `handle` with the
+    /// same identity, which validates the repeated payload against this record before it
+    /// answers.
+    pub fn recorded_batch(
+        &self,
+        view: &EngineView,
+        batch: &ProposalBatchId,
+    ) -> Option<crate::transition::RecordedBatch> {
+        let family = view.projection().view(view.family());
+        let decided = family.decided_batch(batch)?;
+        Some(crate::transition::RecordedBatch {
+            trajectory: decided.trajectory.clone(),
+            proposals: decided.proposals.clone(),
+            spawn: decided.spawn,
+            evidence: decided.evidence.clone(),
+        })
+    }
+
+    /// The batch identity whose decision released this dispatch, if one did: how a repeat
+    /// of the released call names the decision it is answered from.
+    pub fn batch_of_dispatch(&self, view: &EngineView, dispatch: &DispatchId) -> Option<ProposalBatchId> {
+        view.projection()
+            .view(dispatch.trajectory())
+            .batch_of_dispatch(dispatch)
+            .cloned()
+    }
+
+    /// Does the block this batch's denial surfaced still stand at its recorded basis? Only
+    /// while it does is a repeat of the denied call answered from the record; once the state
+    /// has moved — a remedy executed, a sibling admitted — the repeat is a fresh proposal.
+    pub fn denial_stands(&self, view: &EngineView, batch: &ProposalBatchId) -> bool {
+        let family = view.projection().view(view.family());
+        let Some(decided) = family.decided_batch(batch) else {
+            return false;
+        };
+        let views = view.projection().view(&decided.trajectory);
+        (0..decided.proposals.len() as u32).any(|position| {
+            views
+                .pending_block(&crate::basis::SubjectKey::Call {
+                    trajectory: decided.trajectory.clone(),
+                    batch: batch.clone(),
+                    position,
+                })
+                .is_some()
+        })
     }
 
     /// The fork one child was bound to, or `None` for a trajectory that never forked.

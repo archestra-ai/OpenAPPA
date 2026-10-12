@@ -85,6 +85,10 @@ fn embedded_runtime() -> Runtime {
 }
 
 fn open_under(adapter: Adapter) -> Result<Runtime, OpenError> {
+    open_with_log(adapter).map(|(runtime, _)| runtime)
+}
+
+fn open_with_log(adapter: Adapter) -> Result<(Runtime, Arc<LogStore>), OpenError> {
     let config = Config::hosted_composed(
         ROOT,
         &[HostedBattery {
@@ -97,7 +101,8 @@ fn open_under(adapter: Adapter) -> Result<Runtime, OpenError> {
     )
     .expect("the hosted document composes");
     let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
-    Runtime::open_with_store_as(config, store, None, adapter)
+    let runtime = Runtime::open_with_store_as(config, Arc::clone(&store), None, adapter)?;
+    Ok((runtime, store))
 }
 
 /// Every remedy tells the model to call the control tool by the host's spelling, so an
@@ -212,5 +217,145 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
             HookDecision::AllowCall { .. }
         ),
         "after the remedy the aliased read runs"
+    );
+}
+
+#[tokio::test]
+async fn identified_delivery_retries_replay_denied_calls_released_calls_and_closed_results() {
+    let (runtime, store) = open_with_log(adapter()).expect("the host runtime opens");
+    let actor = Actor {
+        root: TrajectoryId("delivery-retry".into()),
+        child: None,
+    };
+    let root = appa_eventlog::TrajectoryId::new(actor.root.0.clone());
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: actor.root.clone(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    let mut proposed = call(&actor, "github_prod.get_file_contents");
+    let HookEvent::ToolCall { call_id, .. } = &mut proposed else {
+        unreachable!()
+    };
+    *call_id = Some("denied".into());
+    let first = hooks::handle_embedded(&runtime, proposed.clone()).await;
+    let HookDecision::DenyCall { offers, .. } = &first.decision else {
+        panic!("the initial narrowing requires acceptance: {:?}", first.decision);
+    };
+    let offer = offers[0].id.clone();
+    let before = store.log(&root).expect("the decided log reads");
+    let repeated = hooks::handle_embedded(&runtime, proposed.clone()).await;
+    assert_eq!(
+        repeated.decision, first.decision,
+        "a delivery retry retains offer identities"
+    );
+    assert_eq!(
+        store.log(&root).unwrap(),
+        before,
+        "a denied delivery retry appends nothing"
+    );
+
+    let plan = serde_json::json!({ "offer_id": offer });
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+                call: ProposedCall {
+                    tool: appa_runtime_api::CONTROL_TOOL.into(),
+                    arguments: serde_json::value::RawValue::from_string(plan.to_string()).unwrap(),
+                    cwd: None,
+                },
+            }
+        )
+        .await,
+        HookDecision::PassControl
+    );
+    let accepted = runtime
+        .execute_embedded_remedy(&actor, serde_json::from_value(plan).unwrap())
+        .await;
+    assert!(!matches!(accepted, RemedyOutcome::Refused { .. }), "{accepted:?}");
+    let HookEvent::ToolCall { call_id, .. } = &mut proposed else {
+        unreachable!()
+    };
+    *call_id = Some("released".into());
+    let released = hooks::handle_embedded(&runtime, proposed.clone()).await;
+    assert!(
+        matches!(released.decision, HookDecision::AllowCall { .. }),
+        "{:?}",
+        released.decision
+    );
+    let before = store.log(&root).unwrap();
+    assert_eq!(
+        hooks::handle_embedded(&runtime, proposed.clone()).await.decision,
+        released.decision
+    );
+    assert_eq!(
+        store.log(&root).unwrap(),
+        before,
+        "a released delivery retry appends nothing"
+    );
+
+    let HookEvent::ToolCall { call, .. } = proposed else {
+        unreachable!()
+    };
+    let result = HookEvent::ToolResult {
+        actor: actor.clone(),
+        call,
+        call_id: Some("released".into()),
+        outcome: appa_runtime_api::ToolOutcome::Success {
+            body: appa_runtime_api::OutcomeBody::Available("original result".into()),
+        },
+    };
+    let finished = hooks::handle_embedded(&runtime, result.clone()).await;
+    assert!(
+        !matches!(finished.decision, HookDecision::Refuse { .. }),
+        "{:?}",
+        finished.decision
+    );
+    let before = store.log(&root).unwrap();
+    assert_eq!(
+        hooks::handle_embedded(&runtime, result.clone()).await.decision,
+        finished.decision
+    );
+    assert_eq!(
+        store.log(&root).unwrap(),
+        before,
+        "a closed-result retry appends nothing"
+    );
+
+    let mut contradiction = result;
+    let HookEvent::ToolResult { outcome, .. } = &mut contradiction else {
+        unreachable!()
+    };
+    *outcome = appa_runtime_api::ToolOutcome::Failure {
+        message: "contradictory report".into(),
+    };
+    let rejected = hooks::handle_embedded(&runtime, contradiction).await.decision;
+    assert!(
+        matches!(
+            rejected,
+            HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. }
+        ),
+        "{rejected:?}"
+    );
+    assert_eq!(
+        store.log(&root).unwrap(),
+        before,
+        "contradictory reports are not new outcomes"
     );
 }

@@ -268,6 +268,10 @@ pub enum EngineEvent {
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
         spawn: Option<SpawnKind>,
+        /// The batch identity this response was already decided under: the session sets it
+        /// when the host's call id names a recorded decision, and the response is answered
+        /// from that record rather than decided again.
+        replay: Option<ProposalBatchId>,
     },
     ToolOutcome {
         dispatch: EngineDispatchId,
@@ -561,6 +565,10 @@ pub enum EngineRefusal {
     UnknownOffer,
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
+    #[error("the host reused a call id")]
+    CallIdReused,
+    #[error("this outcome does not match the recorded dispatch; it is not reported")]
+    OutcomeMismatch,
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
     /// The offer's execution came without what its plan needs, or with an argument the
@@ -584,6 +592,8 @@ impl EngineRefusal {
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
+            EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
+            EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
             EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
             EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
         }
@@ -971,6 +981,47 @@ impl RuntimeEngine {
             .collect()
     }
 
+    /// The tool and canonical bytes of a dispatch the log recorded, open or closed: where a
+    /// repeated report is matched after its occurrence left the open set. Read from the same
+    /// opening record a live call is read from.
+    pub(crate) fn recorded_dispatch_call(
+        &self,
+        view: &EngineView,
+        dispatch: &EngineDispatchId,
+    ) -> Option<OpenDispatch> {
+        let views = view.views(dispatch.trajectory())?;
+        let call = views.dispatch_call(dispatch)?;
+        Some(OpenDispatch {
+            id: dispatch.clone(),
+            tool: call.tool().as_str().to_string(),
+            bytes: call.canonical_arguments().canonical_bytes().to_vec(),
+        })
+    }
+
+    /// The batch identity whose decision released this dispatch: how a repeat of the
+    /// released call names the decision it is answered from.
+    pub(crate) fn decided_batch_of(&self, view: &EngineView, dispatch: &EngineDispatchId) -> Option<ProposalBatchId> {
+        self.engine.batch_of_dispatch(view, dispatch)
+    }
+
+    /// Does the denial decided under this batch identity still stand at its recorded basis?
+    /// Only while it does is the denied call's repeat answered from the record.
+    pub(crate) fn denial_stands(&self, view: &EngineView, batch: &ProposalBatchId) -> bool {
+        self.engine.denial_stands(view, batch)
+    }
+
+    /// Whether executing this offer replays its recorded end: the execution re-answers from
+    /// the record and appends nothing, so a delivery retry of it spends nothing twice.
+    pub(crate) fn offer_replays(&self, view: &EngineView, trajectory: &TrajectoryId, offer: &OfferId) -> bool {
+        let Some(engine_offer) = parse_offer(offer) else {
+            return false;
+        };
+        matches!(
+            self.engine.offer_consults(view, trajectory, &engine_offer),
+            Ok(OfferConsult::Replay(_))
+        )
+    }
+
     /// Where one fork stands in the rebuilt view. The runtime uses it
     /// to find the family's forks still open for binding, and the child
     /// a spawn's fork was bound to when that spawn's result arrives.
@@ -1232,7 +1283,17 @@ impl RuntimeEngine {
                 evidence,
                 entropy,
                 spawn,
-            } => self.model_response(view, trajectory, &call, &evidence, &entropy, spawn, presentation),
+                replay,
+            } => self.model_response(
+                view,
+                trajectory,
+                &call,
+                &evidence,
+                &entropy,
+                spawn,
+                replay,
+                presentation,
+            ),
             EngineEvent::ToolOutcome {
                 dispatch,
                 outcome,
@@ -1272,8 +1333,12 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
         spawn: Option<SpawnKind>,
+        replay: Option<ProposalBatchId>,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
+        if let Some(batch) = replay {
+            return self.replay_response(view, trajectory, call, &batch, spawn, entropy, presentation);
+        }
         let resolved = match self
             .engine
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
@@ -1350,6 +1415,147 @@ impl RuntimeEngine {
             presentation,
         )?;
         Ok(EngineDecision { append, then })
+    }
+
+    /// Replay a recorded batch after checking its trajectory, call bytes and spawn mark.
+    /// Reuse its annotations and pinned audience and file evidence without new consults.
+    /// The engine validates the batch identity and returns no append. Reject changed content.
+    #[allow(clippy::too_many_arguments)]
+    fn replay_response(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        call: &ProposedCall,
+        batch: &ProposalBatchId,
+        spawn: Option<SpawnKind>,
+        entropy: &OfferNonce,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        let recorded = self
+            .engine
+            .recorded_batch(view, batch)
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: "a bound call names a batch the log has not decided".to_string(),
+            })?;
+        if recorded.trajectory != *trajectory {
+            return Err(EngineRefusal::CallIdReused);
+        }
+        let [proposal] = recorded.proposals.as_slice() else {
+            return Err(EngineRefusal::Invariant {
+                detail: "a bound call's recorded batch holds more than its one proposal".to_string(),
+            });
+        };
+        let resolved = self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+            .map_err(|_| EngineRefusal::CallIdReused)?;
+        if proposal.tool() != resolved.tool()
+            || proposal.canonical_arguments().canonical_bytes() != resolved.canonical_arguments().canonical_bytes()
+        {
+            return Err(EngineRefusal::CallIdReused);
+        }
+        // The spawn mark is payload: a repeat wears the mark the decision recorded. A batch
+        // recorded unmarked answers a marked repeat only where the deployment never controlled
+        // the mark — the first delivery was decided unmarked the same way.
+        let marked = spawn.map(|kind| match kind {
+            SpawnKind::Single => SpawnMark::at(0),
+            SpawnKind::FanOut => SpawnMark::fan_out(0),
+        });
+        let fallback = recorded.spawn.is_none() && marked.is_some() && !self.engine.profile().context_control();
+        if recorded.spawn != marked && !fallback {
+            return Err(EngineRefusal::CallIdReused);
+        }
+        let views = view.views(trajectory).ok_or_else(|| EngineRefusal::Invariant {
+            detail: "replaying a proposal for a trajectory the log has not opened".to_string(),
+        })?;
+        let repeated = ProposalBatch {
+            id: batch.clone(),
+            trajectory: trajectory.clone(),
+            provider_results: Vec::new(),
+            proposals: recorded
+                .proposals
+                .iter()
+                .map(|call| CoreProposedCall {
+                    tool: call.tool().clone(),
+                    arguments: serde_json::to_vec(call.arguments())
+                        .expect("a recorded call's arguments serialize back"),
+                    annotation: call.annotation().cloned(),
+                })
+                .collect(),
+            spawn: recorded.spawn,
+            offer_nonce: engine_nonce(entropy),
+            evidence: recorded
+                .proposals
+                .iter()
+                .enumerate()
+                .filter_map(|(position, call)| {
+                    call.file_basis().map(|basis| Evidence::File {
+                        position,
+                        basis: basis.clone(),
+                    })
+                })
+                .collect(),
+            audience: recorded.evidence.clone(),
+        };
+        let decision = self
+            .engine
+            .handle(view, CoreEvent::Proposals(repeated))
+            .map_err(|error| match error {
+                TransitionError::BatchIdentityConflict => EngineRefusal::CallIdReused,
+                TransitionError::BranchEnded => EngineRefusal::Ended,
+                error => EngineRefusal::Invariant {
+                    detail: format!("replaying a proposal: {error}"),
+                },
+            })?;
+        if decision.append.is_some() {
+            return Err(EngineRefusal::Invariant {
+                detail: "a repeated proposal would append: the record did not hold".to_string(),
+            });
+        }
+        let then = match decision.follow_up {
+            FollowUp::Proposals {
+                released: releases,
+                blocked,
+                spent,
+                settled,
+                ..
+            } => {
+                if let Some(release) = releases.into_iter().next() {
+                    Next::ModelResponse {
+                        invocations: vec![released(batch, &release)],
+                        feedback: Vec::new(),
+                    }
+                } else if let Some(settled) = settled.into_iter().next() {
+                    // The release stands after its outcome landed: the repeat of the call is
+                    // answered with the dispatch and fork binding it first released.
+                    let fork = ForkId::of(&settled.dispatch);
+                    let release = Released {
+                        dispatch: settled.dispatch,
+                        call: settled.call,
+                        fork: (!matches!(self.engine.fork_status(view, &fork), ForkStatus::Unprepared)).then_some(fork),
+                    };
+                    Next::ModelResponse {
+                        invocations: vec![released(batch, &release)],
+                        feedback: Vec::new(),
+                    }
+                } else if let Some(block) = blocked.into_iter().next() {
+                    let feedback = self.block_delivery(&block, &self.return_bounds(&views), presentation);
+                    Next::ModelResponse {
+                        invocations: Vec::new(),
+                        feedback: vec![feedback],
+                    }
+                } else {
+                    let _ = spent;
+                    deny("[appa] this call's earlier decision no longer stands; propose it again".to_string()).then
+                }
+            }
+            other => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("a repeated proposal produced a non-proposal follow-up: {other:?}"),
+                });
+            }
+        };
+        Ok(EngineDecision { append: None, then })
     }
 
     fn deliver_proposals(
@@ -3260,6 +3466,12 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::BranchEnded => EngineRefusal::Ended,
         TransitionError::UnknownDispatch => EngineRefusal::DispatchClosed,
+        // A report that disagrees with the record — other bytes than the admitted result, a
+        // failure where a success committed, an observation for a dispatch closed unobserved —
+        // is the host's error, refused like any unmatched report, never an engine fault.
+        TransitionError::ObservationMismatch
+        | TransitionError::ContradictedSuccess
+        | TransitionError::ClosedUnobserved => EngineRefusal::OutcomeMismatch,
         error => EngineRefusal::Invariant {
             detail: format!("deciding an outcome: {error}"),
         },
@@ -4091,6 +4303,98 @@ mod tests {
         engine.validated(opening, trajectory, 1).expect("the opening validates")
     }
 
+    #[test]
+    fn a_recorded_file_basis_survives_call_delivery_replay() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+            version = 2
+            [[tool]]
+            name = "read"
+            parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+            delta = {}
+        "#,
+        )
+        .expect("the read policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let trajectory = TrajectoryId::new("file-delivery-retry");
+        let mut facts = engine.root_opening(&trajectory, b"policy", None);
+        let view = engine.validated(facts.clone(), &trajectory, 1).unwrap();
+        let id = super::ProposalBatchId::new("recorded-file-call");
+        let bytes = br#"{"path":"fixture.txt"}"#;
+        let original = engine
+            .engine
+            .handle(
+                &view,
+                super::CoreEvent::Proposals(super::ProposalBatch {
+                    id: id.clone(),
+                    trajectory: trajectory.clone(),
+                    provider_results: vec![],
+                    proposals: vec![super::CoreProposedCall {
+                        tool: ToolName::new("read"),
+                        arguments: bytes.to_vec(),
+                        annotation: None,
+                    }],
+                    spawn: None,
+                    offer_nonce: super::engine_nonce(&OfferNonce([1; 32])),
+                    evidence: vec![super::Evidence::File {
+                        position: 0,
+                        basis: appa_engine::value::FileBasis::Read(appa_engine::value::FileSource {
+                            version: "v1".into(),
+                            digest: "content".into(),
+                            label: appa_engine::label::Label::top(),
+                        }),
+                    }],
+                    audience: Default::default(),
+                }),
+            )
+            .expect("the pinned file call is decided");
+        let super::FollowUp::Proposals { released, .. } = original.follow_up else {
+            unreachable!()
+        };
+        assert_eq!(released.len(), 1);
+        facts.extend_from_slice(original.append.as_ref().unwrap().facts());
+        let view = engine.validated(facts, &trajectory, 2).unwrap();
+        let call = ProposedCall {
+            tool: "read".into(),
+            arguments: serde_json::value::RawValue::from_string(String::from_utf8(bytes.to_vec()).unwrap()).unwrap(),
+            cwd: None,
+        };
+        let presentation = EmbeddedPresentationOptions::default();
+        let replayed = engine
+            .replay_response(
+                &view,
+                &trajectory,
+                &call,
+                &id,
+                None,
+                &OfferNonce([2; 32]),
+                &presentation,
+            )
+            .expect("the original basis is carried into the repeat");
+        assert!(replayed.append.is_none());
+        let Next::ModelResponse { invocations, .. } = replayed.then else {
+            unreachable!()
+        };
+        assert_eq!(invocations[0].dispatch, released[0].dispatch);
+        let changed = ProposedCall {
+            arguments: serde_json::value::RawValue::from_string(r#"{"path":"other.txt"}"#.into()).unwrap(),
+            ..call
+        };
+        assert!(
+            engine
+                .replay_response(
+                    &view,
+                    &trajectory,
+                    &changed,
+                    &id,
+                    None,
+                    &OfferNonce([3; 32]),
+                    &presentation
+                )
+                .is_err()
+        );
+    }
+
     /// The annotated-tool policy: one Annotator producing `lookup`'s semantics per call, and
     /// one authority able to clear the mark a produced annotation may require.
     fn annotator_policy() -> appa_policy::Config {
@@ -4142,6 +4446,7 @@ mod tests {
                         evidence,
                         entropy: OfferNonce([7u8; 32]),
                         spawn: None,
+                        replay: None,
                     },
                     &EmbeddedPresentationOptions::default(),
                 )
