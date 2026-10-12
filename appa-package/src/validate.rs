@@ -1,6 +1,8 @@
 //! The one coarse operation over a package directory: parse its manifest and
 //! refuse everything a marketplace package may not be.
 
+use std::collections::BTreeSet;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +11,7 @@ use toml::Value;
 
 use crate::manifest::ManifestError;
 use crate::names::{CredentialPrefix, Namespace, PackageName, RelativePath};
-use crate::package::{Battery, MANIFEST_FILE, Package, Role};
+use crate::package::{MANIFEST_FILE, Package, Role};
 use crate::tree::{self, EntryKind, TreeDigestError};
 
 /// Why a directory is not a package. Every variant names the file it read.
@@ -85,6 +87,10 @@ pub enum PackageError {
         variable: String,
         prefix: CredentialPrefix,
     },
+    #[error("{policy} uses policy version {found}, but the battery's base uses {base}")]
+    AddonVersion { policy: PathBuf, base: i64, found: i64 },
+    #[error("{policy} declares `{external}`, which the battery's base already declares")]
+    AddonDuplicateExternal { policy: PathBuf, external: NamedExternal },
     #[error("{policy} declares `{contract}`, which is outside the namespaces it covers ({namespaces})")]
     PolicyForeignContract {
         policy: PathBuf,
@@ -115,17 +121,16 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            let bindings = check_policy(&policy, &package.name, battery)?;
-            battery.audiences = bindings.audiences;
-            battery.credentials = bindings.credentials;
-            let mut targets = std::mem::take(&mut battery.targets);
-            for (target, addon) in &mut targets {
+            let base = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+            for (target, addon) in &mut battery.targets {
                 let policy = contained.resolve(&addon.policy, target.policy_field(), EntryKind::File)?;
-                let bindings = check_policy(&policy, &package.name, battery)?;
+                let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+                check_composes(&policy, &base, &bindings)?;
                 addon.audiences = bindings.audiences;
                 addon.credentials = bindings.credentials;
             }
-            battery.targets = targets;
+            battery.audiences = base.audiences;
+            battery.credentials = base.credentials;
             if let Some(check) = &battery.readiness {
                 let executable = |name: &str| {
                     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
@@ -138,7 +143,11 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     && check.required_executables.iter().all(|name| executable(name))
                     && check.cli_alternatives.iter().all(|alt| {
                         executable(&alt.executable)
-                            && battery.credentials.contains(&alt.credential)
+                            && battery
+                                .credentials
+                                .iter()
+                                .chain(battery.targets.values().flat_map(|addon| &addon.credentials))
+                                .any(|credential| credential == &alt.credential)
                             && !alt.login_hint.trim().is_empty()
                             && !alt.login_hint.contains(['\n', '\r'])
                     });
@@ -228,9 +237,12 @@ const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "saniti
 /// Returns what the policy binds that the manifest alone cannot say: the audience
 /// source providers, which a marketplace gives one owner each, and the credential
 /// variables its helpers read, which an install names to the person.
-fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<PolicyBindings, PackageError> {
-    let namespaces = &battery.namespaces;
-    let helpers = &battery.helpers;
+fn check_policy(
+    policy: &Path,
+    name: &PackageName,
+    namespaces: &[Namespace],
+    helpers: &[RelativePath],
+) -> Result<PolicyBindings, PackageError> {
     let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
         policy: policy.to_path_buf(),
         source,
@@ -269,12 +281,12 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             policy: policy.to_path_buf(),
             field: "policy".to_owned(),
         })?;
-    if declared.get("version").and_then(Value::as_integer).is_none() {
+    let Some(version) = declared.get("version").and_then(Value::as_integer) else {
         return Err(PackageError::PolicyField {
             policy: policy.to_path_buf(),
             field: "version".to_owned(),
         });
-    }
+    };
     for (field, value) in declared {
         if field == "deployment" {
             check_confinement(policy, declared, value)?;
@@ -327,13 +339,68 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             });
         }
     }
-    Ok(PolicyBindings { audiences, credentials })
+    let externals = document
+        .get("externals")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
+        .flat_map(|(section, entries)| {
+            entries.keys().map(move |name| NamedExternal {
+                section: section.clone(),
+                name: name.clone(),
+            })
+        })
+        .collect();
+    Ok(PolicyBindings {
+        version,
+        audiences,
+        credentials,
+        externals,
+    })
 }
 
-/// What `check_policy` reads out of a battery policy for its manifest.
+/// What `check_policy` reads out of a battery policy for its manifest, and what
+/// an add-on must not repeat of its base.
 struct PolicyBindings {
+    version: i64,
     audiences: Vec<String>,
     credentials: Vec<String>,
+    externals: BTreeSet<NamedExternal>,
+}
+
+/// One `[externals.<section>.<name>]` entry, or one field of the `jev` profile:
+/// the loader composes each into the root's table and refuses it twice.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NamedExternal {
+    pub section: String,
+    pub name: String,
+}
+
+impl fmt::Display for NamedExternal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "externals.{}.{}", self.section, self.name)
+    }
+}
+
+/// A deployment of a target includes the add-on beside its base, so the add-on
+/// meets the base under the loader's composition rules: one policy version, and
+/// no external the base already binds.
+fn check_composes(policy: &Path, base: &PolicyBindings, addon: &PolicyBindings) -> Result<(), PackageError> {
+    if addon.version != base.version {
+        return Err(PackageError::AddonVersion {
+            policy: policy.to_path_buf(),
+            base: base.version,
+            found: addon.version,
+        });
+    }
+    match base.externals.intersection(&addon.externals).next() {
+        Some(external) => Err(PackageError::AddonDuplicateExternal {
+            policy: policy.to_path_buf(),
+            external: external.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Returns the credential variables the bindings name, each once, in name order.
@@ -842,6 +909,51 @@ mod tests {
                 field: "battery.targets.multi-user.policy",
                 ..
             })
+        ));
+    }
+
+    const MULTI_USER_ADDON: &str = "[policy]\nversion = 2\n\n\
+         [externals.audience.github-org]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         token_env = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nselectors = [{ template = \"org/<org>\" }]\n";
+
+    /// A battery with a multi-user add-on, and `manifest_tail` appended to its manifest.
+    fn targeted_battery(addon: &str, manifest_tail: &str) -> tempfile::TempDir {
+        let directory = battery(BATTERY_POLICY);
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}{manifest_tail}\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n"),
+        )
+        .unwrap();
+        fs::write(directory.path().join("multi-user.toml"), addon).unwrap();
+        directory
+    }
+
+    /// A deployment of the target holds the add-on's credentials beside the
+    /// base's, so a CLI alternative may stand in for either.
+    #[test]
+    fn readiness_alternatives_may_name_an_add_on_credential() {
+        let readiness = "\n[[battery.readiness.cli_alternatives]]\nexecutable = \"gh\"\n\
+             credential = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nlogin_hint = \"gh auth login\"\n";
+
+        validate_package(targeted_battery(MULTI_USER_ADDON, readiness).path()).unwrap();
+    }
+
+    /// The loader refuses an external two included files both declare, and an
+    /// included file at another policy version, so an add-on that cannot sit
+    /// beside its base is refused here.
+    #[test]
+    fn an_add_on_that_cannot_compose_with_its_base_is_refused() {
+        let colliding = MULTI_USER_ADDON.replace("audience.github-org", "audience.github");
+        assert!(matches!(
+            validate_package(targeted_battery(&colliding, "").path()),
+            Err(PackageError::AddonDuplicateExternal { external, .. })
+                if external == NamedExternal { section: "audience".into(), name: "github".into() }
+        ));
+
+        let versioned = MULTI_USER_ADDON.replace("version = 2", "version = 1");
+        assert!(matches!(
+            validate_package(targeted_battery(&versioned, "").path()),
+            Err(PackageError::AddonVersion { base: 2, found: 1, .. })
         ));
     }
 

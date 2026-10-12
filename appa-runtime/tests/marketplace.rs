@@ -579,16 +579,93 @@ fn a_battery_that_validates_loads() {
 
 /// Whether a deployment holding this package beside its root config loads.
 fn loads_beside_a_root(package: &Path) -> bool {
+    includes_load(package, &["appa.toml"])
+}
+
+/// Whether a deployment holding this package beside its root config, and
+/// including `policies` of it in that order, loads.
+fn includes_load(package: &Path, policies: &[&str]) -> bool {
     let deployment = tempfile::tempdir().expect("a temp dir is creatable");
     let installed = deployment.path().join("probe");
     copy_tree(package, &installed);
     let root = deployment.path().join("appa.toml");
+    let includes = policies
+        .iter()
+        .map(|policy| format!("\"probe/{policy}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     std::fs::write(
         &root,
-        "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        format!(
+            "include = [{includes}]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+        ),
     )
     .expect("the root config is writable");
     Config::load(&root).is_ok()
+}
+
+/// A target's deployment includes its add-on beside the base. A targeted
+/// battery that validates loads in its compose order, and one whose add-on
+/// redeclares an external of its base is refused by both crates.
+#[test]
+fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
+    let tool = "[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n";
+    let audience = |name: &str| {
+        format!(
+            "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+        )
+    };
+    for (what, addon_audience, composes) in [
+        ("a distinct external", "probe-org", true),
+        ("the base's external", "probe", false),
+    ] {
+        let package = tempfile::tempdir().expect("a temp dir is creatable");
+        std::fs::write(
+            package.path().join("appa-package.toml"),
+            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        )
+        .expect("the manifest is writable");
+        std::fs::write(
+            package.path().join("appa.toml"),
+            format!("[policy]\nversion = 2\n{tool}\n{}", audience("probe")),
+        )
+        .expect("the base is writable");
+        std::fs::write(
+            package.path().join("multi-user.toml"),
+            format!("[policy]\nversion = 2\n\n{}", audience(addon_audience)),
+        )
+        .expect("the add-on is writable");
+        std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+
+        let order = validate_package(package.path()).map(|validated| match validated.role {
+            Role::Battery(battery) => battery
+                .compose_order(Some(appa_package::BatteryTarget::MultiUser))
+                .expect("the battery declares the target")
+                .into_iter()
+                .map(|policy| policy.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            Role::Plugin(_) => panic!("{what}: the package is a battery"),
+        });
+        match order {
+            Ok(order) => {
+                assert!(composes, "{what}: the package validates");
+                let order: Vec<&str> = order.iter().map(String::as_str).collect();
+                assert_eq!(order, ["multi-user.toml", "appa.toml"], "{what}");
+                assert!(
+                    includes_load(package.path(), &order),
+                    "{what}: validates and then does not load"
+                );
+            }
+            Err(error) => {
+                assert!(!composes, "{what}: the package is refused: {error}");
+                assert!(
+                    !includes_load(package.path(), &["multi-user.toml", "appa.toml"]),
+                    "{what}: the package is refused and yet loads"
+                );
+            }
+        }
+    }
 }
 
 /// Every rule the two crates share, not a sample of it.

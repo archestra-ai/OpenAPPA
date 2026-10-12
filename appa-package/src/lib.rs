@@ -30,7 +30,7 @@ pub use package::{
 };
 pub use tree::canonical_tree_digest;
 pub use validate::{
-    BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, INCLUDABLE_POLICY_FIELDS, PackageError, validate_package,
+    BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, INCLUDABLE_POLICY_FIELDS, NamedExternal, PackageError, validate_package,
 };
 
 pub use appa_runtime_api::PROTOCOL;
