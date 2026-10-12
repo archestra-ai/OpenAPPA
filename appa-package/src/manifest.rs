@@ -78,6 +78,10 @@ pub enum ManifestError {
         second: String,
         shared: String,
     },
+    #[error("{path}: `[battery]` declares exactly one of `base` or `policy`")]
+    BatteryBase { path: PathBuf },
+    #[error("{path}: `battery.targets.{target}` is not a target: a target is `single-user` or `multi-user`")]
+    Target { path: PathBuf, target: String },
     #[error("{path} declares neither `[battery]` nor `[plugin]`")]
     NoRole { path: PathBuf },
     #[error("{path} declares both `[battery]` and `[plugin]`")]

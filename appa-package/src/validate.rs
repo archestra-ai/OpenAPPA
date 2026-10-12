@@ -111,13 +111,21 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let contained = Contained::new(dir, &manifest_path);
     match &mut package.role {
         Role::Battery(battery) => {
-            let policy = contained.resolve(&battery.policy, "battery.policy", EntryKind::File)?;
+            let policy = contained.resolve(&battery.base, "battery.base", EntryKind::File)?;
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
             let bindings = check_policy(&policy, &package.name, battery)?;
             battery.audiences = bindings.audiences;
             battery.credentials = bindings.credentials;
+            let mut targets = std::mem::take(&mut battery.targets);
+            for (target, addon) in &mut targets {
+                let policy = contained.resolve(&addon.policy, target.policy_field(), EntryKind::File)?;
+                let bindings = check_policy(&policy, &package.name, battery)?;
+                addon.audiences = bindings.audiences;
+                addon.credentials = bindings.credentials;
+            }
+            battery.targets = targets;
             if let Some(check) = &battery.readiness {
                 let executable = |name: &str| {
                     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
@@ -792,6 +800,49 @@ mod tests {
             package.battery().unwrap().credentials,
             vec!["APPA_PROVIDER_GITHUB_TOKEN"]
         );
+    }
+
+    /// Each add-on passes the base's checks, and its audiences and credentials
+    /// are read from its own policy, not merged into the base's.
+    #[test]
+    fn a_battery_add_on_is_checked_and_its_bindings_read_on_their_own() {
+        let directory = battery(BATTERY_POLICY);
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n"),
+        )
+        .unwrap();
+        let addon = "[policy]\nversion = 2\n\n\
+             [externals.audience.github-org]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             token_env = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nselectors = [{ template = \"org/<org>\" }]\n";
+        fs::write(directory.path().join("multi-user.toml"), addon).unwrap();
+
+        let package = validate_package(directory.path()).unwrap();
+        let validated = package.battery().unwrap();
+        assert_eq!(validated.audiences, vec!["github"]);
+        assert!(validated.credentials.is_empty());
+        let multi_user = &validated.targets[&crate::package::BatteryTarget::MultiUser];
+        assert_eq!(multi_user.audiences, vec!["github-org"]);
+        assert_eq!(multi_user.credentials, vec!["APPA_PROVIDER_GITHUB_ORG_TOKEN"]);
+
+        fs::write(
+            directory.path().join("multi-user.toml"),
+            addon.replace("APPA_PROVIDER_GITHUB_ORG_TOKEN", "APPA_PROVIDER_SLACK_TOKEN"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::PolicyForeignCredential { .. })
+        ));
+
+        fs::remove_file(directory.path().join("multi-user.toml")).unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::MissingPath {
+                field: "battery.targets.multi-user.policy",
+                ..
+            })
+        ));
     }
 
     #[test]

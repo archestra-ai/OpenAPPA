@@ -231,10 +231,10 @@ impl Selection {
             }
             // The include spelling names `appa.toml`; a battery kept elsewhere
             // could not be included by name.
-            if battery.policy.as_str() != "appa.toml" {
+            if battery.base.as_str() != "appa.toml" {
                 return Err(InstallError::Invalid(format!(
                     "battery {name} keeps its policy in {}, not appa.toml",
-                    battery.policy
+                    battery.base
                 )));
             }
         }

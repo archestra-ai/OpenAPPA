@@ -25,7 +25,8 @@ pub use names::{
     RelativePath, RelativePathError,
 };
 pub use package::{
-    Battery, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,
+    Battery, BatteryAddon, BatteryTarget, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, MissingTarget,
+    Package, Plugin, Readiness, Role,
 };
 pub use tree::canonical_tree_digest;
 pub use validate::{

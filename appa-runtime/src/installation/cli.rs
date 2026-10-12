@@ -1530,7 +1530,8 @@ mod tests {
     #[test]
     fn setup_notices_name_each_credential_the_benefit_and_the_steps() {
         let battery = |credentials: &[&str], benefit: Option<&str>, setup: &[&str]| Battery {
-            policy: appa_package::RelativePath::parse("appa.toml").unwrap(),
+            base: appa_package::RelativePath::parse("appa.toml").unwrap(),
+            targets: Default::default(),
             hosts: vec![appa_package::Host::ClaudeCode],
             namespaces: vec![],
             helpers: vec![],
