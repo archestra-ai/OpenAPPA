@@ -91,6 +91,13 @@ pub enum PackageError {
     AddonVersion { policy: PathBuf, base: i64, found: i64 },
     #[error("{policy} declares `{external}`, which the battery's base already declares")]
     AddonDuplicateExternal { policy: PathBuf, external: NamedExternal },
+    #[error("{policy} declares `{declaration}`, which the battery's base already declares")]
+    AddonDuplicateDeclaration {
+        policy: PathBuf,
+        declaration: NamedDeclaration,
+    },
+    #[error("`{field}` names the battery's base policy, which a deployment of the target already includes")]
+    AddonIsBase { field: &'static str },
     #[error("{policy} declares `{contract}`, which is outside the namespaces it covers ({namespaces})")]
     PolicyForeignContract {
         policy: PathBuf,
@@ -123,7 +130,14 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             }
             let base = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
             for (target, addon) in &mut battery.targets {
-                let policy = contained.resolve(&addon.policy, target.policy_field(), EntryKind::File)?;
+                let field = target.policy_field();
+                let addon_policy = contained.resolve(&addon.policy, field, EntryKind::File)?;
+                // The loader includes each resolved file once, so an add-on that
+                // is the base would be refused as a duplicate include.
+                if addon_policy == policy {
+                    return Err(PackageError::AddonIsBase { field });
+                }
+                let policy = addon_policy;
                 let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
                 check_composes(&policy, &base, &bindings)?;
                 addon.audiences = bindings.audiences;
@@ -357,6 +371,7 @@ fn check_policy(
         audiences,
         credentials,
         externals,
+        declarations: named_declarations(&document),
     })
 }
 
@@ -367,6 +382,7 @@ struct PolicyBindings {
     audiences: Vec<String>,
     credentials: Vec<String>,
     externals: BTreeSet<NamedExternal>,
+    declarations: BTreeSet<NamedDeclaration>,
 }
 
 /// One `[externals.<section>.<name>]` entry, or one field of the `jev` profile:
@@ -383,9 +399,60 @@ impl fmt::Display for NamedExternal {
     }
 }
 
+/// The declaration kinds the engine registry admits once per name across every
+/// included file. Tool rules are absent: they are ordered matchers and may repeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeclarationKind {
+    Annotator,
+    Authority,
+    Sanitizer,
+}
+
+impl DeclarationKind {
+    const ALL: [Self; 3] = [Self::Annotator, Self::Authority, Self::Sanitizer];
+
+    fn field(self) -> &'static str {
+        match self {
+            Self::Annotator => "annotator",
+            Self::Authority => "authority",
+            Self::Sanitizer => "sanitizer",
+        }
+    }
+}
+
+/// One `[[policy.<kind>]]` declaration, by name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NamedDeclaration {
+    pub kind: DeclarationKind,
+    pub name: String,
+}
+
+impl fmt::Display for NamedDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "policy.{} {}", self.kind.field(), self.name)
+    }
+}
+
+/// Every once-per-name declaration in the fragment; `check_named` has already
+/// refused one without a name.
+fn named_declarations(document: &Value) -> BTreeSet<NamedDeclaration> {
+    DeclarationKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            declarations(document, kind.field())
+                .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+                .map(move |name| NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                })
+        })
+        .collect()
+}
+
 /// A deployment of a target includes the add-on beside its base, so the add-on
-/// meets the base under the loader's composition rules: one policy version, and
-/// no external the base already binds.
+/// meets the base under the loader's composition rules: one policy version, no
+/// external the base already binds, and no annotator, authority or sanitizer the
+/// base already names.
 fn check_composes(policy: &Path, base: &PolicyBindings, addon: &PolicyBindings) -> Result<(), PackageError> {
     if addon.version != base.version {
         return Err(PackageError::AddonVersion {
@@ -394,10 +461,16 @@ fn check_composes(policy: &Path, base: &PolicyBindings, addon: &PolicyBindings) 
             found: addon.version,
         });
     }
-    match base.externals.intersection(&addon.externals).next() {
-        Some(external) => Err(PackageError::AddonDuplicateExternal {
+    if let Some(external) = base.externals.intersection(&addon.externals).next() {
+        return Err(PackageError::AddonDuplicateExternal {
             policy: policy.to_path_buf(),
             external: external.clone(),
+        });
+    }
+    match base.declarations.intersection(&addon.declarations).next() {
+        Some(declaration) => Err(PackageError::AddonDuplicateDeclaration {
+            policy: policy.to_path_buf(),
+            declaration: declaration.clone(),
         }),
         None => Ok(()),
     }
@@ -948,6 +1021,48 @@ mod tests {
             validate_package(targeted_battery(&colliding, "").path()),
             Err(PackageError::AddonDuplicateExternal { external, .. })
                 if external == NamedExternal { section: "audience".into(), name: "github".into() }
+        ));
+
+        let declaring = |declaration: &str| format!("{MULTI_USER_ADDON}\n{declaration}");
+        for (kind, name) in [
+            (DeclarationKind::Annotator, "classifier"),
+            (DeclarationKind::Authority, "review"),
+        ] {
+            let shared = format!("[[policy.{}]]\nname = \"{name}\"\n", kind.field());
+            let directory = targeted_battery(&declaring(&shared), "");
+            fs::write(
+                directory.path().join("appa.toml"),
+                format!("{BATTERY_POLICY}\n{shared}"),
+            )
+            .unwrap();
+            let expected = NamedDeclaration {
+                kind,
+                name: name.to_owned(),
+            };
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::AddonDuplicateDeclaration { declaration, .. }) if declaration == expected
+                ),
+                "accepted a repeated {expected}"
+            );
+        }
+
+        // Tool rules are ordered matchers, so an add-on may add one for a tool its base covers.
+        let tool = "[[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n";
+        validate_package(targeted_battery(&declaring(tool), "").path()).unwrap();
+
+        let directory = targeted_battery(MULTI_USER_ADDON, "");
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}\n[battery.targets.multi-user]\npolicy = \"appa.toml\"\n"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::AddonIsBase {
+                field: "battery.targets.multi-user.policy"
+            })
         ));
 
         let versioned = MULTI_USER_ADDON.replace("version = 2", "version = 1");
