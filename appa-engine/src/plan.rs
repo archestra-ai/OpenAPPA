@@ -1562,6 +1562,7 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("to"),
                 annotator: crate::names::AnnotatorName::new("classifier"),
+                on_no_answer: None,
             }],
             authorities: vec![],
             sanitizers: vec![redact],
@@ -1719,6 +1720,7 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("room"),
                 annotator: crate::names::AnnotatorName::new("directory"),
+                on_no_answer: None,
             }],
             authorities: vec![],
             sanitizers: vec![
@@ -1999,6 +2001,7 @@ mod tests {
                     description: Some("A test tool.".to_string()),
                     parameters: crate::params::test_string_argument_schema("to"),
                     annotator: crate::names::AnnotatorName::new("acl"),
+                    on_no_answer: None,
                 },
                 ToolDeclaration::Declared(contract("neutral", Delta::NONE)),
             ],

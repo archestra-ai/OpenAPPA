@@ -439,6 +439,7 @@ mod tests {
             description: Some("A test tool.".to_string()),
             parameters: crate::params::test_string_argument_schema("room"),
             annotator: crate::names::AnnotatorName::new("directory"),
+            on_no_answer: None,
         };
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),

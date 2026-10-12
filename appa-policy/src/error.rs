@@ -59,6 +59,10 @@ pub enum ConfigError {
         annotator: String,
         field: &'static str,
     },
+    #[error("tool {tool} declares `on_no_answer` without an annotator")]
+    FallbackWithoutAnnotator { tool: String },
+    #[error("tool {tool} `on_no_answer` declares no attention requirement")]
+    FallbackWithoutAttention { tool: String },
     #[error("tool {tool}: annotator {annotator} input {input} reads {reads}, {reason}")]
     AnnotatorInput {
         tool: String,

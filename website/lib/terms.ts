@@ -137,6 +137,8 @@ const TERMS = {
     "Allows an authority to approve a call blocked by excludes because one of these effects has already occurred.",
   attention:
     "Named approvals required for each tool call. An earlier approval does not satisfy a later call. Authorities can give the approvals listed in their permits.attention, regardless of their tags.",
+  on_no_answer:
+    "A static fallback annotation for an annotated tool route. It applies only when the annotator gives no usable answer and must require at least one attention mark.",
   "permits.attention":
     "The named approvals an authority can give for a call. [\"*\"] alone means every mark the policy declares except blocked. Annotators can require only marks the policy declares.",
   blocked:
