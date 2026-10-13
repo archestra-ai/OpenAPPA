@@ -137,6 +137,12 @@ Annotator declares `inputs` or its mandate admits fewer than two trust
 ranks.
 A consult larger than 64 KiB is no answer; nothing is sent.
 
-The questions treat a read-only query to a remote service as data delivered
-to that service. A web search therefore requires trajectory data that
-`public` may read.
+The questions treat delivery as payload, not as the fact of a network
+request. A search query, a body, an upload, or a push requires trajectory
+data that `public` may read. A request that only names a resource, such as
+`git fetch origin main` on an operator-normal checkout, does not. The
+runtime keeps the model's verdict, including one stricter than this guide
+or a custom hint. The question is not an authorization exemption. The
+operator's policy rules remain authoritative. A command's spelling does not
+certify `remote.origin.url`, `core.sshCommand`, a fetch refspec, or a
+helper already configured in the checkout.
