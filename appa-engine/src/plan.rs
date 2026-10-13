@@ -456,13 +456,14 @@ fn narrowing_impact(
                 all && held
             })
         };
-        // An input hop, or another tool's call for a `prior` or cap gap, is a route outside this
+        // An input hop, or another tool's call for a `prior` gap, is a route outside this
         // one-stage view.
-        let redispatch = gaps.iter().any(|gap| matches!(gap, Gap::Prior(_) | Gap::Cap { .. }));
+        let redispatch = gaps.iter().any(|gap| matches!(gap, Gap::Prior(_)));
         let hops = |needs: &mut NeededAtoms| {
             !input_hops(
                 registry,
                 annotation,
+                check::CallReads::Static,
                 &CallStage::default(),
                 CallRole::Ordinary,
                 gaps,
@@ -549,7 +550,7 @@ pub(crate) fn enumerate_plans(
     let mut candidates: Vec<PlanCandidate> = input_hops(
         registry,
         contract,
-        call,
+        check::CallReads::Resolved(call),
         stage,
         role,
         &block.requirement_gaps,
@@ -978,7 +979,7 @@ pub(crate) fn narrowing_remedies(
 pub(crate) fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
-    call: &ResolvedCall,
+    reads: check::CallReads<'_>,
     stage: &CallStage,
     role: CallRole,
     gaps: &[Gap],
@@ -993,7 +994,7 @@ pub(crate) fn input_hops(
         return Vec::new();
     }
     let released = stage.released(current);
-    let forwarded = check::forwarded_label(contract, check::CallReads::Resolved(call));
+    let forwarded = check::forwarded_label(contract, reads);
     registry
         .sanitizers()
         .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
@@ -3497,6 +3498,7 @@ mod tests {
             name: ToolName::new(name),
             tags: tags.iter().map(|tag| TagName::new(*tag)).collect(),
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3596,6 +3598,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![TagName::new("mail")],
             delta: Delta { trust, audience: None },
+            forwards: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
