@@ -56,8 +56,15 @@ def lint(root: Path) -> list[str]:
                     errors.append(f"{manifest}: battery.policy must name appa.toml")
                 else:
                     targets = battery_config.get("targets", {})
-                    for target in targets.values():
-                        policy = battery / target["policy"]
+                    if not isinstance(targets, dict):
+                        targets = {}
+                        errors.append(f"{manifest}: battery.targets must be a table")
+                    for name, target in targets.items():
+                        declared = target.get("policy") if isinstance(target, dict) else None
+                        if not isinstance(declared, str):
+                            errors.append(f"{manifest}: battery.targets.{name}.policy must be a file name")
+                            continue
+                        policy = battery / declared
                         if not policy.is_file():
                             errors.append(f"{policy}: declared target policy is missing")
                         policies.append(policy)
