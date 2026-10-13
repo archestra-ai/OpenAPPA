@@ -231,3 +231,113 @@ selectors = [{ template = "viewer", feeds = "self" }]
         StatusCode::FORBIDDEN
     );
 }
+
+/// The page asks for what the deployment's target reads: a credential only the
+/// multi-user target policy binds is undeclared on a single-user deployment, and on a
+/// multi-user one it is missing until saved. An unknown target refuses startup.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_asks_for_the_credentials_of_the_deployment_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let battery = dir.path().join("batteries/team");
+    std::fs::create_dir_all(&battery).unwrap();
+    let config = dir.path().join("appa.toml");
+    std::fs::write(
+        &config,
+        "include = [\"batteries/team/appa.toml\"]\n[policy]\nversion = 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        battery.join("appa-package.toml"),
+        "schema = 1\nname = \"team\"\ndescription = \"Target setup fixture\"\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        battery.join("appa.toml"),
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/team/read\"\ndelta = {}\n",
+    )
+    .unwrap();
+    std::fs::write(battery.join("single-user.toml"), "[policy]\nversion = 2\n").unwrap();
+    std::fs::write(
+        battery.join("multi-user.toml"),
+        "[policy]\nversion = 2\n[externals.audience.team]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"APPA_PROVIDER_TEAM_TOKEN\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n",
+    )
+    .unwrap();
+    std::fs::write(battery.join("source.py"), "print('{}')\n").unwrap();
+    appa_package::validate_package(&battery).expect("valid fixture package");
+
+    let ui = |target: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
+        command
+            .args([
+                "ui",
+                "--no-open",
+                "--battery",
+                "team",
+                "--runtime-url",
+                "http://127.0.0.1:1",
+                "--config",
+            ])
+            .arg(&config)
+            .env_remove("APPA_PROVIDER_TEAM_TOKEN")
+            .env_remove("APPA_BATTERY_TARGET")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(target) = target {
+            command.env("APPA_BATTERY_TARGET", target);
+        }
+        let mut process = Process(command.spawn().unwrap());
+        let mut line = String::new();
+        std::io::BufReader::new(process.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        (process, line.trim().to_owned())
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let post = |origin: String, path: &'static str, body: Value| {
+        let client = client.clone();
+        async move {
+            client
+                .post(format!("{origin}{path}"))
+                .header("Origin", &origin)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let origin = |link: &str| url::Url::parse(link).unwrap().origin().ascii_serialization();
+    let saving = json!({"credentials": {"APPA_PROVIDER_TEAM_TOKEN": "fixture-only-token"}, "batteries": ["team"]});
+
+    let (_single, link) = ui(None);
+    let refused = post(origin(&link), "/api/credentials", saving.clone()).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    let (_multi, link) = ui(Some("multi-user"));
+    let checked: Value = post(origin(&link), "/api/check", json!({"batteries": ["team"]}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let team = &checked["batteries"][0];
+    assert_eq!(team["credentials"][0]["variable"], "APPA_PROVIDER_TEAM_TOKEN");
+    assert_eq!(team["check"]["status"], "needs_configuration");
+    assert_eq!(team["check"]["reason"], "missing_credential");
+
+    let saved = post(origin(&link), "/api/credentials", saving).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: Value = saved.json().await.unwrap();
+    assert_eq!(
+        saved["batteries"][0]["credentials"][0]["variable"],
+        "APPA_PROVIDER_TEAM_TOKEN"
+    );
+    assert_eq!(saved["batteries"][0]["credentials"][0]["saved"], true);
+    assert_eq!(saved["batteries"][0]["check"]["status"], "ready");
+
+    let (mut invalid, link) = ui(Some("team"));
+    assert!(link.is_empty(), "an unknown target announces no page");
+    assert!(!invalid.0.wait().unwrap().success());
+}

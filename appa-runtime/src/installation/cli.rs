@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_package::generation::{ArtifactDigest, Commit, Generation, Platform};
-use appa_package::{Battery, Namespace, PackageKind, PackageName, Role};
+use appa_package::{Battery, BatteryTarget, Namespace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
 
@@ -215,6 +215,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
     let mut seen = std::collections::BTreeSet::new();
     args.names.retain(|name| seen.insert(name.clone()));
     let result = (|| {
+        let battery_target = crate::config::battery_target()?;
         if !args.server.is_empty() && args.names.len() != 1 {
             return Err(InstallError::Invalid(
                 "--server binds one battery's namespace; install that battery on its own".into(),
@@ -290,7 +291,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
         let mut result = battery_result(&args.names, "installed", prepared);
-        result["setup"] = setup_notices(args.names.iter().zip(&batteries), credential_is_set);
+        result["setup"] = setup_notices(args.names.iter().zip(&batteries), battery_target, credential_is_set);
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "battery.install".into(), result)
@@ -337,15 +338,17 @@ const START_OVER_COMMANDS: [&str; 2] = [
 /// refusal. Batteries with nothing to say are absent.
 fn setup_notices<'a>(
     batteries: impl IntoIterator<Item = (&'a PackageName, &'a Battery)>,
+    target: BatteryTarget,
     is_set: impl Fn(&str) -> bool,
 ) -> serde_json::Value {
     let notices: Vec<serde_json::Value> = batteries
         .into_iter()
-        .filter(|(_, battery)| !battery.credentials.is_empty() || !battery.setup.is_empty())
-        .map(|(name, battery)| {
-            let credentials: Vec<serde_json::Value> = battery
-                .credentials
-                .iter()
+        // A validated battery declares every target or none.
+        .map(|(name, battery)| (name, battery, battery.credentials_for(target).unwrap_or_default()))
+        .filter(|(_, battery, credentials)| !credentials.is_empty() || !battery.setup.is_empty())
+        .map(|(name, battery, credentials)| {
+            let credentials: Vec<serde_json::Value> = credentials
+                .into_iter()
                 .map(|variable| serde_json::json!({"variable": variable, "set": is_set(variable)}))
                 .collect();
             serde_json::json!({
@@ -626,6 +629,7 @@ pub fn install(args: Install) -> ExitCode {
     };
     begin(&args.target);
     let result = (|| {
+        let battery_target = crate::config::battery_target()?;
         if args.runtime.is_some() && name != "kagent" {
             return Err(InstallError::Invalid("--runtime applies only to kagent".into()));
         }
@@ -778,6 +782,7 @@ pub fn install(args: Install) -> ExitCode {
             &included_now,
             &bindings,
             args.target.config.as_deref(),
+            battery_target,
         );
         let mut result = if name == "kagent" {
             let installed = installation
@@ -810,6 +815,7 @@ fn coverage_result(
     included: &std::collections::BTreeSet<String>,
     bindings: &crate::config::ServerBindings,
     config: Option<&Path>,
+    target: BatteryTarget,
 ) -> serde_json::Value {
     let coverage = discover::coverage(servers, available, included, bindings);
     // A suggested battery's setup is named beside the command that includes
@@ -824,6 +830,7 @@ fn coverage_result(
                 .find(|(name, _)| name == suggested)
                 .map(|(name, battery)| (name, battery))
         }),
+        target,
         credential_is_set,
     );
     let suggestions: Vec<serde_json::Value> = coverage
@@ -869,7 +876,14 @@ pub(crate) fn render_server_coverage(
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let (included, bindings) = includes::batteries(&text)?;
-    let result = coverage_result(servers, &available, &included, &bindings, Some(config));
+    let result = coverage_result(
+        servers,
+        &available,
+        &included,
+        &bindings,
+        Some(config),
+        crate::config::battery_target()?,
+    );
     render_coverage(output, style, &result).map_err(|error| super::io("write", Path::new("stdout"), error))
 }
 
@@ -1558,9 +1572,11 @@ mod tests {
             (&notion, battery(&[], Some("Rules for every Notion tool."), &[])),
         ];
 
-        let setup = setup_notices(batteries.iter().map(|(name, battery)| (*name, battery)), |variable| {
-            variable == "APPA_PROVIDER_LINEAR_TOKEN"
-        });
+        let setup = setup_notices(
+            batteries.iter().map(|(name, battery)| (*name, battery)),
+            BatteryTarget::SingleUser,
+            |variable| variable == "APPA_PROVIDER_LINEAR_TOKEN",
+        );
         assert_eq!(
             setup[0]["setup"],
             serde_json::json!(["Run `gh auth login`.", "Or set a token."])

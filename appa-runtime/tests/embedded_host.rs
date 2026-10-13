@@ -80,19 +80,20 @@ fn adapter() -> Adapter {
 }
 
 fn embedded_runtime() -> Runtime {
-    open_under(adapter()).expect("the runtime opens under the host's adapter")
+    open_under(adapter(), None).expect("the runtime opens under the host's adapter")
 }
 
-fn open_under(adapter: Adapter) -> Result<Runtime, OpenError> {
-    open_with_log(adapter).map(|(runtime, _)| runtime)
+fn open_under(adapter: Adapter, target: Option<&str>) -> Result<Runtime, OpenError> {
+    open_with_log(adapter, target).map(|(runtime, _)| runtime)
 }
 
-fn open_with_log(adapter: Adapter) -> Result<(Runtime, Arc<LogStore>), OpenError> {
+fn open_with_log(adapter: Adapter, target: Option<&str>) -> Result<(Runtime, Arc<LogStore>), OpenError> {
     let config = Config::hosted_composed(
         ROOT,
         &[HostedBattery {
             name: "github",
-            policy: BATTERY,
+            base: BATTERY,
+            target,
             token_env: &[],
         }],
         HostDefaults::new(Duration::from_millis(5000), 65_536),
@@ -112,7 +113,10 @@ fn an_adapter_that_spells_no_control_tool_is_refused() {
         spell: |canonical| (!canonical.is_control()).then(|| spell(canonical)).flatten(),
         ..adapter()
     };
-    assert!(matches!(open_under(unspelled), Err(OpenError::UnspelledControlTool)));
+    assert!(matches!(
+        open_under(unspelled, None),
+        Err(OpenError::UnspelledControlTool)
+    ));
 }
 
 /// A call as the host hands it over: identified through the adapter first, the way the wire
@@ -221,7 +225,7 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
 
 #[tokio::test]
 async fn identified_delivery_retries_replay_denied_calls_released_calls_and_closed_results() {
-    let (runtime, store) = open_with_log(adapter()).expect("the host runtime opens");
+    let (runtime, store) = open_with_log(adapter(), None).expect("the host runtime opens");
     let actor = Actor {
         root: TrajectoryId("delivery-retry".into()),
         child: None,
@@ -357,4 +361,37 @@ async fn identified_delivery_retries_replay_denied_calls_released_calls_and_clos
         before,
         "contradictory reports are not new outcomes"
     );
+}
+
+/// A battery's target policy composes before its base, so its variant of a tool the base
+/// also names is the first match and decides the call.
+#[tokio::test]
+async fn a_target_policy_variant_decides_before_the_base() {
+    const TARGET: &str =
+        "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"mcp/github/get_file_contents\"\ndelta = {}\n";
+    let actor = Actor {
+        root: TrajectoryId("conversation-1".into()),
+        child: None,
+    };
+    for (target, allowed) in [(None, false), (Some(TARGET), true)] {
+        let runtime = open_under(adapter(), target).expect("the runtime opens");
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: actor.root.clone(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            },
+        )
+        .await;
+        let decision = hooks::handle(&runtime, call(&actor, "github_prod.get_file_contents")).await;
+        assert_eq!(
+            matches!(decision, HookDecision::AllowCall { .. }),
+            allowed,
+            "{target:?}: {decision:?}"
+        );
+    }
 }

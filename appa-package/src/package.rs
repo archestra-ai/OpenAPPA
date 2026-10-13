@@ -190,6 +190,22 @@ impl Battery {
             None => vec![&self.base],
         }
     }
+
+    /// The variables a deployment of `target` reads: its target policy's, then the
+    /// base's, each once.
+    pub fn credentials_for(&self, target: BatteryTarget) -> Result<Vec<&str>, MissingTarget> {
+        let target_credentials = match self.targets.is_empty() {
+            true => &[][..],
+            false => &self.targets.get(&target).ok_or(MissingTarget(target))?.credentials[..],
+        };
+        let mut credentials: Vec<&str> = Vec::new();
+        for variable in target_credentials.iter().chain(&self.credentials) {
+            if !credentials.contains(&variable.as_str()) {
+                credentials.push(variable);
+            }
+        }
+        Ok(credentials)
+    }
 }
 
 /// Optional, bounded, read-only battery authentication check.
@@ -709,6 +725,29 @@ mod tests {
             names(plain.battery().unwrap().compose_order(BatteryTarget::SingleUser)),
             vec!["appa.toml"]
         );
+    }
+
+    #[test]
+    fn credentials_for_reads_the_target_policy_and_the_base_once_each() {
+        let mut targeted = manifest(TARGETED).unwrap().battery().unwrap().clone();
+        targeted.credentials = vec!["APPA_PROVIDER_A".into(), "APPA_PROVIDER_B".into()];
+        targeted.targets.get_mut(&BatteryTarget::MultiUser).unwrap().credentials =
+            vec!["APPA_PROVIDER_C".into(), "APPA_PROVIDER_A".into()];
+
+        assert_eq!(
+            targeted.credentials_for(BatteryTarget::MultiUser).unwrap(),
+            vec!["APPA_PROVIDER_C", "APPA_PROVIDER_A", "APPA_PROVIDER_B"]
+        );
+        assert_eq!(
+            targeted.credentials_for(BatteryTarget::SingleUser),
+            Err(MissingTarget(BatteryTarget::SingleUser))
+        );
+
+        let mut plain = manifest(BATTERY).unwrap().battery().unwrap().clone();
+        plain.credentials = vec!["APPA_PROVIDER_A".into()];
+        for target in BatteryTarget::ALL {
+            assert_eq!(plain.credentials_for(target).unwrap(), vec!["APPA_PROVIDER_A"]);
+        }
     }
 
     #[test]
