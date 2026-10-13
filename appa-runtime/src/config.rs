@@ -1886,7 +1886,7 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
         (false, None) => return Ok(vec![include_path]),
     }
     battery
-        .compose_order(Some(target))
+        .compose_order(target)
         .into_iter()
         .map(|policy| {
             let policy_path = dir.join(policy.as_str());
