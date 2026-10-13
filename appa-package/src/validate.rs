@@ -185,7 +185,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 });
             }
             if battery.targets.is_none() {
-                check_lookup_routes(&[(&policy, &base)])?;
+                check_lookup_routes(&policy, &base)?;
             }
             if let Some(targets) = &mut battery.targets {
                 check_stands_alone(&policy, &base_document, &base.tools)?;
@@ -212,7 +212,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     )?;
                     check_composes(&policy_path, &base, &bindings)?;
                     check_variants(&policy_path, &bindings.tools, &base.tools)?;
-                    check_lookup_routes(&[(&policy, &base), (&policy_path, &bindings)])?;
+                    check_lookup_routes(&policy_path, &bindings)?;
                     target_policy.audiences = bindings.audiences;
                     target_policy.credentials = bindings.credentials;
                 }
@@ -755,16 +755,13 @@ fn check_composes(policy: &Path, base: &PolicyBindings, target_policy: &PolicyBi
 }
 
 /// The loader follows a lookup route one hop: it refuses a route whose destination
-/// routes its own lookups. `layers` are the policies one deployment includes
-/// together, each with the path of the file declaring its bindings; a destination none of them binds is the root's, which the loader
-/// checks against the composed config.
-fn check_lookup_routes(layers: &[(&Path, &PolicyBindings)]) -> Result<(), PackageError> {
-    let routed = |name: &str| layers.iter().any(|(_, layer)| layer.lookups.contains_key(name));
-    for (policy, (name, target)) in layers
-        .iter()
-        .flat_map(|(policy, layer)| layer.lookups.iter().map(move |route| (*policy, route)))
-    {
-        match (name == target, routed(target)) {
+/// routes its own lookups. A targeted base binds no command-bearing audience, so
+/// every route and every destination it may chain to live in one policy; a
+/// destination it does not bind is the root's, which the loader checks against the
+/// composed config.
+fn check_lookup_routes(policy: &Path, bindings: &PolicyBindings) -> Result<(), PackageError> {
+    for (name, target) in &bindings.lookups {
+        match (name == target, bindings.lookups.contains_key(target)) {
             (true, _) => {
                 return Err(PackageError::AudienceLookupToItself {
                     policy: policy.to_path_buf(),
