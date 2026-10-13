@@ -103,6 +103,8 @@ pub enum PackageError {
     },
     #[error("`{field}` names the battery's base policy, which a deployment of the target already includes")]
     TargetPolicyIsBase { field: &'static str },
+    #[error("`{field}` is outside the base policy's directory, where the battery's helper commands run")]
+    TargetPolicyOutsideBaseDirectory { field: &'static str },
     #[error("{policy} declares `{contract}`, which is outside the namespaces it covers ({namespaces})")]
     PolicyForeignContract {
         policy: PathBuf,
@@ -151,6 +153,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 // is the base would be refused as a duplicate include.
                 if target_path == policy {
                     return Err(PackageError::TargetPolicyIsBase { field });
+                }
+                if target_path.parent() != policy.parent() {
+                    return Err(PackageError::TargetPolicyOutsideBaseDirectory { field });
                 }
                 let policy = target_path;
                 let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
@@ -1091,6 +1096,28 @@ mod tests {
         assert!(matches!(
             validate_package(directory.path()),
             Err(PackageError::TargetPolicyIsBase {
+                field: "battery.targets.multi-user.policy"
+            })
+        ));
+
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        fs::create_dir(directory.path().join("targets")).unwrap();
+        fs::rename(
+            directory.path().join("multi-user.toml"),
+            directory.path().join("targets/multi-user.toml"),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!(
+                "{BATTERY_MANIFEST}{}",
+                BOTH_TARGETS.replace("\"multi-user.toml", "\"targets/multi-user.toml")
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetPolicyOutsideBaseDirectory {
                 field: "battery.targets.multi-user.policy"
             })
         ));
