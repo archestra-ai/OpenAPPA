@@ -5510,7 +5510,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[cfg(feature = "daemon")]
     #[test]
     fn daemon_sqlite_receipts_outlive_the_runtime_that_recorded_them() {
-        use appa_eventlog::{OperationClaim, OperationKey, OperationRequest, ReceiptBinding, SessionScope};
+        use appa_eventlog::{
+            LeaseOwner, OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptLease, SessionScope,
+        };
 
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
@@ -5529,21 +5531,30 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
+        let lease = ReceiptLease::new(
+            LeaseOwner::parse("daemon").expect("the owner is well formed"),
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the lease is well formed");
         {
             let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
             assert!(matches!(
-                runtime.store().claim_operation(request.clone()),
+                runtime.store().claim_operation(request.clone(), &lease),
                 Ok(OperationClaim::Claimed)
             ));
             runtime
                 .store()
-                .complete_operation(request.key.clone(), serde_json::json!({"decision":"mcp_result"}))
+                .complete_operation(
+                    request.key.clone(),
+                    serde_json::json!({"decision":"mcp_result"}),
+                    lease.owner(),
+                )
                 .expect("the operation completes");
         }
         let reopened = Runtime::open(versioned_policy("first"), db, None).expect("the deployment reopens");
         assert!(
             matches!(
-                reopened.store().claim_operation(request),
+                reopened.store().claim_operation(request, &lease),
                 Ok(OperationClaim::Complete { .. })
             ),
             "the daemon's SQLite receipts survive a process restart"
