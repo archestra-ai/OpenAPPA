@@ -263,65 +263,70 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
         };
         let installed = tempfile::tempdir().expect("a temp dir is creatable");
         copy_tree(&directory, installed.path());
-        let policy: toml::Value = toml::from_str(
-            &std::fs::read_to_string(installed.path().join(battery.base.as_str())).expect("the battery policy reads"),
-        )
-        .expect("the battery policy is TOML");
-        for source in appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")
-        {
-            let provider = source.provider.as_str();
-            let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
-                .as_array()
-                .expect("a battery binds its source by a command")
-                .iter()
-                .map(|word| word.as_str().expect("an argv word"))
-                .collect();
-            let served: Vec<String> = source
-                .templates
-                .iter()
-                .map(|t| t.template.as_str().to_owned())
-                .collect();
-            let mut foreign = served.clone();
-            foreign.push("foreign/<x>".to_owned());
-            for (templates, expected) in [(served, 1), (foreign, 2)] {
-                let consult = serde_json::json!({
-                    "version": 1,
-                    "kind": "audience",
-                    "name": provider,
-                    "declaration": { "templates": templates },
-                    "artifact": { "selector": "viewer" },
-                });
-                let mut child = Command::new(on_path(argv[0]))
-                    .args(&argv[1..])
-                    .current_dir(installed.path())
-                    .env_clear()
-                    .env("PATH", no_path.path())
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .expect("the helper spawns");
-                child
-                    .stdin
-                    .take()
-                    .expect("stdin is piped")
-                    .write_all(consult.to_string().as_bytes())
-                    .expect("the consult writes");
-                let output = child.wait_with_output().expect("the helper exits");
-                assert_eq!(
-                    output.status.code(),
-                    Some(expected),
-                    "{provider} of {}: {}",
-                    entry.path,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                assert!(
-                    output.stdout.is_empty(),
-                    "{provider} of {} answered without a credential",
-                    entry.path
-                );
+        let targets = battery.targets.iter().flat_map(|targets| targets.iter());
+        for file in std::iter::once(&battery.base).chain(targets.map(|(_, target)| &target.policy)) {
+            let policy: toml::Value = toml::from_str(
+                &std::fs::read_to_string(installed.path().join(file.as_str())).expect("the battery policy reads"),
+            )
+            .expect("the battery policy is TOML");
+            for source in
+                appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")
+            {
+                let provider = source.provider.as_str();
+                let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
+                    .as_array()
+                    .expect("a battery binds its source by a command")
+                    .iter()
+                    .map(|word| word.as_str().expect("an argv word"))
+                    .collect();
+                let served: Vec<String> = source
+                    .templates
+                    .iter()
+                    .map(|t| t.template.as_str().to_owned())
+                    .collect();
+                let mut foreign = served.clone();
+                foreign.push("foreign/<x>".to_owned());
+                for (templates, expected) in [(served, 1), (foreign, 2)] {
+                    let consult = serde_json::json!({
+                        "version": 1,
+                        "kind": "audience",
+                        "name": provider,
+                        "declaration": { "templates": templates },
+                        "artifact": { "selector": "viewer" },
+                    });
+                    let mut child = Command::new(on_path(argv[0]))
+                        .args(&argv[1..])
+                        .current_dir(installed.path())
+                        .env_clear()
+                        .env("PATH", no_path.path())
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .expect("the helper spawns");
+                    child
+                        .stdin
+                        .take()
+                        .expect("stdin is piped")
+                        .write_all(consult.to_string().as_bytes())
+                        .expect("the consult writes");
+                    let output = child.wait_with_output().expect("the helper exits");
+                    assert_eq!(
+                        output.status.code(),
+                        Some(expected),
+                        "{provider} of {}/{}: {}",
+                        entry.path,
+                        file.as_str(),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(
+                        output.stdout.is_empty(),
+                        "{provider} of {} answered without a credential",
+                        entry.path
+                    );
+                }
+                checked += 1;
             }
-            checked += 1;
         }
     }
     assert!(checked >= 3, "the shipped batteries bind audience sources");
