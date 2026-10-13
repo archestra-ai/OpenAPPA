@@ -111,9 +111,12 @@ pub enum PackageError {
     )]
     BaseUsesTargetAnnotator { policy: PathBuf, annotator: String },
     #[error(
-        "{policy} is a targeted battery's base, which loads alone, yet declares annotator `{annotator}` without a builtin, and a package binds no external a base could carry"
+        "{policy} is a targeted battery's base, which loads alone, yet binds no implementation for `{declaration}`"
     )]
-    BaseAnnotatorUnbound { policy: PathBuf, annotator: String },
+    BaseDeclarationUnbound {
+        policy: PathBuf,
+        declaration: NamedDeclaration,
+    },
     #[error("{policy} names `{tool}` without a bare variant, so a call outside its selectors falls through to `*`")]
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
@@ -467,7 +470,8 @@ fn source_mentions(document: &Value) -> impl Iterator<Item = &str> {
 }
 
 /// A targeted battery's base is loaded alone wherever the sandbox is off, so it
-/// runs no helper, and every tool and annotator it names resolves within it.
+/// runs no helper, every tool and annotator it names resolves within it, and every
+/// declaration the runtime opens only with a binding is bound within it.
 fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(), PackageError> {
     if let Some((external, _)) = externals(base).find(|(_, runs)| *runs) {
         return Err(PackageError::BaseRunsHelper {
@@ -481,18 +485,28 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
             entry: entry.to_owned(),
         });
     }
+    let bound: BTreeSet<NamedExternal> = externals(base).map(|(external, _)| external).collect();
+    let unbound = DeclarationKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            declarations(base, kind.field()).filter_map(move |declaration| {
+                let name = declaration.get("name").and_then(Value::as_str)?;
+                kind.binds_at_open(name, declaration).then(|| NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                })
+            })
+        })
+        .find(|declaration| !bound.contains(&declaration.binding()));
+    if let Some(declaration) = unbound {
+        return Err(PackageError::BaseDeclarationUnbound {
+            policy: policy.to_path_buf(),
+            declaration,
+        });
+    }
     let declared: BTreeSet<&str> = declarations(base, "annotator")
         .filter_map(|annotator| annotator.get("name").and_then(Value::as_str))
         .collect();
-    let unbound = declarations(base, "annotator")
-        .filter(|annotator| annotator.get("builtin").is_none())
-        .find_map(|annotator| annotator.get("name").and_then(Value::as_str));
-    if let Some(annotator) = unbound {
-        return Err(PackageError::BaseAnnotatorUnbound {
-            policy: policy.to_path_buf(),
-            annotator: annotator.to_owned(),
-        });
-    }
     let uses = declarations(base, "tool").filter_map(|tool| tool.get("annotator").and_then(Value::as_str));
     if let Some(annotator) = uses.into_iter().find(|annotator| !declared.contains(annotator)) {
         return Err(PackageError::BaseUsesTargetAnnotator {
@@ -601,7 +615,29 @@ impl DeclarationKind {
             Self::Sanitizer => "sanitizer",
         }
     }
+
+    fn section(self) -> &'static str {
+        match self {
+            Self::Annotator => "annotators",
+            Self::Authority => "authorities",
+            Self::Sanitizer => "sanitizers",
+        }
+    }
+
+    /// Whether the runtime refuses to open a policy that declares this without an
+    /// `[externals]` binding: an authority may stay unbound, an annotator naming a
+    /// builtin is complete as written, and the engine applies its reserved sanitizer.
+    fn binds_at_open(self, name: &str, declaration: &Value) -> bool {
+        match self {
+            Self::Authority => false,
+            Self::Annotator => declaration.get("builtin").is_none(),
+            Self::Sanitizer => name != RESERVED_SANITIZER,
+        }
+    }
 }
+
+/// The sanitizer the engine applies itself (`SanitizerName::ATTEST_SCHEMA`).
+const RESERVED_SANITIZER: &str = "attest-schema";
 
 /// One `[[policy.<kind>]]` declaration, by name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -613,6 +649,15 @@ pub struct NamedDeclaration {
 impl fmt::Display for NamedDeclaration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "policy.{} {}", self.kind.field(), self.name)
+    }
+}
+
+impl NamedDeclaration {
+    fn binding(&self) -> NamedExternal {
+        NamedExternal {
+            section: self.kind.section().to_owned(),
+            name: self.name.clone(),
+        }
     }
 }
 
@@ -1769,14 +1814,15 @@ mod tests {
         validate_package(with_targets(&format!("{base}\n{annotator}"), "").path()).unwrap();
     }
 
-    /// Loaded alone, a targeted base has only its own bindings, so an annotator it
-    /// declares must be a builtin or bound by the base itself.
+    /// Loaded alone, a targeted base has only its own bindings, so every declaration
+    /// the runtime opens only with a binding is bound by the base itself.
     #[test]
-    fn a_targeted_base_binds_the_annotators_it_declares() {
-        let declared = format!(
+    fn a_targeted_base_binds_every_declaration_it_opens_with() {
+        let annotator = format!(
             "{TARGETED_BASE}\n[[policy.annotator]]\nname = \"classifier\"\n\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n"
         );
-        let binding = "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n";
+        let sanitizer = format!("{TARGETED_BASE}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n");
+        let stock_mask = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
         let with_targets = |base: &str, target_tail: &str| {
             let directory = targeted(base, &format!("{MULTI_USER_POLICY}\n{target_tail}"));
             fs::write(
@@ -1787,12 +1833,39 @@ mod tests {
             directory
         };
 
-        assert!(matches!(
-            validate_package(with_targets(&declared, binding).path()),
-            Err(PackageError::BaseAnnotatorUnbound { annotator, .. }) if annotator == "classifier"
-        ));
-        let builtin = declared.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
-        validate_package(with_targets(&builtin, "").path()).unwrap();
+        for (base, target_binding, kind, name) in [
+            (
+                annotator.as_str(),
+                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n",
+                DeclarationKind::Annotator,
+                "classifier",
+            ),
+            (sanitizer.as_str(), stock_mask, DeclarationKind::Sanitizer, "mask"),
+        ] {
+            let expected = NamedDeclaration {
+                kind,
+                name: name.to_owned(),
+            };
+            assert!(matches!(
+                validate_package(with_targets(base, target_binding).path()),
+                Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
+            ));
+        }
+
+        let builtin_annotator =
+            annotator.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
+        let base_bound_sanitizer = format!("{sanitizer}\n{stock_mask}");
+        let reserved_sanitizer = sanitizer.replace("\"mask\"", &format!("\"{RESERVED_SANITIZER}\""));
+        let unbound_authority =
+            format!("{TARGETED_BASE}\n[[policy.authority]]\nname = \"operator\"\nhint = \"Ask the operator.\"\n");
+        for base in [
+            builtin_annotator,
+            base_bound_sanitizer,
+            reserved_sanitizer,
+            unbound_authority,
+        ] {
+            validate_package(with_targets(&base, "").path()).unwrap();
+        }
     }
 
     /// The engine picks a tool's first matching variant, target policy before base, and a
