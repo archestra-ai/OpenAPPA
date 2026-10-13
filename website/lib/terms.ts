@@ -120,7 +120,7 @@ const TERMS = {
   contains:
     "Under requires.audience: the current audience must include these readers; a whole-entry $arg placeholder is allowed only here, and a selector placeholder such as @slack:channel/$channel_id is allowed here and in delta. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
   tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",

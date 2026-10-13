@@ -169,7 +169,9 @@ pub(crate) struct RawRequires {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRequiresAudience {
     pub(crate) contains: Option<Vec<String>>,
-    pub(crate) within: Option<Vec<String>>,
+    /// Parsed so a policy writing it still loads, then dropped: an upper bound on the audience
+    /// is satisfied by any narrowing and prevents no disclosure, so APPA keeps no such requirement.
+    pub(crate) within: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]

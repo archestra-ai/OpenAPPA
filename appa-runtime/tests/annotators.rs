@@ -1300,7 +1300,10 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
 
     annotator.set(
         "classifier",
-        answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
+        answer(
+            serde_json::json!({}),
+            Some(serde_json::json!({ "contains": ["@team"] })),
+        ),
     );
     source.set(&["alice@corp.example"]);
     let consults_before = annotator.requests().len();
@@ -1321,7 +1324,7 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
     let decision = propose(&runtime, fetch("https://c.example")).await;
     assert!(
         matches!(decision, HookDecision::DenyCall { .. }),
-        "the narrowed trajectory is not within the moved group: {decision:?}"
+        "the narrowed trajectory does not cover the moved group: {decision:?}"
     );
     assert_eq!(source.reads().len(), 2);
 
@@ -1332,7 +1335,7 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
         "classifier",
         answer(
             serde_json::json!({}),
-            Some(serde_json::json!({ "within": ["@nobody"] })),
+            Some(serde_json::json!({ "contains": ["@nobody"] })),
         ),
     );
     let refused = propose(&runtime, fetch("https://d.example")).await;
@@ -1345,6 +1348,29 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
     );
     assert_eq!(audit_len(&runtime), before);
     assert_eq!(source.reads().len(), 2);
+}
+
+/// `within` is no `requires.audience` key: an answer writing it is no answer, refused
+/// operationally before any decision or directory read.
+#[tokio::test]
+async fn an_answer_writing_requires_audience_within_is_refused() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (annotator_url, annotator) = serve_annotator().await;
+    let (audience_url, source) = serve_members().await;
+    let runtime = open_runtime(&dir, &symbolic_policy(&annotator_url, &audience_url)).await;
+    let before = audit_len(&runtime);
+
+    annotator.set(
+        "classifier",
+        answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
+    );
+    let refused = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(refused, HookDecision::Refuse { .. }),
+        "an answer writing `within` is no answer, got {refused:?}"
+    );
+    assert_eq!(audit_len(&runtime), before);
+    assert!(source.reads().is_empty());
 }
 
 /// A produced chain word narrows the trajectory symbolically: the delta is offered and
@@ -1364,12 +1390,12 @@ async fn a_produced_chain_word_narrows_the_trajectory_without_a_directory_read()
     assert!(source.reads().is_empty());
 
     // The narrowed trajectory holds `internal` as written: a later call requiring it to
-    // stay within `internal` needs no membership either.
+    // cover `internal` needs no membership either.
     annotator.set(
         "classifier",
         answer(
             serde_json::json!({}),
-            Some(serde_json::json!({ "within": ["internal"] })),
+            Some(serde_json::json!({ "contains": ["internal"] })),
         ),
     );
     assert_eq!(

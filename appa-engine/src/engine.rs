@@ -4393,39 +4393,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_read_that_narrows_into_the_cap_passes_the_cap() {
-        let a_reader = Audience::restricted([ReaderId::new("a")]);
-        let scoped = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("scoped"),
-            tags: vec![],
-            delta: Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a_reader.clone()))),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a_reader))],
-                },
-                ..Requires::default()
-            },
-        };
-        let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-        let e = engine_at(vec![scoped], known(TRUSTED, both));
-        let log = vec![opened(&e)];
-        match check(&e, &log, &call("scoped", json!({}))) {
-            CheckOutcome::Block(block) => {
-                assert!(block.requirement_gaps.is_empty(), "narrowing into the cap is not a gap");
-                assert!(block.narrowing.is_some());
-            }
-            other => panic!("expected a narrowing-only soft block, got {other:?}"),
-        }
-    }
-
     fn emitting(name: &str, kind: &str) -> ToolAnnotation {
         ToolAnnotation {
             description: Some("A test tool.".to_string()),
@@ -12278,16 +12245,18 @@ mod tests {
         cfg.audience = slack_groups(&["team"]);
         let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
         let log = vec![opened(&e)];
-        let capped = {
+        let requiring = {
             let mut produced = notify.clone();
-            produced.requires.label.audience = vec![AudienceRequirement::Cap(group_audience("team"))];
+            produced.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                group_audience("team"),
+            ))];
             let unpinned = call("notify", json!({}));
             raw(&unpinned
                 .clone()
                 .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
         };
         let batch_with =
-            |evidence: crate::audience::AudienceEvidence| evidenced_batch("b1", vec![capped.clone()], evidence);
+            |evidence: crate::audience::AudienceEvidence| evidenced_batch("b1", vec![requiring.clone()], evidence);
 
         assert_eq!(
             e.handle(
@@ -12297,7 +12266,7 @@ mod tests {
             Err(TransitionError::MembershipNeeded {
                 needed: vec![group_atom("team")]
             }),
-            "the produced cap is read extensionally, so the act asks for exactly its group"
+            "the produced `contains` is read extensionally, so the act asks for exactly its group"
         );
 
         let team = |members: Vec<ReaderId>| source_evidence(vec![user_group("team", members)]);
@@ -12306,7 +12275,7 @@ mod tests {
             .handle(&viewing(&e, &log), batch_with(evidence.clone()))
             .expect("the batch decides under the pinned answer");
         let (released, blocked) = answered(&decision);
-        assert_eq!(released.len(), 1, "alice is a team member, so the cap holds");
+        assert_eq!(released.len(), 1, "the team is alice alone, so the label covers it");
         assert!(blocked.is_empty());
         let facts = appended_facts(decision);
         assert!(
@@ -14209,12 +14178,15 @@ mod tests {
             tool
         }
 
-        fn capped_send() -> ToolAnnotation {
+        fn team_send() -> ToolAnnotation {
             let mut send = plain_tool("send");
             send.requires = Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(grouped(&["auditor"], &["team"]))],
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(grouped(
+                        &[],
+                        &["team"],
+                    )))],
                 },
                 ..Requires::default()
             };
@@ -14367,24 +14339,43 @@ mod tests {
         fn a_route_reads_the_answers_the_block_recorded_over_any_fresh_answer() {
             use crate::route::{RouteDepth, RouteOutcome, RouteStep};
 
-            let mut seen = plain_tool("seen");
-            seen.delta = Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(grouped(&[], &["board"]))),
+            let officer = crate::authority::Authority {
+                name: AuthorityName::new("officer"),
+                mandate: crate::authority::Mandate {
+                    reader_ceiling: Some(grouped(&[], &["team"])),
+                    ..crate::authority::Mandate::default()
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            };
+            let mut send = plain_tool("send");
+            send.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::restricted([corp_reader("bob")]),
+                    ))],
+                },
+                ..Requires::default()
             };
             let e = grouped_engine(
-                config(vec![capped_send(), seen], vec![]),
+                config(vec![send], vec![officer]),
                 &[],
-                known(TRUSTED, readers(&["alice"])),
+                known(TRUSTED, Audience::restricted([corp_reader("alice")])),
             );
             let log = vec![opened(&e)];
-            let recorded_answers = source_evidence(vec![user_group("board", vec![]), user_group("team", vec![])]);
+            let bob_in_team = || user_group("team", vec![slack_member("slack:UB", Some("bob@corp.com"))]);
             let decided = e
                 .handle(
                     &viewing(&e, &log),
-                    act_batch("b1", vec![], vec![raw(&call("send", json!({})))], recorded_answers),
+                    act_batch(
+                        "b1",
+                        vec![],
+                        vec![raw(&call("send", json!({})))],
+                        source_evidence(vec![bob_in_team()]),
+                    ),
                 )
-                .expect("the tool plans of the block read `board`, so the batch answers it too");
+                .expect("the officer's ceiling plans the block, so the batch answers `team`");
             let log = [log, appended_facts(decided)].concat();
             let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
             let subject = crate::basis::SubjectKey::Call {
@@ -14392,39 +14383,24 @@ mod tests {
                 batch: crate::transition::ProposalBatchId::new("b1"),
                 position: 0,
             };
-            let cap = crate::check::Gap::Cap {
-                cap: grouped(&["auditor"], &["team"]),
-            };
             let routes = |answers: crate::audience::AudienceEvidence| {
                 e.recovery_routes(&view, &subject, &answers, RouteDepth::new(2).unwrap())
                     .expect("the recorded answers stand")
             };
 
-            let narrowed = Audience::of_clauses([
-                crate::label::Clause::new([], [], [ReaderId::new("alice")]).expect("a reader clause"),
-                crate::label::Clause::new([], [crate::label::GroupRef::Named(GroupName::new("board"))], [])
-                    .expect("a group clause"),
-            ]);
             let recorded = routes(no_answers());
             assert_eq!(recorded.len(), 1);
             assert_eq!(recorded[0].outcome, RouteOutcome::Complete);
             assert!(
                 matches!(
                     &recorded[0].steps[..],
-                    [RouteStep::Precede { tool, clears, accepts: Some(narrowing) }]
-                        if tool.as_str() == "seen"
-                            && clears == &vec![cap.clone()]
-                            && narrowing.to.audience == narrowed
+                    [RouteStep::Authorize { authority, .. }] if authority.as_str() == "officer"
                 ),
-                "`seen` narrows `alice` by the symbolic `board`, empty under the recorded answer, within \
-                 the cap the recorded empty `team` leaves at `auditor`: {:?}",
+                "the recorded `team` answer puts bob under the officer's ceiling: {:?}",
                 recorded[0].steps
             );
             assert_eq!(
-                routes(source_evidence(vec![
-                    user_group("board", vec![]),
-                    user_group("team", vec![])
-                ])),
+                routes(source_evidence(vec![bob_in_team()])),
                 recorded,
                 "restating the answers the block consumed reads them once"
             );
@@ -14433,17 +14409,14 @@ mod tests {
                     e.recovery_routes(
                         &view,
                         &subject,
-                        &source_evidence(vec![user_group(
-                            "team",
-                            vec![slack_member("slack:UA", Some("alice@corp.com"))]
-                        )]),
+                        &source_evidence(vec![user_group("team", vec![])]),
                         RouteDepth::ONE
                     ),
                     Err(crate::route::RouteError::Evidence(
                         crate::audience::EvidenceRefusal::ContradictedPin { .. }
                     ))
                 ),
-                "a fresh answer that would lift the cap contradicts the answer the block consumed"
+                "a fresh answer that would drop the route contradicts the answer the block consumed"
             );
             assert!(matches!(
                 e.recovery_routes(
@@ -14494,9 +14467,9 @@ mod tests {
         }
 
         #[test]
-        fn a_cap_written_with_a_group_decides_by_the_answer_and_an_empty_answer_is_valid() {
+        fn a_contains_written_with_a_group_decides_by_the_answer_and_an_empty_answer_is_valid() {
             let e = grouped_engine(
-                config(vec![capped_send()], vec![]),
+                config(vec![team_send()], vec![]),
                 &[],
                 known(TRUSTED, Audience::restricted([corp_reader("alice")])),
             );
@@ -14510,18 +14483,19 @@ mod tests {
                 })
             );
 
+            let outsider = source_evidence(vec![user_group(
+                "team",
+                vec![slack_member("slack:UB", Some("bob@corp.com"))],
+            )]);
             let decided = e
-                .handle(
-                    &viewing(&e, &log),
-                    act_batch("b1", vec![], send(), source_evidence(vec![user_group("team", vec![])])),
-                )
-                .expect("an empty answer decides");
+                .handle(&viewing(&e, &log), act_batch("b1", vec![], send(), outsider))
+                .expect("a member answer decides");
             let (released, blocked) = answered(&decided);
             assert!(released.is_empty());
             assert_eq!(
                 blocked[0].block.raw.requirement_gaps,
-                vec![crate::check::Gap::Cap {
-                    cap: grouped(&["auditor"], &["team"])
+                vec![crate::check::Gap::Includes {
+                    recipients: grouped(&[], &["team"])
                 }]
             );
             assert_eq!(
@@ -14529,18 +14503,15 @@ mod tests {
                 Ok(())
             );
 
-            let answer = source_evidence(vec![user_group(
-                "team",
-                vec![slack_member("slack:UA", Some("alice@corp.com"))],
-            )]);
+            let empty = source_evidence(vec![user_group("team", vec![])]);
             let released = e
-                .handle(&viewing(&e, &log), act_batch("b2", vec![], send(), answer.clone()))
-                .expect("a member answer decides");
+                .handle(&viewing(&e, &log), act_batch("b2", vec![], send(), empty.clone()))
+                .expect("an empty answer decides");
             assert_eq!(tool_names(answered(&released).0), ["send"]);
             let facts = appended_facts(released);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
-                Fact::DispatchOpened { evidence, .. } if evidence == &answer
+                Fact::DispatchOpened { evidence, .. } if evidence == &empty
             )));
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
@@ -14548,20 +14519,20 @@ mod tests {
 
         #[test]
         fn one_act_reads_one_answer_for_a_group_two_sites_read() {
-            // A cap the current symbolic audience does not structurally derive: reading it
+            // A recipient the current symbolic audience does not structurally cover: reading it
             // takes the group's members.
-            let mut alice_capped = plain_tool("send");
-            alice_capped.requires = Requires {
+            let mut to_alice = plain_tool("send");
+            to_alice.requires = Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-                        Audience::restricted([corp_reader("alice")]),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::literal(Audience::restricted([corp_reader("alice")])),
                     ))],
                 },
                 ..Requires::default()
             };
             let e = grouped_engine(
-                config(vec![team_delta("seen"), alice_capped], vec![]),
+                config(vec![team_delta("seen"), to_alice], vec![]),
                 &["seen"],
                 known(TRUSTED, Audience::public()),
             );
@@ -14594,7 +14565,7 @@ mod tests {
                     fact,
                     Fact::ValueAdmitted { value, .. } if value.label.audience == symbolic("team")
                 )),
-                "the admitted label stays symbolic while the cap reads the same act's answer"
+                "the admitted label stays symbolic while `contains` reads the same act's answer"
             );
             assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
         }
@@ -14720,9 +14691,9 @@ mod tests {
                     .expect("the covering declaration declares");
                 crate::profile::identity_of(cfg, &profile)
             };
-            let forward = config(vec![capped_send(), team_delta("read")], vec![]);
-            let backward = config(vec![team_delta("read"), capped_send()], vec![]);
-            let mut remapped = config(vec![capped_send(), team_delta("read")], vec![]);
+            let forward = config(vec![team_send(), team_delta("read")], vec![]);
+            let backward = config(vec![team_delta("read"), team_send()], vec![]);
+            let mut remapped = config(vec![team_send(), team_delta("read")], vec![]);
             remapped.audience.groups[0].from = vec![crate::audience::SelectorSpec {
                 provider: "slack".to_string(),
                 selector: "user-group/other".to_string(),

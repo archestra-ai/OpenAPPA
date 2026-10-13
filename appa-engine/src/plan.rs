@@ -9,15 +9,9 @@
 //! An empty list is a proof, not a shrug.
 //!
 //! **A redispatch clears its gap directly or is not offered**. A plan for a failed
-//! `prior(k)` names a registered tool whose `emits` includes `k`. A plan for a failed cap names a
-//! tool whose own established restrictive audience contribution, folded into the current label,
-//! lands within the cap. Only a declared audience delta can prove that: an Annotated tool's
-//! contribution exists only per call, so it claims nothing at load. The blocked target's own
-//! delta takes no part in the claim — audience only
-//! narrows under `combine`, so a candidate that clears on its own contribution still clears when
-//! the target's delta folds after it, while one that needs the target's help is target-assisted
-//! advice this module does not offer. The named tool is dispatched as an ordinary separately-checked
-//! call: its own requirements, denials, and reservations bite at its own block, when it is
+//! `prior(k)` names a registered tool whose every declared variant `emits` `k`; an Annotated
+//! variant's effects exist only per call, so it claims nothing at load. The named tool is
+//! dispatched as an ordinary separately-checked call: its own requirements, denials, and reservations bite at its own block, when it is
 //! actually proposed — a directly clearing tool is sound advice even when its own call would
 //! block today.
 //!
@@ -33,7 +27,7 @@
 //! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
 //! (narrowing), `Withhold` (execution without admitting result output), `Sanitize` (an
 //! output sanitizer's relabel standing in for the raw crossing),
-//! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing tools, in
+//! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters, in
 //! name order — the agent picks, and each redispatch is separately checked for real.
 //! The empty-proof is complete over exactly this subset.
 //!
@@ -214,10 +208,10 @@ pub struct RedispatchPlan {
 }
 
 impl RedispatchPlan {
-    /// `None` unless at least one gap is claimed and every claimed gap is a redispatch species —
-    /// `prior(k)` or a cap, the two redispatch shapes.
+    /// `None` unless at least one gap is claimed and every claimed gap is a `prior(k)`, the one
+    /// redispatch shape.
     pub fn new(tool: ToolName, clears: Vec<Gap>) -> Option<RedispatchPlan> {
-        let valid = !clears.is_empty() && clears.iter().all(|gap| matches!(gap, Gap::Prior(_) | Gap::Cap { .. }));
+        let valid = !clears.is_empty() && clears.iter().all(|gap| matches!(gap, Gap::Prior(_)));
         valid.then_some(RedispatchPlan { tool, clears })
     }
 
@@ -372,10 +366,11 @@ pub(crate) fn plan(
 
     let terminal = |plan: &RemedyPlan| plan.executable().is_some_and(|plan| plan.hop().is_none());
     if !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
-        let mut needs = NeededAtoms::default();
-        let redispatches = direct_redispatches(registry, &current, raw, context, &mut needs);
-        needs.refuse_if_any()?;
-        plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
+        plans.extend(
+            direct_redispatches(registry, raw)
+                .into_iter()
+                .map(RemedyPlan::Redispatch),
+        );
     }
     let fork_advice = match (role, &raw.narrowing) {
         (CallRole::MarkedSpawn(_), _) => None,
@@ -850,7 +845,7 @@ pub(crate) fn gap_power_cmp(
         Gap::Attention(_) => Some(Ordering::Equal),
         // These gaps have no covering authority by construction (`enumerate_assignments` returns
         // `None`), so no assignment reaching this comparison carries one.
-        Gap::Prior(_) | Gap::Cap { .. } => Some(Ordering::Equal),
+        Gap::Prior(_) => Some(Ordering::Equal),
     }
 }
 
@@ -1373,7 +1368,7 @@ pub(crate) fn gap_cover(
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
-        Gap::Prior(_) | Gap::Cap { .. } => Evaluation::Fails,
+        Gap::Prior(_) => Evaluation::Fails,
     }
 }
 
@@ -1387,8 +1382,8 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 /// The atoms the planning of one surfaced block reads, so the operation answers them
 /// before [`plan`] runs — the deterministic second gathering stage, a pure function of the
 /// block and the policy. Each read site of the enumeration is mirrored by its
-/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`);
-/// a `cap` gap reads every tool's delta. A sanitizer's transition is not gathered: its
+/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`).
+/// A sanitizer's transition is not gathered: its
 /// admission derives from the value's label first and asks for members only where the
 /// enumeration itself finds derivation short, so the gate would demand atoms the decision
 /// never reads. The check's own reads — the call's contract — are the check stage's.
@@ -1400,15 +1395,6 @@ pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &
         for authority in registry.authorities() {
             if authority.scope.covers(&contract.tags) {
                 atoms.extend(authority.mandate.needed_atoms(providers));
-            }
-        }
-    }
-    if has(|gap| matches!(gap, Gap::Cap { .. })) {
-        for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
-            // A placeholder delta names its collection only per call; a cap comparison against
-            // it waits for that call.
-            if let Some(crate::contract::DeltaAudience::Static(audience)) = &tool.delta.audience {
-                atoms.extend(audience.needed_atoms(providers));
             }
         }
     }
@@ -1430,13 +1416,7 @@ pub(crate) fn plan_atoms(registry: &Registry, plan: &ExecutableRemedyPlan) -> Ve
     atoms
 }
 
-fn direct_redispatches(
-    registry: &Registry,
-    current: &Label,
-    raw: &RawBlock,
-    context: &MembershipContext<'_>,
-    needs: &mut NeededAtoms,
-) -> Vec<RedispatchPlan> {
+fn direct_redispatches(registry: &Registry, raw: &RawBlock) -> Vec<RedispatchPlan> {
     let mut direct = Vec::new();
     // A redispatch names the tool, not one ordered contract, so it clears a gap only when every
     // variant of that tool clears it.
@@ -1444,7 +1424,7 @@ fn direct_redispatches(
         let variant_clears: Vec<Vec<Gap>> = registry
             .variants(name)
             .map(|declaration| match declaration.declared() {
-                Some(tool) => direct_clears(tool, &raw.requirement_gaps, current, context, needs),
+                Some(tool) => direct_clears(tool, &raw.requirement_gaps),
                 // An Annotated variant's requirements exist only per call: it provably clears
                 // nothing at load, so the tool never qualifies as a redispatch.
                 None => Vec::new(),
@@ -1464,33 +1444,12 @@ fn direct_redispatches(
     direct
 }
 
-/// The gaps a successful call to `tool` clears by itself (RMD-13): a `prior` it emits, or a cap
-/// the label it commits from `current` stays within.
-pub(crate) fn direct_clears(
-    tool: &ToolAnnotation,
-    gaps: &[Gap],
-    current: &Label,
-    context: &MembershipContext<'_>,
-    needs: &mut NeededAtoms,
-) -> Vec<Gap> {
-    let has_cap = gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
-    // No call is at hand here, so a placeholder delta commits no label and clears no cap.
-    let committed =
-        (has_cap && tool.delta.selector_placeholder().is_none()).then(|| check::committed_label(tool, current));
+/// The gaps a successful call to `tool` clears by itself (RMD-13): each `prior` it emits.
+pub(crate) fn direct_clears(tool: &ToolAnnotation, gaps: &[Gap]) -> Vec<Gap> {
     gaps.iter()
-        .filter(|gap| match (gap, &committed) {
-            (Gap::Prior(kind), _) => tool.emits.contains(kind),
-            // An undecided cap comparison is a missing answer, not a refuted clearing: it joins
-            // the aggregate refusal so the redispatch list never silently shrinks.
-            (Gap::Cap { cap }, Some(committed)) => match committed.within_cap(cap, context) {
-                Evaluation::Holds => true,
-                Evaluation::Fails => false,
-                Evaluation::Needs(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            },
-            _ => false,
+        .filter(|gap| match gap {
+            Gap::Prior(kind) => tool.emits.contains(kind),
+            Gap::TrustFloor { .. } | Gap::Includes { .. } | Gap::NoPrior(_) | Gap::Attention(_) => false,
         })
         .cloned()
         .collect()
@@ -2044,121 +2003,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cap_redispatch_claims_only_what_it_actually_clears() {
-        let a = || Audience::restricted([ReaderId::new("a")]);
-        let ab = || Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-        let narrowing_tool = |name: &str, to: Audience| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
-            tags: vec![],
-            delta: Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(to))),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires::default(),
-        };
-        let send = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a()))],
-                },
-                ..Requires::default()
-            },
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![
-                send,
-                narrowing_tool("narrow_all", a()),
-                narrowing_tool("narrow_some", ab()),
-            ]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
-        let planned = plan_of(&registry, &log, &call("send", json!({})));
-
-        assert_eq!(
-            planned.plans,
-            vec![redispatch(
-                "narrow_all",
-                vec![Gap::Cap {
-                    cap: DeclaredAudience::literal(a())
-                }]
-            )]
-        );
-    }
-
-    #[test]
-    fn only_an_established_static_contribution_claims_a_cap_clear() {
-        let a = Audience::restricted([ReaderId::new("a")]);
-        let send = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a))],
-                },
-                ..Requires::default()
-            },
-        };
-        let contract = |name: &str, delta: Delta| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
-            tags: vec![],
-            delta,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires::default(),
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: vec![
-                ToolDeclaration::Declared(send),
-                // An Annotated tool's contribution exists only per call: it claims no cap clear.
-                ToolDeclaration::Annotated {
-                    name: ToolName::new("annotated"),
-                    tags: vec![],
-                    description: Some("A test tool.".to_string()),
-                    parameters: crate::params::test_string_argument_schema("to"),
-                    annotator: crate::names::AnnotatorName::new("acl"),
-                },
-                ToolDeclaration::Declared(contract("neutral", Delta::NONE)),
-            ],
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![crate::registry::AnnotatorDeclaration {
-                name: crate::names::AnnotatorName::new("acl"),
-                trust: None,
-                audiences: None,
-                marks: None,
-                effects: None,
-            }],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
-        let planned = plan_of(&registry, &log, &call("send", json!({})));
-        assert!(planned.plans.is_empty());
-        assert!(!planned.is_curable());
-    }
-
-    #[test]
     fn one_tool_clearing_several_gaps_is_one_offer_with_the_complete_claim() {
         let a = Audience::restricted([ReaderId::new("a")]);
         let send = ToolAnnotation {
@@ -2169,10 +2013,6 @@ mod tests {
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a.clone()))],
-                },
                 history: vec![
                     HistoryRequirement::Prior(EffectKind::new("backup.done")),
                     HistoryRequirement::Prior(EffectKind::new("receipt")),
@@ -2186,7 +2026,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a.clone()))),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
@@ -2207,9 +2047,6 @@ mod tests {
             vec![redispatch(
                 "fixer",
                 vec![
-                    Gap::Cap {
-                        cap: DeclaredAudience::literal(a)
-                    },
                     Gap::Prior(EffectKind::new("backup.done")),
                     Gap::Prior(EffectKind::new("receipt")),
                 ],
@@ -2672,11 +2509,6 @@ mod tests {
                 collect(&unconfined, &raw(vec![includes()], false)),
                 atoms(&["team"]),
                 "an includes gap reads the in-scope authority; the input sanitizer reads its transition against the value"
-            );
-            assert_eq!(
-                collect(&unconfined, &raw(vec![Gap::Cap { cap: group("team") }], false)),
-                atoms(&["press"]),
-                "a cap gap reads every tool's delta and no authority"
             );
             assert_eq!(
                 collect(
@@ -4151,16 +3983,8 @@ mod tests {
             Some(clause.readers().clone())
         }
 
-        fn intersect(a: &Audience, b: &Audience) -> Audience {
-            match (readers(a), readers(b)) {
-                (None, _) => b.clone(),
-                (_, None) => a.clone(),
-                (Some(a), Some(b)) => Audience::restricted(a.intersection(&b).cloned()),
-            }
-        }
-
-        fn within(audience: &Audience, cap: &Audience) -> bool {
-            match (readers(audience), readers(cap)) {
+        fn within(audience: &Audience, outer: &Audience) -> bool {
+            match (readers(audience), readers(outer)) {
                 (_, None) => true,
                 (None, Some(_)) => false,
                 (Some(a), Some(c)) => a.is_subset(&c),
@@ -4180,28 +4004,18 @@ mod tests {
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
                 Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                Gap::Prior(_) | Gap::Cap { .. } => false,
+                Gap::Prior(_) => false,
             })
         }
 
-        pub(super) fn direct_set(registry: &Registry, current: &Label, raw: &RawBlock) -> Vec<(ToolName, Vec<Gap>)> {
+        pub(super) fn direct_set(registry: &Registry, raw: &RawBlock) -> Vec<(ToolName, Vec<Gap>)> {
             let mut expected = Vec::new();
             for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
-                let narrowed = match &tool.delta {
-                    Delta {
-                        audience: Some(DeltaAudience::Static(delta)),
-                        ..
-                    } => Some(intersect(&current.audience, &Audience::of_declared(delta))),
-                    _ => None,
-                };
                 let clears: Vec<Gap> = raw
                     .requirement_gaps
                     .iter()
                     .filter(|gap| match gap {
                         Gap::Prior(kind) => tool.emits.contains(kind),
-                        Gap::Cap { cap } => narrowed
-                            .as_ref()
-                            .is_some_and(|audience| within(audience, &Audience::of_declared(cap))),
                         _ => false,
                     })
                     .cloned()
@@ -4284,26 +4098,18 @@ mod tests {
     fn a_requires() -> impl Strategy<Value = Requires> {
         (
             prop::option::of((0u8..2).prop_map(Trust::new)),
-            prop::option::of(small_audience()),
             an_includes(),
             prop::collection::vec(small_effect().prop_map(HistoryRequirement::Prior), 0..2),
             prop::collection::vec(small_effect().prop_map(HistoryRequirement::NoPrior), 0..2),
             prop::bool::ANY,
         )
-            .prop_map(|(floor, cap, includes, prior, no_prior, attend)| {
+            .prop_map(|(floor, includes, prior, no_prior, attend)| {
                 let mut history = prior;
                 history.extend(no_prior);
-                let mut audience = Vec::new();
-                if let Some(cap) = cap {
-                    audience.push(AudienceRequirement::Cap(DeclaredAudience::literal(cap)));
-                }
-                if let Some(includes) = includes {
-                    audience.push(includes);
-                }
                 Requires {
                     label: LabelRequirements {
                         trust_floor: floor,
-                        audience,
+                        audience: includes.into_iter().collect(),
                     },
                     history,
                     attention: if attend { vec![MarkName::new("m0")] } else { vec![] },
@@ -4491,7 +4297,7 @@ mod tests {
                 .collect();
             let expected = match coverable || raw.requirement_gaps.is_empty() {
                 true => Vec::new(),
-                false => reference::direct_set(&registry, &state.partial(), &raw),
+                false => reference::direct_set(&registry, &raw),
             };
             prop_assert_eq!(offered, expected);
         }
@@ -4627,20 +4433,10 @@ mod tests {
                     HistoryRequirement::NoPrior(_) => None,
                 })
                 .collect();
-            let has_cap = contract
-                .requires.audience_requirements().iter()
-                .any(|requirement| matches!(requirement, AudienceRequirement::Cap(DeclaredAudience::Union(_))));
             let redispatches = registry
                 .tools()
                 .filter_map(ToolDeclaration::declared)
-                .filter(|candidate| {
-                    candidate.emits.iter().any(|kind| priors.contains(kind))
-                        || (has_cap
-                            && matches!(
-                                candidate.delta.audience.as_ref(),
-                                Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
-                            ))
-                })
+                .filter(|candidate| candidate.emits.iter().any(|kind| priors.contains(kind)))
                 .count() as u128;
             bound = bound.saturating_add(redispatches);
 
@@ -4732,7 +4528,7 @@ mod tests {
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                    Gap::Prior(_) | Gap::Cap { .. } => false,
+                    Gap::Prior(_) => false,
                 }
             };
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
@@ -4792,7 +4588,7 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Prior(_) | Gap::Cap { .. } => Some(O::Equal),
+                    Gap::Attention(_) | Gap::Prior(_) => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

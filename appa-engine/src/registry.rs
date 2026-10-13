@@ -674,7 +674,7 @@ pub enum LoadError {
 /// candidates; per catalogue, the confined child-return menu. The bound keeps enumeration total
 /// (no runtime truncation: "every sound alternative" is literal). Deployment configuration
 /// sets it via `[limits] planner_cap`; omitted, the cap is 4096. The bound is a sum as much as
-/// a product: for an annotated tool every audience-narrowing tool in the catalogue counts as a
+/// a product: for an annotated tool every emitting tool in the catalogue counts as a
 /// redispatch candidate, so the default admits a catalogue of a few thousand tools before a
 /// deployment has to raise it. Zero is unrepresentable: every stage's worst case is at least
 /// one, so a zero cap would refuse every registry.
@@ -815,7 +815,7 @@ fn worst_case_plan_alternatives(
                             }
                         }
                     }
-                    AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
+                    AudienceRequirement::Includes(_) => {}
                 }
             }
             let mut seen_no_prior: Vec<&EffectKind> = Vec::new();
@@ -895,41 +895,30 @@ fn worst_case_plan_alternatives(
         multiply(worst_case_return_options(sanitizers));
     }
 
-    // What the Annotator may require is unknown at load, so every candidate that emits at all,
-    // and every audience-narrowing candidate, stays counted as a redispatch.
-    let (priors, has_cap): (Vec<&EffectKind>, bool) = match declaration {
-        ToolDeclaration::Annotated { .. } => (Vec::new(), true),
-        ToolDeclaration::Declared(tool) => (
-            tool.requires
-                .history
-                .iter()
-                .filter_map(|requirement| match requirement {
-                    HistoryRequirement::Prior(kind) => Some(kind),
-                    HistoryRequirement::NoPrior(_) => None,
-                })
-                .collect(),
-            tool.requires
-                .audience_requirements()
-                .iter()
-                .any(|requirement| matches!(requirement, AudienceRequirement::Cap(DeclaredAudience::Union(_)))),
-        ),
+    // What the Annotator may require is unknown at load, so every candidate that emits at all
+    // stays counted as a redispatch.
+    let priors: Vec<&EffectKind> = match declaration {
+        ToolDeclaration::Annotated { .. } => Vec::new(),
+        ToolDeclaration::Declared(tool) => tool
+            .requires
+            .history
+            .iter()
+            .filter_map(|requirement| match requirement {
+                HistoryRequirement::Prior(kind) => Some(kind),
+                HistoryRequirement::NoPrior(_) => None,
+            })
+            .collect(),
     };
     let any_prior = matches!(declaration, ToolDeclaration::Annotated { .. });
     let redispatches = tools
         .iter()
         .filter(|candidate| match candidate {
             ToolDeclaration::Declared(tool) => {
-                tool.emits.iter().any(|kind| priors.contains(&kind))
-                    || (any_prior && !tool.emits.is_empty())
-                    || (has_cap
-                        && matches!(
-                            tool.delta.audience.as_ref(),
-                            Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
-                        ))
+                tool.emits.iter().any(|kind| priors.contains(&kind)) || (any_prior && !tool.emits.is_empty())
             }
-            // An Annotated candidate's emits and delta are unknown at load; the cap is the only
-            // bound, so it stays counted wherever a prior or a cap could match it.
-            ToolDeclaration::Annotated { .. } => any_prior || !priors.is_empty() || has_cap,
+            // An Annotated candidate's emits are unknown at load; the cap is the only bound, so
+            // it stays counted wherever a prior could match it.
+            ToolDeclaration::Annotated { .. } => any_prior || !priors.is_empty(),
         })
         .count() as u128;
     let input_hops = sanitizers
@@ -1162,11 +1151,6 @@ impl Registry {
                             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
                                 direct.extend(check_declared(&audience, recipients, || {
                                     format!("tool {} contains", tool.name.as_str())
-                                })?);
-                            }
-                            AudienceRequirement::Cap(cap) => {
-                                direct.extend(check_declared(&audience, cap, || {
-                                    format!("tool {} within", tool.name.as_str())
                                 })?);
                             }
                             AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
@@ -1737,7 +1721,7 @@ fn audience_arguments(
                     AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => {
                         Some((argument.clone(), ArgumentShape::String))
                     }
-                    AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
+                    AudienceRequirement::Includes(_) => None,
                 });
             recipients
                 .chain(tool.selector_placeholders().flat_map(selector_arguments))
@@ -1941,9 +1925,7 @@ fn configured_audience_vocabulary(
         }
         for requirement in &tool.requires.label.audience {
             match requirement {
-                AudienceRequirement::Includes(RecipientSpec::Static(audience)) | AudienceRequirement::Cap(audience) => {
-                    vocabulary.add_declared(audience)
-                }
+                AudienceRequirement::Includes(RecipientSpec::Static(audience)) => vocabulary.add_declared(audience),
                 AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => {}
             }
         }
@@ -2146,10 +2128,9 @@ mod tests {
                 "private",
             )]))),
         };
-        classified.requires.label.audience =
-            vec![AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new(
-                "partner",
-            )]))];
+        classified.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::restricted([ReaderId::new("partner")]),
+        ))];
         let mut cfg = base();
         cfg.tools = declared(vec![classified]);
 
@@ -2179,11 +2160,6 @@ mod tests {
             DeclaredAudience::literal(named.clone()),
         ))];
         includes.tools = declared(vec![includes_tool]);
-
-        let mut cap = base();
-        let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(named.clone()))];
-        cap.tools = declared(vec![cap_tool]);
 
         let mut ceiling = base();
         ceiling.authorities = vec![Authority {
@@ -2220,7 +2196,6 @@ mod tests {
         vec![
             ("tool emit delta", delta),
             ("tool emit contains", includes),
-            ("tool emit within", cap),
             ("authority officer reader ceiling", ceiling),
             ("sanitizer redactor from", transition_from),
             ("sanitizer redactor to", transition_to),
@@ -2291,12 +2266,12 @@ mod tests {
     fn one_reserved_member_spoils_an_otherwise_literal_set() {
         let mut cfg = base();
         let mut spoiled = tool("emit");
-        spoiled.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-            Audience::restricted([
+        spoiled.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::literal(Audience::restricted([
                 ReaderId::new("ap@corp.example"),
                 ReaderId::new("finance"),
                 ReaderId::new("public"),
-            ]),
+            ])),
         ))];
         cfg.tools = declared(vec![spoiled]);
         assert!(matches!(
@@ -2329,13 +2304,13 @@ mod tests {
         }];
         assert!(Registry::build_covered(public_ceiling).is_ok());
 
-        let mut empty_cap = base();
-        let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-            Audience::restricted([]),
+        let mut empty_contains = base();
+        let mut contains_tool = tool("emit");
+        contains_tool.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::literal(Audience::restricted([])),
         ))];
-        empty_cap.tools = declared(vec![cap_tool]);
-        assert!(Registry::build_covered(empty_cap).is_ok());
+        empty_contains.tools = declared(vec![contains_tool]);
+        assert!(Registry::build_covered(empty_contains).is_ok());
     }
 
     #[test]
@@ -2516,7 +2491,9 @@ mod tests {
                 )
                 .unwrap(),
             ))),
-            AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new("partner")])),
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([ReaderId::new(
+                "partner",
+            )]))),
         ];
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -3278,7 +3255,7 @@ mod tests {
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new("finance")],
             )))),
-            AudienceRequirement::Cap(DeclaredAudience::literal(Audience::public())),
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::public()))),
         ];
         cfg.tools = declared(vec![emitter]);
         assert!(Registry::build_covered(cfg).is_ok());
@@ -3572,101 +3549,6 @@ mod tests {
             Registry::build_covered_with_cap(prior_target_config(4), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "wire"
         ));
-    }
-
-    fn cap_target_config_with(narrowers: usize, cap: DeclaredAudience) -> RegistryConfig {
-        let mut target = tool("send");
-        target.requires = Requires {
-            label: LabelRequirements {
-                trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(cap)],
-            },
-            ..Requires::default()
-        };
-        let mut tools = vec![target];
-        for i in 0..narrowers {
-            let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([
-                ReaderId::new("a"),
-                ReaderId::new("c"),
-            ])));
-            tools.push(narrower);
-        }
-        let mut public = tool("public-delta");
-        public.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::literal(Audience::public())));
-        let neutral = tool("neutral");
-        let mut unannotated = tool("unannotated");
-        unannotated.delta = Delta::NONE;
-        tools.extend([public, neutral, unannotated]);
-        let mut cfg = base();
-        cfg.tools = declared(tools);
-        cfg
-    }
-
-    fn cap_target_config(narrowers: usize) -> RegistryConfig {
-        cap_target_config_with(narrowers, DeclaredAudience::restricted([ReaderId::new("a")]))
-    }
-
-    #[test]
-    fn the_bound_counts_only_static_restricted_contributions_for_a_cap() {
-        let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(Registry::build_covered_with_cap(cap_target_config(3), cap).is_ok());
-        assert!(matches!(
-            Registry::build_covered_with_cap(cap_target_config(4), cap),
-            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "send"
-        ));
-    }
-
-    /// An Annotated candidate's delta is unknown at load; the cap is the only bound, so it stays
-    /// counted as a redispatch wherever a cap could match it.
-    #[test]
-    fn an_annotated_candidate_stays_counted_wherever_a_cap_could_match_it() {
-        let mut cfg = cap_target_config(3);
-        cfg.annotators = vec![annotator("classifier")];
-        cfg.tools.push(annotated("shell", "classifier"));
-        assert!(matches!(
-            Registry::build_covered_with_cap(cfg, PlannerCap::new(4).expect("nonzero")),
-            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "send"
-        ));
-    }
-
-    #[test]
-    fn a_vacuous_public_cap_arms_no_redispatch_count() {
-        let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(matches!(
-            Registry::build_covered_with_cap(cap_target_config(4), cap),
-            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
-        ));
-        assert!(
-            Registry::build_covered_with_cap(
-                cap_target_config_with(4, DeclaredAudience::literal(Audience::public())),
-                cap
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn a_tool_clearing_both_gap_species_counts_once() {
-        let mut target = tool("send");
-        target.requires = Requires {
-            label: LabelRequirements {
-                trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-                    Audience::restricted([ReaderId::new("a")]),
-                ))],
-            },
-            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
-            ..Requires::default()
-        };
-        let mut fixer = tool("fixer");
-        fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
-            "a",
-        )])));
-        let mut cfg = base();
-        cfg.tools = declared(vec![target, fixer]);
-        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
     }
 
     #[test]

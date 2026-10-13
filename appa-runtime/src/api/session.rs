@@ -3511,76 +3511,69 @@ context_control = false
     }
     #[tokio::test]
     async fn symbolic_audience_acceptance_needs_no_membership_sources() {
-        for requirement in ["within", "contains"] {
-            let policy = format!(
-                r#"
+        let policy = r#"
 version = 2
 [[policy.tool]]
 name = "read_internal"
-delta = {{ audience = ["internal"] }}
-requires = {{ audience = {{ {requirement} = ["internal"] }} }}
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "send_reader"
-delta = {{}}
-requires = {{ audience = {{ contains = ["reader@example.com"] }} }}
-"#
-            );
-            let dir = tempfile::tempdir().unwrap();
-            let db = dir.path().join("appa.db");
-            let runtime = Runtime::open(config_with(&policy, None), db.clone(), None).unwrap();
-            let session = runtime.create_session(root(), None).unwrap();
-            let read = ProposedCall {
-                tool: "read_internal".into(),
-                arguments: raw(serde_json::json!({})),
-                cwd: None,
-            };
-            assert!(matches!(
-                session.on_tool_call(read.clone(), false).await.unwrap(),
-                ToolCallDecision::Deny { .. }
-            ));
-            let decision = session
-                .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None, None)
-                .await
-                .unwrap();
-            assert!(
-                matches!(decision, RemedyDecision::Authorized { .. }),
-                "{requirement}: {decision:?}"
-            );
-            assert!(matches!(
-                session.on_tool_call(read.clone(), false).await.unwrap(),
-                ToolCallDecision::Allow { .. }
-            ));
+delta = {}
+requires = { audience = { contains = ["reader@example.com"] } }
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open(config_with(policy, None), db.clone(), None).unwrap();
+        let session = runtime.create_session(root(), None).unwrap();
+        let read = ProposedCall {
+            tool: "read_internal".into(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        };
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await.unwrap(),
+            ToolCallDecision::Deny { .. }
+        ));
+        let decision = session
+            .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(decision, RemedyDecision::Authorized { .. }), "{decision:?}");
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await.unwrap(),
+            ToolCallDecision::Allow { .. }
+        ));
+        session
+            .on_tool_result(
+                read,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("internal result".into()),
+                },
+            )
+            .await
+            .unwrap();
+        drop(session);
+        drop(runtime);
+
+        // Replay preserves the symbolic label; a real membership question still refuses.
+        let runtime = Runtime::open(config_with(policy, None), db, None).unwrap();
+        assert_eq!(runtime.status(&root()).unwrap().audience, "internal");
+        let session = runtime.session(&root(), &root()).unwrap();
+        assert!(matches!(
             session
-                .on_tool_result(
-                    read,
-                    ToolOutcome::Success {
-                        body: OutcomeBody::Available("internal result".into()),
+                .on_tool_call(
+                    ProposedCall {
+                        tool: "send_reader".into(),
+                        arguments: raw(serde_json::json!({})),
+                        cwd: None,
                     },
+                    false
                 )
                 .await
-                .unwrap();
-            drop(session);
-            drop(runtime);
-
-            // Replay preserves the symbolic label; a real membership question still refuses.
-            let runtime = Runtime::open(config_with(&policy, None), db, None).unwrap();
-            assert_eq!(runtime.status(&root()).unwrap().audience, "internal");
-            let session = runtime.session(&root(), &root()).unwrap();
-            assert!(matches!(
-                session
-                    .on_tool_call(
-                        ProposedCall {
-                            tool: "send_reader".into(),
-                            arguments: raw(serde_json::json!({})),
-                            cwd: None,
-                        },
-                        false
-                    )
-                    .await
-                    .unwrap(),
-                ToolCallDecision::Deny { .. }
-            ));
-        }
+                .unwrap(),
+            ToolCallDecision::Deny { .. }
+        ));
     }
 
     const ATTENTION: &str = r#"

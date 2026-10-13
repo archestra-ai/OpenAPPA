@@ -115,7 +115,6 @@ pub enum RecipientSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudienceRequirement {
     Includes(RecipientSpec),
-    Cap(DeclaredAudience),
 }
 
 /// One segment of a selector placeholder: text written as is, or the name of the call argument
@@ -406,8 +405,7 @@ impl ToolAnnotation {
             .symbolic_atoms()
             .chain(self.requires.audience_requirements().iter().flat_map(|requirement| {
                 let declared = match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Static(declared))
-                    | AudienceRequirement::Cap(declared) => Some(declared),
+                    AudienceRequirement::Includes(RecipientSpec::Static(declared)) => Some(declared),
                     AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => None,
                 };
                 declared.into_iter().flat_map(DeclaredAudience::symbolic_atoms)
@@ -435,8 +433,7 @@ impl ToolAnnotation {
                     .iter()
                     .filter_map(|requirement| match requirement {
                         AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => Some(placeholder),
-                        AudienceRequirement::Includes(RecipientSpec::Static(_) | RecipientSpec::Placeholder(_))
-                        | AudienceRequirement::Cap(_) => None,
+                        AudienceRequirement::Includes(RecipientSpec::Static(_) | RecipientSpec::Placeholder(_)) => None,
                     }),
             )
     }

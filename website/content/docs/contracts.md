@@ -244,9 +244,8 @@ Use `delta.audience` to restrict who can receive a tool's result. Use `requires.
 |---|---|
 | `delta.audience` | Restricts the result to the specified readers. |
 | `requires.audience.contains` | Checks that the current audience includes all specified readers. |
-| `requires.audience.within` | Checks that every reader in the current audience belongs to the specified audience. |
 
-In the example below, reading a ticket restricts the trajectory to `internal`. The `publish_update` call requires unrestricted sharing. The `process_internal_data` call requires the trajectory's audience to be within `internal`.
+In the example below, reading a ticket restricts the trajectory to `internal`. The `publish_update` call requires unrestricted sharing.
 
 ```toml
 [[policy.tool]]
@@ -256,10 +255,6 @@ delta = { audience = ["internal"] }
 [[policy.tool]]
 name = "publish_update"
 requires = { audience = { contains = ["public"] } }
-
-[[policy.tool]]
-name = "process_internal_data"
-requires = { audience = { within = ["internal"] } }
 ```
 
 Multiple entries combine readers from all entries. For example:
@@ -268,9 +263,8 @@ Multiple entries combine readers from all entries. For example:
 |---|---|
 | `delta = { audience = ["@finance", "@support"] }` | The result is for readers who belong to either group. |
 | `requires = { audience = { contains = ["@finance", "@support"] } }` | The current audience must include every member of both groups. |
-| `requires = { audience = { within = ["@finance", "@support"] } }` | Every current reader must belong to at least one of the two groups. |
 
-`within` checks the trajectory's audience, not the recipient of one call. Only `contains` and `within` are allowed under `requires.audience`. Other keys cause a load error.
+`contains` is the only requirement under `requires.audience`.
 
 Each audience entry can be one of the following:
 
@@ -323,7 +317,7 @@ url = "https://audience.corp/slack"
 selectors = [{ template = "viewer", feeds = "self" }, { template = "channel/<id>" }]
 ```
 
-A selector placeholder MAY be the only entry of `delta.audience` or of `requires.audience.contains`. It MAY also be an entry of an annotator's `audiences` mandate; see [Permits and hint](#permits-and-hint). It MUST NOT appear under `within`, beside other entries in one list, or in an annotator's answer.
+A selector placeholder MAY be the only entry of `delta.audience` or of `requires.audience.contains`. It MAY also be an entry of an annotator's `audiences` mandate; see [Permits and hint](#permits-and-hint). It MUST NOT appear beside other entries in one list or in an annotator's answer.
 
 Each `$<argument_name>` becomes a required top-level argument of the tool, as under `contains`, except that a selector placeholder also accepts an argument declared as an array of strings; see [Read an audience from a tool argument](#read-an-audience-from-a-tool-argument). The spelling, with each `$<argument_name>` read as a variable segment, MUST match one template the provider declares under `selectors`; see [Declare selector templates](#declare-selector-templates). A `$<argument_name>` segment matches only a `<variable>` segment of the template.
 
@@ -804,7 +798,7 @@ The response uses `emits` for effects and `requires.history` for history checks.
 - `answer` must contain exactly `delta`, `requires`, and `emits`.
 - `requires` must contain `history` and `attention` arrays, even when empty.
 - Audience and trust fields inside `delta` and `requires` are optional. An omitted field adds no restriction or requirement.
-- `requires.audience` can contain `contains`, `within`, or both.
+- `requires.audience` must contain exactly `contains`.
 - Each history entry is `{"contains":"<effect>"}` or `{"excludes":"<effect>"}`.
 - JSON audience values use `"public"` or a list of permitted audiences. Do not put `public` inside a JSON audience list.
 - A restricted list cannot repeat entries or contain both `self` and `internal`.
@@ -883,7 +877,7 @@ When a tool result would restrict the agent, OpenAPPA can offer a sanitizer whos
 
 If the cleaned result still adds restrictions, the agent can accept them or select another compatible sanitizer. Cleaning a new result does not remove restrictions from data the agent has already read.
 
-Changing tool arguments can satisfy an audience `contains` requirement. For example, a sanitizer could replace an external recipient with an allowed internal recipient. It cannot satisfy `within` or trust requirements, because changing arguments does not change the data the agent has already read.
+Changing tool arguments can satisfy an audience `contains` requirement. For example, a sanitizer could replace an external recipient with an allowed internal recipient. It cannot satisfy a trust requirement, because changing arguments does not change the data the agent has already read.
 
 OpenAPPA selects the contract that matches the new arguments and checks the call again, including its requirements, effects, and argument schema. If that contract uses an annotator, OpenAPPA requests a new annotation. Membership checks use the responses already recorded for this decision.
 

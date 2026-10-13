@@ -328,8 +328,8 @@ impl Serialize for AudienceRequirement {
 }
 
 impl Requirement {
-    /// Project one assigned gap. A `cap` or `prior` gap is never assigned to an authority
-    /// — no mandate covers them — so meeting one here is a broken planning invariant.
+    /// Project one assigned gap. A `prior` gap is never assigned to an authority — no
+    /// mandate covers it — so meeting one here is a broken planning invariant.
     pub fn of(gap: &Gap, chain: &TrustChain) -> Requirement {
         match gap {
             Gap::TrustFloor { required, .. } => Requirement::Trust {
@@ -349,8 +349,8 @@ impl Requirement {
             Gap::Attention(mark) => Requirement::Attention {
                 mark: mark.as_str().to_string(),
             },
-            Gap::Prior(_) | Gap::Cap { .. } => {
-                unreachable!("authorities are assigned only coverable gaps; a cap or prior gap has no mandate")
+            Gap::Prior(_) => {
+                unreachable!("authorities are assigned only coverable gaps; a prior gap has no mandate")
             }
         }
     }
@@ -501,19 +501,11 @@ pub enum HistoryEntry {
     Excludes(String),
 }
 
-/// The audience half of a `requires` answer off the wire: a `contains` floor, a `within`
-/// ceiling, or both — never neither.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequiredAudienceAnswer {
-    pub includes: Option<DeclaredAudience>,
-    pub cap: Option<DeclaredAudience>,
-}
-
+/// The audience half of a `requires` answer off the wire: exactly its `contains` floor.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequiredAudienceWire {
-    contains: Option<serde_json::Value>,
-    within: Option<serde_json::Value>,
+    contains: serde_json::Value,
 }
 
 /// One answered audience read against the mandate: the list parses as one declared audience
@@ -543,7 +535,8 @@ pub struct AnnotationAnswer {
     pub delta_trust: Option<String>,
     pub delta_audience: Option<DeclaredAudience>,
     pub required_trust: Option<String>,
-    pub required_audience: Option<RequiredAudienceAnswer>,
+    /// The `requires.audience.contains` floor.
+    pub required_audience: Option<DeclaredAudience>,
     pub history: Vec<HistoryEntry>,
     pub attention: Vec<String>,
     pub emits: Vec<String>,
@@ -627,13 +620,7 @@ impl AnnotationAnswer {
             None => None,
             Some(value) => {
                 let wire: RequiredAudienceWire = serde_json::from_value(value).map_err(|_| invalid_shape())?;
-                if wire.contains.is_none() && wire.within.is_none() {
-                    return Err(invalid_shape());
-                }
-                Some(RequiredAudienceAnswer {
-                    includes: bounded("requires.audience.contains", wire.contains)?,
-                    cap: bounded("requires.audience.within", wire.within)?,
-                })
+                bounded("requires.audience.contains", Some(wire.contains))?
             }
         };
         let history = requires
@@ -769,7 +756,7 @@ Do not start from a default annotation. Interpret the call first. Always return 
 
 For trust and audience, make the most reasonable classification supported by the visible call and its provenance. Do not restrict them merely because harm is theoretically possible, but do not treat missing evidence as proof that produced data is trusted or public. When provenance or allowed readership is materially ambiguous, prefer the safer supported trust rank or audience without inventing policy values the call gives no basis to choose. Use label (`delta.trust`, `delta.audience`) and required audience (`requires.audience`) as the default way of stating restrictions; `requires.attention` is for exceptional cases only.
 
-`delta` describes the value the call produces: `delta.trust` the rank its data deserves, `delta.audience` the declared audience allowed to read it. `requires` constrains whether the call may run at all: `requires.trust` is a minimum trust rank, checked after your own `delta.trust` has narrowed the session, so a floor above your `delta.trust` sends the call to an authority permitting that floor; `requires.audience` holds `contains` (the current audience must cover those readers), `within` (the current audience must stay within that audience), or both; `requires.attention` lists fresh review marks; `requires.history` holds `{\"contains\": ...}` and `{\"excludes\": ...}` entries over the declared effect kinds. `emits` lists the declared effect kinds the call visibly performs. Keep produced-data classification separate from disclosure requirements. Attention marks are for exceptional cases requiring out-of-band human signoff or explicit authority intervention. Use `delta.audience`, `requires.audience`, and trust labels as the default way to express data classification and access restrictions.
+`delta` describes the value the call produces: `delta.trust` the rank its data deserves, `delta.audience` the declared audience allowed to read it. `requires` constrains whether the call may run at all: `requires.trust` is a minimum trust rank, checked after your own `delta.trust` has narrowed the session, so a floor above your `delta.trust` sends the call to an authority permitting that floor; `requires.audience` holds `contains` (the current audience must cover those readers); `requires.attention` lists fresh review marks; `requires.history` holds `{\"contains\": ...}` and `{\"excludes\": ...}` entries over the declared effect kinds. `emits` lists the declared effect kinds the call visibly performs. Keep produced-data classification separate from disclosure requirements. Attention marks are for exceptional cases requiring out-of-band human signoff or explicit authority intervention. Use `delta.audience`, `requires.audience`, and trust labels as the default way to express data classification and access restrictions.
 
 For produced data, when `args` or `context` visibly identifies both a source being read and the declared audience allowed to read that source, use that audience in `delta.audience`. Copying or transforming a value does not by itself change the source evidence.
 
@@ -903,13 +890,7 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
         "type": "array",
         "items": {"oneOf": [object(&[("contains", &effect)]), object(&[("excludes", &effect)])]}
     });
-    let required_audience = serde_json::json!({
-        "anyOf": [
-            object(&[("contains", &audience)]),
-            object(&[("within", &audience)]),
-            object(&[("contains", &audience), ("within", &audience)])
-        ]
-    });
+    let required_audience = object(&[("contains", &audience)]);
     let attention = serde_json::json!({"type": "array", "items": array_items(&declaration.attention_marks)});
     let mut delta = vec![object(&[]), object(&[("audience", &audience)])];
     let mut requires = vec![
@@ -1148,7 +1129,7 @@ mod tests {
                     "delta": {"trust": "suspicious", "audience": ["audit"]},
                     "requires": {
                         "trust": "trusted",
-                        "audience": {"contains": ["support"], "within": ["support", "audit"]},
+                        "audience": {"contains": ["support"]},
                         "history": [{"contains": "network"}, {"excludes": "disclosure"}],
                         "attention": ["review"]
                     },
@@ -1160,13 +1141,7 @@ mod tests {
                 delta_trust: Some("suspicious".to_string()),
                 delta_audience: Some(DeclaredAudience::restricted([ReaderId::new("audit")])),
                 required_trust: Some("trusted".to_string()),
-                required_audience: Some(RequiredAudienceAnswer {
-                    includes: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
-                    cap: Some(DeclaredAudience::restricted([
-                        ReaderId::new("support"),
-                        ReaderId::new("audit"),
-                    ])),
-                }),
+                required_audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
                 history: vec![
                     HistoryEntry::Contains("network".to_string()),
                     HistoryEntry::Excludes("disclosure".to_string()),
@@ -1180,10 +1155,13 @@ mod tests {
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}}),
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": [], "note": "x"}),
             serde_json::json!({"delta": {"trust": null}, "requires": {"history": [], "attention": []}, "emits": []}),
-            // `requires` without its mandatory arrays, and an empty audience object.
+            // `requires` without its mandatory arrays, an empty audience object, and an
+            // audience key beside `contains`.
             serde_json::json!({"delta": {}, "requires": {"attention": []}, "emits": []}),
             serde_json::json!({"delta": {}, "requires": {"history": []}, "emits": []}),
             serde_json::json!({"delta": {}, "requires": {"audience": {}, "history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {}, "requires": {"audience": {"within": ["support"]}, "history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {}, "requires": {"audience": {"contains": ["support"], "within": ["support"]}, "history": [], "attention": []}, "emits": []}),
             // A duplicate emitted kind, and a history entry naming both operators.
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": ["network", "network"]}),
             serde_json::json!({"delta": {}, "requires": {"history": [{"contains": "network", "excludes": "network"}], "attention": []}, "emits": []}),
@@ -1329,7 +1307,7 @@ mod tests {
         let answer = AnnotationAnswer::from_wire(
             &neutral(serde_json::json!({
                 "delta": {"audience": ["audit", "@eng", "internal"]},
-                "audience": {"within": ["internal"]}
+                "audience": {"contains": ["internal"]}
             })),
             &declaration,
         )
@@ -1347,12 +1325,9 @@ mod tests {
         );
         assert_eq!(
             answer.required_audience,
-            Some(RequiredAudienceAnswer {
-                includes: None,
-                cap: Some(DeclaredAudience::Union(
-                    Clause::new([ChainAudience::Internal], [], []).expect("a chain clause")
-                )),
-            })
+            Some(DeclaredAudience::Union(
+                Clause::new([ChainAudience::Internal], [], []).expect("a chain clause")
+            ))
         );
 
         let with_reader = AnnotationDeclaration {

@@ -993,6 +993,43 @@ fn compiled_tool_parameters_are_normalized_in_policy_identity() {
 }
 
 #[test]
+fn a_requires_within_loads_and_imposes_no_requirement() {
+    let config = load(
+        r#"
+version = 2
+
+[[tool]]
+name = "send"
+requires = { audience = { within = ["internal"], contains = ["alice"] } }
+delta = {}
+
+[[tool]]
+name = "post"
+requires = { audience = { within = ["@"] } }
+delta = {}
+"#,
+    )
+    .expect("a policy writing `within` loads");
+    let declared = |name: &str| {
+        config
+            .engine()
+            .registry()
+            .variants(&ToolName::new(name))
+            .next()
+            .and_then(ToolDeclaration::declared)
+            .cloned()
+            .expect("the tool is declared")
+    };
+    assert_eq!(
+        declared("send").requires.audience_requirements(),
+        [AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::restricted([ReaderId::new("alice")])
+        ))]
+    );
+    assert!(declared("post").requires.audience_requirements().is_empty());
+}
+
+#[test]
 fn a_declared_group_mention_loads_when_routed_and_refuses_at_load_when_not() {
     let policy = r#"
 version = 2
@@ -1016,7 +1053,7 @@ delta = { audience = ["auditor", "@team"] }
 
 [[tool]]
 name = "send"
-requires = { audience = { within = ["@team"], contains = ["@board"] } }
+requires = { audience = { contains = ["@board"] } }
 delta = {}
 
 [[authority]]
@@ -1090,10 +1127,10 @@ confined_results = ["read", "send"]
     ));
 
     for (case, replacement) in [
-        ("bare @", "within = [\"@\"]"),
-        ("public beside a group", "within = [\"public\", \"@team\"]"),
+        ("bare @", "contains = [\"@\"]"),
+        ("public beside a group", "contains = [\"public\", \"@board\"]"),
     ] {
-        let malformed = policy.replace("within = [\"@team\"]", replacement);
+        let malformed = policy.replace("contains = [\"@board\"]", replacement);
         assert!(
             matches!(load(&malformed), Err(ConfigError::BadAudience { .. })),
             "{case} loads"
@@ -1261,14 +1298,6 @@ fn a_selector_placeholder_reads_one_declared_collection_per_call() {
             "spelling",
         ),
         (
-            "under within",
-            tool(
-                channel,
-                "requires = { audience = { within = [\"@slack:channel/$channel_id\"] } }",
-            ),
-            "spelling",
-        ),
-        (
             "an argument the schema declares as another type",
             tool(integer, delta),
             "schema",
@@ -1394,7 +1423,7 @@ fn a_provider_enters_the_policy_when_a_contract_or_mandate_names_it() {
     );
     assert_eq!(
         providers(
-            "version = 2\n[[tool]]\nname = \"t\"\nrequires = { audience = { within = [\"@google-workspace:group/eng@corp.com\"] } }\n"
+            "version = 2\n[[tool]]\nname = \"t\"\nrequires = { audience = { contains = [\"@google-workspace:group/eng@corp.com\"] } }\n"
         ),
         ["google-workspace"]
     );

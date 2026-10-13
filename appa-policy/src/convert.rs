@@ -202,11 +202,8 @@ impl RawRequires {
                     &format!("{ctx} requires contains"),
                 )?));
             }
-            if let Some(cap) = a.within {
-                audience.push(AudienceRequirement::Cap(parse_declared_audience(
-                    &cap,
-                    &format!("{ctx} requires within"),
-                )?));
+            if a.within.is_some() {
+                tracing::warn!("{ctx}: `requires.audience.within` is ignored; it is not a requirement APPA keeps");
             }
         }
         let mut history = Vec::new();

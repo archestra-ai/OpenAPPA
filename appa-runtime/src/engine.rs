@@ -1722,7 +1722,6 @@ impl RuntimeEngine {
                 match gap {
                     Gap::TrustFloor { .. } => "trust_floor",
                     Gap::Includes { .. } => "includes",
-                    Gap::Cap { .. } => "cap",
                     Gap::Prior(_) => "prior",
                     Gap::NoPrior(_) => "no_prior",
                     Gap::Attention(_) => "attention",
@@ -2596,15 +2595,11 @@ impl RuntimeEngine {
                 .rank_of(name)
                 .expect("a decoded annotation answer names declared ranks")
         };
-        let mut requirements = Vec::new();
-        if let Some(required) = &answer.required_audience {
-            if let Some(includes) = &required.includes {
-                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())));
-            }
-            if let Some(cap) = &required.cap {
-                requirements.push(AudienceRequirement::Cap(cap.clone()));
-            }
-        }
+        let requirements = answer
+            .required_audience
+            .iter()
+            .map(|includes| AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())))
+            .collect();
         ProducedAnnotation {
             delta: Delta {
                 trust: answer.delta_trust.as_deref().map(rank),
@@ -3690,8 +3685,6 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
                 )
             }
         },
-        // Count only: a cap may read a directory group's members.
-        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -3763,13 +3756,6 @@ fn clause_count(clause: &Clause) -> String {
 
 fn clause_size(clause: &Clause) -> usize {
     clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
-}
-
-fn declared_count(audience: &DeclaredAudience) -> String {
-    match audience {
-        DeclaredAudience::Public => "public".to_string(),
-        DeclaredAudience::Union(clause) => clause_count(clause),
-    }
 }
 
 fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
@@ -4329,7 +4315,7 @@ mod tests {
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
-    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
+    use crate::consult::{AnnotationAnswer, HistoryEntry, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
@@ -4740,10 +4726,7 @@ mod tests {
             delta_trust: Some("suspicious".to_string()),
             delta_audience: Some(DeclaredAudience::Public),
             required_trust: Some("trusted".to_string()),
-            required_audience: Some(RequiredAudienceAnswer {
-                includes: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
-                cap: Some(DeclaredAudience::Public),
-            }),
+            required_audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
             history: vec![HistoryEntry::Excludes("send".to_string())],
             attention: Vec::new(),
             emits: vec!["read".to_string()],
@@ -4773,12 +4756,9 @@ mod tests {
         assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));
         assert_eq!(
             produced.requires.label.audience,
-            vec![
-                AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([ReaderId::new(
-                    "support"
-                )]))),
-                AudienceRequirement::Cap(DeclaredAudience::Public),
-            ]
+            vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                DeclaredAudience::restricted([ReaderId::new("support")])
+            ))]
         );
         assert_eq!(
             produced.requires.history,

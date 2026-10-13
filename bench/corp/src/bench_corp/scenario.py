@@ -305,14 +305,10 @@ def audience_entries(value: object, location: str, field: str, name: str) -> lis
 
 def _audiences_of(value: object, location: str, field: str, name: str) -> list[str]:
     """Every audience entry an annotation audience field names. A `delta.audience` is a
-    bare value; a `requires.audience` holds a `contains` floor, a `within` cap, or both."""
+    bare value; a `requires.audience` holds exactly its `contains` floor."""
     match value:
-        case dict() as bounds if bounds and set(bounds) <= {"contains", "within"}:
-            return [
-                entry
-                for key, bound in bounds.items()
-                for entry in audience_entries(bound, location, f"{field}.{key}", name)
-            ]
+        case {"contains": bound} if len(value) == 1:
+            return audience_entries(bound, location, f"{field}.contains", name)
         case _:
             return audience_entries(value, location, field, name)
 

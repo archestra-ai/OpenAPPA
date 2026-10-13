@@ -25,7 +25,6 @@ use crate::value::ResolvedCall;
 pub enum Gap {
     TrustFloor { required: Trust, actual: Trust },
     Includes { recipients: DeclaredAudience },
-    Cap { cap: DeclaredAudience },
     Prior(EffectKind),
     NoPrior(EffectKind),
     Attention(MarkName),
@@ -258,11 +257,6 @@ fn label_gaps(
                     }
                 },
             },
-            AudienceRequirement::Cap(cap) => match committed.within_cap(cap, context) {
-                Evaluation::Holds => {}
-                Evaluation::Fails => gaps.push(Gap::Cap { cap: cap.clone() }),
-                Evaluation::Needs(mut ask) => needed.append(&mut ask.needed),
-            },
         }
     }
 }
@@ -400,7 +394,6 @@ pub(crate) fn validate_annotation(
     for requirement in annotation.requires.audience_requirements() {
         let permitted = match requirement {
             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => permits_declared(recipients),
-            AudienceRequirement::Cap(cap) => permits_declared(cap),
             // A produced annotation never reads a call argument: a placeholder belongs to a
             // static declaration, which resolves it per call; an annotation already is the
             // judgment of one exact call.
@@ -720,11 +713,11 @@ mod tests {
             },
             ..annotation("lookup")
         };
-        let with_cap = |audience: DeclaredAudience| ToolAnnotation {
+        let with_includes = |audience: DeclaredAudience| ToolAnnotation {
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(audience)],
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(audience))],
                 },
                 ..Requires::default()
             },
@@ -748,8 +741,8 @@ mod tests {
             with_delta(chain(ChainAudience::Internal)),
             with_delta(group("team")),
             with_delta(mixed.clone()),
-            with_cap(group("team")),
-            with_cap(chain(ChainAudience::Internal)),
+            with_includes(group("team")),
+            with_includes(chain(ChainAudience::Internal)),
         ] {
             assert_eq!(
                 validate_annotation(&bounded, declaration, &pinned_by_classifier(admitted.clone())),
@@ -762,7 +755,7 @@ mod tests {
             with_delta(DeclaredAudience::Union(
                 Clause::new([ChainAudience::Self_], [], [ReaderId::new("support")]).unwrap(),
             )),
-            with_cap(chain(ChainAudience::Self_)),
+            with_includes(chain(ChainAudience::Self_)),
         ] {
             assert!(
                 matches!(
@@ -819,9 +812,9 @@ mod tests {
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(Trust::new(0)),
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new(
-                        "support",
-                    )]))],
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::restricted([ReaderId::new("support")]),
+                    ))],
                 },
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("mail.sent"))],
                 attention: vec![MarkName::new("reviewed")],

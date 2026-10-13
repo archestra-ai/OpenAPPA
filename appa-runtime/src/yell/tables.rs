@@ -158,10 +158,7 @@ static RECIPIENT_SPEC: Table = Table {
 
 static AUDIENCE_REQUIREMENT: Table = Table {
     name: "AudienceRequirement",
-    entries: &[
-        ("Includes", Rule::Table(&RECIPIENT_SPEC)),
-        ("Cap", Rule::Table(&DECLARED_AUDIENCE)),
-    ],
+    entries: &[("Includes", Rule::Table(&RECIPIENT_SPEC))],
 };
 
 static LABEL_REQUIREMENTS: Table = Table {
@@ -241,17 +238,11 @@ static GAP_INCLUDES: Table = Table {
     entries: &[("recipients", Rule::Table(&DECLARED_AUDIENCE))],
 };
 
-static GAP_CAP: Table = Table {
-    name: "Gap::Cap",
-    entries: &[("cap", Rule::Table(&DECLARED_AUDIENCE))],
-};
-
 static GAP: Table = Table {
     name: "Gap",
     entries: &[
         ("TrustFloor", Rule::Table(&GAP_TRUST_FLOOR)),
         ("Includes", Rule::Table(&GAP_INCLUDES)),
-        ("Cap", Rule::Table(&GAP_CAP)),
         ("Prior", Rule::Token(Class::Effect)),
         ("NoPrior", Rule::Token(Class::Effect)),
         ("Attention", Rule::Token(Class::Mark)),

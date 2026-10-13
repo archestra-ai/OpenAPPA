@@ -230,6 +230,41 @@ audiences = ["alice@northwind.example"]
         load_scenario(root)
 
 
+@pytest.mark.parametrize(
+    "audience",
+    [
+        '{ within = ["alice@northwind.example"] }',
+        '{ contains = ["alice@northwind.example"], within = ["alice@northwind.example"] }',
+    ],
+)
+def test_an_annotation_requiring_within_refuses_at_load(tmp_path: Path, audience: str) -> None:
+    manifest = (
+        _with_policy_profile(_MINIMAL)
+        + f"""
+[[annotator_answer]]
+annotator = "document-acl"
+args = {{ subject = "alice.md" }}
+annotation = {{ delta = {{}}, requires = {{ audience = {audience}, history = [], attention = [] }}, emits = [] }}
+"""
+    )
+    root = _write_scenario(tmp_path / "within-requirement", manifest)
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        """version = 1
+
+[[policy.annotator]]
+name = "document-acl"
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["alice@northwind.example"]
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+
+    with pytest.raises(ScenarioError):
+        load_scenario(root)
+
+
 @pytest.mark.parametrize("audiences", ['[1]', '"alice@northwind.example"'])
 def test_a_malformed_audience_mandate_is_a_scenario_error(tmp_path: Path, audiences: str) -> None:
     root = _write_scenario(tmp_path / "malformed-mandate", _with_policy_profile(_MINIMAL))
