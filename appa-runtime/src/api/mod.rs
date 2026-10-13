@@ -1358,6 +1358,21 @@ impl Inner {
             .map_err(read_refused)
     }
 
+    /// Begin one read-decide-append step on `root`'s log; see [`LogStore::step`].
+    pub(super) fn step(&self, root: &TrajectoryId) -> Result<appa_eventlog::Step<'_>, EventError> {
+        self.store
+            .step(root)
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
+            .map_err(read_refused)
+    }
+
+    /// `root`'s log as it stands within `step`.
+    pub(super) fn step_log(&self, step: &appa_eventlog::Step<'_>, root: &TrajectoryId) -> Result<Log, EventError> {
+        step.log()
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
+            .map_err(read_refused)
+    }
+
     /// Record one host observation in this root's log, at the position the append is tried
     /// at, unconditionally. A write that depends on what stands at that position derives it
     /// through [`Inner::append_host_with`] instead.
@@ -1387,12 +1402,13 @@ impl Inner {
         derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
     ) -> Result<Answer, Refusal> {
         for _ in 0..HOST_ATTEMPTS {
-            let log = self.log(root)?;
+            let step = self.step(root)?;
+            let log = self.step_log(&step, root)?;
             let (observation, answer) = derive(&log)?;
             let Some(observation) = observation else {
                 return Ok(answer);
             };
-            match self.store.append_host(&log, &[], &observation) {
+            match step.append_host(&log, &[], &observation) {
                 Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
                 Err(error) => {
@@ -4179,7 +4195,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[cfg(feature = "postgres")]
     #[tokio::test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
-    async fn a_view_on_a_lease_records_under_the_session_lock_the_lease_holds() {
+    async fn a_view_on_a_lease_records_and_leaves_no_lock_behind() {
         let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
         let store = Arc::new(
             LogStore::open(appa_eventlog::Backend::Postgres {
@@ -4192,32 +4208,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             Runtime::open_with_store(versioned_policy("leased"), Arc::clone(&store), None).expect("the runtime opens");
         let unique = tempfile::tempdir().expect("a unique root name exists");
         let root = TrajectoryId(format!("leased:{}", unique.path().display()));
-
-        // A host serializes a trajectory across its replicas with a session-level lock on
-        // the key an append locks too. Only the connection that holds it can append.
         let lease = Arc::new(store.lease().expect("a connection leases"));
-        let key = root.0.clone();
-        lease
-            .postgres()
-            .expect("the PostgreSQL API is present")
-            .with_client(move |client| {
-                client.query_one("SELECT pg_advisory_lock(hashtextextended($1, 0))", &[&key])?;
-                Ok(())
-            })
-            .expect("the host's session lock is taken");
-        let key = root.0.clone();
-        let free_elsewhere = store
-            .lease()
-            .expect("a second connection leases")
-            .postgres()
-            .expect("the PostgreSQL API is present")
-            .with_client(move |client| {
-                Ok(client
-                    .query_one("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", &[&key])?
-                    .get::<_, bool>(0))
-            })
-            .expect("another connection asks for the lock");
-        assert!(!free_elsewhere, "the lock shuts out every other connection of the pool");
 
         assert_eq!(
             crate::hooks::handle(
@@ -4248,12 +4239,35 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             status,
         );
 
+        // Every step ended with its transaction: another connection takes the family's row
+        // at once, while the lease that recorded the start is still held.
+        let key = root.0.clone();
+        let free = store
+            .lease()
+            .expect("a second connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                let mut transaction = client.transaction()?;
+                let free = transaction
+                    .query_opt(
+                        "SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT",
+                        &[&key],
+                    )?
+                    .is_some();
+                transaction.rollback()?;
+                Ok(free)
+            })
+            .expect("another connection locks the family's row");
+        assert!(free, "the family's row exists and no step still holds it");
+
         let key = root.0.clone();
         lease
             .postgres()
             .expect("the PostgreSQL API is present")
             .with_client(move |client| {
                 client.execute("DELETE FROM openappa_events WHERE root=$1", &[&key])?;
+                client.execute("DELETE FROM openappa_roots WHERE root=$1", &[&key])?;
                 Ok(())
             })
             .expect("the test root cleans up");
@@ -5510,7 +5524,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[cfg(feature = "daemon")]
     #[test]
     fn daemon_sqlite_receipts_outlive_the_runtime_that_recorded_them() {
-        use appa_eventlog::{OperationClaim, OperationKey, OperationRequest, ReceiptBinding, SessionScope};
+        use appa_eventlog::{
+            LeaseOwner, OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptLease, SessionScope,
+        };
 
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
@@ -5529,21 +5545,30 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
+        let lease = ReceiptLease::new(
+            LeaseOwner::parse("daemon").expect("the owner is well formed"),
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the lease is well formed");
         {
             let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
             assert!(matches!(
-                runtime.store().claim_operation(request.clone()),
+                runtime.store().claim_operation(request.clone(), &lease),
                 Ok(OperationClaim::Claimed)
             ));
             runtime
                 .store()
-                .complete_operation(request.key.clone(), serde_json::json!({"decision":"mcp_result"}))
+                .complete_operation(
+                    request.key.clone(),
+                    serde_json::json!({"decision":"mcp_result"}),
+                    lease.owner(),
+                )
                 .expect("the operation completes");
         }
         let reopened = Runtime::open(versioned_policy("first"), db, None).expect("the deployment reopens");
         assert!(
             matches!(
-                reopened.store().claim_operation(request),
+                reopened.store().claim_operation(request, &lease),
                 Ok(OperationClaim::Complete { .. })
             ),
             "the daemon's SQLite receipts survive a process restart"

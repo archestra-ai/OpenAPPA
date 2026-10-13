@@ -775,6 +775,88 @@ pub struct RuntimeEngine {
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: a retired engine decides under the same one.
     naming: ToolNaming,
+    /// The views this engine built last, one per family; see [`RuntimeEngine::rebuild_view`].
+    views: HeldViews,
+}
+
+/// How many families' views one engine holds at most.
+const HELD_VIEWS: usize = 128;
+
+/// The last view this engine built for each of a bounded number of families, so the next read
+/// of a family validates only the batches its log accepted since rather than the whole log.
+#[derive(Default)]
+struct HeldViews {
+    held: std::sync::Mutex<HeldFamilies>,
+}
+
+#[derive(Default)]
+struct HeldFamilies {
+    views: std::collections::HashMap<TrajectoryId, HeldView>,
+    /// Families in the order they were last used, oldest first.
+    order: std::collections::VecDeque<TrajectoryId>,
+}
+
+struct HeldView {
+    view: EngineView,
+    basis: u64,
+    facts: usize,
+    /// The view's last record, which a later log of the family must still hold at that
+    /// position for the view to describe it.
+    last: Option<Fact>,
+}
+
+impl HeldViews {
+    fn held(&self) -> std::sync::MutexGuard<'_, HeldFamilies> {
+        self.held
+            .lock()
+            .expect("the held views mutex is never poisoned: no panic runs while it is held")
+    }
+
+    /// `log`'s view, advanced from a held view of a prefix of `log` through the batches the
+    /// log accepted since. `None` when no held view describes a prefix of `log`, or a batch
+    /// is refused: the caller then rebuilds from the whole log.
+    fn advanced(&self, engine: &Engine, log: &Log) -> Option<EngineView> {
+        let (mut view, basis) = {
+            let held = self.held();
+            let found = held.views.get(log.root())?;
+            let same_prefix = found.basis <= log.basis()
+                && found.facts <= log.facts().len()
+                && found.facts.checked_sub(1).map(|last| &log.facts()[last]) == found.last.as_ref();
+            if !same_prefix {
+                return None;
+            }
+            (found.view.clone(), found.basis)
+        };
+        for batch in log.batches_after(basis)? {
+            engine.admit_batch(&mut view, batch.to_vec()).ok()?;
+        }
+        Some(view)
+    }
+
+    fn keep(&self, log: &Log, view: &EngineView) {
+        let mut held = self.held();
+        // The family was used now, whether or not this view replaces the held one.
+        held.order.retain(|family| family != log.root());
+        held.order.push_back(log.root().clone());
+        if !held
+            .views
+            .get(log.root())
+            .is_some_and(|found| found.basis > log.basis())
+        {
+            let fresh = HeldView {
+                view: view.clone(),
+                basis: log.basis(),
+                facts: log.facts().len(),
+                last: log.facts().last().cloned(),
+            };
+            held.views.insert(log.root().clone(), fresh);
+        }
+        while held.order.len() > HELD_VIEWS {
+            if let Some(oldest) = held.order.pop_front() {
+                held.views.remove(&oldest);
+            }
+        }
+    }
 }
 
 impl RuntimeEngine {
@@ -820,6 +902,7 @@ impl RuntimeEngine {
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
             naming,
+            views: HeldViews::default(),
         }
     }
 
@@ -864,8 +947,28 @@ impl RuntimeEngine {
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
     /// view cannot be built against a log it does not describe.
+    ///
+    /// A family's last view is held, and a later log that still holds that view's records is
+    /// validated only from where the view stands, batch by batch, through the validator a sealed
+    /// batch passes. That view equals the one a replay of the whole log builds; anything the
+    /// advance refuses is judged by that whole replay instead.
     pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
-        self.validated(log.facts().to_vec(), log.root(), log.basis())
+        let view = match self.views.advanced(&self.engine, log) {
+            Some(view) => {
+                // Every debug test build checks the advance against a whole replay.
+                #[cfg(all(test, debug_assertions))]
+                assert_eq!(
+                    view,
+                    self.validated(log.facts().to_vec(), log.root(), log.basis())
+                        .expect("a whole replay accepts every log an advance accepts"),
+                    "an advanced view equals the view a replay of the whole log builds"
+                );
+                view
+            }
+            None => self.validated(log.facts().to_vec(), log.root(), log.basis())?,
+        };
+        self.views.keep(log, &view);
+        Ok(view)
     }
 
     /// Where this trajectory stands in the log:

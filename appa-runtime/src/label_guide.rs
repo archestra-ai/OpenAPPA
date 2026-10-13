@@ -204,13 +204,15 @@ pub(crate) const DELTA_TRUST_RULE: &str = concat!(
 
 pub(crate) const REQUIRES_AUDIENCE_RULE: &str = concat!(
     "`requires.audience.contains` names the readers who must already be allowed to read the trajectory's ",
-    "data before the call may run, because the call delivers data to them. Any argument value that leaves ",
-    "this machine is data delivered to whoever receives it — a query string, a message body, a file's ",
-    "contents, a path in a URL. Classify by who receives those bytes. A call being a read does not by itself ",
-    "make it `none`: a search against a remote service delivers the query to that service. A destination ",
-    "readable beyond a known reader set — a hosted repository, a site, a paste service or a mailing list — ",
-    "is `public` unless the call or its context proves a narrower readership. Judge the destinations the arguments ",
-    "actually name, and answer the widest one."
+    "data before the call may run, because the call delivers that data to them. Delivery is payload, not ",
+    "the fact of a network request. A query string, a message body, a file's contents, an upload, or a ",
+    "commit pushed outward is data delivered to whoever receives it. An argument that only names what to ",
+    "retrieve — a remote, a ref, an id, a channel, a path, a package name — is not trajectory data, and a ",
+    "read that carries only those names delivers nothing. A search against a remote service delivers the ",
+    "query. A destination of delivered bytes that is readable beyond a known reader set — a hosted ",
+    "repository, a site, a paste service or a mailing list — is `public` unless the call or its context ",
+    "proves a narrower readership. Judge the destinations the delivered bytes actually reach, and answer ",
+    "the widest one."
 );
 
 pub(crate) const REQUIRES_TRUST_RULE: &str = concat!(
@@ -292,24 +294,26 @@ pub(crate) struct RequiresAudienceCriteria {
 
 pub(crate) const REQUIRES_AUDIENCE_CRITERIA: RequiresAudienceCriteria = RequiresAudienceCriteria {
     none: concat!(
-        "No bytes leave this machine and no other reader receives anything: the call ",
-        "reads, searches or computes locally, or writes to a local path — scratch, ",
-        "temporary, or inside the project's working tree. A working-tree edit is ",
-        "`none` because the bytes reach a reader only when a later call pushes or ",
-        "publishes them."
+        "No trajectory bytes leave this machine: the call reads, searches or computes ",
+        "locally, writes to a local path, or retrieves a named resource whose arguments ",
+        "only name it — a remote, a ref, an id, a channel, a path or a package name. A ",
+        "working-tree edit is `none` because the bytes reach a reader only when a later ",
+        "call pushes or publishes them."
     ),
     internal: concat!(
-        "The receiving party is a person or service inside the operator's ",
-        "organization: posting to an internal chat channel or sending a direct ",
-        "message, pushing to a private repository, emailing a colleague, writing to ",
-        "an internal service, database or ticket — and also a read-only query against ",
-        "an internal service, because the query itself reaches it."
+        "The call delivers trajectory bytes to a person or service inside the ",
+        "operator's organization: posting to an internal chat channel or sending a ",
+        "direct message, pushing to a private repository, emailing a colleague, writing ",
+        "to an internal service, database or ticket, or a query that carries text to an ",
+        "internal service. Naming that service's id, channel or path, with no text of ",
+        "the trajectory's, is not delivery."
     ),
     public: concat!(
-        "The receiving party is outside the operator's control: a public repository, ",
-        "issue tracker or website, a package registry, an external email recipient, ",
-        "or any third-party service — including a read-only one, because a search ",
-        "query or an HTTP request reaches that destination."
+        "The call delivers trajectory bytes to a party outside the operator's control: ",
+        "a public repository, issue tracker or website, a package registry, an external ",
+        "email recipient, or a third-party service. A search query, a request body, an ",
+        "upload or a push reaches that destination. A request that only names a ",
+        "document, a remote or a ref does not."
     ),
 };
 
@@ -327,17 +331,16 @@ pub(crate) const REQUIRES_TRUST_CRITERIA: RequiresTrustCriteria = RequiresTrustC
         "sends it to a person, even a colleague, writes it where people can read it, even ",
         "an internal repository, ticket or channel, delivers or publishes it to a service ",
         "outside the operator's organization, or executes or installs content that the ",
-        "trajectory supplied. A URL or query sent to a third party counts, since it can ",
-        "carry data out. Pushing commits, filing a report, installing a package and ",
-        "running a downloaded script all count. An injected instruction that fires this ",
-        "call moves data or code outward."
+        "trajectory supplied. A URL or query sent to a third party counts when it carries ",
+        "trajectory text, not when it only names what to read. Pushing commits, filing a ",
+        "report, installing a package and running a downloaded script all count. An ",
+        "injected instruction that fires this call moves data or code outward."
     ),
     false_: concat!(
         "The call's effect stays on the operator's machine — even if it overwrites or ",
-        "deletes local files — or it only reads from an internal service the operator ",
-        "controls: a read or lookup whose arguments only name what to read (an id, a ",
-        "channel, a path) counts here. Re-running it ",
-        "after an injection produces nothing but wasted work."
+        "deletes local files — or its arguments only name what to retrieve: an id, a ",
+        "channel, a path, a remote or a ref, including against a third party. Re-running ",
+        "it after an injection produces nothing but wasted work."
     ),
 };
 
@@ -364,7 +367,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object, with the `context` it came with, if any.
-pub(crate) const EXAMPLES: [Example; 18] = [
+pub(crate) const EXAMPLES: [Example; 19] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: ResultAudience::Internal,
@@ -379,7 +382,7 @@ pub(crate) const EXAMPLES: [Example; 18] = [
         delta_trust: ResultTrust::Suspicious,
         requires_audience: RequiredAudience::Public,
         requires_trusted: true,
-        why: "a public page comes back, and the URL can carry data to a third party",
+        why: "a public page comes back; the prompt is trajectory text the call can deliver, unlike a request that only names a document",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "cat ~/.aws/credentials", "description": "Show the profile"}}"#,
@@ -406,6 +409,14 @@ pub(crate) const EXAMPLES: [Example; 18] = [
         why: "an acknowledgement comes back, and the write stays local",
     },
     Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "git fetch origin main", "description": "Update the remote-tracking ref"}}"#,
+        delta_audience: ResultAudience::Public,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "the remote and ref only name what to retrieve; the command's own progress comes back",
+    },
+    Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "git push origin HEAD:main", "description": "Publish the branch"}}"#,
         delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
@@ -417,17 +428,17 @@ pub(crate) const EXAMPLES: [Example; 18] = [
         call: r#"{"tool": "get_ticket_from_crm", "arguments": {"ticket_id": "T-4471"}}"#,
         delta_audience: ResultAudience::Internal,
         delta_trust: ResultTrust::Suspicious,
-        requires_audience: RequiredAudience::Internal,
+        requires_audience: RequiredAudience::None,
         requires_trusted: false,
-        why: "a customer record comes back, written by someone outside the operator's control; the ticket id reaches an internal service",
+        why: "a customer record comes back, written by someone outside the operator's control; the ticket id only names it",
     },
     Example {
         call: r#"{"tool": "slack_read_channel", "arguments": {"channel_id": "C0123", "limit": 50}}"#,
         delta_audience: ResultAudience::Internal,
         delta_trust: ResultTrust::Suspicious,
-        requires_audience: RequiredAudience::Internal,
+        requires_audience: RequiredAudience::None,
         requires_trusted: false,
-        why: "an internal chat log comes back; the read only names a channel inside the workspace",
+        why: "an internal chat log comes back; the channel id only names it",
     },
     Example {
         call: r#"{"tool": "slack_send_message", "arguments": {"channel_id": "C0123", "text": "Build is green"}}"#,
@@ -449,41 +460,41 @@ pub(crate) const EXAMPLES: [Example; 18] = [
         call: r#"{"tool": "Bash", "arguments": {"command": "gh pr view 12 --comments", "description": "Read the review"}, "context": {"github": {"answer": {"repository": {"name": "acme/widget", "visibility": "public"}, "pull_request": {"number": 12, "author": {"login": "ana", "association": "MEMBER"}, "participants": [{"login": "ana", "association": "MEMBER"}, {"login": "bo", "association": "COLLABORATOR"}]}}}}}"#,
         delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
-        requires_audience: RequiredAudience::Public,
-        requires_trusted: true,
-        why: "a public repository's pull request comes back, and the context shows only the operator's collaborators wrote it",
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "a public repository's pull request comes back, written only by the operator's collaborators; the number only names it",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "gh issue view 7 --comments", "description": "Read the report"}, "context": {"github": {"answer": {"repository": {"name": "acme/billing", "visibility": "private"}, "issue": {"number": 7, "author": {"login": "ana", "association": "MEMBER"}, "participants": [{"login": "ana", "association": "MEMBER"}, {"login": "mallory", "association": "NONE"}]}}}}}"#,
         delta_audience: ResultAudience::Internal,
         delta_trust: ResultTrust::Suspicious,
-        requires_audience: RequiredAudience::Internal,
-        requires_trusted: true,
-        why: "a private repository's issue comes back, and the context shows a comment by someone outside the operator's collaborators",
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "a private repository's issue comes back, with a comment by someone outside the operator's collaborators; the number only names it",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "gh pr view 31 --comments", "description": "Read the update"}, "context": {"github": {"answer": {"repository": {"name": "acme/widget", "visibility": "public"}, "pull_request": {"number": 31, "author": {"login": "renovate", "association": "NONE"}, "participants": [{"login": "renovate", "association": "NONE", "bot": true}, {"login": "ana", "association": "MEMBER", "bot": false}], "truncated": false}}}}}"#,
         delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
-        requires_audience: RequiredAudience::Public,
-        requires_trusted: true,
-        why: "a bot the organization installed wrote the pull request, and a collaborator the rest",
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "a bot the organization installed wrote the pull request, and a collaborator the rest; the number only names it",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "gh issue view 140 --comments", "description": "Read the thread"}, "context": {"github": {"answer": {"repository": {"name": "acme/widget", "visibility": "public"}, "issue": {"number": 140, "author": {"login": "ana", "association": "MEMBER"}, "participants": [{"login": "ana", "association": "MEMBER", "bot": false}], "truncated": true}}}}}"#,
         delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Suspicious,
-        requires_audience: RequiredAudience::Public,
-        requires_trusted: true,
-        why: "the list of participants is truncated, so the authors of the hidden comments are unknown",
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "the list of participants is truncated, so the authors of the hidden comments are unknown; the number only names it",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm install left-pad 2>&1 | tail -3", "description": "Add the dependency"}}"#,
         delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
-        requires_audience: RequiredAudience::Public,
+        requires_audience: RequiredAudience::None,
         requires_trusted: true,
-        why: "a registry receives the request and content it serves is installed; the package manager's own log comes back",
+        why: "the package name only names what to install; installing still requires trust, and the package manager's own log comes back",
     },
     Example {
         call: r#"{"tool": "ToolSearch", "arguments": {"query": "select:Read,Edit", "max_results": 5}}"#,
@@ -765,5 +776,24 @@ mod tests {
                 REQUIRES_TRUST_RULE
             ]
         );
+    }
+
+    fn example(command: &str) -> Option<&Example> {
+        EXAMPLES.iter().find(|example| example.call.contains(command))
+    }
+
+    #[test]
+    fn worked_examples_separate_a_search_from_a_named_fetch() {
+        let fetch = example("git fetch origin main").expect("the fetch example");
+        let push = example("git push origin HEAD:main").expect("the push example");
+        let search = example("docs.example.org").expect("the fetch-with-prompt example");
+        assert_eq!(fetch.requires_audience, RequiredAudience::None);
+        assert!(!fetch.requires_trusted);
+        assert_eq!(push.requires_audience, RequiredAudience::Public);
+        assert!(push.requires_trusted);
+        assert_eq!(search.requires_audience, RequiredAudience::Public);
+        assert!(search.requires_trusted);
+        assert!(!REQUIRES_AUDIENCE_CRITERIA.public.contains("read-only"));
+        assert!(REQUIRES_AUDIENCE_RULE.contains("not the fact of a network request"));
     }
 }

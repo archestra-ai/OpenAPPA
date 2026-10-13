@@ -36,7 +36,7 @@ digest = "sha256:7344d3a3ecbbcf92aea634c1ff6546ec8848c79f1658b2429f0df70b90d47c9
 
 [packages.battery.jev]
 path = "batteries/jev"
-digest = "sha256:82d47856395330dedfc043f897ecd69bdfacfa73b2cc8e9dfda6f339ef61cb23"
+digest = "sha256:7b9ede33e0cda3102f42a1500d6ba8e4be0bba4c3d9c5f1666ac9b6895e5369b"
 
 [packages.battery.launchdarkly]
 path = "batteries/launchdarkly"

@@ -139,6 +139,24 @@ impl Engine {
         Ok(EngineView::validated(projection, self.identity, family.clone()))
     }
 
+    /// Advance `view` by one batch its log accepted after the position `view` stands at. The
+    /// batch's records pass the validator a sealed batch passes, resumed where `view` stands,
+    /// and fold forward through [`EngineView::advance`]; a view advanced batch by batch equals
+    /// the view [`Engine::view`] builds from the whole log. A runtime holding a view reads only
+    /// the batches after it this way; anything refused here it rebuilds through `view`.
+    pub fn admit_batch(
+        &self,
+        view: &mut EngineView,
+        records: Vec<Fact>,
+    ) -> Result<(), crate::transition::BatchRefusal> {
+        if view.policy() != self.identity {
+            return Err(crate::transition::ViewMismatch::ForeignPolicy.into());
+        }
+        let batch = self.seal(view, records)?;
+        view.advance(&batch)?;
+        Ok(())
+    }
+
     /// The validator over a bare record stream, for tests that pin a refusal without holding a
     /// view. Production reaches it through [`Engine::view`].
     #[cfg(test)]
