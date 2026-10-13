@@ -1,5 +1,4 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import importlib.util
 import json
 from pathlib import Path
 import stat
@@ -11,9 +10,6 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("audience-source-multi-user.py")
-SPEC = importlib.util.spec_from_file_location("audience_source_multi_user", SCRIPT)
-AUDIENCE_SOURCE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(AUDIENCE_SOURCE)
 
 TEMPLATES = ["org/<org>/members", "org/<org>/team/<team>", "repo/<owner>/<repo>/collaborators"]
 
@@ -109,6 +105,20 @@ class Selectors(unittest.TestCase):
                 result = run_script(envelope(), github.env())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, "")
+
+    def test_a_collection_past_the_page_budget_is_refused_not_truncated(self):
+        budget = 50
+        answers = {
+            f"/orgs/acme/members?per_page=100&page={page}": [
+                account(f"member-{page}-{index}", page * 1000 + index) for index in range(100)
+            ]
+            for page in range(1, budget + 2)
+        }
+        with Loopback(answers) as github:
+            result = run_script(envelope(), github.env())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(github.seen, list(answers)[:budget])
 
     def test_the_viewer_and_unserved_selectors_are_refused_before_any_network(self):
         for selector in ["viewer", "org//members", "org/a/repos", "repo/a/collaborators", ""]:

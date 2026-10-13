@@ -57,13 +57,17 @@ def rest_api(token):
     return call
 
 
-def paginated(call, path):
+def paginated(call, path, max_pages=None):
+    """Every page of a listing; past `max_pages` full pages the listing is
+    refused, never cut short."""
     page = 1
     while True:
         batch = call(path, per_page=PAGE_SIZE, page=page)
         yield from batch
         if len(batch) < PAGE_SIZE:
             return
+        if page == max_pages:
+            raise RuntimeError(f"{path} lists {max_pages * PAGE_SIZE} or more accounts; map that audience from a bulk source")
         page += 1
 
 
@@ -84,10 +88,10 @@ def collection_path(selector):
             raise ValueError(f"{selector!r} names no collection this source serves")
 
 
-def people(call, path):
+def people(call, path, max_pages=None):
     """The accounts a collection lists, its bots left out: a GitHub App
     acts for the people who installed it and reads as none of its own."""
-    for account in paginated(call, path):
+    for account in paginated(call, path, max_pages):
         if account.get("type") == "User":
             yield account
 

@@ -9,4 +9,4 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import context  # noqa: E402
 
 if __name__ == "__main__":
-    context.main(context.MULTI_USER)
+    context.main(context.Deployment.MULTI_USER)
