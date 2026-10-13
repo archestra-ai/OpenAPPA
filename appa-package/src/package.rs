@@ -348,8 +348,7 @@ struct RawPackage {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBattery {
-    policy: Option<String>,
-    base: Option<String>,
+    policy: String,
     #[serde(default)]
     targets: BTreeMap<String, RawTargetPolicy>,
     hosts: Vec<String>,
@@ -373,15 +372,7 @@ struct RawTargetPolicy {
 
 impl RawBattery {
     fn validate(self, name: &PackageName, path: &Path) -> Result<Battery, ManifestError> {
-        let base = match (&self.policy, &self.base) {
-            (Some(policy), None) => relative(policy, "battery.policy", path)?,
-            (None, Some(base)) => relative(base, "battery.base", path)?,
-            _ => {
-                return Err(ManifestError::BatteryBase {
-                    path: path.to_path_buf(),
-                });
-            }
-        };
+        let base = relative(&self.policy, "battery.policy", path)?;
         let mut declared = BTreeMap::new();
         for (target, target_policy) in self.targets {
             let parsed = BatteryTarget::parse(&target).ok_or_else(|| ManifestError::Target {
@@ -643,7 +634,7 @@ mod tests {
     }
 
     const TARGETED: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
-         [battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n\
+         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n\
          [battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n\
          [battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
 
@@ -685,15 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn a_battery_declares_exactly_one_base_and_only_known_targets() {
-        assert!(matches!(
-            manifest(&TARGETED.replace("base = \"appa.toml\"", "base = \"appa.toml\"\npolicy = \"appa.toml\"")),
-            Err(ManifestError::BatteryBase { .. })
-        ));
-        assert!(matches!(
-            manifest(&TARGETED.replace("base = \"appa.toml\"\n", "")),
-            Err(ManifestError::BatteryBase { .. })
-        ));
+    fn a_battery_declares_only_known_targets() {
         assert!(matches!(
             manifest(&TARGETED.replace("targets.multi-user", "targets.team")),
             Err(ManifestError::Target { target, .. }) if target == "team"
