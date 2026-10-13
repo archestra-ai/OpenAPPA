@@ -151,6 +151,59 @@ dependency or a claimed security boundary.
 To uninstall, remove the plugin entry and reload OpenCode. Stop the runtime
 separately. Keep the policy and database if protected sessions will resume.
 
+## Future work
+
+The restrictions above are integration limits, not judgments that these
+OpenCode features are undesirable. The APPA engine already supports child
+trajectories and checked returns; AppenCode does not yet map that lifecycle.
+Keep a feature refused until its additional flows are mediated. An OpenCode
+permission approval alone must not bypass that boundary.
+
+The [plugin](./appencode.ts) owns lifecycle mapping; the
+[adapter](../../appa-adapter-opencode/src/lib.rs) owns spawn and tool identities.
+The [Claude Code mapping](../../appa-adapter-claude-code/src/parse.rs) shows
+how an existing integration reports child starts and checked returns.
+
+1. **Foreground subagents first.** Bind each child to its launching call and
+   inherit the parent's Label before the child works. Prepare its return
+   contract before delegation, check its tool flows, and admit or sanitize its
+   answer before the parent receives it. Map V2's child `session.context`
+   hooks, lineage from `session.get`, and mutable foreground results in
+   `tool.execute.after` to APPA's child lifecycle. Cover concurrent launches,
+   resumed children, cancellation, and restart without confusing identities.
+2. **Conversation forks.** Map OpenCode's fork lineage to APPA's root-fork
+   operation. A conversation copied from a protected parent must inherit its
+   security state, not open as a neutral root. Cover resume, revert, and
+   restart; copied history must not lose its restrictions.
+3. **Background results and alternate child launches.** Mediate delayed child
+   and shell completion messages, including foreground jobs moved into the
+   background. OpenCode admits these through synthetic messages rather than
+   the original tool-result hook. Commands can also create children without
+   the subagent tool. Observing completion after delivery is insufficient:
+   the integration needs a boundary that can withhold or replace what reaches
+   the parent. Public hook coverage may need an upstream extension.
+4. **Code Mode.** In the targeted 2.0.28 implementation, its host-side `fetch`
+   bypasses individual tool hooks. Mediate those network emissions and assign
+   distinct APPA call identities to nested tool calls before enabling
+   `execute`. Checking the final result cannot undo an earlier HTTP request.
+   Reassess the actual host implementation when changing the pinned version.
+5. **Implicit instructions and model requests.** Admit nested `AGENTS.md`
+   content before OpenCode adds it to the conversation, instead of refusing
+   the surrounding read. Evaluate the V2 model-request hooks separately for
+   main, title, compaction, and generation requests, including WebSocket
+   providers. Tool-result protection alone does not mediate these emissions.
+6. **File-label tracking: deferred, outside the first subagent extension.**
+   When this work resumes, integrate APPA's runtime-owned file mediation
+   rather than attaching a Label only to a pathname. Preserve Labels across
+   writes, later reads, and snapshot restoration, and prevent native tools or
+   subprocesses from bypassing the managed workspace. Foreground subagent
+   support does not depend on completing this work.
+
+For each enabled path, test both permitted and refused flows through the
+published OpenCode CLI and real APPA runtime. Verify that private child data
+cannot reach a public parent result, sanitized bytes replace every result
+channel, and interruptions or restarts cannot erase inherited restrictions.
+
 ## Verify
 
 From the checkout:
