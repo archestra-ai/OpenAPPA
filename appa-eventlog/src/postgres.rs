@@ -341,7 +341,7 @@ struct LogCache {
 #[derive(Default)]
 struct CachedLogs {
     logs: std::collections::HashMap<String, CachedLog>,
-    /// Roots in the order they were cached, oldest first.
+    /// Roots in the order they were last stored, oldest first.
     order: std::collections::VecDeque<String>,
     facts: usize,
 }
@@ -384,9 +384,9 @@ impl LogCache {
         {
             return;
         }
-        match entries.logs.remove(root) {
-            Some(older) => entries.facts -= older.log.facts().len(),
-            None => entries.order.push_back(root.to_owned()),
+        if let Some(older) = entries.logs.remove(root) {
+            entries.facts -= older.log.facts().len();
+            entries.order.retain(|cached| cached != root);
         }
         while entries.facts + size > CACHED_FACTS {
             let Some(oldest) = entries.order.pop_front() else {
@@ -396,9 +396,7 @@ impl LogCache {
                 entries.facts -= gone.log.facts().len();
             }
         }
-        if !entries.order.iter().any(|cached| cached == root) {
-            entries.order.push_back(root.to_owned());
-        }
+        entries.order.push_back(root.to_owned());
         entries.facts += size;
         entries.logs.insert(
             root.to_owned(),
@@ -515,7 +513,15 @@ impl PostgresStore {
         self.query(move |client| {
             client.batch_execute("BEGIN")?;
             let result = operation(client);
-            client.batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+            match result {
+                Ok(_) => client.batch_execute("COMMIT")?,
+                // The operation's own error is the one to report. A connection that cannot
+                // roll back is dropped by the pool's reset, and the server ends the
+                // transaction with it.
+                Err(_) => {
+                    let _ = client.batch_execute("ROLLBACK");
+                }
+            }
             Ok(result)
         })?
     }
@@ -1200,9 +1206,9 @@ impl PostgresStore {
         })?;
         let (log, last_batch) = match cached {
             Some(CachedLog { mut log, last_batch }) if prefix == from && rows.first() == Some(&last_batch) => {
-                let mut batches = rows.into_iter().skip(1).collect::<Vec<_>>();
+                let batches = rows.into_iter().skip(1).collect::<Vec<_>>();
                 let last = batches.last().cloned().unwrap_or(last_batch);
-                extend(&mut log, std::mem::take(&mut batches))?;
+                extend(&mut log, batches)?;
                 (log, last)
             }
             Some(_) => {
