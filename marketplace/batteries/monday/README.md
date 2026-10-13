@@ -15,13 +15,13 @@ public source revision.
 ## Targets
 
 `appa.toml` is the base policy; a deployment composes one target policy
-over it, whose rules run first. Both targets bind the `monday` audience
-source and give `create_notification` its recipient check, described below.
+over it, whose rules run first. Both targets compose `recipient.toml`, which
+binds the `monday` audience source and gives `create_notification` its
+recipient check, described below. The source names the recipient by confirmed
+email and never asks who owns the token. The targets differ only in setup:
 
-- **single-user** (`single-user.toml`) — one person's API token.
-- **multi-user** (`multi-user.toml`) — an app token with `users:read`
-  that every agent shares. The same policy and helper: the source names the
-  recipient by confirmed email and never asks who owns the token.
+- **single-user** — one person's API token.
+- **multi-user** — an app token with `users:read` that every agent shares.
 - **base alone** — no helper and no lookup: `create_notification`
   requires trusted public input and review; every other rule is the same.
 

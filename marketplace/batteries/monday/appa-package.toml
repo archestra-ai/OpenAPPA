@@ -19,10 +19,10 @@ setup = [
 required_executables = ["python3"]
 
 [battery.targets.single-user]
-policy = "single-user.toml"
+policy = "recipient.toml"
 
 [battery.targets.multi-user]
-policy = "multi-user.toml"
+policy = "recipient.toml"
 setup = [
   "Connect the MCP server https://mcp.monday.com/mcp with OAuth or a monday API token. The install adds policy, not a connection.",
   "In the monday.com Developer Center, create an app with the `users:read` scope and install it on the account the agents use.",

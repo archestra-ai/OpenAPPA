@@ -1,7 +1,8 @@
-# monday battery, multi-user target: an app token every agent shares. The same
-# rule as the single-user target; the `monday` audience source names the
-# recipient by the confirmed email the monday Users API reports, never relative
-# to the token's owner. These rules run before the base policy's.
+# monday battery, policy of both targets. A notification names one recipient;
+# the `monday` audience source resolves that user through the monday Users API
+# to a confirmed email, never relative to the token's owner, so the call's input
+# must be sharable with the actual recipient. These rules run before the base
+# policy's.
 
 [policy]
 version = 2

@@ -1,7 +1,7 @@
 //! monday battery: internal reads and reviewed writes, like Linear and PostHog.
 mod common;
 
-use appa_package::BatteryTarget;
+use appa_package::{BatteryTarget, MANIFEST_FILE, Package, Role};
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime_api::{HookDecision, ProposedCall};
@@ -73,7 +73,12 @@ async fn composed_runtime(
                 }
             }
             if let Some(url) = monday_source {
-                let policy_path = target.join(format!("{}.toml", battery_target.as_str()));
+                let package = Package::read(&target.join(MANIFEST_FILE)).unwrap();
+                let Role::Battery(battery) = package.role else {
+                    panic!("monday is a battery");
+                };
+                let targets = battery.targets.expect("monday declares its targets");
+                let policy_path = target.join(targets.get(battery_target).policy.as_str());
                 let policy = std::fs::read_to_string(&policy_path).unwrap().replace(
                     "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_MONDAY_TOKEN\"",
                     &format!("url = \"{url}\""),
@@ -291,17 +296,6 @@ async fn the_base_alone_notifies_only_with_public_input() {
     let dir = tempfile::tempdir().unwrap();
     let with_expansion = composed_runtime(&dir, true, None, Composition::BaseAlone).await;
     review_write(&with_expansion, notification("1")).await;
-}
-
-/// The two target policies are one document: the multi-user target reuses the helper and
-/// names no token-owner-relative selector.
-#[test]
-fn the_target_policies_declare_the_same_rules() {
-    let policy = |file: &str| -> toml::Value {
-        toml::from_str(&std::fs::read_to_string(repo_root().join("marketplace/batteries/monday").join(file)).unwrap())
-            .unwrap()
-    };
-    assert_eq!(policy("single-user.toml"), policy("multi-user.toml"));
 }
 
 async fn notification_checks_its_recipient(battery_target: BatteryTarget) {
