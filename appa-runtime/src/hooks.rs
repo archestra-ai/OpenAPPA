@@ -57,9 +57,12 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answer
         return answered;
     }
     let presentation = EmbeddedPresentationOptions {
-        // amppa v1 has no checked child-return lifecycle. Do not advise a model
+        // These v1 plugins have no checked child-return lifecycle. Do not advise a model
         // to delegate on the assumption that the child's labels are inherited.
-        supports_delegation: adapter.name != appa_runtime_api::AdapterName::Amp,
+        supports_delegation: !matches!(
+            adapter.name,
+            appa_runtime_api::AdapterName::Amp | appa_runtime_api::AdapterName::OpenCode
+        ),
         ..EmbeddedPresentationOptions::default()
     };
     let handled = handle_internal(runtime, event, presentation).await;

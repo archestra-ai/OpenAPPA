@@ -418,8 +418,8 @@ impl RawPlugin {
 
         match host {
             Host::Embedded => unreachable!("Host::parse names only served hosts"),
-            // amppa is distributed as an Amp plugin, not a marketplace installer.
-            Host::Amp => Err(ManifestError::Host {
+            // These integrations are source-distributed, not marketplace installers.
+            Host::Amp | Host::OpenCode => Err(ManifestError::Host {
                 path: path.to_path_buf(),
                 host: self.host,
             }),
@@ -706,12 +706,14 @@ mod tests {
     }
 
     #[test]
-    fn amp_is_a_battery_host_but_has_no_marketplace_installer() {
-        assert!(manifest(&BATTERY.replace("[\"claude-code\"]", "[\"amp\"]")).is_ok());
-        assert!(matches!(
-            manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"amp\"")),
-            Err(ManifestError::Host { .. })
-        ));
+    fn source_plugins_are_battery_hosts_but_have_no_marketplace_installer() {
+        for host in ["amp", "opencode"] {
+            assert!(manifest(&BATTERY.replace("[\"claude-code\"]", &format!("[\"{host}\"]"))).is_ok());
+            assert!(matches!(
+                manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", &format!("host = \"{host}\""))),
+                Err(ManifestError::Host { .. })
+            ));
+        }
     }
 
     #[test]
