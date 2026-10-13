@@ -1210,21 +1210,22 @@ impl PostgresStore {
         let (prefix, rows) = worker.run({
             let id = id.clone();
             move |state| {
+                let start = stored_position(from)?;
                 // The batches before the cached last one are not read again, only counted, so a
                 // removed row still refuses the log as a gap.
                 let prefix: i64 = match from {
                     0 => 0,
-                    from => state
+                    _ => state
                         .client
                         .query_one(
                             "SELECT count(*) FROM openappa_events WHERE root = $1 AND seq < $2",
-                            &[&id, &(from as i64)],
+                            &[&id, &start],
                         )?
                         .get(0),
                 };
                 let rows = state.client.query(
                     "SELECT seq, payload FROM openappa_events WHERE root = $1 AND seq >= $2 ORDER BY seq",
-                    &[&id, &(from as i64)],
+                    &[&id, &start],
                 )?;
                 let rows = contiguous_from(from, rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
                     .map_err(|gap| PostgresError(gap.to_string()))?;
@@ -1327,10 +1328,11 @@ impl PostgresStore {
     ) -> Result<(), crate::files::FileStoreError> {
         let workspace = workspace.to_owned();
         self.transaction(move |client| {
+            let position = stored_position(basis)?;
             let appended = client.execute(
                 "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,$2,$3) \
                  ON CONFLICT (workspace, seq) DO NOTHING",
-                &[&workspace, &(basis as i64), &payload],
+                &[&workspace, &position, &payload],
             )?;
             if appended == 0 {
                 let current = client
@@ -1348,7 +1350,7 @@ impl PostgresStore {
                 let root = root.as_str().to_owned();
                 client.execute(
                     "INSERT INTO openappa_file_roots(root,workspace,seq) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                    &[&root, &workspace, &(basis as i64)],
+                    &[&root, &workspace, &position],
                 )?;
                 let bound: String = client
                     .query_one("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
@@ -1484,6 +1486,12 @@ impl Drop for PostgresStep<'_> {
     }
 }
 
+/// A log position as the `bigint` column stores it. A position past `i64::MAX` cannot be
+/// stored, so it is refused rather than wrapped.
+fn stored_position(position: u64) -> Result<i64, PostgresError> {
+    i64::try_from(position).map_err(|_| PostgresError(format!("the log position {position} cannot be stored")))
+}
+
 /// Lock `root`'s family row for the rest of the transaction, creating the row on first use.
 /// Writers of one family serialize on it; the lock ends with the transaction.
 fn lock_root(client: &mut Client, root: &str) -> Result<(), ::postgres::Error> {
@@ -1593,9 +1601,11 @@ impl Batch {
         }
         let inserted = client.execute(
             "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3) ON CONFLICT (root, seq) DO NOTHING",
-            &[&self.root, &(self.basis as i64), &self.bytes],
+            &[&self.root, &stored_position(self.basis)?, &self.bytes],
         )?;
         if inserted == 0 {
+            // The log ended at `basis` a statement ago in this transaction, so the writer that
+            // took the position wrote exactly one batch there.
             return Ok(Written::Conflict(self.basis + 1));
         }
         if let Some(key) = &self.key {
