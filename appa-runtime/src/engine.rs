@@ -3855,7 +3855,7 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
                 "Run the tool and withhold its result".to_string()
             };
         }
-        match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
+        match (needs_approval, plan.narrowing(), plan.sanitizer()) {
             (true, _, Some(sanitizer)) => {
                 format!(
                     "Submit for approval and use sanitizer {}'s result",
@@ -3865,31 +3865,32 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             (false, _, Some(sanitizer)) => {
                 format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
             }
-            (true, true, None) => format!(
+            (true, Some(narrowing), None) => format!(
                 "Submit for approval and accept {} for the rest of this session",
-                narrowing_change(plan)
+                narrowing_change(narrowing)
             ),
-            (false, true, None) => format!("Accept {} for the rest of this session", narrowing_change(plan)),
-            (true, false, None) => "Submit for approval".to_string(),
-            (false, false, None) => "Apply the offered remedy".to_string(),
+            (false, Some(narrowing), None) => {
+                format!("Accept {} for the rest of this session", narrowing_change(narrowing))
+            }
+            (true, None, None) => "Submit for approval".to_string(),
+            (false, None, None) => "Apply the offered remedy".to_string(),
         }
     }
 }
 
 /// The change a narrowing plan asks the model to accept, in the words of the reasons
 /// `narrowing_feedback` gives: "session trust would fall", "allowed readers would narrow".
-fn narrowing_change(plan: &ExecutableRemedyPlan) -> &'static str {
-    match plan.narrowing() {
-        Some(narrowing) => match (
-            narrowing.from.trust != narrowing.to.trust,
-            narrowing.from.audience != narrowing.to.audience,
-        ) {
-            (true, true) => "lower trust and narrower readers",
-            (true, false) => "lower trust",
-            (false, true) => "narrower readers",
-            (false, false) => "this change",
-        },
-        None => "this change",
+fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
+    // The engine builds a narrowing only where the label moves, so one dimension changes.
+    debug_assert_ne!(narrowing.from, narrowing.to, "a narrowing changes trust or readers");
+    match (
+        narrowing.from.trust != narrowing.to.trust,
+        narrowing.from.audience != narrowing.to.audience,
+    ) {
+        (true, true) => "lower trust and narrower readers",
+        (true, false) => "lower trust",
+        (false, true) => "narrower readers",
+        (false, false) => "this change",
     }
 }
 
@@ -4986,7 +4987,7 @@ mod tests {
         ];
         let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
         for (to, change) in cases {
-            for (include_display_plan, required) in [(false, false), (true, false), (true, true)] {
+            for (include_display_plan, required) in [(false, false), (false, true), (true, false), (true, true)] {
                 let planned = PlannedBlock {
                     raw: RawBlock {
                         requirement_gaps: vec![],
