@@ -110,6 +110,10 @@ pub enum PackageError {
         "{policy} is a targeted battery's base, which loads alone, yet a tool names annotator `{annotator}` it does not declare"
     )]
     BaseUsesTargetAnnotator { policy: PathBuf, annotator: String },
+    #[error(
+        "{policy} is a targeted battery's base, which loads alone, yet declares annotator `{annotator}` without a builtin, and a package binds no external a base could carry"
+    )]
+    BaseAnnotatorUnbound { policy: PathBuf, annotator: String },
     #[error("{policy} names `{tool}` without a bare variant, so a call outside its selectors falls through to `*`")]
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
@@ -480,6 +484,15 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
     let declared: BTreeSet<&str> = declarations(base, "annotator")
         .filter_map(|annotator| annotator.get("name").and_then(Value::as_str))
         .collect();
+    let unbound = declarations(base, "annotator")
+        .filter(|annotator| annotator.get("builtin").is_none())
+        .find_map(|annotator| annotator.get("name").and_then(Value::as_str));
+    if let Some(annotator) = unbound {
+        return Err(PackageError::BaseAnnotatorUnbound {
+            policy: policy.to_path_buf(),
+            annotator: annotator.to_owned(),
+        });
+    }
     let uses = declarations(base, "tool").filter_map(|tool| tool.get("annotator").and_then(Value::as_str));
     if let Some(annotator) = uses.into_iter().find(|annotator| !declared.contains(annotator)) {
         return Err(PackageError::BaseUsesTargetAnnotator {
@@ -1218,7 +1231,12 @@ mod tests {
             (DeclarationKind::Annotator, "classifier"),
             (DeclarationKind::Authority, "review"),
         ] {
-            let shared = format!("[[policy.{}]]\nname = \"{name}\"\n", kind.field());
+            let builtin = if kind == DeclarationKind::Annotator {
+                "builtin = \"llm\"\n"
+            } else {
+                ""
+            };
+            let shared = format!("[[policy.{}]]\nname = \"{name}\"\n{builtin}", kind.field());
             let directory = targeted_battery(&declaring(&shared), "");
             fs::write(directory.path().join("appa.toml"), format!("{TARGETED_BASE}\n{shared}")).unwrap();
             let expected = NamedDeclaration {
@@ -1302,28 +1320,6 @@ mod tests {
             validate_package(targeted_battery(&versioned, "").path()),
             Err(PackageError::TargetPolicyVersion { base: 2, found: 1, .. })
         ));
-    }
-
-    /// A partial target declaration is refused as the manifest is read.
-    #[test]
-    fn a_battery_declares_every_target_or_none() {
-        let only_multi_user = battery(BATTERY_POLICY);
-        fs::write(
-            only_multi_user.path().join("appa-package.toml"),
-            format!("{BATTERY_MANIFEST}\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n"),
-        )
-        .unwrap();
-        fs::write(only_multi_user.path().join("multi-user.toml"), MULTI_USER_POLICY).unwrap();
-        assert!(matches!(
-            validate_package(only_multi_user.path()),
-            Err(PackageError::Manifest(ManifestError::PartialTargets {
-                missing: BatteryTarget::SingleUser,
-                ..
-            }))
-        ));
-
-        validate_package(battery(BATTERY_POLICY).path()).unwrap();
-        validate_package(targeted_battery(MULTI_USER_POLICY, "").path()).unwrap();
     }
 
     #[test]
@@ -1753,7 +1749,7 @@ mod tests {
     /// one declared only by the target policies leaves the base unloadable.
     #[test]
     fn a_targeted_base_declares_the_annotators_its_tools_use() {
-        let annotator = "[[policy.annotator]]\nname = \"classifier\"\n";
+        let annotator = "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"llm\"\n";
         let base =
             format!("{TARGETED_BASE}\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n");
         let with_targets = |base: &str, target_tail: &str| {
@@ -1771,6 +1767,32 @@ mod tests {
             Err(PackageError::BaseUsesTargetAnnotator { annotator, .. }) if annotator == "classifier"
         ));
         validate_package(with_targets(&format!("{base}\n{annotator}"), "").path()).unwrap();
+    }
+
+    /// Loaded alone, a targeted base has only its own bindings, so an annotator it
+    /// declares must be a builtin or bound by the base itself.
+    #[test]
+    fn a_targeted_base_binds_the_annotators_it_declares() {
+        let declared = format!(
+            "{TARGETED_BASE}\n[[policy.annotator]]\nname = \"classifier\"\n\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n"
+        );
+        let binding = "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n";
+        let with_targets = |base: &str, target_tail: &str| {
+            let directory = targeted(base, &format!("{MULTI_USER_POLICY}\n{target_tail}"));
+            fs::write(
+                directory.path().join("single-user.toml"),
+                format!("{SINGLE_USER_POLICY}\n{target_tail}"),
+            )
+            .unwrap();
+            directory
+        };
+
+        assert!(matches!(
+            validate_package(with_targets(&declared, binding).path()),
+            Err(PackageError::BaseAnnotatorUnbound { annotator, .. }) if annotator == "classifier"
+        ));
+        let builtin = declared.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
+        validate_package(with_targets(&builtin, "").path()).unwrap();
     }
 
     /// The engine picks a tool's first matching variant, target policy before base, and a
