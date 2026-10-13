@@ -3,14 +3,18 @@
 #![cfg(unix)]
 mod common;
 
-use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
-use appa_runtime_api::{HookDecision, ProposedCall};
+use appa_package::BatteryTarget;
+use appa_runtime::api::{AuditEvent, OpenError, RemedyOutcome, Runtime};
+use appa_runtime::config::{Config, HostDefaults, HostedBattery};
+use appa_runtime::hooks;
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use common::{
     Classifier, actor, members_source, offer_of, propose, ran, raw, repo_root, root, serve_runtime, session_runtime,
 };
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
@@ -52,16 +56,32 @@ fn needs_review(classifier: &Classifier) {
     );
 }
 
-/// The shipped battery with its audience source swapped for the loopback.
-async fn install_battery(dir: &tempfile::TempDir) {
-    let target = dir.path().join("marketplace/batteries/databricks");
+fn battery_dir() -> std::path::PathBuf {
+    repo_root().join("marketplace/batteries/databricks")
+}
+
+/// The shipped package copied under `dir`, so the base composes its target policies.
+fn copy_battery(dir: &std::path::Path) -> std::path::PathBuf {
+    let target = dir.join("marketplace/batteries/databricks");
     std::fs::create_dir_all(&target).unwrap();
+    for entry in std::fs::read_dir(battery_dir()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+    target
+}
+
+/// The shipped battery with its single-user audience source swapped for the loopback.
+async fn install_battery(dir: &tempfile::TempDir) {
+    let target = copy_battery(dir.path());
     let source = members_source().await;
     let binding = "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_DATABRICKS_TOKEN\"\n";
-    let policy = std::fs::read_to_string(repo_root().join("marketplace/batteries/databricks/appa.toml")).unwrap();
+    let policy = std::fs::read_to_string(target.join("single-user.toml")).unwrap();
     assert!(policy.contains(binding), "the battery binds its source as documented");
     std::fs::write(
-        target.join("appa.toml"),
+        target.join("single-user.toml"),
         policy.replace(binding, &format!("url = \"{source}\"\n")),
     )
     .unwrap();
@@ -311,4 +331,223 @@ async fn the_namespace_covers_each_bound_server_under_the_host() {
     }
     let (code, answer) = hook(&served.url, &pre_tool_use("databricks", "genie_ask"));
     assert_eq!(code, 2, "an unbound server is not covered: {answer}");
+}
+
+const ROOT: &str = r#"
+[policy]
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576
+"#;
+
+fn policy(file: &str) -> toml::Value {
+    toml::from_str(&std::fs::read_to_string(battery_dir().join(file)).unwrap()).unwrap()
+}
+
+/// The shipped battery copied under `dir`, beside a root config that includes its base
+/// and then reads `root`.
+fn installed(dir: &std::path::Path, root: &str) -> std::path::PathBuf {
+    copy_battery(dir);
+    let path = dir.join("appa.toml");
+    std::fs::write(
+        &path,
+        format!("include = [\"marketplace/batteries/databricks/appa.toml\"]\n{root}"),
+    )
+    .unwrap();
+    path
+}
+
+/// The base alone, as a host composes it with no target: it loads without the audience
+/// source, and a Genie question narrows the trajectory to suspicious internal as before.
+#[tokio::test]
+async fn the_base_alone_keeps_every_rule_without_the_audience_source() {
+    let base = std::fs::read_to_string(battery_dir().join("appa.toml")).unwrap();
+    let config = Config::hosted_composed(
+        ROOT,
+        &[HostedBattery {
+            name: "databricks",
+            base: &base,
+            target: None,
+            token_env: &[],
+        }],
+        HostDefaults::new(Duration::from_secs(5), 65_536),
+        |_| None,
+    )
+    .expect("the base composes alone");
+    let store =
+        Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+    let runtime = Arc::new(Runtime::open_with_store(config, store, None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    let ask = call("genie_ask", serde_json::json!({ "question": "revenue by region" }));
+    let offer = offer_of(&propose(&runtime, ask.clone()).await);
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, ask.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, ask).await;
+    let labels: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some((label.trust, label.audience)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec![("suspicious".to_string(), "internal".to_string())]);
+}
+
+/// A `databricks` CLI stand-in first on this test binary's PATH, answering one active user
+/// to `current-user me` and `users list`, and logging each call's arguments and the CLI
+/// login variables it saw to the file it answers; every helper the runtime spawns inherits
+/// it, a service principal's login, and a person's token and profile beside them.
+fn databricks_cli() -> std::path::PathBuf {
+    static LOG: OnceLock<std::path::PathBuf> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let log = dir.join("calls.jsonl");
+        let cli = dir.join("databricks");
+        std::fs::write(
+            &cli,
+            format!(
+                r#"#!/bin/sh
+python3 -c 'import json, os, sys; print(json.dumps({{"args": sys.argv[1:], **{{name: os.environ.get(name) for name in ["DATABRICKS_AUTH_TYPE", "DATABRICKS_CONFIG_FILE", "DATABRICKS_TOKEN", "DATABRICKS_CONFIG_PROFILE"]}}}}))' "$@" >> {log}
+case "$1" in
+  current-user) echo '{{"id": "1", "userName": "ana@corp.example", "active": true}}' ;;
+  users) echo '[{{"id": "1", "userName": "ana@corp.example", "active": true}}]' ;;
+  *) exit 1 ;;
+esac
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(dir.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
+        // SAFETY: set once, before any deployment that spawns the CLI loads; nothing else in
+        // this binary writes the environment.
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("DATABRICKS_HOST", "https://workspace.example");
+            std::env::set_var("DATABRICKS_CLIENT_ID", "principal-fixture");
+            std::env::set_var("DATABRICKS_CLIENT_SECRET", "secret-fixture");
+            std::env::set_var("DATABRICKS_TOKEN", "dapi-personal-fixture");
+            std::env::set_var("DATABRICKS_CONFIG_PROFILE", "personal");
+        }
+        log
+    })
+    .clone()
+}
+
+/// The CLI calls since the last one taken, each its arguments and the login variables seen.
+fn cli_calls(log: &std::path::Path) -> Vec<serde_json::Value> {
+    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    std::fs::write(log, "").unwrap();
+    calls.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+/// Each composition's startup probe reads the root's selectors through its own audience
+/// source. Single-user runs the CLI as the person's own login and serves `viewer`;
+/// multi-user runs it as the service principal alone, the person's token, profile and config
+/// file out of reach, and serves no `viewer`, so a deployment mapping onto it does not open.
+#[tokio::test]
+async fn each_target_reads_the_workspace_as_its_own_login() {
+    let log = databricks_cli();
+    let members = "[policy.audience]\ninternal = [\"databricks:members\"]\n";
+    let viewer = "[policy.audience]\nself = [\"databricks:viewer\"]\ninternal = [\"databricks:members\"]\n";
+    let opened = |dir: &tempfile::TempDir, target, mapping: &str| {
+        let config = Config::load_for_target(&installed(dir.path(), &format!("{ROOT}{mapping}")), &[], target)
+            .expect("the composition loads");
+        Runtime::open(config, dir.path().join("runtime.db"), None)
+    };
+    let probed = async |target, mapping: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = opened(&dir, target, mapping).expect("the deployment opens");
+        runtime.probe_sources().await.expect("the probe reads every selector");
+        cli_calls(&log)
+    };
+    let call = |args: &[&str], login: [Option<&str>; 4]| {
+        serde_json::json!({
+            "args": ([args, &["-o", "json"]].concat()),
+            "DATABRICKS_AUTH_TYPE": login[0],
+            "DATABRICKS_CONFIG_FILE": login[1],
+            "DATABRICKS_TOKEN": login[2],
+            "DATABRICKS_CONFIG_PROFILE": login[3],
+        })
+    };
+    let personal = [None, None, Some("dapi-personal-fixture"), Some("personal")];
+    let principal = [Some("oauth-m2m"), Some("/dev/null"), None, None];
+    let members_listing = [
+        "users",
+        "list",
+        "--attributes",
+        "id,userName,active",
+        "--filter",
+        "active eq true",
+    ];
+
+    let mut calls = probed(BatteryTarget::SingleUser, viewer).await;
+    calls.sort_by_key(|call| call["args"][0].as_str().unwrap().to_owned());
+    assert_eq!(
+        calls,
+        vec![
+            call(&["current-user", "me"], personal),
+            call(&members_listing, personal)
+        ]
+    );
+
+    assert_eq!(
+        probed(BatteryTarget::MultiUser, members).await,
+        vec![call(&members_listing, principal)]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let refused = opened(&dir, BatteryTarget::MultiUser, viewer).err();
+    assert!(
+        matches!(&refused, Some(OpenError::Policy(error))
+            if matches!(&**error, appa_policy::ConfigError::BadAudienceSource { selector, .. } if selector == "databricks:viewer")),
+        "{refused:?}"
+    );
+}
+
+/// The two target policies differ in their helpers alone: the same rules, the same
+/// declarations, and the same externals bound.
+#[test]
+fn the_target_policies_declare_the_same_rules() {
+    let single = policy("single-user.toml");
+    let multi = policy("multi-user.toml");
+    assert_eq!(single["policy"], multi["policy"]);
+    let bound = |document: &toml::Value| -> Vec<(String, Vec<String>)> {
+        document["externals"]
+            .as_table()
+            .unwrap()
+            .iter()
+            .map(|(section, entries)| (section.clone(), entries.as_table().unwrap().keys().cloned().collect()))
+            .collect()
+    };
+    assert_eq!(bound(&single), bound(&multi));
 }
