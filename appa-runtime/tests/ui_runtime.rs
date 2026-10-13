@@ -248,7 +248,7 @@ async fn setup_asks_for_the_credentials_of_the_deployment_target() {
     .unwrap();
     std::fs::write(
         battery.join("appa-package.toml"),
-        "schema = 1\nname = \"team\"\ndescription = \"Target setup fixture\"\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        "schema = 1\nname = \"team\"\ndescription = \"Target setup fixture\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -358,7 +358,7 @@ async fn setup_refuses_a_runtime_of_another_deployment_target() {
     .unwrap();
     std::fs::write(
         battery.join("appa-package.toml"),
-        "schema = 1\nname = \"team\"\ndescription = \"Target runtime fixture\"\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        "schema = 1\nname = \"team\"\ndescription = \"Target runtime fixture\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
     )
     .unwrap();
     std::fs::write(
