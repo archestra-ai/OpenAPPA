@@ -611,16 +611,21 @@ fn includes_load(package: &Path, policies: &[&str]) -> bool {
     Config::load(&root).is_ok()
 }
 
-/// A targeted battery on disk whose multi-user target policy binds `multi_user_audience`.
+/// An audience source the probe battery's helper serves.
+fn probe_audience(name: &str) -> String {
+    format!(
+        "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+    )
+}
+
+/// The external a targeted probe's base binds: its base runs no helper.
+const PROBE_BASE_EXTERNAL: &str = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+
+/// A targeted battery on disk whose multi-user target policy binds `multi_user_external`.
 /// The base and each target policy carry a rule of their own, so the composed rule
 /// order shows which policies a deployment included and in what order.
-fn targeted_probe(multi_user_audience: &str) -> tempfile::TempDir {
-    let audience = |name: &str| {
-        format!(
-            "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
-             selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
-        )
-    };
+fn targeted_probe(multi_user_external: &str) -> tempfile::TempDir {
     let package = tempfile::tempdir().expect("a temp dir is creatable");
     std::fs::write(
         package.path().join("appa-package.toml"),
@@ -630,21 +635,23 @@ fn targeted_probe(multi_user_audience: &str) -> tempfile::TempDir {
     std::fs::write(
         package.path().join("appa.toml"),
         format!(
-            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{}",
-            audience("probe")
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n\
+             [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n{PROBE_BASE_EXTERNAL}"
         ),
     )
     .expect("the base is writable");
     std::fs::write(
         package.path().join("single-user.toml"),
-        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/single_user\"\ndelta = {}\n",
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/single_user\"\ndelta = {{}}\n\n{}",
+            probe_audience("probe")
+        ),
     )
     .expect("the single-user target policy is writable");
     std::fs::write(
         package.path().join("multi-user.toml"),
         format!(
-            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/multi_user\"\ndelta = {{}}\n\n{}",
-            audience(multi_user_audience)
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/multi_user\"\ndelta = {{}}\n\n{multi_user_external}"
         ),
     )
     .expect("the multi-user target policy is writable");
@@ -660,11 +667,11 @@ fn targeted_probe(multi_user_audience: &str) -> tempfile::TempDir {
 fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
     use appa_package::BatteryTarget;
 
-    for (what, multi_user_audience, composes) in [
-        ("a distinct external", "probe-org", true),
-        ("the base's external", "probe", false),
+    for (what, multi_user_external, composes) in [
+        ("a distinct external", probe_audience("probe-org"), true),
+        ("the base's external", PROBE_BASE_EXTERNAL.to_owned(), false),
     ] {
-        let package = targeted_probe(multi_user_audience);
+        let package = targeted_probe(&multi_user_external);
         let validated = validate_package(package.path());
         assert_eq!(validated.is_ok(), composes, "{what}: {validated:?}");
 
@@ -697,7 +704,7 @@ fn a_targeted_battery_target_policy_is_not_included_directly() {
     use appa_package::BatteryTarget;
     use appa_runtime::config::ConfigError;
 
-    let package = targeted_probe("probe-org");
+    let package = targeted_probe(&probe_audience("probe-org"));
     validate_package(package.path()).expect("the targeted package validates");
     let (_deployment, root) = deployment_including(package.path(), &["multi-user.toml"]);
     for target in BatteryTarget::ALL {
@@ -719,12 +726,6 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
     use appa_package::BatteryTarget;
     use appa_runtime::config::ConfigError;
 
-    let audience = |name: &str| {
-        format!(
-            "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
-             selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
-        )
-    };
     let deployment = |manifest_targets: &str, target_policies: &[(&str, &str)]| {
         let deployment = tempfile::tempdir().expect("a temp dir is creatable");
         let battery = deployment.path().join("probe");
@@ -736,18 +737,24 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
             ),
         )
         .expect("the manifest is writable");
+        // A targeted base runs no helper, so it binds a stock sanitizer in place of a source.
+        let base_external = match manifest_targets {
+            "" => probe_audience("probe"),
+            _ => "[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
+                  [externals.sanitizers.probe]\nbuiltin = \"redact-secrets\"\n"
+                .to_owned(),
+        };
         std::fs::write(
             battery.join("appa.toml"),
             format!(
-                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{}",
-                audience("probe")
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{base_external}"
             ),
         )
         .expect("the base is writable");
         for (file, external) in target_policies {
             std::fs::write(
                 battery.join(file),
-                format!("[policy]\nversion = 2\n\n{}", audience(external)),
+                format!("[policy]\nversion = 2\n\n{}", probe_audience(external)),
             )
             .expect("the target policy is writable");
         }
@@ -762,7 +769,13 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
     let load = |deployment: &tempfile::TempDir, target| {
         Config::load_for_target(&deployment.path().join("appa.toml"), &[], target)
     };
-    let externals = |config: Config| config.externals.audience.into_keys().collect::<Vec<_>>();
+    let externals = |config: Config| {
+        let mut bound: Vec<_> = (config.externals.audience.into_keys())
+            .chain(config.externals.sanitizers.into_keys())
+            .collect();
+        bound.sort();
+        bound
+    };
 
     const BOTH: &str = "\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
     let targeted = deployment(
