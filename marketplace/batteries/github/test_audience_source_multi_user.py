@@ -106,6 +106,13 @@ class Selectors(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, "")
 
+    def test_a_malformed_listing_is_a_failure_not_a_partial_roster(self):
+        for listed in [{}, [{"login": "alice", "id": 7}], [account("alice", 7, "Organization")], ["alice"]]:
+            with Loopback({"/orgs/acme/members?per_page=100&page=1": listed}) as github:
+                result = run_script(envelope(), github.env())
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+
     def test_a_collection_past_the_page_budget_is_refused_not_truncated(self):
         budget = 50
         answers = {

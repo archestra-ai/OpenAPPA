@@ -63,6 +63,8 @@ def paginated(call, path, max_pages=None):
     page = 1
     while True:
         batch = call(path, per_page=PAGE_SIZE, page=page)
+        if not isinstance(batch, list):
+            raise RuntimeError(f"{path} page {page} is not a JSON array")
         yield from batch
         if len(batch) < PAGE_SIZE:
             return
@@ -90,10 +92,16 @@ def collection_path(selector):
 
 def people(call, path, max_pages=None):
     """The accounts a collection lists, its bots left out: a GitHub App
-    acts for the people who installed it and reads as none of its own."""
+    acts for the people who installed it and reads as none of its own. An
+    account of any other or no type is refused, never skipped."""
     for account in paginated(call, path, max_pages):
-        if account.get("type") == "User":
-            yield account
+        match account:
+            case {"type": "User"}:
+                yield account
+            case {"type": "Bot"}:
+                continue
+            case _:
+                raise RuntimeError(f"{path} lists an account of unrecognized type: {account!r}")
 
 
 def check_declaration(request, source_name, served):
