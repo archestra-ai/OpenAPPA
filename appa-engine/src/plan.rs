@@ -64,9 +64,11 @@ use serde::{Deserialize, Serialize};
 use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
 use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, CallRole, Gap, Narrowing, RawBlock};
-use crate::contract::ToolAnnotation;
-use crate::fact::EffectKind;
-use crate::label::{Audience, Evaluation, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
+use crate::contract::{StaticAnnotation, ToolAnnotation, ToolDeclaration};
+use crate::fact::{EffectKind, EffectSet};
+use crate::label::{
+    Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
+};
 use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -263,6 +265,19 @@ pub struct PlannedBlock {
     /// Advice, never a remedy: a child begins at the same label, so a fork cures no requirement.
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
     pub fork_advice: Option<ForkAdvice>,
+    /// Advice, never a remedy: what accepting the block's narrowing does to the rest of the
+    /// policy's argument-free tools. `None` when nothing narrows or nothing gets worse.
+    pub narrowing_impact: Option<NarrowingImpact>,
+}
+
+/// How a narrowing moves the policy's argument-free tools, judged on the current history:
+/// of `tools` analysed, `sign_off` start needing an authority and `blocked` lose every
+/// authority and input sanitizer that could clear them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NarrowingImpact {
+    pub tools: usize,
+    pub sign_off: usize,
+    pub blocked: usize,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -374,11 +389,135 @@ pub(crate) fn plan(
             sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
         }),
     };
+    let narrowing_impact = raw.narrowing.as_ref().and_then(|narrowing| {
+        narrowing_impact(
+            registry,
+            narrowing,
+            &contract.emits,
+            floor.as_ref(),
+            &has_committed,
+            &has_reserved,
+            context,
+        )
+    });
     Ok(PlannedBlock {
         raw: raw.clone(),
         plans,
         fork_advice,
+        narrowing_impact,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Standing {
+    Clear,
+    SignOff,
+    Blocked,
+}
+
+/// Each argument-free variant judged by the planner's one-stage remedies before and after the narrowing;
+/// a tool counts by its worst variant. Reads a fresh `Expansions`, so an undecided membership
+/// drops the variant instead of asking, and the operation's evidence stays untouched.
+fn narrowing_impact(
+    registry: &Registry,
+    narrowing: &Narrowing,
+    emits: &EffectSet,
+    floor: Option<&Floor>,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
+    context: &MembershipContext<'_>,
+) -> Option<NarrowingImpact> {
+    let unanswered = Expansions::default();
+    let context = MembershipContext::new(context.within, context.providers, &unanswered);
+    let accepted = |kind: &EffectKind| emits.contains(kind) || has_committed(kind);
+    let standing = |tool: &StaticAnnotation<'_>, label: &Label, has_committed: &dyn Fn(&EffectKind) -> bool| {
+        let annotation = tool.annotation();
+        let block = check::evaluate_static(tool, label, &has_committed, has_reserved, &context).ok()?;
+        let gaps = &block.requirement_gaps;
+        let mut needs = NeededAtoms::default();
+        let settles = !narrowing_remedies(
+            registry,
+            label,
+            annotation,
+            block.narrowing.as_ref(),
+            floor,
+            &context,
+            &mut needs,
+        )
+        .is_empty();
+        let covered = |needs: &mut NeededAtoms| {
+            // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
+            gaps.iter().fold(true, |all, gap| {
+                let held = registry.authorities().iter().fold(false, |held, authority| {
+                    match gap_cover(authority, gap, &annotation.tags, &context) {
+                        Evaluation::Holds => true,
+                        Evaluation::Fails => held,
+                        Evaluation::Needs(needed) => {
+                            needs.absorb(needed);
+                            held
+                        }
+                    }
+                });
+                all && held
+            })
+        };
+        // An input hop, or another tool's call for a `prior` or cap gap, is a route outside this
+        // one-stage view.
+        let redispatch = gaps.iter().any(|gap| matches!(gap, Gap::Prior(_) | Gap::Cap { .. }));
+        let hops = |needs: &mut NeededAtoms| {
+            !input_hops(
+                registry,
+                annotation,
+                &CallStage::default(),
+                CallRole::Ordinary,
+                gaps,
+                label,
+                &context,
+                needs,
+            )
+            .is_empty()
+        };
+        let standing = if settles && gaps.is_empty() {
+            Some(Standing::Clear)
+        } else if redispatch || hops(&mut needs) {
+            None
+        } else if settles && covered(&mut needs) {
+            Some(Standing::SignOff)
+        } else {
+            Some(Standing::Blocked)
+        };
+        needs.refuse_if_any().ok()?;
+        standing
+    };
+    let mut impact = NarrowingImpact {
+        tools: 0,
+        sign_off: 0,
+        blocked: 0,
+    };
+    for name in registry.tool_names() {
+        let Some((before, after)) = registry
+            .variants(name)
+            .filter_map(ToolDeclaration::declared)
+            .filter_map(|tool| StaticAnnotation::of(tool).ok())
+            .filter_map(|tool| {
+                Some((
+                    standing(&tool, &narrowing.from, has_committed)?,
+                    standing(&tool, &narrowing.to, &accepted)?,
+                ))
+            })
+            .reduce(|(before, after), (next_before, next_after)| (before.max(next_before), after.max(next_after)))
+        else {
+            continue;
+        };
+        impact.tools += 1;
+        match after {
+            _ if after <= before => {}
+            Standing::Blocked => impact.blocked += 1,
+            Standing::SignOff => impact.sign_off += 1,
+            Standing::Clear => {}
+        }
+    }
+    (impact.sign_off + impact.blocked > 0).then_some(impact)
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
@@ -3391,6 +3530,187 @@ mod tests {
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
         assert_eq!(planned.fork_advice, Some(ForkAdvice::SameLabel));
+    }
+
+    #[test]
+    fn a_narrowing_counts_the_tools_it_moves_to_sign_off_or_blocked() {
+        let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
+        let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
+        let tool = |name: &str, tags: &[&str], recipients: Vec<RecipientSpec>| ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags: tags.iter().map(|tag| TagName::new(*tag)).collect(),
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: recipients.into_iter().map(AudienceRequirement::Includes).collect(),
+                },
+                ..Requires::default()
+            },
+        };
+        let to_alice = || vec![RecipientSpec::Static(alice())];
+        let emitting = |mut tool: ToolAnnotation, effect: &str| {
+            tool.emits = EffectSet::new([EffectKind::new(effect)]).expect("one effect");
+            tool
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: declared(vec![
+                {
+                    let mut fetch = emitting(tool("fetch", &[], vec![]), "consumed");
+                    fetch.delta.audience = Some(DeltaAudience::Static(insider()));
+                    fetch
+                },
+                emitting(tool("approve", &[], vec![]), "approved"),
+                tool("read", &[], vec![]),
+                tool("read(scope:org)", &[], to_alice()),
+                tool("post", &["mail"], to_alice()),
+                tool("share", &["docs"], to_alice()),
+                tool("notify", &["docs", "mail"], to_alice()),
+                {
+                    let mut drain = tool("drain", &["mail"], to_alice());
+                    drain.requires.history = vec![HistoryRequirement::NoPrior(EffectKind::new("consumed"))];
+                    drain
+                },
+                {
+                    let mut gated = tool("gated", &[], vec![]);
+                    gated.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("approved"))];
+                    gated
+                },
+                tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
+            ]),
+            authorities: vec![Authority {
+                name: AuthorityName::new("desk"),
+                mandate: Mandate {
+                    reader_ceiling: Some(alice()),
+                    ..Mandate::default()
+                },
+                scope: Scope {
+                    tags: vec![TagName::new("mail")],
+                },
+                hint: None,
+            }],
+            sanitizers: vec![Sanitizer {
+                name: SanitizerName::new("scrub"),
+                on: SanitizerPoints {
+                    input: true,
+                    output: false,
+                },
+                transition: DeclaredTransition::Audience {
+                    from_includes: insider(),
+                    to: DeclaredAudience::Public,
+                },
+                scope: Scope {
+                    tags: vec![TagName::new("docs")],
+                },
+                hint: None,
+            }],
+            audience: crate::audience::AudienceConfig::default(),
+            annotators: vec![],
+        });
+        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
+            Some(NarrowingImpact {
+                tools: 5,
+                sign_off: 1,
+                blocked: 2,
+            }),
+            "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
+             fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
+             not analysed"
+        );
+        let narrowed = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("insider")])))];
+        assert_eq!(
+            plan_of(&registry, &narrowed, &call("post", json!({}))).narrowing_impact,
+            None,
+            "a block that narrows nothing has no impact"
+        );
+    }
+
+    #[test]
+    fn a_tool_whose_own_narrowing_the_floor_refuses_is_not_promised_sign_off() {
+        let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
+        let insider = || Audience::restricted([ReaderId::new("insider")]);
+        let tool = |name: &str, trust: Option<Trust>| ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags: vec![TagName::new("mail")],
+            delta: Delta { trust, audience: None },
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(alice()))],
+                },
+                ..Requires::default()
+            },
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: declared(vec![
+                tool("post", None),
+                tool("lookup", Some(SUSPICIOUS)),
+                tool("audit", None),
+                {
+                    let mut spent = tool("audit(scope:org)", None);
+                    spent.requires.history = vec![HistoryRequirement::NoPrior(EffectKind::new("spent"))];
+                    spent
+                },
+            ]),
+            authorities: vec![Authority {
+                name: AuthorityName::new("desk"),
+                mandate: Mandate {
+                    reader_ceiling: Some(alice()),
+                    ..Mandate::default()
+                },
+                scope: Scope {
+                    tags: vec![TagName::new("mail")],
+                },
+                hint: None,
+            }],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig::default(),
+            annotators: vec![],
+        });
+        let narrowing = Narrowing {
+            from: known(TRUSTED, Audience::public()),
+            to: known(TRUSTED, insider()),
+        };
+        let parts = crate::label::TestContext::default();
+        let impact = |floor: Option<&Floor>| {
+            narrowing_impact(
+                &registry,
+                &narrowing,
+                &EffectSet::default(),
+                floor,
+                &|kind| kind == &EffectKind::new("spent"),
+                &|_| false,
+                &parts.context(),
+            )
+        };
+        assert_eq!(
+            impact(None),
+            Some(NarrowingImpact {
+                tools: 3,
+                sign_off: 2,
+                blocked: 0,
+            }),
+            "audit's org variant is blocked before and after, so its other variant's move is no news"
+        );
+        assert_eq!(
+            impact(Some(&Floor::new(known(TRUSTED, insider()), None))),
+            Some(NarrowingImpact {
+                tools: 3,
+                sign_off: 1,
+                blocked: 0,
+            }),
+            "under a trusted floor lookup's drop to suspicious never settles, before or after"
+        );
     }
 
     #[test]

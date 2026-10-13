@@ -4069,6 +4069,15 @@ fn block_feedback(
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
     }
+    if let Some(impact) = planned.narrowing_impact {
+        reasons.push(format!(
+            "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
+            impact.sign_off + impact.blocked,
+            impact.tools,
+            impact.sign_off,
+            impact.blocked
+        ));
+    }
     if planned.plans.iter().any(|plan| match plan {
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
         RemedyPlan::Redispatch(_) => false,
@@ -4726,6 +4735,7 @@ mod tests {
                 RemedyPlan::Executable(plan(8)),
             ],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let offers = vec![
             (OfferId("offer-for-8".to_string()), PlanId::new(8)),
@@ -4826,6 +4836,7 @@ mod tests {
             },
             plans: vec![RemedyPlan::Redispatch(redispatch)],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
@@ -4880,6 +4891,7 @@ mod tests {
             },
             plans: vec![RemedyPlan::Executable(plan)],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
         let spelling = super::ReturnSpelling {
@@ -5013,6 +5025,7 @@ mod tests {
                         },
                     })],
                     fork_advice: None,
+                    narrowing_impact: None,
                 };
                 let options = EmbeddedPresentationOptions {
                     control_tool: "approve_remedy".to_string(),
@@ -5059,6 +5072,57 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_impact_adds_one_reason() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::{Audience, Label};
+        use appa_engine::plan::NarrowingImpact;
+
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let reasons = |narrowing_impact| {
+            let planned = PlannedBlock {
+                raw: RawBlock {
+                    requirement_gaps: vec![],
+                    narrowing: Some(Narrowing {
+                        from: Label::new(Trust::new(2), Audience::public()),
+                        to: Label::new(Trust::new(0), Audience::public()),
+                    }),
+                },
+                plans: vec![],
+                fork_advice: None,
+                narrowing_impact,
+            };
+            let options = EmbeddedPresentationOptions {
+                control_tool: "approve_remedy".to_string(),
+                supports_delegation: false,
+                include_display_plan: true,
+            };
+            block_feedback(
+                &planned,
+                &[],
+                policy.engine().registry(),
+                &ReturnBounds {
+                    label: Label::top(),
+                    lowest: Trust::new(0),
+                },
+                ToolNaming::AsAuthored,
+                "send_mail",
+                &options,
+            )
+            .display
+            .expect("the display plan is requested")
+            .reasons
+        };
+        let without = reasons(None);
+        let with = reasons(Some(NarrowingImpact {
+            tools: 4,
+            sign_off: 1,
+            blocked: 2,
+        }));
+        assert_eq!(with.len(), without.len() + 1);
+        assert!(with.starts_with(&without));
+    }
+
+    #[test]
     fn embedded_presentation_uses_the_host_control_name_and_omits_delegation_advice() {
         let options = EmbeddedPresentationOptions {
             control_tool: "approve_remedy".to_string(),
@@ -5079,6 +5143,7 @@ mod tests {
                 }],
             })],
             fork_advice: Some(super::ForkAdvice::SameLabel),
+            narrowing_impact: None,
         };
         let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
         let feedback = block_feedback(
@@ -5140,6 +5205,7 @@ mod tests {
                 },
                 plans: vec![],
                 fork_advice: None,
+                narrowing_impact: None,
             };
             block_feedback(
                 &planned,
