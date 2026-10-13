@@ -11,11 +11,11 @@ OpenAPPA gates a flow at the point where a trajectory's label changes, not only 
 When a tool call is blocked, OpenAPPA returns structured feedback with a remedy offer:
 
 ```text
-[appa] Blocked: this call cannot run yet.
+[appa] Blocked: get_pod_logs cannot run yet.
 Why:
   - session trust would fall: trusted -> suspicious
 Continue:
-  - Accept this change for the rest of this session:
+  - Accept lower trust for the rest of this session:
     execute_remedy_plan(offer_id: "…")
 ```
 

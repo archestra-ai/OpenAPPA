@@ -102,6 +102,10 @@ async fn a_share_runs_only_when_everyone_it_reaches_may_already_read() {
         archestra("search_files", serde_json::json!({ "query": "notes" })),
         archestra("load_skill", serde_json::json!({ "name": "release" })),
         archestra(
+            "yell",
+            serde_json::json!({ "message": "blocked", "with_trajectory": false }),
+        ),
+        archestra(
             "set_project_share",
             serde_json::json!({ "visibility": "team", "team_ids": ["t1"] }),
         ),

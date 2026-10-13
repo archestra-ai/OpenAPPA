@@ -33,7 +33,7 @@ def test_nested_mcp_json_refusal_is_counted_once():
 
 
 def test_native_adk_text_refusal_requires_tool_feedback_and_no_mcp_call():
-    blocked = "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - session trust would fall: trusted -> suspicious"
+    blocked = "[appa] Blocked: restart_deployment cannot run yet.\n\nWhy:\n  - session trust would fall: trusted -> suspicious"
     state = {"requests": [{"index": 0, "messages": []},
                           {"index": 1, "messages": [{"role": "tool", "content": blocked}]}],
              "invocations": [], "lookups": []}

@@ -25,6 +25,10 @@ This covers projects, apps, knowledge bases, knowledge connectors, plugins, agen
 
 `search_tools` lists the tools an agent can call. `search_files` lists the files an agent can reach. `load_skill` loads a skill's instructions and bundled files. These tools add no label and require nothing. An agent can look up tools, files, and skills at any point in a session.
 
+## Reporting
+
+`yell` files a guardrails report with the organization's admins. It is how an agent escalates a block, so it adds no label and requires nothing: no label the session picked up can refuse it.
+
 ## Audiences
 
 The source builds:

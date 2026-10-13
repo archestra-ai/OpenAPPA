@@ -97,11 +97,11 @@ def test_chat_completions_stream_is_openai_sse_with_indexed_tool_deltas(step):
 
 def test_remedy_uses_actual_feedback_and_advances_from_transcript():
     with running_fixture() as (base, _):
-        request = completion([{"tool": "get_file_contents"}, {"remedy": "accept this change"}])
+        request = completion([{"tool": "get_file_contents"}, {"remedy": "accept lower trust"}])
         first = json.loads(http(base, "/v1/chat/completions", request)[1])["choices"][0]["message"]
         request["messages"] += [first, {"role": "tool", "tool_call_id": first["tool_calls"][0]["id"],
             "content": json.dumps({"appa": "denied", "result":
-                '  - Accept this change:\n    execute_remedy_plan(offer_id: "abcdef012345")'})}]
+                '  - Accept lower trust for the rest of this session:\n    execute_remedy_plan(offer_id: "abcdef012345")'})}]
         second = json.loads(http(base, "/v1/chat/completions", request)[1])["choices"][0]["message"]
         call = second["tool_calls"][0]
         assert call["function"]["name"] == "execute_remedy_plan"
@@ -111,7 +111,7 @@ def test_remedy_uses_actual_feedback_and_advances_from_transcript():
 
 def test_missing_remedy_unknown_tool_and_invalid_input_are_explicit_http_errors():
     with running_fixture() as (base, _):
-        for request in [completion([{"remedy": "accept this change"}]), completion([{"tool": "missing"}]),
+        for request in [completion([{"remedy": "accept lower trust"}]), completion([{"tool": "missing"}]),
                         {"messages": []}]:
             with pytest.raises(urllib.error.HTTPError) as error:
                 http(base, "/v1/chat/completions", request)
