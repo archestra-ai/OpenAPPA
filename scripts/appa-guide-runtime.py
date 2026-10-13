@@ -42,6 +42,7 @@ UniqueKeyLoader.add_constructor(
 RUNTIME_URL = os.environ.get("APPA_GUIDE_RUNTIME_URL", "http://127.0.0.1:8787").rstrip(
     "/"
 )
+APPA = "/usr/local/bin/appa"
 REFRESH = "/usr/local/bin/appa-refresh-batteries"
 IDENTITY_DIR = Path("/var/run/appa/identity")
 POLICY_CONFIGMAP = os.environ.get("APPA_POLICY_CONFIGMAP_NAME")
@@ -233,9 +234,10 @@ def with_lookup_rosters(
     directory = next(
         d / battery for d in directories if (d / battery / "appa.toml").is_file()
     )
-    package = tomllib.loads(
-        (directory / "appa-package.toml").read_text(encoding="utf-8")
-    )
+    manifest = directory / "appa-package.toml"
+    if not manifest.is_file():
+        return root
+    package = tomllib.loads(manifest.read_text(encoding="utf-8"))
     selected = package["battery"].get("targets", {}).get(target)
     if selected is None:
         return root
@@ -253,6 +255,28 @@ def with_lookup_rosters(
     )
 
 
+def validated_include(candidate: str, battery: str) -> str:
+    """The candidate as the runtime composes it, with the empty lookup rosters added
+    only when it is refused without them: another composed source may declare them."""
+    try:
+        validate_policy(candidate)
+        return candidate
+    except RuntimeError as refused:
+        rostered = with_lookup_rosters(
+            candidate,
+            battery,
+            battery_dirs(),
+            os.environ.get("APPA_BATTERY_TARGET", "single-user"),
+        )
+        if rostered == candidate:
+            raise
+        try:
+            validate_policy(rostered)
+        except RuntimeError:
+            raise refused from None
+        return rostered
+
+
 def validate_policy(root: str) -> None:
     with tempfile.NamedTemporaryFile(
         "w", suffix=".toml", encoding="utf-8"
@@ -260,7 +284,7 @@ def validate_policy(root: str) -> None:
         candidate.write(root)
         candidate.flush()
         command = [
-            "/usr/local/bin/appa",
+            APPA,
             "describe",
             "--check",
             "--config",
@@ -395,13 +419,7 @@ def include_battery(request: dict) -> dict:
     candidate, changed = with_battery_include(current, battery)
     if not changed:
         return {**runtime_state(), "changed": False, "battery": battery}
-    candidate = with_lookup_rosters(
-        candidate,
-        battery,
-        battery_dirs(),
-        os.environ.get("APPA_BATTERY_TARGET", "single-user"),
-    )
-    validate_policy(candidate)
+    candidate = validated_include(candidate, battery)
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": True, "battery": battery, "reload": reloaded}
 

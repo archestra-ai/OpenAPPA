@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -125,25 +127,6 @@ class AppaGuideRuntimeTests(unittest.TestCase):
         unchanged, changed = guide.with_battery_include(expanded, "github")
         self.assertFalse(changed)
         self.assertEqual(unchanged, expanded)
-
-    def test_battery_include_adds_the_roster_its_target_looks_up(self) -> None:
-        repository = SCRIPT.parent.parent
-        batteries = [repository / "marketplace/batteries"]
-        bootstrap = (repository / "charts/appa-runtime/files/appa.toml").read_text()
-        root, _ = guide.with_battery_include(bootstrap, "github")
-
-        multi = guide.with_lookup_rosters(root, "github", batteries, "multi-user")
-        audience = tomllib.loads(multi)["externals"]["audience"]
-        self.assertEqual(audience, {"host-members": {"readers": {}}})
-        self.assertTrue(
-            guide.preserves_policy_shape(tomllib.loads(root), tomllib.loads(multi))
-        )
-        self.assertEqual(
-            guide.with_lookup_rosters(multi, "github", batteries, "multi-user"), multi
-        )
-        self.assertEqual(
-            guide.with_lookup_rosters(root, "github", batteries, "single-user"), root
-        )
 
     def test_demo_policy_preserves_the_bootstrap_shape(self) -> None:
         repository = SCRIPT.parent.parent
@@ -381,6 +364,95 @@ class AppaGuideRuntimeTests(unittest.TestCase):
                 first_thread.join(2)
                 second_thread.join(2)
                 self.assertTrue(second_entered.is_set())
+
+
+REPOSITORY = SCRIPT.parent.parent
+BOOTSTRAP = (REPOSITORY / "charts/appa-runtime/files/appa.toml").read_text()
+
+
+class BatteryIncludeCompositionTests(unittest.TestCase):
+    """The include path against the runtime's own composition: the appa binary."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--quiet",
+                "--manifest-path",
+                str(REPOSITORY / "Cargo.toml"),
+                "-p",
+                "appa",
+                "--bin",
+                "appa",
+            ],
+            check=True,
+        )
+        cls.previous = guide.APPA
+        guide.APPA = str(REPOSITORY / "target/debug/appa")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        guide.APPA = cls.previous
+
+    def include(self, root: str, battery: str, target: str, *dirs: Path) -> str:
+        directories = [*dirs, REPOSITORY / "marketplace/batteries"]
+        environment = {
+            "APPA_BATTERY_TARGET": target,
+            "APPA_BATTERIES_DIR": ":".join(map(str, directories)),
+        }
+        candidate, _ = guide.with_battery_include(root, battery)
+        with mock.patch.dict(os.environ, environment):
+            return guide.validated_include(candidate, battery)
+
+    def test_multi_user_adds_the_empty_roster_its_target_looks_up(self) -> None:
+        included = self.include(BOOTSTRAP, "github", "multi-user")
+        audience = tomllib.loads(included)["externals"]["audience"]
+        self.assertEqual(audience, {"host-members": {"readers": {}}})
+        self.assertTrue(
+            guide.preserves_policy_shape(
+                tomllib.loads(BOOTSTRAP), tomllib.loads(included)
+            )
+        )
+
+    def test_single_user_adds_no_roster(self) -> None:
+        included = self.include(BOOTSTRAP, "github", "single-user")
+        self.assertNotIn("audience", tomllib.loads(included)["externals"])
+
+    def test_a_manifestless_battery_is_included(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plain = Path(directory) / "plain"
+            plain.mkdir()
+            (plain / "appa.toml").write_text("[policy]\nversion = 2\n")
+            included = self.include(BOOTSTRAP, "plain", "multi-user", Path(directory))
+            self.assertEqual(
+                guide.with_lookup_rosters(
+                    included, "plain", [Path(directory)], "multi-user"
+                ),
+                included,
+            )
+        self.assertEqual(
+            tomllib.loads(included)["include"], ["batteries/plain/appa.toml"]
+        )
+        self.assertNotIn("audience", tomllib.loads(included)["externals"])
+
+    def test_a_roster_another_include_declares_is_not_duplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            members = Path(directory) / "members"
+            members.mkdir()
+            (members / "appa.toml").write_text(
+                "[policy]\nversion = 2\n\n[externals.audience.host-members]\n"
+                'readers = { "github:583231" = "ana@corp.example" }\n'
+            )
+            root, _ = guide.with_battery_include(BOOTSTRAP, "members")
+            included = self.include(root, "github", "multi-user", Path(directory))
+        parsed = tomllib.loads(included)
+        self.assertEqual(
+            parsed["include"],
+            ["batteries/members/appa.toml", "batteries/github/appa.toml"],
+        )
+        self.assertNotIn("audience", parsed["externals"])
 
 
 if __name__ == "__main__":
