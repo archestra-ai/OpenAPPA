@@ -1,0 +1,19 @@
+{
+  "name": "appa-appencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./appencode.ts" },
+  "dependencies": {
+    "@opencode/plugin": "2.0.28",
+    "effect": "4.0.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

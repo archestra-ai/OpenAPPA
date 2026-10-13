@@ -30,6 +30,8 @@ APPA runs alongside the agent as a local process, sidecar, or shared service. Fo
 
 [Claude Code](/claude-code) is a ready-made example for a coding agent; [kagent](/kagent) shows the same approach for Kubernetes agents. Their dedicated guides cover setup and configuration.
 
+For OpenCode V2, [AppenCode v1](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/opencode) checks direct tool calls and results. It supports remedy plans and output sanitization. It refuses Code Mode and subagents; it does not gate inference or provide filesystem confinement. The integration README covers source installation and the supported boundaries.
+
 Ask your coding agent to run [this prompt](#start-in-your-repository) to implement it.
 
 ## Use APPA at the LLM proxy

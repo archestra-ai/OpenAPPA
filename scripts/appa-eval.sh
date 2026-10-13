@@ -68,6 +68,9 @@ run "Battery script linter" python3 scripts/lint_batteries.py
 run "Rust tests" cargo test --workspace --locked
 run "Runtime binary" cargo build --package appa --locked
 run "amppa plugin and runtime integration" bun test integrations/amp
+run_at integrations/opencode "AppenCode locked dependencies" bun install --frozen-lockfile
+run_at integrations/opencode "AppenCode types" bun run check
+run_at integrations/opencode "AppenCode plugin and runtime integration" bun test
 
 run "Repository Python tests" uv run --with 'pyyaml==6.0.2' python3 -m unittest \
   scripts/test_lint_batteries.py \

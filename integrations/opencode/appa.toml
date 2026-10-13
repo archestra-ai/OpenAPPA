@@ -1,0 +1,38 @@
+# Starting policy for AppenCode v1, not a general-purpose coding policy.
+# Undeclared tools are refused. Code Mode and subagents are refused by the plugin.
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "host/opencode/read(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/opencode/read"
+
+[[policy.tool]]
+name = "host/opencode/webfetch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/opencode/websearch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/opencode/write"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/opencode/edit"
+requires = { trust = "trusted" }
+
+# A command gate is not a filesystem or network sandbox. Permit only pwd here.
+[[policy.tool]]
+name = "host/opencode/shell(command:pwd)"
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
