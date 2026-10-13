@@ -986,7 +986,7 @@ mod tests {
         let mut args = fixture(dir.path());
         let battery = dir.path().join("batteries/team");
         std::fs::create_dir_all(&battery).unwrap();
-        std::fs::write(battery.join("appa-package.toml"), "schema = 1\nname = \"team\"\ndescription = \"Team\"\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n[battery.readiness]\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-team-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_TOKEN\"\nlogin_hint = \"appa-team-fixture-cli login\"\n").unwrap();
+        std::fs::write(battery.join("appa-package.toml"), "schema = 1\nname = \"team\"\ndescription = \"Team\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n[battery.readiness]\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-team-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_TOKEN\"\nlogin_hint = \"appa-team-fixture-cli login\"\n").unwrap();
         std::fs::write(battery.join("appa.toml"), "[policy]\nversion = 2\n").unwrap();
         std::fs::write(battery.join("single-user.toml"), "[policy]\nversion = 2\n").unwrap();
         std::fs::write(battery.join("multi-user.toml"), "[policy]\nversion = 2\n[externals.audience.team]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"APPA_PROVIDER_TEAM_TOKEN\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n").unwrap();

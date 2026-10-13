@@ -624,7 +624,7 @@ fn targeted_probe(multi_user_audience: &str) -> tempfile::TempDir {
     let package = tempfile::tempdir().expect("a temp dir is creatable");
     std::fs::write(
         package.path().join("appa-package.toml"),
-        "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
     )
     .expect("the manifest is writable");
     std::fs::write(
@@ -729,11 +729,10 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
         let deployment = tempfile::tempdir().expect("a temp dir is creatable");
         let battery = deployment.path().join("probe");
         std::fs::create_dir(&battery).expect("the battery dir is creatable");
-        let base = if target_policies.is_empty() { "policy" } else { "base" };
         std::fs::write(
             battery.join("appa-package.toml"),
             format!(
-                "schema = 1\nname = \"probe\"\ndescription = \"a battery\"\n\n[battery]\n{base} = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{manifest_targets}"
+                "schema = 1\nname = \"probe\"\ndescription = \"a battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{manifest_targets}"
             ),
         )
         .expect("the manifest is writable");
