@@ -183,11 +183,11 @@ pub struct Battery {
 
 impl Battery {
     /// The policies a deployment of `target` includes, target policy first. A battery
-    /// without targets, or a deployment that names none, includes the base alone.
-    pub fn compose_order(&self, target: Option<BatteryTarget>) -> Vec<&RelativePath> {
-        match (target, &self.targets) {
-            (Some(target), Some(targets)) => vec![&targets.get(target).policy, &self.base],
-            _ => vec![&self.base],
+    /// without targets includes the base alone.
+    pub fn compose_order(&self, target: BatteryTarget) -> Vec<&RelativePath> {
+        match &self.targets {
+            Some(targets) => vec![&targets.get(target).policy, &self.base],
+            None => vec![&self.base],
         }
     }
 }
@@ -696,18 +696,17 @@ mod tests {
         }
 
         assert_eq!(
-            names(targeted.compose_order(Some(BatteryTarget::MultiUser))),
+            names(targeted.compose_order(BatteryTarget::MultiUser)),
             vec!["multi-user.toml", "appa.toml"]
         );
         assert_eq!(
-            names(targeted.compose_order(Some(BatteryTarget::SingleUser))),
+            names(targeted.compose_order(BatteryTarget::SingleUser)),
             vec!["single-user.toml", "appa.toml"]
         );
-        assert_eq!(names(targeted.compose_order(None)), vec!["appa.toml"]);
 
         let plain = manifest(BATTERY).unwrap();
         assert_eq!(
-            names(plain.battery().unwrap().compose_order(Some(BatteryTarget::SingleUser))),
+            names(plain.battery().unwrap().compose_order(BatteryTarget::SingleUser)),
             vec!["appa.toml"]
         );
     }
