@@ -56,7 +56,11 @@ def lint(root: Path) -> list[str]:
                     errors.append(f"{manifest}: battery.policy must name appa.toml")
                 else:
                     targets = battery_config.get("targets", {})
-                    policies += [battery / target["policy"] for target in targets.values()]
+                    for target in targets.values():
+                        policy = battery / target["policy"]
+                        if not policy.is_file():
+                            errors.append(f"{policy}: declared target policy is missing")
+                        policies.append(policy)
         allowed.update(policies)
         for policy in policies:
             errors.extend(unreachable_rules(policy))
