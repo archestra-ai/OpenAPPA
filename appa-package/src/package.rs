@@ -96,6 +96,14 @@ impl BatteryTarget {
             Self::MultiUser => "battery.targets.multi-user.policy",
         }
     }
+
+    /// The manifest field that names this target's setup steps.
+    pub(crate) fn setup_field(self) -> &'static str {
+        match self {
+            Self::SingleUser => "battery.targets.single-user.setup",
+            Self::MultiUser => "battery.targets.multi-user.setup",
+        }
+    }
 }
 
 impl fmt::Display for BatteryTarget {
@@ -115,6 +123,8 @@ pub struct TargetPolicy {
     /// The readiness command a deployment of this target runs in place of the
     /// base's, validated like it.
     pub readiness: Option<Vec<String>>,
+    /// The setup steps a deployment of this target follows in place of the base's.
+    pub setup: Option<Vec<String>>,
 }
 
 /// A battery's target policies: one for every target, so a deployment of any
@@ -220,6 +230,14 @@ impl Battery {
         match &self.targets {
             Some(targets) => targets.get(target).readiness.as_deref().unwrap_or(base),
             None => base,
+        }
+    }
+
+    /// The setup steps a deployment of `target` follows: its target policy's, else the base's.
+    pub fn setup_steps(&self, target: BatteryTarget) -> &[String] {
+        match &self.targets {
+            Some(targets) => targets.get(target).setup.as_deref().unwrap_or(&self.setup),
+            None => &self.setup,
         }
     }
 }
@@ -401,6 +419,7 @@ struct RawBattery {
 struct RawTargetPolicy {
     policy: String,
     readiness: Option<Vec<String>>,
+    setup: Option<Vec<String>>,
 }
 
 impl RawBattery {
@@ -417,6 +436,10 @@ impl RawBattery {
                 audiences: Vec::new(),
                 credentials: Vec::new(),
                 readiness: target_policy.readiness,
+                setup: target_policy
+                    .setup
+                    .map(|steps| setup_steps(&steps, parsed.setup_field(), path))
+                    .transpose()?,
             };
             declared.insert(parsed, target_policy);
         }
@@ -481,13 +504,7 @@ impl RawBattery {
                 });
             }
         };
-        let mut setup = Vec::new();
-        for (index, step) in self.setup.iter().enumerate() {
-            setup.push(one_line(step).ok_or_else(|| ManifestError::Setup {
-                path: path.to_path_buf(),
-                step: index + 1,
-            })?);
-        }
+        let setup = setup_steps(&self.setup, "battery.setup", path)?;
         let mut detect = Vec::new();
         for program in self.detect {
             let parsed = ExecutableName::parse(&program).ok_or_else(|| ManifestError::Detect {
@@ -519,6 +536,20 @@ impl RawBattery {
 }
 
 /// `text` trimmed, when it is one non-empty line.
+fn setup_steps(steps: &[String], field: &'static str, path: &Path) -> Result<Vec<String>, ManifestError> {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            one_line(step).ok_or_else(|| ManifestError::Setup {
+                path: path.to_path_buf(),
+                field,
+                step: index + 1,
+            })
+        })
+        .collect()
+}
+
 fn one_line(text: &str) -> Option<String> {
     let line = text.trim();
     (!line.is_empty() && !line.contains(['\n', '\r'])).then(|| line.to_owned())
@@ -711,6 +742,27 @@ mod tests {
                 .readiness_command(BatteryTarget::MultiUser)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_target_policy_setup_replaces_the_bases_for_its_target_alone() {
+        let targeted = TARGETED.replace(
+            "hosts = [\"claude-code\"]\n",
+            "hosts = [\"claude-code\"]\nsetup = [\"Make a token.\"]\n",
+        );
+        let package = manifest(&format!("{targeted}setup = [\"Install the App.\"]\n")).unwrap();
+        let battery = package.battery().unwrap();
+
+        assert_eq!(battery.setup_steps(BatteryTarget::MultiUser), ["Install the App."]);
+        assert_eq!(battery.setup_steps(BatteryTarget::SingleUser), ["Make a token."]);
+        assert!(matches!(
+            manifest(&format!("{targeted}setup = [\"one\\ntwo\"]\n")),
+            Err(ManifestError::Setup {
+                field: "battery.targets.multi-user.setup",
+                step: 1,
+                ..
+            })
+        ));
     }
 
     /// A battery that declares targets declares every one of them; a battery

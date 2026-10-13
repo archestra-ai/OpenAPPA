@@ -30,3 +30,8 @@ policy = "single-user.toml"
 [battery.targets.multi-user]
 policy = "multi-user.toml"
 readiness = ["python3", "check-multi-user.py"]
+setup = [
+  "Create a GitHub App with read access to repository metadata, contents, issues, and pull requests and to organization members, and install it on the repositories the agents use.",
+  "Set `APPA_PROVIDER_GITHUB_TOKEN` to an installation token of that App; it starts with `ghs_` and expires after an hour, so refresh it. A personal access token is refused.",
+  "For GitHub Enterprise Server, set `GITHUB_API_URL` to its API root, for example `https://github.example.com/api/v3`.",
+]

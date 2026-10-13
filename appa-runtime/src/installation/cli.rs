@@ -343,9 +343,16 @@ fn setup_notices<'a>(
 ) -> serde_json::Value {
     let notices: Vec<serde_json::Value> = batteries
         .into_iter()
-        .map(|(name, battery)| (name, battery, battery.credentials_for(target)))
-        .filter(|(_, battery, credentials)| !credentials.is_empty() || !battery.setup.is_empty())
-        .map(|(name, battery, credentials)| {
+        .map(|(name, battery)| {
+            (
+                name,
+                battery,
+                battery.credentials_for(target),
+                battery.setup_steps(target),
+            )
+        })
+        .filter(|(_, _, credentials, setup)| !credentials.is_empty() || !setup.is_empty())
+        .map(|(name, battery, credentials, setup)| {
             let credentials: Vec<serde_json::Value> = credentials
                 .into_iter()
                 .map(|variable| serde_json::json!({"variable": variable, "set": is_set(variable)}))
@@ -354,7 +361,7 @@ fn setup_notices<'a>(
                 "battery": name.as_str(),
                 "credentials": credentials,
                 "benefit": battery.benefit,
-                "setup": battery.setup,
+                "setup": setup,
             })
         })
         .collect();
@@ -1593,6 +1600,39 @@ mod tests {
         assert!(rendered.contains("linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell)."));
         assert!(!rendered.contains("otion"));
         assert_eq!(rendered.lines().filter(|line| line.contains("reads")).count(), 2);
+    }
+
+    /// A deployment's notice names its own target's steps.
+    #[test]
+    fn setup_notices_follow_the_deployment_target() {
+        let target_policy = |setup: Option<&str>| appa_package::TargetPolicy {
+            policy: appa_package::RelativePath::parse("target.toml").unwrap(),
+            audiences: vec![],
+            credentials: vec![],
+            readiness: None,
+            setup: setup.map(|step| vec![step.to_owned()]),
+        };
+        let battery = Battery {
+            base: appa_package::RelativePath::parse("appa.toml").unwrap(),
+            targets: Some(appa_package::TargetPolicies {
+                single_user: target_policy(None),
+                multi_user: target_policy(Some("Install the App.")),
+            }),
+            hosts: vec![appa_package::Host::ClaudeCode],
+            namespaces: vec![],
+            helpers: vec![],
+            audiences: vec![],
+            credentials: vec![],
+            benefit: None,
+            setup: vec!["Make a token.".to_owned()],
+            readiness: None,
+            detect: vec![],
+        };
+        let github = PackageName::parse("github").unwrap();
+        let steps = |target| setup_notices([(&github, &battery)], target, |_| false)[0]["setup"].clone();
+
+        assert_eq!(steps(BatteryTarget::MultiUser), serde_json::json!(["Install the App."]));
+        assert_eq!(steps(BatteryTarget::SingleUser), serde_json::json!(["Make a token."]));
     }
 
     /// Every battery without a binding goes in one command, so the person

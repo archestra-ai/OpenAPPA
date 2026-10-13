@@ -245,7 +245,7 @@ impl Local {
                 .map(|alt| json!({"executable": alt.executable, "credential": alt.credential,
                     "login_hint": alt.login_hint, "installed": runtime_info.as_ref().and_then(|r| r["prerequisites"]["executables"][&alt.executable].as_bool()).unwrap_or_else(|| readiness::executable_available(&alt.executable))})).collect();
             json!({"name": entry.name, "description": entry.package.description,
-                "benefit": battery.benefit, "setup": battery.setup,
+                "benefit": battery.benefit, "setup": battery.setup_steps(self.target),
                 "included": active.contains(&entry.name), "configured": configured.contains(&entry.name),
                 "selected": configured.contains(&entry.name) || self.selected.contains(&entry.name),
                 "credentials": credentials, "dependencies": dependencies, "alternatives": alternatives,

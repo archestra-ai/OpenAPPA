@@ -233,6 +233,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                         .iter()
                         .filter_map(|(_, target_policy)| target_policy.readiness.as_deref())
                 })
+                .filter(|command| !command.is_empty())
                 .collect();
             let readiness_error = |policy: PathBuf| {
                 PackageError::Readiness { policy, reason: "a check runs python3 on a declared helper and requires python3; a target policy's check needs the base's [battery.readiness]; executables are bare names; alternatives reference owned credentials".into() }
@@ -1388,6 +1389,34 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    /// An empty target policy check is presence-only, as an empty base one is: it runs
+    /// nothing, so it needs neither python3 nor the base's check.
+    #[test]
+    fn an_empty_target_policy_readiness_command_runs_nothing() {
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        let path = directory.path().join("appa-package.toml");
+        let with = |tail: &str| format!("{BATTERY_MANIFEST}{tail}{BOTH_TARGETS}readiness = []\n");
+        let base_check = "\n[battery.readiness]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             required_executables = [\"python3\"]\n";
+        for tail in [
+            "",
+            "\n[battery.readiness]\nrequired_executables = [\"gh\"]\n",
+            base_check,
+        ] {
+            fs::write(&path, with(tail)).unwrap();
+            let package = validate_package(directory.path()).unwrap_or_else(|error| panic!("{tail}: {error}"));
+            let Role::Battery(battery) = package.role else {
+                panic!("a battery")
+            };
+            assert!(battery.readiness_command(BatteryTarget::MultiUser).is_empty(), "{tail}");
+        }
+        let package = validate_package(directory.path()).unwrap();
+        assert_eq!(
+            package.battery().unwrap().readiness_command(BatteryTarget::SingleUser),
+            ["python3", "audience-source.py"]
+        );
     }
 
     /// The loader refuses an external two included files both declare, and an
