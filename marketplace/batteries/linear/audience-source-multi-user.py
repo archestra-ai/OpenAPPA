@@ -4,16 +4,12 @@ one answer out.
 The token is an OAuth app's access token issued with `actor=app`: no
 person stands behind it, so there is no viewer, and a personal API key,
 which acts as its owner, is refused. Serves audience-source.py's
-templates other than `viewer`, and its member lookup; a member is still
-the account's email as Linear reports it.
+templates other than `viewer`, and the member lookup (see
+linear_audience.py); a member is still the account's email as Linear
+reports it.
 """
 
-import importlib.util
-from pathlib import Path
-
-SPEC = importlib.util.spec_from_file_location("audience_source", Path(__file__).with_name("audience-source.py"))
-linear = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(linear)
+import linear_audience
 
 
 SERVED_TEMPLATES = [
@@ -31,7 +27,7 @@ def answer(call, artifact):
         case {"selector": "viewer"}:
             raise ValueError("a multi-user deployment has no viewer")
         case _:
-            return linear.answer(call, artifact)
+            return linear_audience.answer(call, artifact)
 
 
 def app_token(token):
@@ -41,4 +37,4 @@ def app_token(token):
 
 
 if __name__ == "__main__":
-    linear.serve(SERVED_TEMPLATES, answer, app_token)
+    linear_audience.serve(SERVED_TEMPLATES, answer, app_token)

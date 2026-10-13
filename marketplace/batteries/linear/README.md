@@ -41,7 +41,8 @@ authorized for everything this connection can list. Image extraction can
 fetch external URLs, so its input must be public and reviewed.
 
 **`audience-source.py`** — the `linear` audience source, over the
-GraphQL API. It answers these selectors:
+GraphQL API; its reads live in `linear_audience.py`, which both
+entrypoints import. It answers these selectors:
 
 - `linear:viewer` — the token's own reader. Feeds `self`.
 - `linear:full-members` — every active member of the workspace, guests

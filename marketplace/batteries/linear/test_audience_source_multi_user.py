@@ -6,10 +6,21 @@ import sys
 import unittest
 
 
+sys.path.insert(0, str(Path(__file__).parent))
 SCRIPT = Path(__file__).with_name("audience-source-multi-user.py")
 SPEC = importlib.util.spec_from_file_location("audience_source_multi_user", SCRIPT)
 MULTI_USER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MULTI_USER)
+
+SINGLE_USER_TEMPLATES = [
+    "viewer",
+    "full-members",
+    "team/<key>/members",
+    "team/<key>/readers",
+    "issue/<id>/readers",
+    "project/<id>/readers",
+    "document/<id>/readers",
+]
 
 
 def no_api(*_args, **_kwargs):
@@ -39,7 +50,7 @@ class Selectors(unittest.TestCase):
     def test_the_served_templates_are_the_single_user_ones_but_the_viewer(self):
         self.assertEqual(
             MULTI_USER.SERVED_TEMPLATES,
-            [template for template in MULTI_USER.linear.SERVED_TEMPLATES if template != "viewer"],
+            [template for template in SINGLE_USER_TEMPLATES if template != "viewer"],
         )
 
     def test_a_team_reads_as_in_the_single_user_source_by_email(self):
@@ -74,7 +85,7 @@ class Token(unittest.TestCase):
 
 class Declaration(unittest.TestCase):
     def test_a_declaration_with_the_viewer_is_refused_before_the_token_is_read(self):
-        declared = list(MULTI_USER.linear.SERVED_TEMPLATES)
+        declared = SINGLE_USER_TEMPLATES
         result = run_script(envelope(declaration={"templates": declared}), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(result.stdout, "")
