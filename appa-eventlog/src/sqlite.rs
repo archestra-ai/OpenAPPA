@@ -639,15 +639,16 @@ impl Sqlite {
                     params![organization, session, id, lease.owner().as_str(), expires_at],
                 )?;
                 if renewed == 0 {
-                    let status: Option<String> = connection
+                    let kept: Option<i64> = connection
                         .query_row(
-                            "SELECT status FROM operations
-                             WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
-                            params![organization, session, id],
+                            "SELECT 1 FROM operations
+                             WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3
+                               AND status='complete' AND lease_owner=?4",
+                            params![organization, session, id, lease.owner().as_str()],
                             |row| row.get(0),
                         )
                         .optional()?;
-                    if status.as_deref() != Some("complete") {
+                    if kept.is_none() {
                         renewal = Renewal::Lost;
                     }
                 }
@@ -662,15 +663,16 @@ impl Sqlite {
                     params![organization, session, id, lease.owner().as_str(), expires_at],
                 )?;
                 if renewed == 0 {
-                    let status: Option<String> = connection
+                    let kept: Option<i64> = connection
                         .query_row(
-                            "SELECT status FROM processed_results
-                             WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
-                            params![organization, session, id],
+                            "SELECT 1 FROM processed_results
+                             WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3
+                               AND status='complete' AND lease_owner=?4",
+                            params![organization, session, id, lease.owner().as_str()],
                             |row| row.get(0),
                         )
                         .optional()?;
-                    if status.as_deref() != Some("complete") {
+                    if kept.is_none() {
                         renewal = Renewal::Lost;
                     }
                 }

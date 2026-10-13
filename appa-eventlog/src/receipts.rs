@@ -244,11 +244,11 @@ impl ProcessedResultClaim {
 /// What renewing an owner's receipts found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Renewal {
-    /// Every listed receipt is still pending under the caller's lease, now extended, or is
-    /// complete.
+    /// Every listed receipt is still pending under the caller's lease, now extended, or the
+    /// caller completed it.
     Kept,
-    /// Some listed receipt is gone, or pending under another owner. The work it guarded is no
-    /// longer the caller's to finish.
+    /// Some listed receipt is gone, or another owner took it over, pending or complete. The
+    /// work it guarded is no longer the caller's to finish.
     Lost,
 }
 
@@ -1375,10 +1375,21 @@ mod tests {
                 .expect("a completed receipt accepts its own completion from anyone");
             assert_eq!(
                 store
-                    .renew_receipts(&lease("a"), &[request.key], &[result_request.key])
+                    .renew_receipts(
+                        &lease("a"),
+                        std::slice::from_ref(&request.key),
+                        std::slice::from_ref(&result_request.key)
+                    )
+                    .unwrap(),
+                Renewal::Lost,
+                "a receipt another owner took over and completed stays lost to the displaced one"
+            );
+            assert_eq!(
+                store
+                    .renew_receipts(&lease("b"), &[request.key], &[result_request.key])
                     .unwrap(),
                 Renewal::Kept,
-                "a completed receipt is never lost"
+                "a receipt its owner completed is kept"
             );
         }
     }

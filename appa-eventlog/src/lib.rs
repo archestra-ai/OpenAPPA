@@ -982,8 +982,8 @@ impl LogStore {
     }
 
     /// Extends the lease on each listed receipt still pending under the lease's owner, in one
-    /// transaction. [`Renewal::Lost`] when any listed receipt is gone or pending under another
-    /// owner; a completed receipt is never lost.
+    /// transaction. [`Renewal::Lost`] when any listed receipt is gone or another owner took it
+    /// over, pending or complete; a receipt the caller completed is kept.
     pub fn renew_receipts(
         &self,
         lease: &ReceiptLease,
@@ -3437,7 +3437,8 @@ mod tests {
     }
 
     /// Once another owner recovered a receipt, the owner it displaced can neither complete nor
-    /// renew it. A completed receipt is never lost and accepts its own completion from anyone.
+    /// renew it, even once the new owner completed it. A completed receipt accepts its own
+    /// completion from anyone.
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
@@ -3550,8 +3551,19 @@ mod tests {
                     std::slice::from_ref(&result.key)
                 )
                 .unwrap(),
+            Renewal::Lost,
+            "a receipt another owner took over and completed stays lost to the displaced one"
+        );
+        assert_eq!(
+            store
+                .renew_receipts(
+                    &b,
+                    std::slice::from_ref(&operation.key),
+                    std::slice::from_ref(&result.key)
+                )
+                .unwrap(),
             Renewal::Kept,
-            "a completed receipt is never lost"
+            "a receipt its owner completed is kept"
         );
         let mut missing = operation.key.clone();
         missing.operation_id = "op-missing".to_owned();

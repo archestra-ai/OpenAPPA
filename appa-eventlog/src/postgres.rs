@@ -728,8 +728,9 @@ impl PostgresStore {
                     && client
                         .query_opt(
                             "SELECT 1 FROM openappa_operations \
-                             WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3 AND status='complete'",
-                            &[organization, session, id],
+                             WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3 AND status='complete' \
+                               AND lease_owner=$4",
+                            &[organization, session, id, &lease.owner().as_str()],
                         )?
                         .is_none()
                 {
@@ -749,8 +750,9 @@ impl PostgresStore {
                     && client
                         .query_opt(
                             "SELECT 1 FROM openappa_processed_results \
-                             WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 AND status='complete'",
-                            &[organization, session, id],
+                             WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 AND status='complete' \
+                               AND lease_owner=$4",
+                            &[organization, session, id, &lease.owner().as_str()],
                         )?
                         .is_none()
                 {
