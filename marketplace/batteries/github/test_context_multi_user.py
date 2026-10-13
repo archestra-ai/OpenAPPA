@@ -195,7 +195,7 @@ class MultiUserAnswers(unittest.TestCase):
         )
 
     def test_the_single_user_query_still_reads_the_viewer_and_logins(self):
-        fields = selected_fields(CONTEXT.query_of(CONTEXT.SINGLE_USER))
+        fields = selected_fields(CONTEXT.query_of(CONTEXT.Deployment.SINGLE_USER))
         self.assertTrue({"viewer", "viewerPermission", "login"} <= fields, fields)
         self.assertNotIn("databaseId", fields)
 

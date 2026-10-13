@@ -422,7 +422,7 @@ def note(author, association, editor=None):
 def multi_user(repository_fields, listed=None):
     """The `github` context entry context-multi-user.py answers for a recorded GraphQL response."""
     payload = {"data": {"repository": {"nameWithOwner": "acme/api", "visibility": "PUBLIC", "parent": None, **repository_fields}}}
-    return {"answer": CONTEXT.answer_of(payload, listed, CONTEXT.MULTI_USER)}
+    return {"answer": CONTEXT.answer_of(payload, listed, CONTEXT.Deployment.MULTI_USER)}
 
 
 def multi_user_pull_request(comments=(), commit_users=(11,), editor=None):

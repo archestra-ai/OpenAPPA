@@ -34,6 +34,10 @@ SERVED_TEMPLATES = [
     "org/<org>/team/<team>",
     "repo/<owner>/<repo>/collaborators",
 ]
+# Listing pages a collection may fill. Members need no profile reads here,
+# so the budget is wider than the single-user source's, but a roster past
+# it is refused rather than answered in part.
+MAX_PAGES = 50
 
 
 def person(account):
@@ -47,7 +51,7 @@ def person(account):
 def answer(call, artifact):
     match artifact:
         case {"selector": str() as selector} if len(artifact) == 1:
-            return {"members": [person(account) for account in people(call, collection_path(selector))]}
+            return {"members": [person(account) for account in people(call, collection_path(selector), MAX_PAGES)]}
         case {"selector": _} if len(artifact) == 1:
             raise ValueError("the selector must be a string")
         case {"member": _} if len(artifact) == 1:

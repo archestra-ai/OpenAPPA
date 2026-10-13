@@ -41,8 +41,8 @@ token cannot see, or any GitHub error exits nonzero: the runtime hands
 the annotator an error entry, and the call itself is never refused here.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 import json
 import os
 import re
@@ -682,9 +682,9 @@ def github_id_of(account):
             return None
 
 
-@dataclass(frozen=True)
-class Deployment:
-    """How the answer names a person, and where the token comes from.
+class Deployment(Enum):
+    """Whose token the provider holds, which decides how the answer names a
+    person and where the token comes from.
 
     A single-user deployment's token is a person's: the answer names the
     viewer, the viewer's permission, and every person by `login`. A
@@ -692,33 +692,49 @@ class Deployment:
     has no viewer: every person is `person`, `github:<id>`, and the token
     comes from the deployment alone."""
 
-    key: str
-    author: str
-    editor: str
-    user: str
-    viewer: bool
-    person: Callable[[dict], str | None]
-    token: Callable[[], str]
+    SINGLE_USER = "single-user"
+    MULTI_USER = "multi-user"
+
+    @property
+    def has_viewer(self):
+        return self is Deployment.SINGLE_USER
+
+    @property
+    def key(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return "login"
+            case Deployment.MULTI_USER:
+                return "person"
+
+    def person(self, account):
+        match self:
+            case Deployment.SINGLE_USER:
+                return login_of(account)
+            case Deployment.MULTI_USER:
+                return github_id_of(account)
+
+    def token(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return resolve_token()
+            case Deployment.MULTI_USER:
+                return env_token()
 
 
-SINGLE_USER = Deployment("login", "login __typename", "login", "login", True, login_of, resolve_token)
 ACCOUNT = "__typename ... on User { databaseId } ... on Bot { databaseId }"
-MULTI_USER = Deployment(
-    "person",
-    ACCOUNT,
-    ACCOUNT,
-    "databaseId",
-    False,
-    github_id_of,
-    env_token,
-)
 
 
 def query_of(deployment):
-    actor = f"author {{ {deployment.author} }} authorAssociation editor {{ {deployment.editor} }} lastEditedAt"
+    match deployment:
+        case Deployment.SINGLE_USER:
+            author, editor, user = "login __typename", "login", "login"
+            viewer, viewer_permission = "viewer { login }\n  ", " viewerPermission"
+        case Deployment.MULTI_USER:
+            author, editor, user = ACCOUNT, ACCOUNT, "databaseId"
+            viewer, viewer_permission = "", ""
+    actor = f"author {{ {author} }} authorAssociation editor {{ {editor} }} lastEditedAt"
     listed = f"pageInfo {{ hasNextPage }} nodes {{ number {actor} }}"
-    viewer = "viewer { login }\n  " if deployment.viewer else ""
-    viewer_permission = " viewerPermission" if deployment.viewer else ""
     return f"""
 query(
   $owner: String!, $name: String!, $number: Int!, $withNumber: Boolean!,
@@ -749,7 +765,7 @@ query(
           comments(first: 30) {{ pageInfo {{ hasNextPage }} nodes {{ {actor} }} }}
         }} }}
         commits(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ commit {{
-          authors(first: 10) {{ pageInfo {{ hasNextPage }} nodes {{ user {{ {deployment.user} }} }} }}
+          authors(first: 10) {{ pageInfo {{ hasNextPage }} nodes {{ user {{ {user} }} }} }}
         }} }} }}
       }}
     }}
@@ -887,7 +903,7 @@ def listing_of(repository, listed, deployment):
     return {"items": [listed_item(node, deployment) for node in nodes], "truncated": listed.scope == WHOLE and more}
 
 
-def answer_of(payload, listed=None, deployment=SINGLE_USER):
+def answer_of(payload, listed=None, deployment=Deployment.SINGLE_USER):
     """The provider's answer from one GraphQL response."""
     data = payload.get("data") if isinstance(payload, dict) else None
     repository = data.get("repository") if isinstance(data, dict) else None
@@ -901,10 +917,10 @@ def answer_of(payload, listed=None, deployment=SINGLE_USER):
     if visibility not in ("public", "private", "internal"):
         raise RuntimeError(f"GitHub reports the unknown repository visibility {visibility!r}")
     facts = {"name": repository.get("nameWithOwner"), "visibility": visibility}
-    if deployment.viewer:
+    if deployment.has_viewer:
         facts["viewer_permission"] = repository.get("viewerPermission")
     facts["fork_of"] = (repository.get("parent") or {}).get("nameWithOwner")
-    answer = {"viewer": (data.get("viewer") or {}).get("login")} if deployment.viewer else {}
+    answer = {"viewer": (data.get("viewer") or {}).get("login")} if deployment.has_viewer else {}
     answer["repository"] = facts
     node = repository.get("issueOrPullRequest")
     match (node or {}).get("__typename"):
@@ -917,7 +933,7 @@ def answer_of(payload, listed=None, deployment=SINGLE_USER):
     return answer
 
 
-def context_of(consult, deployment=SINGLE_USER):
+def context_of(consult, deployment=Deployment.SINGLE_USER):
     """The answer for one consult: `None` for a call that reaches nothing on
     GitHub, else the facts one GraphQL query returns."""
     if not isinstance(consult, dict) or consult.get("version") != 1 or consult.get("kind") != "context":
@@ -945,4 +961,4 @@ def main(deployment):
 
 
 if __name__ == "__main__":
-    main(SINGLE_USER)
+    main(Deployment.SINGLE_USER)
