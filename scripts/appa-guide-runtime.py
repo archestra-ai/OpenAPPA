@@ -50,7 +50,6 @@ POLICY_CONFIGMAP = os.environ.get("APPA_POLICY_CONFIGMAP_NAME")
 POLICY_CONFIGMAP_KEY = os.environ.get("APPA_POLICY_CONFIGMAP_KEY", "appa.toml")
 RUNTIME_RELEASE = os.environ.get("APPA_RUNTIME_RELEASE_NAME")
 BATTERY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 MANAGEMENT_LOCK = Path(
     os.environ.get(
         "APPA_GUIDE_MANAGEMENT_LOCK", "/var/lib/appa/.appa-guide-management.lock"
@@ -244,50 +243,34 @@ class Composition(NamedTuple):
         )
 
 
-def with_lookup_rosters(root: str, battery: str, composition: Composition) -> str:
-    """Append an empty readers roster for each lookup the battery's target policy
-    routes to the root, so the include composes; an empty roster denies until filled."""
-    directory = next(
-        d / battery
-        for d in composition.battery_dirs
-        if (d / battery / "appa.toml").is_file()
+def run_appa(arguments: list[str], composition: Composition) -> None:
+    command = [composition.appa, *arguments]
+    for directory in composition.battery_dirs:
+        command.extend(("--batteries-dir", str(directory)))
+    environment = os.environ.copy()
+    environment.pop("APPA_BATTERIES_DIR", None)
+    environment["APPA_BATTERY_TARGET"] = composition.target
+    checked = subprocess.run(
+        command, capture_output=True, check=False, env=environment, timeout=30
     )
-    manifest = directory / "appa-package.toml"
-    if not manifest.is_file():
-        return root
-    package = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    selected = package["battery"].get("targets", {}).get(composition.target)
-    if selected is None:
-        return root
-    policy = tomllib.loads((directory / selected["policy"]).read_text(encoding="utf-8"))
-    declared = tomllib.loads(root).get("externals", {}).get("audience", {})
-    lookups = {
-        entry["lookup"]
-        for entry in policy.get("externals", {}).get("audience", {}).values()
-        if "lookup" in entry
-    }
-    return root + "".join(
-        f"\n[externals.audience.{name if BARE_KEY.fullmatch(name) else json.dumps(name)}]\n"
-        "readers = {}\n"
-        for name in sorted(lookups - declared.keys())
-    )
+    if checked.returncode != 0:
+        detail = (checked.stderr or checked.stdout).decode("utf-8", errors="replace")[
+            -2000:
+        ]
+        raise RuntimeError(f"candidate policy is invalid: {detail}")
 
 
-def validated_include(candidate: str, battery: str, composition: Composition) -> str:
-    """The candidate as the runtime composes it, with the empty lookup rosters added
-    only when it is refused without them: another composed source may declare them."""
-    try:
-        validate_policy(candidate, composition)
-        return candidate
-    except RuntimeError as refused:
-        rostered = with_lookup_rosters(candidate, battery, composition)
-        if rostered == candidate:
-            raise
-        try:
-            validate_policy(rostered, composition)
-        except RuntimeError:
-            raise refused from None
-        return rostered
+def validated_include(candidate: str, composition: Composition) -> str:
+    """The candidate with an empty readers roster for each lookup target the
+    runtime finds no composed source declaring; an empty roster denies until
+    filled."""
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", encoding="utf-8") as root:
+        root.write(candidate)
+        root.flush()
+        run_appa(["add-lookup-rosters", "--config", root.name], composition)
+        rostered = Path(root.name).read_text(encoding="utf-8")
+    validate_policy(rostered, composition)
+    return rostered
 
 
 def validate_policy(root: str, composition: Composition) -> None:
@@ -296,26 +279,7 @@ def validate_policy(root: str, composition: Composition) -> None:
     ) as candidate:
         candidate.write(root)
         candidate.flush()
-        command = [
-            composition.appa,
-            "describe",
-            "--check",
-            "--config",
-            candidate.name,
-        ]
-        for directory in composition.battery_dirs:
-            command.extend(("--batteries-dir", str(directory)))
-        environment = os.environ.copy()
-        environment.pop("APPA_BATTERIES_DIR", None)
-        environment["APPA_BATTERY_TARGET"] = composition.target
-        checked = subprocess.run(
-            command, capture_output=True, check=False, env=environment, timeout=30
-        )
-    if checked.returncode != 0:
-        detail = (checked.stderr or checked.stdout).decode("utf-8", errors="replace")[
-            -2000:
-        ]
-        raise RuntimeError(f"candidate policy is invalid: {detail}")
+        run_appa(["describe", "--check", "--config", candidate.name], composition)
 
 
 def patch_policy_configmap(expected: str, replacement: str) -> None:
@@ -433,7 +397,7 @@ def include_battery(request: dict) -> dict:
     candidate, changed = with_battery_include(current, battery)
     if not changed:
         return {**runtime_state(), "changed": False, "battery": battery}
-    candidate = validated_include(candidate, battery, Composition.serving())
+    candidate = validated_include(candidate, Composition.serving())
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": True, "battery": battery, "reload": reloaded}
 
@@ -569,7 +533,9 @@ def annotate_apply(request: dict) -> dict:
         if not isinstance(document, dict):
             raise TypeError("apply manifest must be one mapping")
         if document.get("kind") != "Agent":
-            raise ValueError("appa-guide Kubernetes apply supports only Agent manifests")
+            raise ValueError(
+                "appa-guide Kubernetes apply supports only Agent manifests"
+            )
         if "status" in document:
             raise ValueError("Agent apply must carry complete spec and no status")
         spec = document.get("spec")

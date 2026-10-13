@@ -22,14 +22,31 @@ SPEC.loader.exec_module(guide)
 REPOSITORY = SCRIPT.parent.parent
 APPA = Path(os.environ.get("APPA_BIN", REPOSITORY / "target/debug/appa"))
 BOOTSTRAP = (REPOSITORY / "charts/appa-runtime/files/appa.toml").read_text()
+MEMBERS = (
+    "[policy]\nversion = 2\n\n[externals.audience.host-members]\n"
+    'readers = { "github:583231" = "ana@corp.example" }\n'
+)
+RELAY = (
+    "[policy]\nversion = 2\n\n[externals.audience.relay]\n"
+    'command = ["python3", "relay.py"]\nlookup = "relay-members"\n'
+    'selectors = [{ template = "team/<team>" }]\n'
+)
 
 
-def include(root: str, battery: str, target: str, *dirs: Path) -> str:
+def include(root: str, battery: str, target: str, batteries: Path | None = None) -> str:
+    extra = () if batteries is None else (batteries,)
     composition = guide.Composition(
-        str(APPA), (*dirs, REPOSITORY / "marketplace/batteries"), target
+        str(APPA), (*extra, REPOSITORY / "marketplace/batteries"), target
     )
     candidate, _ = guide.with_battery_include(root, battery)
-    return guide.validated_include(candidate, battery, composition)
+    return guide.validated_include(candidate, composition)
+
+
+def fragments(directory: Path, **policies: str) -> Path:
+    for name, policy in policies.items():
+        (directory / name).mkdir()
+        (directory / name / "appa.toml").write_text(policy)
+    return directory
 
 
 class BatteryIncludeCompositionTests(unittest.TestCase):
@@ -54,35 +71,51 @@ class BatteryIncludeCompositionTests(unittest.TestCase):
 
     def test_a_manifestless_battery_is_included(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            plain = Path(directory) / "plain"
-            plain.mkdir()
-            (plain / "appa.toml").write_text("[policy]\nversion = 2\n")
-            included = include(BOOTSTRAP, "plain", "multi-user", Path(directory))
-            composition = guide.Composition(str(APPA), (Path(directory),), "multi-user")
-            self.assertEqual(
-                guide.with_lookup_rosters(included, "plain", composition), included
-            )
-        self.assertEqual(
-            tomllib.loads(included)["include"], ["batteries/plain/appa.toml"]
-        )
-        self.assertNotIn("audience", tomllib.loads(included)["externals"])
+            batteries = fragments(Path(directory), plain="[policy]\nversion = 2\n")
+            included = include(BOOTSTRAP, "plain", "multi-user", batteries)
+        parsed = tomllib.loads(included)
+        self.assertEqual(parsed["include"], ["batteries/plain/appa.toml"])
+        self.assertNotIn("audience", parsed["externals"])
 
     def test_a_roster_another_include_declares_is_not_duplicated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            members = Path(directory) / "members"
-            members.mkdir()
-            (members / "appa.toml").write_text(
-                "[policy]\nversion = 2\n\n[externals.audience.host-members]\n"
-                'readers = { "github:583231" = "ana@corp.example" }\n'
-            )
+            batteries = fragments(Path(directory), members=MEMBERS)
             root, _ = guide.with_battery_include(BOOTSTRAP, "members")
-            included = include(root, "github", "multi-user", Path(directory))
+            included = include(root, "github", "multi-user", batteries)
         parsed = tomllib.loads(included)
         self.assertEqual(
             parsed["include"],
             ["batteries/members/appa.toml", "batteries/github/appa.toml"],
         )
         self.assertNotIn("audience", parsed["externals"])
+
+    def test_only_the_lookup_no_source_declares_is_added(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            batteries = fragments(Path(directory), members=MEMBERS, relay=RELAY)
+            root, _ = guide.with_battery_include(BOOTSTRAP, "members")
+            root, _ = guide.with_battery_include(root, "relay")
+            included = include(root, "github", "multi-user", batteries)
+        audience = tomllib.loads(included)["externals"]["audience"]
+        self.assertEqual(audience, {"relay-members": {"readers": {}}})
+
+    def test_inline_externals_tables_take_the_roster(self) -> None:
+        policy = "[policy]\nversion = 2\n"
+        for root, expected in (
+            (
+                "externals = { timeout_ms = 5000, max_body_bytes = 4096 }\n" + policy,
+                {"timeout_ms": 5000, "max_body_bytes": 4096},
+            ),
+            (
+                policy
+                + "[externals]\ntimeout_ms = 5000\nmax_body_bytes = 4096\naudience = {}\n",
+                {"timeout_ms": 5000, "max_body_bytes": 4096},
+            ),
+        ):
+            included = include(root, "github", "multi-user")
+            externals = tomllib.loads(included)["externals"]
+            self.assertEqual(
+                externals, {**expected, "audience": {"host-members": {"readers": {}}}}
+            )
 
 
 if __name__ == "__main__":
