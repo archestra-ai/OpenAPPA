@@ -3890,6 +3890,7 @@ fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
         (true, true) => "lower trust and narrower readers",
         (true, false) => "lower trust",
         (false, true) => "narrower readers",
+        // The assert above rules this out; a release build keeps a neutral label.
         (false, false) => "this change",
     }
 }
