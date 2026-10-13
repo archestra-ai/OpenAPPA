@@ -14,6 +14,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -226,19 +227,36 @@ def with_battery_include(root: str, battery: str) -> tuple[str, bool]:
     return root[:start] + replacement + root[end:], True
 
 
-def with_lookup_rosters(
-    root: str, battery: str, directories: list[Path], target: str
-) -> str:
+class Composition(NamedTuple):
+    """What the runtime composes a candidate root with: its binary, battery
+    directories, and deployment target."""
+
+    appa: str
+    battery_dirs: tuple[Path, ...]
+    target: str
+
+    @classmethod
+    def serving(cls) -> Composition:
+        return cls(
+            APPA,
+            tuple(battery_dirs()),
+            os.environ.get("APPA_BATTERY_TARGET", "single-user"),
+        )
+
+
+def with_lookup_rosters(root: str, battery: str, composition: Composition) -> str:
     """Append an empty readers roster for each lookup the battery's target policy
     routes to the root, so the include composes; an empty roster denies until filled."""
     directory = next(
-        d / battery for d in directories if (d / battery / "appa.toml").is_file()
+        d / battery
+        for d in composition.battery_dirs
+        if (d / battery / "appa.toml").is_file()
     )
     manifest = directory / "appa-package.toml"
     if not manifest.is_file():
         return root
     package = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    selected = package["battery"].get("targets", {}).get(target)
+    selected = package["battery"].get("targets", {}).get(composition.target)
     if selected is None:
         return root
     policy = tomllib.loads((directory / selected["policy"]).read_text(encoding="utf-8"))
@@ -255,45 +273,41 @@ def with_lookup_rosters(
     )
 
 
-def validated_include(candidate: str, battery: str) -> str:
+def validated_include(candidate: str, battery: str, composition: Composition) -> str:
     """The candidate as the runtime composes it, with the empty lookup rosters added
     only when it is refused without them: another composed source may declare them."""
     try:
-        validate_policy(candidate)
+        validate_policy(candidate, composition)
         return candidate
     except RuntimeError as refused:
-        rostered = with_lookup_rosters(
-            candidate,
-            battery,
-            battery_dirs(),
-            os.environ.get("APPA_BATTERY_TARGET", "single-user"),
-        )
+        rostered = with_lookup_rosters(candidate, battery, composition)
         if rostered == candidate:
             raise
         try:
-            validate_policy(rostered)
+            validate_policy(rostered, composition)
         except RuntimeError:
             raise refused from None
         return rostered
 
 
-def validate_policy(root: str) -> None:
+def validate_policy(root: str, composition: Composition) -> None:
     with tempfile.NamedTemporaryFile(
         "w", suffix=".toml", encoding="utf-8"
     ) as candidate:
         candidate.write(root)
         candidate.flush()
         command = [
-            APPA,
+            composition.appa,
             "describe",
             "--check",
             "--config",
             candidate.name,
         ]
-        for directory in battery_dirs():
+        for directory in composition.battery_dirs:
             command.extend(("--batteries-dir", str(directory)))
         environment = os.environ.copy()
         environment.pop("APPA_BATTERIES_DIR", None)
+        environment["APPA_BATTERY_TARGET"] = composition.target
         checked = subprocess.run(
             command, capture_output=True, check=False, env=environment, timeout=30
         )
@@ -419,7 +433,7 @@ def include_battery(request: dict) -> dict:
     candidate, changed = with_battery_include(current, battery)
     if not changed:
         return {**runtime_state(), "changed": False, "battery": battery}
-    candidate = validated_include(candidate, battery)
+    candidate = validated_include(candidate, battery, Composition.serving())
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": True, "battery": battery, "reload": reloaded}
 
@@ -438,7 +452,7 @@ def update_policy(request: dict) -> dict:
         current_value, candidate_value
     ):
         raise ValueError("candidate does not retain the current root policy structure")
-    validate_policy(candidate)
+    validate_policy(candidate, Composition.serving())
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": candidate != current, "reload": reloaded}
 

@@ -155,6 +155,7 @@ jobs:
               - 'scripts/test_appa_refresh_batteries.py'
               - 'scripts/appa-guide-runtime.py'
               - 'scripts/test_appa_guide_runtime.py'
+              - 'scripts/test_appa_guide_include.py'
               - 'scripts/appa-oci-tags.py'
               - 'scripts/test_appa_oci_tags.py'
               - 'scripts/appa-image-descriptor.py'
@@ -319,6 +320,11 @@ jobs:
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
+
+      - name: Test appa-guide's battery include against the runtime
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
+          python3 -m unittest scripts/test_appa_guide_include.py
 
       - name: Setup Bun for source plugins
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
