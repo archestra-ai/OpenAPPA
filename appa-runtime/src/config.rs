@@ -751,8 +751,10 @@ pub enum ConfigError {
         path: String,
         source: Box<appa_package::ManifestError>,
     },
-    #[error("battery {battery} has no policy for the {target} deployment target")]
-    MissingBatteryTarget { battery: String, target: BatteryTarget },
+    #[error(
+        "the root config includes {path:?}, a battery's target policy; include the battery's base, and {BATTERY_TARGET_VARIABLE} picks the target policy"
+    )]
+    TargetPolicyIncluded { path: String },
     #[error(
         "the root config includes {path:?}, which the host does not compose{}",
         reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
@@ -1858,7 +1860,8 @@ fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<Strin
 
 /// The policies an include composes for `target`, as canonical paths. An include of
 /// a battery's base composes its target policy first when the battery declares
-/// targets; any other include composes alone.
+/// targets, and any other file of such a battery is refused: the deployment target
+/// picks its target policy. Any other include composes alone.
 fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<PathBuf>, ConfigError> {
     let dir = include_path.parent().expect("a canonical file path has a parent");
     let manifest = dir.join(appa_package::MANIFEST_FILE);
@@ -1872,18 +1875,18 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
     let appa_package::Role::Battery(battery) = &package.role else {
         return Ok(vec![include_path]);
     };
-    if !std::fs::canonicalize(dir.join(battery.base.as_str())).is_ok_and(|base| base == include_path) {
-        return Ok(vec![include_path]);
+    let is_base = std::fs::canonicalize(dir.join(battery.base.as_str())).is_ok_and(|base| base == include_path);
+    match (is_base, &battery.targets) {
+        (true, _) => (),
+        (false, Some(_)) => {
+            return Err(ConfigError::TargetPolicyIncluded {
+                path: include_path.display().to_string(),
+            });
+        }
+        (false, None) => return Ok(vec![include_path]),
     }
-    let order = battery
+    battery
         .compose_order(Some(target))
-        .map_err(
-            |appa_package::MissingTarget(target)| ConfigError::MissingBatteryTarget {
-                battery: package.name.to_string(),
-                target,
-            },
-        )?;
-    order
         .into_iter()
         .map(|policy| {
             let policy_path = dir.join(policy.as_str());

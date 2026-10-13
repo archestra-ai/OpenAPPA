@@ -582,9 +582,9 @@ fn loads_beside_a_root(package: &Path) -> bool {
     includes_load(package, &["appa.toml"])
 }
 
-/// Whether a deployment holding this package beside its root config, and
-/// including `policies` of it in that order, loads.
-fn includes_load(package: &Path, policies: &[&str]) -> bool {
+/// A deployment holding this package beside its root config, and including
+/// `policies` of it in that order; the root config's path.
+fn deployment_including(package: &Path, policies: &[&str]) -> (tempfile::TempDir, PathBuf) {
     let deployment = tempfile::tempdir().expect("a temp dir is creatable");
     let installed = deployment.path().join("probe");
     copy_tree(package, &installed);
@@ -601,77 +601,119 @@ fn includes_load(package: &Path, policies: &[&str]) -> bool {
         ),
     )
     .expect("the root config is writable");
+    (deployment, root)
+}
+
+/// Whether a deployment holding this package beside its root config, and
+/// including `policies` of it in that order, loads.
+fn includes_load(package: &Path, policies: &[&str]) -> bool {
+    let (_deployment, root) = deployment_including(package, policies);
     Config::load(&root).is_ok()
 }
 
-/// A target's deployment includes its target policy beside the base. A targeted
-/// battery that validates loads in its compose order, and one whose target policy
-/// redeclares an external of its base is refused by both crates.
-#[test]
-fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
-    let tool = "[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n";
+/// A targeted battery on disk whose multi-user target policy binds `multi_user_audience`.
+/// The base and each target policy carry a rule of their own, so the composed rule
+/// order shows which policies a deployment included and in what order.
+fn targeted_probe(multi_user_audience: &str) -> tempfile::TempDir {
     let audience = |name: &str| {
         format!(
             "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
              selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
         )
     };
-    for (what, target_audience, composes) in [
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        package.path().join("appa-package.toml"),
+        "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+    )
+    .expect("the manifest is writable");
+    std::fs::write(
+        package.path().join("appa.toml"),
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{}",
+            audience("probe")
+        ),
+    )
+    .expect("the base is writable");
+    std::fs::write(
+        package.path().join("single-user.toml"),
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/single_user\"\ndelta = {}\n",
+    )
+    .expect("the single-user target policy is writable");
+    std::fs::write(
+        package.path().join("multi-user.toml"),
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/multi_user\"\ndelta = {{}}\n\n{}",
+            audience(multi_user_audience)
+        ),
+    )
+    .expect("the multi-user target policy is writable");
+    std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+    package
+}
+
+/// A deployment includes a targeted battery by its base, and each target's deployment
+/// composes that target's policy before the base. A targeted battery that validates
+/// loads so under every target, and one whose target policy redeclares an external of
+/// its base is refused by both crates.
+#[test]
+fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
+    use appa_package::BatteryTarget;
+
+    for (what, multi_user_audience, composes) in [
         ("a distinct external", "probe-org", true),
         ("the base's external", "probe", false),
     ] {
-        let package = tempfile::tempdir().expect("a temp dir is creatable");
-        std::fs::write(
-            package.path().join("appa-package.toml"),
-            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
-        )
-        .expect("the manifest is writable");
-        std::fs::write(package.path().join("single-user.toml"), "[policy]\nversion = 2\n")
-            .expect("the single-user target policy is writable");
-        std::fs::write(
-            package.path().join("appa.toml"),
-            format!("[policy]\nversion = 2\n{tool}\n{}", audience("probe")),
-        )
-        .expect("the base is writable");
-        std::fs::write(
-            package.path().join("multi-user.toml"),
-            format!("[policy]\nversion = 2\n\n{}", audience(target_audience)),
-        )
-        .expect("the target policy is writable");
-        std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+        let package = targeted_probe(multi_user_audience);
+        let validated = validate_package(package.path());
+        assert_eq!(validated.is_ok(), composes, "{what}: {validated:?}");
 
-        let order = validate_package(package.path()).map(|validated| match validated.role {
-            Role::Battery(battery) => battery
-                .compose_order(appa_package::BatteryTarget::MultiUser)
-                .into_iter()
-                .map(|policy| policy.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            Role::Plugin(_) => panic!("{what}: the package is a battery"),
-        });
-        match order {
-            Ok(order) => {
-                assert!(composes, "{what}: the package validates");
-                let order: Vec<&str> = order.iter().map(String::as_str).collect();
-                assert_eq!(order, ["multi-user.toml", "appa.toml"], "{what}");
-                assert!(
-                    includes_load(package.path(), &order),
-                    "{what}: validates and then does not load"
-                );
-            }
-            Err(error) => {
-                assert!(!composes, "{what}: the package is refused: {error}");
-                assert!(
-                    !includes_load(package.path(), &["multi-user.toml", "appa.toml"]),
-                    "{what}: the package is refused and yet loads"
-                );
+        let (_deployment, root) = deployment_including(package.path(), &["appa.toml"]);
+        for (target, target_rule) in [
+            (BatteryTarget::SingleUser, "mcp/probe/single_user"),
+            (BatteryTarget::MultiUser, "mcp/probe/multi_user"),
+        ] {
+            let loaded = Config::load_for_target(&root, &[], target);
+            match (composes, target) {
+                (true, _) | (false, BatteryTarget::SingleUser) => assert_eq!(
+                    loaded
+                        .unwrap_or_else(|error| panic!("{what}: {target} loads: {error}"))
+                        .tool_names(),
+                    [target_rule, "mcp/probe/read"],
+                    "{what}: {target}"
+                ),
+                (false, BatteryTarget::MultiUser) => {
+                    assert!(loaded.is_err(), "{what}: the package is refused and yet loads")
+                }
             }
         }
     }
 }
 
+/// The deployment target picks a battery's target policy, so a root config that
+/// includes one directly is refused, whichever target it runs.
+#[test]
+fn a_targeted_battery_target_policy_is_not_included_directly() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let package = targeted_probe("probe-org");
+    validate_package(package.path()).expect("the targeted package validates");
+    let (_deployment, root) = deployment_including(package.path(), &["multi-user.toml"]);
+    for target in BatteryTarget::ALL {
+        assert!(
+            matches!(
+                Config::load_for_target(&root, &[], target),
+                Err(ConfigError::TargetPolicyIncluded { path }) if path.ends_with("multi-user.toml")
+            ),
+            "{target}"
+        );
+    }
+}
+
 /// An include of a battery's base composes the deployment target's policy with it: each
 /// target binds its own external, a battery without targets loads its base under
-/// either, and a manifest without the chosen target is refused.
+/// either, and a manifest that declares only some targets is refused.
 #[test]
 fn an_included_battery_loads_its_policy_for_the_deployment_target() {
     use appa_package::BatteryTarget;
@@ -751,10 +793,16 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
         "\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
         &[("multi-user.toml", "probe-org")],
     );
-    assert!(matches!(
-        load(&partial, BatteryTarget::SingleUser),
-        Err(ConfigError::MissingBatteryTarget { battery, target: BatteryTarget::SingleUser }) if battery == "probe"
-    ));
+    for target in BatteryTarget::ALL {
+        assert!(
+            matches!(
+                load(&partial, target),
+                Err(ConfigError::UnreadableBatteryManifest { source, .. })
+                    if matches!(*source, appa_package::ManifestError::PartialTargets { missing: BatteryTarget::SingleUser, .. })
+            ),
+            "{target}"
+        );
+    }
 }
 
 /// Every rule the two crates share, not a sample of it.
