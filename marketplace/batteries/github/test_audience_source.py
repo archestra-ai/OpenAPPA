@@ -194,6 +194,12 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             AUDIENCE_SOURCE.answer(fixture_api(pages), {"selector": "org/acme/members"})
 
+    def test_a_malformed_listing_is_a_failure_not_a_partial_roster(self):
+        for listed in [{}, [{"login": "alice"}], [user("alice", type="Organization")], ["alice"]]:
+            call = fixture_api([("/orgs/acme/members", {"per_page": 100, "page": 1}, listed)])
+            with self.assertRaises(RuntimeError):
+                AUDIENCE_SOURCE.answer(call, {"selector": "org/acme/members"})
+
     def test_an_unserved_selector_is_refused(self):
         call = fixture_api([])
         for selector in [
