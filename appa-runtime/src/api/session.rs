@@ -1366,9 +1366,7 @@ impl Session {
         for _ in 0..RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
-            let decision = self.drive(&policy, entering, opening, |context| {
-                event(context, carried.clone())
-            })?;
+            let decision = self.drive(&policy, entering, opening, |context| event(context, carried.clone()))?;
             match decision.then {
                 // The engine batches every missing answer into one request set, and evidence
                 // is matched by name, never by position. Without a reviewer the
@@ -8572,7 +8570,9 @@ max_body_bytes = 65536
                 tokio::spawn(async move {
                     let session = runtime.session(&root, &root).expect("the session reattaches");
                     barrier.wait().await;
-                    session.on_tool_call_identified(fetch(a), Some(call_id), None, None).await
+                    session
+                        .on_tool_call_identified(fetch(a), Some(call_id), None, None)
+                        .await
                 })
             })
             .collect();

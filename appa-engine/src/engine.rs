@@ -144,7 +144,11 @@ impl Engine {
     /// and fold forward through [`EngineView::advance`]; a view advanced batch by batch equals
     /// the view [`Engine::view`] builds from the whole log. A runtime holding a view reads only
     /// the batches after it this way; anything refused here it rebuilds through `view`.
-    pub fn admit_batch(&self, view: &mut EngineView, records: Vec<Fact>) -> Result<(), crate::transition::BatchRefusal> {
+    pub fn admit_batch(
+        &self,
+        view: &mut EngineView,
+        records: Vec<Fact>,
+    ) -> Result<(), crate::transition::BatchRefusal> {
         if view.policy() != self.identity {
             return Err(crate::transition::ViewMismatch::ForeignPolicy.into());
         }

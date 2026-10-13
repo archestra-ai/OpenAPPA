@@ -328,7 +328,9 @@ impl Log {
     /// The facts of every batch after position `basis`, one slice per batch in log order.
     /// `None` when this read stands before `basis`.
     pub fn batches_after(&self, basis: u64) -> Option<impl Iterator<Item = &[Fact]>> {
-        let first = usize::try_from(basis).ok().filter(|first| *first <= self.batch_ends.len())?;
+        let first = usize::try_from(basis)
+            .ok()
+            .filter(|first| *first <= self.batch_ends.len())?;
         let start = match first {
             0 => 0,
             first => self.batch_ends[first - 1],
@@ -2890,9 +2892,10 @@ mod tests {
             .expect("the PostgreSQL API is present")
             .with_client(move |client| {
                 let mut transaction = client.transaction()?;
-                let free = match transaction
-                    .query_opt("SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT", &[&key])
-                {
+                let free = match transaction.query_opt(
+                    "SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT",
+                    &[&key],
+                ) {
                     Ok(row) => row.is_some(),
                     Err(error) if error.code() == Some(&::postgres::error::SqlState::LOCK_NOT_AVAILABLE) => false,
                     Err(error) => return Err(error.into()),
@@ -2913,7 +2916,10 @@ mod tests {
             trajectory: root.clone(),
             kind: appa_engine::fact::BoundaryKind::VoidReturn,
         }];
-        assert!(postgres_root_is_free(&store, &root), "an opened root has its row, and nobody holds it");
+        assert!(
+            postgres_root_is_free(&store, &root),
+            "an opened root has its row, and nobody holds it"
+        );
 
         let step = store.step(&root).expect("the step begins");
         let log = step.log().expect("the step reads");
@@ -2984,7 +2990,11 @@ mod tests {
             .expect("another store appends");
         let second = reader.log(&root).expect("the log reads again");
         assert_eq!(second.basis(), first.basis() + 1, "the cached read sees the new batch");
-        assert_eq!(second, writer.log(&root).expect("the writer reads"), "and equals a cold read");
+        assert_eq!(
+            second,
+            writer.log(&root).expect("the writer reads"),
+            "and equals a cold read"
+        );
 
         // The last batch the reader cached is replaced behind its back.
         let key = root.as_str().to_owned();
@@ -3004,7 +3014,10 @@ mod tests {
         let reread = reader.log(&root).expect("the rewritten log reads");
         assert_eq!(reread.basis(), 2);
         assert!(
-            reread.batches_after(1).expect("the batch exists").all(<[Fact]>::is_empty),
+            reread
+                .batches_after(1)
+                .expect("the batch exists")
+                .all(<[Fact]>::is_empty),
             "the reader drops its cached copy and reads the stored batch"
         );
         forget_postgres_roots(&writer, vec![root]);

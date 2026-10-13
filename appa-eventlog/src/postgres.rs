@@ -376,7 +376,12 @@ impl LogCache {
         let root = log.root().as_str();
         let size = log.facts().len();
         let mut entries = self.entries();
-        if size > CACHED_FACTS || entries.logs.get(root).is_some_and(|cached| cached.log.basis() >= log.basis()) {
+        if size > CACHED_FACTS
+            || entries
+                .logs
+                .get(root)
+                .is_some_and(|cached| cached.log.basis() >= log.basis())
+        {
             return;
         }
         match entries.logs.remove(root) {
@@ -1438,9 +1443,7 @@ impl Drop for PostgresStep<'_> {
     fn drop(&mut self) {
         if self.open {
             // Should the connection not answer, the pool's reset ends the transaction instead.
-            let _ = self
-                .worker()
-                .run(|state| Ok(state.client.batch_execute("ROLLBACK")?));
+            let _ = self.worker().run(|state| Ok(state.client.batch_execute("ROLLBACK")?));
         }
     }
 }
@@ -1452,7 +1455,10 @@ fn lock_root(client: &mut Client, root: &str) -> Result<(), ::postgres::Error> {
     if client.query_opt(lock, &[&root])?.is_some() {
         return Ok(());
     }
-    client.execute("INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING", &[&root])?;
+    client.execute(
+        "INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&root],
+    )?;
     client.query_one(lock, &[&root])?;
     Ok(())
 }
@@ -1504,13 +1510,7 @@ impl From<Written> for Result<(), AppendError> {
 }
 
 impl Batch {
-    fn new(
-        root: &TrajectoryId,
-        basis: u64,
-        bytes: Vec<u8>,
-        key: Option<&str>,
-        hold: Option<HeldRead>,
-    ) -> Batch {
+    fn new(root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>, hold: Option<HeldRead>) -> Batch {
         Batch {
             root: root.as_str().to_owned(),
             basis,
@@ -1540,7 +1540,14 @@ impl Batch {
                  WHERE root = $1 AND id = $2 AND read_call_id = $3 AND status = 'read'
                    AND decision->>'kind' IN ('opening', 'bound')
                    AND (decision->>'generation')::bigint = $4",
-                &[&self.root, &hold.id, &hold.call_id, &hold.generation, &bound, &hold.bind],
+                &[
+                    &self.root,
+                    &hold.id,
+                    &hold.call_id,
+                    &hold.generation,
+                    &bound,
+                    &hold.bind,
+                ],
             )?;
             if changed != 1 {
                 return Ok(Written::ReadClaimLost);

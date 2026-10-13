@@ -835,7 +835,11 @@ impl HeldViews {
 
     fn keep(&self, log: &Log, view: &EngineView) {
         let mut held = self.held();
-        if held.views.get(log.root()).is_some_and(|found| found.basis > log.basis()) {
+        if held
+            .views
+            .get(log.root())
+            .is_some_and(|found| found.basis > log.basis())
+        {
             return;
         }
         let fresh = HeldView {

@@ -4250,7 +4250,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .with_client(move |client| {
                 let mut transaction = client.transaction()?;
                 let free = transaction
-                    .query_opt("SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT", &[&key])?
+                    .query_opt(
+                        "SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT",
+                        &[&key],
+                    )?
                     .is_some();
                 transaction.rollback()?;
                 Ok(free)
