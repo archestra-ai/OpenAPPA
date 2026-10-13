@@ -18,7 +18,7 @@ use crate::names::{AnnotatorName, AudienceArgument, MarkName};
 use crate::projection::Views;
 use crate::value::ResolvedCall;
 
-/// One requirement the committed label misses. The audience payloads are the declared,
+/// One requirement the checked label misses. The audience payloads are the declared,
 /// symbolic recipient sets — feedback renders `internal` or `@finance` as written, never a
 /// membership snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,19 +165,18 @@ pub(crate) fn evaluate_state(
         to: committed.clone(),
     });
 
-    // File-to-file operations return only an acknowledgement to the trajectory. Requirements
-    // still check the content that flows to the destination, without narrowing the trajectory by
-    // that content. Combining with `committed` preserves predecessor-sensitive mutation checks.
-    let checked = match reads {
-        CallReads::Resolved(call) => call
-            .file_output_label(annotation, current)
-            .map_or_else(|| committed.clone(), |file| committed.combine(&file)),
-        CallReads::Static => committed.clone(),
-    };
+    // Requirements check what the call sends: the current label, which the agent's arguments
+    // carry, met with what the call forwards. A substitution replaces the arguments, so it
+    // replaces the current label in the `contains` check; the trust floor never reads it.
+    let forwarded = forwarded_label(annotation, reads);
+    let checked = current.combine(&forwarded);
+    let released = stage
+        .substituted()
+        .map_or_else(|| checked.clone(), |substituted| substituted.combine(&forwarded));
 
     let mut gaps = Vec::new();
     let mut needed = Vec::new();
-    label_gaps(annotation, &checked, reads, stage, context, &mut gaps, &mut needed);
+    label_gaps(annotation, &checked, &released, reads, context, &mut gaps, &mut needed);
     if !needed.is_empty() {
         // An undecided comparison keeps the whole check open: gaps drive remedy planning,
         // and a requirement that is neither held nor refuted cannot be planned over yet.
@@ -202,39 +201,39 @@ pub(crate) fn evaluate_state(
     })
 }
 
-fn released_covers(
-    stage: &CallStage,
-    committed: &Label,
-    recipients: &DeclaredAudience,
-    context: &MembershipContext<'_>,
-) -> Evaluation {
-    match stage.substituted() {
-        None => committed.covers(recipients, context),
-        Some(label) => label.covers(recipients, context),
+/// What the call sends beyond the agent's arguments: the rule's `forwards` and the file
+/// content the host sends with it. The sink receives it whatever the arguments say, so every
+/// requirement reads it, and no substitution of the arguments removes it. The call's `delta`
+/// labels its result and never enters here.
+pub(crate) fn forwarded_label(annotation: &ToolAnnotation, reads: CallReads<'_>) -> Label {
+    let declared = annotation.forwards.output_label();
+    match reads {
+        CallReads::Resolved(call) => declared.combine(&call.forwarded_file_label()),
+        CallReads::Static => declared,
     }
 }
 
 fn label_gaps(
     annotation: &ToolAnnotation,
-    committed: &Label,
+    checked: &Label,
+    released: &Label,
     reads: CallReads<'_>,
-    stage: &CallStage,
     context: &MembershipContext<'_>,
     gaps: &mut Vec<Gap>,
     needed: &mut Vec<SymbolicAtom>,
 ) {
     if let Some(floor) = annotation.requires.trust_floor()
-        && !committed.meets_floor(floor)
+        && !checked.meets_floor(floor)
     {
         gaps.push(Gap::TrustFloor {
             required: floor,
-            actual: committed.trust,
+            actual: checked.trust,
         });
     }
     for requirement in annotation.requires.audience_requirements() {
         match requirement {
             AudienceRequirement::Includes(spec) => match resolve_recipients(spec, reads) {
-                Some(recipients) => match released_covers(stage, committed, &recipients, context) {
+                Some(recipients) => match released.covers(&recipients, context) {
                     Evaluation::Holds => {}
                     Evaluation::Fails => gaps.push(Gap::Includes { recipients }),
                     Evaluation::Needs(mut ask) => needed.append(&mut ask.needed),
@@ -449,6 +448,7 @@ mod tests {
             description: None,
             parameters: ToolParameters::open(),
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -597,6 +597,63 @@ mod tests {
                 }
             ],
             "destination requirements still inspect copied content"
+        );
+    }
+
+    /// An edit sends the predecessor's bytes on in the file it writes, so a requirement reads
+    /// them. A replacement overwrites the predecessor without sending it: the requirement does
+    /// not read it, and only the result the call returns carries it.
+    #[test]
+    fn an_edit_sends_its_predecessor_and_a_replacement_does_not() {
+        let annotation = ToolAnnotation {
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::Public,
+                    ))],
+                },
+                ..Requires::default()
+            },
+            ..annotation("write")
+        };
+        let current = Label::new(Trust::new(1), Audience::public());
+        let private = FileSource {
+            version: "v1".into(),
+            digest: "private".into(),
+            label: Label::new(
+                Trust::new(1),
+                Audience::of_declared(&chain(crate::label::ChainAudience::Self_)),
+            ),
+        };
+        let context = TestContext::default();
+        let evaluate = |basis: FileBasis| {
+            evaluate_state(
+                &annotation,
+                &current,
+                &|_| false,
+                &|_| false,
+                CallReads::Resolved(&call("write").with_file_basis(Some(basis))),
+                &CallStage::default(),
+                &context.context(),
+            )
+            .unwrap()
+        };
+
+        let edit = evaluate(FileBasis::Edit(private.clone()));
+        assert_eq!(
+            edit.requirement_gaps,
+            vec![Gap::Includes {
+                recipients: DeclaredAudience::Public
+            }]
+        );
+
+        let replace = evaluate(FileBasis::Replace(Some(private.clone())));
+        assert_eq!(replace.requirement_gaps, vec![]);
+        assert_eq!(
+            replace.narrowing.map(|narrowing| narrowing.to),
+            Some(private.label),
+            "the replaced content still labels what the call returns"
         );
     }
 

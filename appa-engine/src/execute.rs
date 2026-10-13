@@ -116,6 +116,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {

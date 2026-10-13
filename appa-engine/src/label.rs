@@ -830,7 +830,7 @@ impl Audience {
             .collect()
     }
 
-    fn combine(&self, other: &Self) -> Self {
+    pub(crate) fn combine(&self, other: &Self) -> Self {
         Audience::of_clauses(self.clauses.iter().chain(other.clauses.iter()).cloned())
     }
 

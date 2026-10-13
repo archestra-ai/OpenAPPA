@@ -308,9 +308,21 @@ async fn public_documentation_does_not_narrow_a_fresh_public_trajectory() {
     assert_eq!(propose(&runtime, public).await, HookDecision::AllowCall { spawn: None });
 }
 
+/// A submission's own result label never gates it: on a fresh public trajectory it only
+/// waits for review. Once a board read narrows the trajectory, sending to the public needs
+/// an authority that may widen the audience.
 #[tokio::test]
 async fn external_submissions_require_explicit_audience_approval() {
     for name in ["create_form_submission", "submit_bug_or_feature_request"] {
+        let args = if name == "create_form_submission" {
+            serde_json::json!({ "form_token": "example", "answers": [{ "question_id": "name", "name": "Example" }], "form_timezone_offset": 0 })
+        } else {
+            serde_json::json!({ "kind": "bug", "title": "Example", "description": "Example" })
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = runtime(&dir, false).await;
+        review_write(&fresh, call(name, args.clone())).await;
+
         let dir = tempfile::tempdir().unwrap();
         let without_expansion = runtime(&dir, false).await;
         accept_read(
@@ -318,11 +330,6 @@ async fn external_submissions_require_explicit_audience_approval() {
             call("get_board_info", serde_json::json!({ "boardId": 1 })),
         )
         .await;
-        let args = if name == "create_form_submission" {
-            serde_json::json!({ "form_token": "example", "answers": [{ "question_id": "name", "name": "Example" }], "form_timezone_offset": 0 })
-        } else {
-            serde_json::json!({ "kind": "bug", "title": "Example", "description": "Example" })
-        };
         assert!(
             matches!(propose(&without_expansion, call(name, args.clone())).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
         );

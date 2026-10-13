@@ -289,17 +289,17 @@ impl PolicyFileKey {
 /// the semantic sequences (the trust chain's rank order, authority registration order), sorts
 /// true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyIdentityV1(#[serde(with = "crate::hex32")] [u8; 32]);
+pub struct PolicyIdentityV2(#[serde(with = "crate::hex32")] [u8; 32]);
 
-impl PolicyIdentityV1 {
+impl PolicyIdentityV2 {
     pub(crate) fn of_registry(registry: &Registry) -> Self {
         let document = identity_document_from_registry(registry);
         let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
         let mut hasher = Sha256::new();
-        hasher.update(b"appa:policy-identity:v1");
+        hasher.update(b"appa:policy-identity:v2");
         hasher.update([0u8]);
         hasher.update(&canonical);
-        PolicyIdentityV1(hasher.finalize().into())
+        PolicyIdentityV2(hasher.finalize().into())
     }
 
     /// The digest bytes, for hosts that persist the identity beside a
@@ -318,6 +318,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             "parameters": tool.parameters.normalized(),
             "description": tool.description,
             "delta": tool.delta,
+            "forwards": tool.forwards,
             "emits": tool.emits,
             "requires": {
                 "trust_floor": tool.requires.label.trust_floor,
@@ -386,14 +387,14 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
 /// production reads [`crate::engine::Engine::identity`], which is this same digest taken
 /// from the registry the engine actually holds.
 #[cfg(test)]
-pub(crate) fn identity_of(registry: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV1 {
+pub(crate) fn identity_of(registry: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV2 {
     let built = crate::registry::Registry::build(
         registry.clone(),
         crate::registry::PlannerCap::default(),
         profile.clone(),
     )
     .expect("a fixture configuration builds");
-    PolicyIdentityV1::of_registry(&built)
+    PolicyIdentityV2::of_registry(&built)
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -658,6 +659,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -1216,7 +1218,7 @@ mod tests {
         assert_eq!(engine.open_vectors(), vec![]);
     }
 
-    fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV1 {
+    fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV2 {
         super::identity_of(cfg, profile)
     }
 
@@ -1395,6 +1397,17 @@ mod tests {
             t
         }]);
         assert_ne!(identity(&delta_edit, &profile), base);
+
+        let forwards_edit = config(vec![{
+            let mut t = tool("fetch");
+            t.forwards = Delta {
+                trust: Some(Trust::new(0)),
+                audience: None,
+            };
+            t
+        }]);
+        assert_ne!(identity(&forwards_edit, &profile), base);
+        assert_ne!(identity(&forwards_edit, &profile), identity(&delta_edit, &profile));
 
         // Routing the tool through an Annotator, and then narrowing that Annotator's mandate,
         // each move the identity: what a produced annotation may say is part of the policy.

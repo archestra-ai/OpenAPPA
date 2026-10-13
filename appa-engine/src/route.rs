@@ -756,7 +756,11 @@ impl<'a> Search<'a> {
                     let crate::authority::DeclaredTransition::Audience { to, .. } = transition else {
                         continue;
                     };
-                    let to = Audience::of_declared(to);
+                    // The hop replaces the arguments only: what the call forwards still
+                    // reaches the sink beside the derived bytes.
+                    let forwarded =
+                        check::forwarded_label(&self.context.contract, CallReads::Resolved(&self.context.call));
+                    let to = Audience::of_declared(to).combine(&forwarded.audience);
                     for gap in gaps {
                         if let Gap::Includes { recipients } = gap
                             && Audience::of_declared(recipients).derives_within_audience(&to, within)
@@ -915,6 +919,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }

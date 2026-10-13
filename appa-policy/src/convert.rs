@@ -126,11 +126,12 @@ impl RawTool {
             None => ToolParameters::open(),
         };
         if let Some(annotator) = self.annotator {
-            let statics = match (&self.delta, &self.requires, self.effects.is_empty()) {
-                (Some(_), _, _) => Some("delta"),
-                (None, Some(_), _) => Some("requires"),
-                (None, None, false) => Some("effects"),
-                (None, None, true) => None,
+            let statics = match (&self.delta, &self.forwards, &self.requires, self.effects.is_empty()) {
+                (Some(_), _, _, _) => Some("delta"),
+                (None, Some(_), _, _) => Some("forwards"),
+                (None, None, Some(_), _) => Some("requires"),
+                (None, None, None, false) => Some("effects"),
+                (None, None, None, true) => None,
             };
             if let Some(field) = statics {
                 return Err(ConfigError::AnnotatorWithStatics {
@@ -154,6 +155,10 @@ impl RawTool {
             Some(d) => d.convert(chain, &ctx())?,
             None => Delta::default(),
         };
+        let forwards = match self.forwards {
+            Some(f) => f.convert_literal(chain, &ctx())?,
+            None => Delta::NONE,
+        };
         let requires = match self.requires {
             Some(r) => r.convert(chain, &ctx())?,
             None => Requires::default(),
@@ -170,6 +175,7 @@ impl RawTool {
             tags: self.tags.into_iter().map(TagName::new).collect(),
             parameters,
             delta,
+            forwards,
             emits,
             requires,
         }))
@@ -184,6 +190,23 @@ impl RawDelta {
         };
         let audience = match self.audience {
             Some(a) => Some(parse_delta_audience(&a, &format!("{ctx} delta audience"))?),
+            None => None,
+        };
+        Ok(Delta { trust, audience })
+    }
+
+    /// A tool's `forwards`: the same shape as `delta`, written as a literal. It labels content
+    /// the call sends whatever its arguments say, so no entry reads them.
+    fn convert_literal(self, chain: &TrustChain, ctx: &str) -> Result<Delta, ConfigError> {
+        let trust = match self.trust.as_deref() {
+            Some(value) => Some(parse_trust(value, chain, ctx)?),
+            None => None,
+        };
+        let audience = match self.audience {
+            Some(a) => Some(DeltaAudience::Static(parse_declared_audience(
+                &a,
+                &format!("{ctx} forwards audience"),
+            )?)),
             None => None,
         };
         Ok(Delta { trust, audience })

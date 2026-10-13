@@ -380,6 +380,7 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -418,6 +419,7 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -430,6 +432,7 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -858,6 +861,7 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };

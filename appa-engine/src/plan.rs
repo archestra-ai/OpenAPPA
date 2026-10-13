@@ -549,6 +549,7 @@ pub(crate) fn enumerate_plans(
     let mut candidates: Vec<PlanCandidate> = input_hops(
         registry,
         contract,
+        call,
         stage,
         role,
         &block.requirement_gaps,
@@ -970,11 +971,14 @@ pub(crate) fn narrowing_remedies(
     settlements
 }
 
-/// Every input-substitution progress hop this call stage offers, in registry name order.
+/// Every input-substitution progress hop this call stage offers, in registry name order. A
+/// substitution replaces the arguments only, so a hop is offered where its derived label, met
+/// with what the call forwards, clears a recipient — exactly as the check reads it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
+    call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
     gaps: &[Gap],
@@ -989,6 +993,7 @@ pub(crate) fn input_hops(
         return Vec::new();
     }
     let released = stage.released(current);
+    let forwarded = check::forwarded_label(contract, check::CallReads::Resolved(call));
     registry
         .sanitizers()
         .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
@@ -996,7 +1001,7 @@ pub(crate) fn input_hops(
             // An undecided admission or clearing joins the aggregate refusal instead of
             // shrinking the menu.
             match sanitizer.derive_input(&released, &contract.tags, context) {
-                Ok(Some(derived)) => clears_a_recipient(&derived, gaps, context, needs),
+                Ok(Some(derived)) => clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs),
                 Ok(None) => false,
                 Err(needed) => {
                     needs.absorb(needed);
@@ -1555,6 +1560,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
             requires: Requires::default(),
         };
@@ -1565,6 +1571,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1617,6 +1624,91 @@ mod tests {
         );
     }
 
+    /// A substitution replaces the arguments only. Where the call forwards content the
+    /// recipient may not read, derived arguments the recipient may read clear nothing: the
+    /// check keeps the gap, and the planner offers no hop the check would refuse.
+    #[test]
+    fn an_input_hop_never_clears_what_the_call_forwards() {
+        let internal = Audience::restricted([ReaderId::new("insider")]);
+        let widened = Audience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]);
+        let partner = DeclaredAudience::restricted([ReaderId::new("partner")]);
+        let share = |forwards: Delta| ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("share"),
+            tags: vec![],
+            delta: Delta::NONE,
+            forwards,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(partner.clone()))],
+                },
+                ..Requires::default()
+            },
+        };
+        let registry_with = |tool: ToolAnnotation| {
+            build(RegistryConfig {
+                trust_chain: chain(),
+                tools: declared(vec![tool]),
+                authorities: vec![],
+                sanitizers: vec![Sanitizer {
+                    name: SanitizerName::new("redact"),
+                    on: SanitizerPoints {
+                        input: true,
+                        output: false,
+                    },
+                    transition: DeclaredTransition::Audience {
+                        from_includes: DeclaredAudience::literal(internal.clone()),
+                        to: DeclaredAudience::literal(widened.clone()),
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                }],
+                audience: crate::audience::AudienceConfig::default(),
+                annotators: vec![],
+            })
+        };
+        let insider_only = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal.clone()))),
+        };
+        let log = vec![opened(Label::new(TRUSTED, internal.clone()))];
+        let offers_redact = |registry: &Registry| {
+            plan_of(registry, &log, &call("share", json!({})))
+                .plans
+                .iter()
+                .any(|plan| {
+                    plan.executable().and_then(ExecutableRemedyPlan::hop) == Some(&SanitizerName::new("redact"))
+                })
+        };
+        assert!(
+            offers_redact(&registry_with(share(Delta::NONE))),
+            "a call that forwards nothing is cleared by its derived arguments"
+        );
+        assert!(!offers_redact(&registry_with(share(insider_only.clone()))));
+
+        let parts = crate::label::TestContext::default();
+        let substituted = check::evaluate_state(
+            &share(insider_only),
+            &Label::new(TRUSTED, internal),
+            &|_| false,
+            &|_| false,
+            check::CallReads::Resolved(&call("share", json!({}))),
+            &CallStage::substituting(
+                Label::new(TRUSTED, widened),
+                crate::candidate::SanitizerLineage::default(),
+            ),
+            &parts.context(),
+        )
+        .expect("the check reads no symbolic audience");
+        assert_eq!(
+            substituted.requirement_gaps,
+            vec![Gap::Includes { recipients: partner }]
+        );
+    }
+
     #[test]
     fn an_annotated_tool_keeps_its_input_substitution_hops() {
         let partner = Audience::restricted([ReaderId::new("partner")]);
@@ -1627,6 +1719,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1711,6 +1804,7 @@ mod tests {
             tags: vec![],
             delta,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -1943,6 +2037,7 @@ mod tests {
                 audience: None,
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -1952,6 +2047,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2011,6 +2107,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![
@@ -2029,6 +2126,7 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
         };
@@ -2062,6 +2160,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2105,6 +2204,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2196,6 +2296,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2237,6 +2338,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2285,6 +2387,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2379,6 +2482,7 @@ mod tests {
                 tags: tags(tool_tags),
                 delta,
                 parameters: crate::params::ToolParameters::open(),
+                forwards: Delta::NONE,
                 emits: EffectSet::default(),
                 requires: Requires::default(),
             }
@@ -2579,6 +2683,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2695,6 +2800,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("spend"))],
@@ -2737,6 +2843,7 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             emits: EffectSet::new(kinds.iter().copied().map(EffectKind::new)).expect("distinct generated effect kinds"),
             requires: Requires::default(),
         };
@@ -2764,6 +2871,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
@@ -2804,6 +2912,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -2816,6 +2925,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("lock"))],
@@ -2855,6 +2965,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2905,6 +3016,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2961,6 +3073,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3024,6 +3137,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3097,6 +3211,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3138,6 +3253,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3154,6 +3270,7 @@ mod tests {
             tags: vec![],
             delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
         };
@@ -3191,6 +3308,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
@@ -3203,6 +3321,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3250,6 +3369,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
@@ -3293,6 +3413,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3340,6 +3461,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3558,6 +3680,7 @@ mod tests {
                 )]))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -3597,6 +3720,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("db.deleted")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -3609,6 +3733,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -3637,6 +3762,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -3649,6 +3775,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -3685,6 +3812,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -3697,6 +3825,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3732,6 +3861,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
@@ -3744,6 +3874,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3778,6 +3909,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -3805,6 +3937,7 @@ mod tests {
             tags: vec![TagName::new("payments")],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -3846,6 +3979,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -3882,6 +4016,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("sentry-review")],
@@ -3894,6 +4029,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new(MarkName::BLOCKED)],
@@ -3935,6 +4071,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("ka")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
@@ -3947,6 +4084,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("kb")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
@@ -4130,6 +4268,7 @@ mod tests {
                 tags: vec![],
                 delta,
                 parameters: crate::params::test_string_argument_schema("to"),
+                forwards: Delta::NONE,
                 emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
                 requires,
             })

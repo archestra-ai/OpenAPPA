@@ -635,6 +635,10 @@ pub enum LoadError {
     )]
     ProviderRunPlaceholder { tool: String },
     #[error(
+        "tool {tool} forwards a selector placeholder: `forwards` labels content the call sends whatever its arguments say, so it is written as a literal"
+    )]
+    ForwardsPlaceholder { tool: String },
+    #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
     OutputSanitizerUncovered { sanitizer: String },
@@ -1143,6 +1147,22 @@ impl Registry {
                         }
                         Some(DeltaAudience::Selector(placeholder)) => {
                             check_placeholder(&audience, placeholder, || format!("tool {} delta", tool.name.as_str()))?;
+                        }
+                        None => {}
+                    }
+                    check_rank(&config.trust_chain, tool.forwards.trust, || {
+                        format!("tool {} forwards", tool.name.as_str())
+                    })?;
+                    match tool.forwards.audience.as_ref() {
+                        Some(DeltaAudience::Static(declared)) => {
+                            direct.extend(check_declared(&audience, declared, || {
+                                format!("tool {} forwards", tool.name.as_str())
+                            })?);
+                        }
+                        Some(DeltaAudience::Selector(_)) => {
+                            return Err(LoadError::ForwardsPlaceholder {
+                                tool: tool.name.as_str().to_string(),
+                            });
                         }
                         None => {}
                     }
@@ -1983,6 +2003,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -2116,6 +2137,36 @@ mod tests {
         assert!(matches!(
             Registry::build_covered(cfg),
             Err(LoadError::ReservedMark(name)) if name == "overreach"
+        ));
+    }
+
+    /// `forwards` labels content the call sends whatever its arguments say: a rank it names is
+    /// a declared rank, and it never reads a placeholder.
+    #[test]
+    fn forwards_is_a_literal_over_the_declared_vocabulary() {
+        let forwarding = |forwards: Delta| {
+            let mut cfg = base();
+            cfg.tools = declared(vec![ToolAnnotation {
+                forwards,
+                ..tool("mail_report")
+            }]);
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(
+            forwarding(Delta {
+                trust: Some(Trust::new(u8::MAX)),
+                audience: None,
+            }),
+            Err(LoadError::RankOutOfChain { .. })
+        ));
+        let placeholder =
+            crate::contract::SelectorPlaceholder::parse("slack:channel/$channel").expect("a placeholder spelling");
+        assert!(matches!(
+            forwarding(Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Selector(placeholder)),
+            }),
+            Err(LoadError::ForwardsPlaceholder { tool }) if tool == "mail_report"
         ));
     }
 
