@@ -1565,8 +1565,10 @@ impl Batch {
                 &[&self.root],
             )?
             .get(0);
-        if current as u64 != self.basis {
-            return Ok(Written::Conflict(current as u64));
+        let current = u64::try_from(current)
+            .map_err(|_| PostgresError(format!("the log ends at a negative position: {current}")))?;
+        if current != self.basis {
+            return Ok(Written::Conflict(current));
         }
         if let Some(hold) = &self.hold {
             let bound = serde_json::json!({"generation": hold.generation, "kind": TICKET_BOUND});
