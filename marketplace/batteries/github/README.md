@@ -6,9 +6,32 @@ requests, and user search. Shared by the Claude Code and kagent plugins.
 Installing the battery adds its policy include; it does not create the
 MCP connection or enable tools in either host.
 
+## Targets
+
+`appa.toml` is the base policy; a deployment composes one target policy
+over it, whose rules run first.
+
+- **single-user** (`single-user.toml`) — one person's token, as this
+  README describes: the annotators, the context provider, and the
+  audience source naming people by verified email.
+- **multi-user** (`multi-user.toml`) — a GitHub App installation token,
+  with no viewer. The same rules over `context-multi-user.py` and
+  `audience-source-multi-user.py`, which name every person `github:<id>`
+  by numeric account id. The root config must map those ids to people:
+
+  ```toml
+  [externals.audience.host-members]
+  readers = { "github:583231" = "ana@corp.example" }
+  ```
+
+- **base alone** — no helper and no lookup: a read of one repository
+  enters `suspicious` and stays with the viewer (`self`), and a write
+  into one needs trusted data everyone may see. The parent issue
+  `sub_issue_write` returns is labelled as such a read is.
+
 ## Files
 
-**`appa.toml`** — the rules, in six groups. Each rule names its tool by
+**`appa.toml`**, **`single-user.toml`** — the rules, in six groups. Each rule names its tool by
 the canonical tool id `mcp/github/<tool>`.
 
 *Who am I* — `get_me` returns the viewer's own profile, nothing written
@@ -184,7 +207,7 @@ lookup resolves a `github:<login>` member the same way and answers
 `null` for a login GitHub does not know.
 
 The battery binds the source itself, under `[externals.audience.github]`
-in `appa.toml`, and declares the four templates above as its
+in `single-user.toml`, and declares the four templates above as its
 `selectors`. Audience mappings are root-only, so the root config maps
 the chain onto them:
 

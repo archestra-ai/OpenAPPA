@@ -23,3 +23,9 @@ required_executables = ["python3"]
 executable = "gh"
 credential = "APPA_PROVIDER_GITHUB_TOKEN"
 login_hint = "gh auth login -s user:email"
+
+[battery.targets.single-user]
+policy = "single-user.toml"
+
+[battery.targets.multi-user]
+policy = "multi-user.toml"

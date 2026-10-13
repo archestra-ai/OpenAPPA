@@ -373,13 +373,14 @@ class WriteResultTests(unittest.TestCase):
 
 
 class MandateTests(unittest.TestCase):
-    """Every answer stays within the mandate the shipped policy declares, so the
-    engine never refuses it as outside its mandate."""
+    """Every answer stays within the mandate each shipped target policy
+    declares, so the engine never refuses it as outside its mandate."""
 
-    POLICY = tomllib.loads(Path(__file__).with_name("appa.toml").read_text())["policy"]
+    TARGETS = ["single-user.toml", "multi-user.toml"]
 
-    def mandate(self, name):
-        [declared] = [annotator for annotator in self.POLICY["annotator"] if annotator["name"] == name]
+    def mandate(self, target, name):
+        policy = tomllib.loads(Path(__file__).with_name(target).read_text())["policy"]
+        [declared] = [annotator for annotator in policy["annotator"] if annotator["name"] == name]
         audiences = {audience.replace("$owner", "acme").replace("$repo", "api") for audience in declared["audiences"]}
         return set(declared["ranks"]), audiences
 
@@ -398,12 +399,13 @@ class MandateTests(unittest.TestCase):
         calls += [write(tool, outsider, issue_number=42) for tool in ARGUMENT_ONLY_WRITES]
         calls += [FILE_READ, ANNOTATOR.Call("issue_read", 42, team), ANNOTATOR.Call("issue_read", 42, outsider)]
         fork = ANNOTATOR.Repository("public", fork=True)
-        for name in [ANNOTATOR.READERS, ANNOTATOR.CONTENT]:
-            ranks, audiences = self.mandate(name)
-            self.assertEqual(audiences, {COLLABORATORS}, name)
-            for call in calls:
-                for repository in [PUBLIC, PRIVATE, INTERNAL, fork]:
-                    self.assert_within(ANNOTATOR.annotation(name, call, repository, "acme", "api"), ranks, audiences)
+        for target in self.TARGETS:
+            for name in [ANNOTATOR.READERS, ANNOTATOR.CONTENT]:
+                ranks, audiences = self.mandate(target, name)
+                self.assertEqual(audiences, {COLLABORATORS}, (target, name))
+                for call in calls:
+                    for repository in [PUBLIC, PRIVATE, INTERNAL, fork]:
+                        self.assert_within(ANNOTATOR.annotation(name, call, repository, "acme", "api"), ranks, audiences)
 
 
 CONTEXT_SPEC = importlib.util.spec_from_file_location("github_context", Path(__file__).with_name("context.py"))
