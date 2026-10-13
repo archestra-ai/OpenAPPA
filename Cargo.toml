@@ -9,6 +9,7 @@ members = [
     "appa-eventlog",
     "appa-policy",
     "appa-adapter-amp",
+    "appa-adapter-opencode",
     "appa-adapter-claude-code",
     "appa-adapter-kagent",
     "appa-runtime-api",

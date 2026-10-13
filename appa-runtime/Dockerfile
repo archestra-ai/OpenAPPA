@@ -29,6 +29,7 @@ COPY appa-policy appa-policy
 COPY appa-runtime appa-runtime
 COPY appa-runtime-api appa-runtime-api
 COPY appa-adapter-amp appa-adapter-amp
+COPY appa-adapter-opencode appa-adapter-opencode
 COPY appa-adapter-claude-code appa-adapter-claude-code
 COPY appa-adapter-kagent appa-adapter-kagent
 COPY appa-builtin appa-builtin

@@ -49,6 +49,7 @@ jobs:
               - 'appa-policy/**'
               - 'appa-builtin/**'
               - 'appa-adapter-amp/**'
+              - 'appa-adapter-opencode/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
               - 'appa-example-agent/**'

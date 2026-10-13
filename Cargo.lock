@@ -109,6 +109,7 @@ dependencies = [
  "appa-adapter-amp",
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
+ "appa-adapter-opencode",
  "appa-builtin",
  "appa-engine",
  "appa-eventlog",
@@ -183,6 +184,14 @@ dependencies = [
  "appa-runtime-api",
  "proptest",
  "serde_json",
+]
+
+[[package]]
+name = "appa-adapter-opencode"
+version = "0.32.0"
+dependencies = [
+ "appa-runtime-api",
+ "proptest",
 ]
 
 [[package]]
