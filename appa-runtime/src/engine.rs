@@ -792,7 +792,7 @@ struct HeldViews {
 #[derive(Default)]
 struct HeldFamilies {
     views: std::collections::HashMap<TrajectoryId, HeldView>,
-    /// Families in the order they were first held, oldest first.
+    /// Families in the order they were last used, oldest first.
     order: std::collections::VecDeque<TrajectoryId>,
 }
 
@@ -835,25 +835,25 @@ impl HeldViews {
 
     fn keep(&self, log: &Log, view: &EngineView) {
         let mut held = self.held();
-        if held
+        // The family was used now, whether or not this view replaces the held one.
+        held.order.retain(|family| family != log.root());
+        held.order.push_back(log.root().clone());
+        if !held
             .views
             .get(log.root())
             .is_some_and(|found| found.basis > log.basis())
         {
-            return;
+            let fresh = HeldView {
+                view: view.clone(),
+                basis: log.basis(),
+                facts: log.facts().len(),
+                last: log.facts().last().cloned(),
+            };
+            held.views.insert(log.root().clone(), fresh);
         }
-        let fresh = HeldView {
-            view: view.clone(),
-            basis: log.basis(),
-            facts: log.facts().len(),
-            last: log.facts().last().cloned(),
-        };
-        if held.views.insert(log.root().clone(), fresh).is_none() {
-            held.order.push_back(log.root().clone());
-            while held.order.len() > HELD_VIEWS {
-                if let Some(oldest) = held.order.pop_front() {
-                    held.views.remove(&oldest);
-                }
+        while held.order.len() > HELD_VIEWS {
+            if let Some(oldest) = held.order.pop_front() {
+                held.views.remove(&oldest);
             }
         }
     }

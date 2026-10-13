@@ -77,10 +77,12 @@ pub(crate) fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, Sequ
 pub(crate) fn contiguous_from(first: u64, rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
     rows.into_iter()
         .zip(first..)
-        .map(|((found, batch), expected)| match found == expected as i64 {
-            true => Ok(batch),
-            false => Err(SequenceGap { expected, found }),
-        })
+        .map(
+            |((found, batch), expected)| match u64::try_from(found) == Ok(expected) {
+                true => Ok(batch),
+                false => Err(SequenceGap { expected, found }),
+            },
+        )
         .collect()
 }
 

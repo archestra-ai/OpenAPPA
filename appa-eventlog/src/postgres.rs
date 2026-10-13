@@ -341,7 +341,7 @@ struct LogCache {
 #[derive(Default)]
 struct CachedLogs {
     logs: std::collections::HashMap<String, CachedLog>,
-    /// Roots in the order they were last stored, oldest first.
+    /// Roots in the order they were last used, oldest first.
     order: std::collections::VecDeque<String>,
     facts: usize,
 }
@@ -376,12 +376,17 @@ impl LogCache {
         let root = log.root().as_str();
         let size = log.facts().len();
         let mut entries = self.entries();
-        if size > CACHED_FACTS
-            || entries
-                .logs
-                .get(root)
-                .is_some_and(|cached| cached.log.basis() >= log.basis())
+        if size > CACHED_FACTS {
+            return;
+        }
+        if entries
+            .logs
+            .get(root)
+            .is_some_and(|cached| cached.log.basis() >= log.basis())
         {
+            // A read the cache already answered still counts as a use.
+            entries.order.retain(|cached| cached != root);
+            entries.order.push_back(root.to_owned());
             return;
         }
         if let Some(older) = entries.logs.remove(root) {

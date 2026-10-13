@@ -559,7 +559,8 @@ pub enum AppendError {
 }
 
 /// One read-decide-append step on one root's log; see [`LogStore::step`]. An append ends the
-/// step; dropping it without one writes nothing.
+/// step; dropping it without one writes nothing. On PostgreSQL the step holds the family's row
+/// lock from its read to its append; on SQLite it relies on the compare-and-swap alone.
 pub struct Step<'a> {
     store: &'a LogStore,
     root: TrajectoryId,
@@ -617,9 +618,7 @@ impl Step<'_> {
         key: Option<&str>,
         hold: Option<&embedded::EmbeddedAppendHold<'_>>,
     ) -> Result<(), AppendError> {
-        if based_on.root != self.root {
-            return Err(AppendError::Conflict { current: 0 });
-        }
+        assert_eq!(based_on.root, self.root, "a step appends only to the log it read");
         match self.backend {
             StepBackend::Sqlite(_) => match hold {
                 None => self.store.append_at(&based_on.root, based_on.basis, bytes, key),
