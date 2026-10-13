@@ -147,6 +147,20 @@ class BatteryLinterTests(unittest.TestCase):
         policy.write_text('[externals.context.helper]\ncommand = ["python3", "batteries/other/entry.py"]\n')
         self.assertIn("unused manifest helper", self.kinds(battery))
 
+    def test_a_target_policy_reaches_the_helpers_it_binds(self):
+        directory = self.make_battery(
+            [["python3", "entry.py"]],
+            ["entry.py", "multi.py"],
+            {"entry.py": "pass\n", "multi.py": "pass\n"},
+        )
+        self.assertIn("unused manifest helper", self.kinds(directory))
+        manifest = directory / "appa-package.toml"
+        manifest.write_text(manifest.read_text() + '\n[battery.targets.multi-user]\npolicy = "multi-user.toml"\n')
+        (directory / "multi-user.toml").write_text('[externals.context.multi]\ncommand = ["python3", "multi.py"]\n')
+        self.assertEqual(self.kinds(directory), [])
+        (directory / "multi-user.toml").unlink()
+        self.assertEqual(self.kinds(directory), ["invalid manifest"])
+
     def test_commands_are_discovered_inside_nested_toml_values(self):
         directory = self.make_battery(
             [],

@@ -853,6 +853,10 @@ fn check_binding(
             // An audience source declares the selector templates it serves
             // beside its binding; the loader parses the templates themselves.
             "selectors" if external.starts_with("audience.") && declares_selectors(value) => {}
+            // An audience source may send its member lookups to another
+            // audience entry; the loader resolves the name in the composed config.
+            "lookup"
+                if external.starts_with("audience.") && value.as_str().is_some_and(|target| !target.is_empty()) => {}
             _ => return Err(refuse()),
         }
     }
@@ -1507,6 +1511,32 @@ mod tests {
                     Err(PackageError::PolicyExternalCommand { .. } | PackageError::PolicyRootSetting { .. })
                 ),
                 "accepted {replacement}"
+            );
+        }
+    }
+
+    /// An audience source may route its member lookups to another audience
+    /// entry by name; no other external, and no other value, carries one.
+    #[test]
+    fn an_audience_binding_may_route_its_lookups() {
+        let binding = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        let routed = BATTERY_POLICY.replace(binding, &format!("{binding}lookup = \"readers\"\n"));
+        assert!(validate_package(battery(&routed).path()).is_ok());
+
+        for refused in [
+            BATTERY_POLICY.replace(binding, &format!("{binding}lookup = \"\"\n")),
+            BATTERY_POLICY.replace(binding, &format!("{binding}lookup = 3\n")),
+            format!(
+                "{BATTERY_POLICY}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n\
+                 [externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\nlookup = \"readers\"\n"
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&refused).path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted {refused}"
             );
         }
     }

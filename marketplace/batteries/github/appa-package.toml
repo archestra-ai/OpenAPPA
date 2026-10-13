@@ -7,7 +7,7 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
 detect = ["gh"]
-helpers = ["check.py", "audience-source.py", "context.py", "repository-visibility.py", "github_token.py"]
+helpers = ["check.py", "audience-source.py", "audience-source-multi-user.py", "context.py", "context-multi-user.py", "repository-visibility.py", "github_audience.py", "github_token.py"]
 benefit = "APPA asks GitHub if a repository is public or private, who its collaborators are, and who wrote each issue and pull request. With this, APPA lets private-repository data flow only to its collaborators and marks text from outside authors as suspicious."
 setup = [
   "Create a classic personal access token at https://github.com/settings/tokens/new with the `repo`, `read:org`, and `user:email` scopes. It starts with `ghp_`.",

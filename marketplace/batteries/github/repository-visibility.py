@@ -235,6 +235,17 @@ def context_answer(call, owner, repo):
     return answer if isinstance(named, str) and named.lower() == f"{owner}/{repo}".lower() else None
 
 
+def identity_key(answer):
+    """The key the context answer names each person by: a single-user
+    answer names its viewer and every person by `login`; a multi-user one
+    has no viewer and names every person `person`, `github:<id>`."""
+    match answer:
+        case {"viewer": _}:
+            return "login"
+        case _:
+            return "person"
+
+
 def written_by_the_team(call, owner, repo, kind):
     """Whether the context shows that only the repository's own people wrote
     the pull request or issue (`kind`) the call names."""
@@ -245,14 +256,15 @@ def written_by_the_team(call, owner, repo, kind):
     participants = item.get("participants")
     if item.get("number") != call.number or item.get("truncated") is not False or not participants:
         return False
+    key = identity_key(answer)
     team = {
-        participant.get("login")
+        participant.get(key)
         for participant in participants
         if isinstance(participant, dict) and (participant.get("association") in TEAM or participant.get("bot") is True)
     }
     team.discard(None)
-    everyone = [participant.get("login") if isinstance(participant, dict) else None for participant in participants]
-    author = (item.get("author") or {}).get("login")
+    everyone = [participant.get(key) if isinstance(participant, dict) else None for participant in participants]
+    author = (item.get("author") or {}).get(key)
     wrote = [author, *everyone, *item.get("commit_authors", []), *item.get("last_editors", [])]
     return all(login in team for login in wrote)
 
@@ -265,10 +277,11 @@ def listed_by_the_team(call, owner, repo):
     items = listed.get("items") if isinstance(listed, dict) else None
     if not isinstance(items, list) or listed.get("truncated") is not False or not all(isinstance(item, dict) for item in items):
         return False
+    key = identity_key(answer)
     authors = [(item.get("author") if isinstance(item.get("author"), dict) else {}, item.get("bot") is True) for item in items]
-    team = {author.get("login") for author, bot in authors if author.get("association") in TEAM or bot}
+    team = {author.get(key) for author, bot in authors if author.get("association") in TEAM or bot}
     team.discard(None)
-    wrote = [author.get("login") for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
+    wrote = [author.get(key) for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
     return all(login in team for login in wrote)
 
 

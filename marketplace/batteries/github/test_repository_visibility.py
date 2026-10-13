@@ -406,6 +406,72 @@ class MandateTests(unittest.TestCase):
                     self.assert_within(ANNOTATOR.annotation(name, call, repository, "acme", "api"), ranks, audiences)
 
 
+CONTEXT_SPEC = importlib.util.spec_from_file_location("github_context", Path(__file__).with_name("context.py"))
+CONTEXT = importlib.util.module_from_spec(CONTEXT_SPEC)
+CONTEXT_SPEC.loader.exec_module(CONTEXT)
+
+
+def actor(number, typename="User"):
+    return {"__typename": typename, "databaseId": number}
+
+
+def note(author, association, editor=None):
+    return {"author": author, "authorAssociation": association, "editor": editor, "lastEditedAt": "2026-09-01T10:00:00Z" if editor else None}
+
+
+def multi_user(repository_fields, listed=None):
+    """The `github` context entry context-multi-user.py answers for a recorded GraphQL response."""
+    payload = {"data": {"repository": {"nameWithOwner": "acme/api", "visibility": "PUBLIC", "parent": None, **repository_fields}}}
+    return {"answer": CONTEXT.answer_of(payload, listed, CONTEXT.MULTI_USER)}
+
+
+def multi_user_pull_request(comments=(), commit_users=(11,), editor=None):
+    node = {
+        "__typename": "PullRequest",
+        "number": 12,
+        "locked": False,
+        "isCrossRepository": False,
+        **note(actor(11), "MEMBER", editor),
+        "comments": {"pageInfo": {"hasNextPage": False}, "nodes": list(comments)},
+        "reviews": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "commits": {
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [{"commit": {"authors": {"pageInfo": {"hasNextPage": False}, "nodes": [{"user": {"databaseId": number}} for number in commit_users]}}}],
+        },
+    }
+    return multi_user({"issueOrPullRequest": node})
+
+
+class MultiUserContextTests(unittest.TestCase):
+    """The same trust decisions over the answer a multi-user deployment's
+    context provider gives: people named `person`, `github:<id>`, no viewer."""
+
+    def test_a_pull_request_the_team_and_its_apps_alone_wrote_keeps_trust(self):
+        context = multi_user_pull_request(comments=[note(actor(12), "COLLABORATOR"), note(actor(41, "Bot"), "NONE")], editor=actor(12))
+        self.assertNotIn("viewer", context["answer"])
+        self.assertIsNone(read_trust(pull_request_read(context)))
+
+    def test_an_outsider_commenter_commit_author_or_editor_makes_it_suspicious(self):
+        for context in [
+            multi_user_pull_request(comments=[note(actor(66), "CONTRIBUTOR")]),
+            multi_user_pull_request(comments=[note({"__typename": "Mannequin"}, "NONE")]),
+            multi_user_pull_request(commit_users=(11, 66)),
+            multi_user_pull_request(editor=actor(66)),
+        ]:
+            self.assertEqual(read_trust(pull_request_read(context), PRIVATE), "suspicious", context)
+
+    def test_a_listing_the_team_alone_wrote_and_edited_keeps_trust_and_an_outsiders_edit_does_not(self):
+        issues = CONTEXT.Listing("issues", CONTEXT.PREFIX, 30, states=("OPEN",))
+
+        def listing_of(*nodes):
+            return multi_user({"issues": {"pageInfo": {"hasNextPage": False}, "nodes": list(nodes)}}, issues)
+
+        team = [{"number": 2, **note(actor(11), "MEMBER", editor=actor(12))}, {"number": 3, **note(actor(12), "COLLABORATOR")}, {"number": 4, **note(actor(41, "Bot"), "NONE")}]
+        self.assertIsNone(read_trust(list_issues(listing_of(*team))))
+        outsider = {"number": 1, **note(actor(11), "MEMBER", editor=actor(66))}
+        self.assertEqual(read_trust(list_issues(listing_of(*team, outsider)), PRIVATE), "suspicious")
+
+
 class ConsultTests(unittest.TestCase):
     def test_the_repository_is_read_from_the_calls_arguments(self):
         self.assertEqual(ANNOTATOR.repository_of(consult()), (ANNOTATOR.CONTENT, "acme", "api", FILE_READ))

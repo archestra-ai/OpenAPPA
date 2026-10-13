@@ -98,5 +98,17 @@ class ResolveToken(unittest.TestCase):
             GITHUB_TOKEN.resolve_token(gh.environ())
 
 
+class EnvToken(unittest.TestCase):
+    def test_the_variable_is_the_only_source(self):
+        gh = FakeGh("echo gho-from-gh")
+        self.addCleanup(gh.close)
+
+        self.assertEqual(GITHUB_TOKEN.env_token(gh.environ(APPA_PROVIDER_GITHUB_TOKEN=" ghp-fixture\n")), "ghp-fixture")
+        for environ in (gh.environ(), gh.environ(APPA_PROVIDER_GITHUB_TOKEN="  ")):
+            with self.assertRaises(RuntimeError):
+                GITHUB_TOKEN.env_token(environ)
+        self.assertFalse(gh.record.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

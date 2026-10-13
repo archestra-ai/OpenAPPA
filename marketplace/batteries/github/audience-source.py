@@ -34,20 +34,17 @@ operation, so an API hiccup never becomes a policy decision.
 """
 
 import concurrent.futures
-import json
 import os
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 
-# The sibling module is found beside this file however the file is loaded:
+# The sibling modules are found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_token import api_root, resolve_token  # noqa: E402
+from github_audience import Forbidden, NotFound, collection_path, people, serve  # noqa: E402
+from github_token import resolve_token  # noqa: E402
 
 
-API_ROOT = api_root(os.environ)
 SOURCE_NAME = "github"
 SERVED_TEMPLATES = [
     "viewer",
@@ -55,56 +52,10 @@ SERVED_TEMPLATES = [
     "org/<org>/team/<team>",
     "repo/<owner>/<repo>/collaborators",
 ]
-TIMEOUT_SECONDS = 30
-PAGE_SIZE = 100
 # Accounts a collection may hold: each costs one profile read, and a larger
 # roster cannot answer inside the runtime's consult budget, so it is refused
 # instead of timing out halfway.
 MAX_MEMBERS = 1000
-
-
-class NotFound(Exception):
-    """GitHub answered 404: the path names nothing the token can see."""
-
-
-class Forbidden(Exception):
-    """GitHub answered 403: the token lacks the scope for this path."""
-
-
-def rest_api(token):
-    def call(path, **params):
-        query = f"?{urllib.parse.urlencode(params)}" if params else ""
-        request = urllib.request.Request(
-            f"{API_ROOT}{path}{query}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            match error.code:
-                case 404:
-                    raise NotFound(path) from error
-                case 403:
-                    raise Forbidden(path) from error
-                case status:
-                    raise RuntimeError(f"GET {path} failed: {status}") from error
-
-    return call
-
-
-def paginated(call, path):
-    page = 1
-    while True:
-        batch = call(path, per_page=PAGE_SIZE, page=page)
-        yield from batch
-        if len(batch) < PAGE_SIZE:
-            return
-        page += 1
 
 
 def qualified(login):
@@ -145,9 +96,7 @@ PROFILE_READS = 8
 
 def collection_members(call, path):
     logins = []
-    for user in paginated(call, path):
-        if user.get("type") != "User":
-            continue
+    for user in people(call, path):
         logins.append(user["login"])
         if len(logins) > MAX_MEMBERS:
             raise RuntimeError(f"{path} lists more than {MAX_MEMBERS} accounts; map that audience from a bulk source")
@@ -177,18 +126,7 @@ def answer(call, artifact):
                 case "viewer":
                     members = [viewer_reader(call)]
                 case str():
-                    match selector.split("/"):
-                        case ["org", org, "members"] if org:
-                            path = f"/orgs/{urllib.parse.quote(org, safe='')}/members"
-                        case ["org", org, "team", team] if org and team:
-                            org = urllib.parse.quote(org, safe="")
-                            path = f"/orgs/{org}/teams/{urllib.parse.quote(team, safe='')}/members"
-                        case ["repo", owner, repo, "collaborators"] if owner and repo:
-                            owner = urllib.parse.quote(owner, safe="")
-                            path = f"/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators"
-                        case _:
-                            raise ValueError(f"{selector!r} names no collection this source serves")
-                    members = collection_members(call, path)
+                    members = collection_members(call, collection_path(selector))
                 case _:
                     raise ValueError("the selector must be a string")
             return {"members": members}
@@ -198,41 +136,5 @@ def answer(call, artifact):
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
-def check_declaration(request):
-    """The policy's declared templates against the ones this script serves.
-
-    The binding beside this script declares them to the policy, and the
-    runtime sends that declaration with every consult. A mismatch is a
-    version skew between policy and script, refused before any credential
-    is read; the exit status 2 tells it apart from a provider failure.
-    """
-    declared = request.get("declaration", {}).get("templates")
-    if declared != SERVED_TEMPLATES:
-        print(
-            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-
-def main():
-    request = json.load(sys.stdin)
-
-    if request.get("version") != 1:
-        raise ValueError("unsupported request version")
-    if request.get("kind") != "audience":
-        raise ValueError("unexpected consult kind")
-    if request.get("name") != SOURCE_NAME:
-        raise ValueError("unexpected source name")
-    check_declaration(request)
-
-    json.dump({"version": 1, "answer": answer(rest_api(resolve_token()), request.get("artifact"))}, sys.stdout)
-    sys.stdout.write("\n")
-
-
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        print(f"github audience source: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    serve(SOURCE_NAME, SERVED_TEMPLATES, answer, resolve_token)
