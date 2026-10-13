@@ -102,7 +102,7 @@ Gists, Notifications, Projects, security alerts) are not listed here.
 A tool the policy does not name is blocked; add rules for them in your
 root config if you enable those sets.
 
-**`repository-visibility.py`** — the two annotators, one script. A
+**`repository_visibility.py`** — the two annotators, one script. A
 consult carries the call's `owner` and `repo` and the `github` context
 entry; the script reads `GET /repos/{owner}/{repo}` for the visibility
 and whether the repository is a fork, and answers the contract for that

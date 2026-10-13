@@ -16,7 +16,7 @@ class Loopback:
     """One stdlib HTTP server standing in for GitHub's REST root, answering every
     request with one status and body."""
 
-    def __init__(self, status, answer):
+    def __init__(self, status, answer, headers=()):
         seen = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -26,6 +26,8 @@ class Loopback:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
+                for name, value in headers:
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(encoded)
 
@@ -59,8 +61,8 @@ def run_script(env):
 
 
 class InstallationCheck(unittest.TestCase):
-    def verdict(self, status, answer):
-        with Loopback(status, answer) as github:
+    def verdict(self, status, answer, headers=()):
+        with Loopback(status, answer, headers) as github:
             result = run_script(github.env())
         self.assertEqual(github.seen, [("/installation/repositories?per_page=1", "Bearer ghs-installation")])
         return result
@@ -88,6 +90,19 @@ class InstallationCheck(unittest.TestCase):
             self.verdict(403, {"message": "You must authenticate with an installation access token"}),
             {"status": "needs_configuration", "authentication": "token", "reason": "not_an_installation"},
         )
+
+    def test_a_throttled_installation_is_unavailable(self):
+        forbidden = {"message": "Resource not accessible by integration"}
+        for headers, answer in [
+            ([("x-ratelimit-remaining", "0")], forbidden),
+            ([("retry-after", "60")], forbidden),
+            ([], {"message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}),
+        ]:
+            with self.subTest(headers=headers, answer=answer):
+                self.assertEqual(
+                    self.verdict(403, answer, headers),
+                    {"status": "unavailable", "authentication": "token", "reason": "provider_unavailable"},
+                )
 
     def test_an_unset_token_is_missing_and_gh_is_never_asked(self):
         with tempfile.TemporaryDirectory() as directory:

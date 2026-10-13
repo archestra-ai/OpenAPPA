@@ -27,11 +27,11 @@ audiences = ["@github:repo/$owner/$repo/collaborators"]
 marks = []
 
 [externals.annotators."github.repository-visibility"]
-command = ["python3", "repository-visibility.py"]
+command = ["python3", "repository_visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 
 [externals.annotators."github.repository-readers"]
-command = ["python3", "repository-visibility.py"]
+command = ["python3", "repository_visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 
 [externals.context.github]

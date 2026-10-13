@@ -210,7 +210,7 @@ name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]
-command = ["python3", "repository-visibility.py"]
+command = ["python3", "repository_visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 
 [externals.audience.github]

@@ -11,7 +11,7 @@ import tomllib
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("repository-visibility.py")
+SCRIPT = Path(__file__).with_name("repository_visibility.py")
 MULTI_USER_SCRIPT = Path(__file__).with_name("repository-visibility-multi-user.py")
 SPEC = importlib.util.spec_from_file_location("repository_visibility", SCRIPT)
 ANNOTATOR = importlib.util.module_from_spec(SPEC)

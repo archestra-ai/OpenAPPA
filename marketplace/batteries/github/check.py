@@ -58,6 +58,24 @@ def check(environ=None, open_url=urllib.request.urlopen, run=subprocess.run):
     return result("ready", "verified")
 
 
+def throttled(error):
+    """GitHub answers a throttled request with 403 too: the primary limit spent
+    (`x-ratelimit-remaining: 0`), a secondary limit (`retry-after`), or either
+    one named only in the message."""
+    headers = error.headers
+    if headers is not None and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers):
+        return True
+    try:
+        body = json.loads(error.read())
+    except (OSError, ValueError):
+        return False
+    match body:
+        case {"message": str() as message}:
+            return "rate limit" in message.lower()
+        case _:
+            return False
+
+
 def check_installation(environ=None, open_url=urllib.request.urlopen):
     """A multi-user deployment's check: its token is a GitHub App installation's,
     read from the deployment alone. One listing of the repositories the
@@ -81,6 +99,8 @@ def check_installation(environ=None, open_url=urllib.request.urlopen):
         match error.code:
             case 401:
                 return result("needs_configuration", "invalid_credential")
+            case 403 if throttled(error):
+                return result("unavailable", "provider_unavailable")
             case 403:
                 return result("needs_configuration", "not_an_installation")
             case _:
