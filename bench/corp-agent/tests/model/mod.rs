@@ -1,3 +1,5 @@
+#![allow(dead_code, reason = "each test binary scripts a subset of these steps")]
+
 //! A real HTTP server speaking the OpenAI wire with a scripted answer per
 //! round. It stands in for inference and for nothing else: the runtime, the
 //! policy, the agent loop and the tool shim in these tests are the shipped
@@ -24,6 +26,12 @@ enum Step {
         id: String,
         nth: usize,
         arguments: serde_json::Value,
+    },
+    /// Pursue the first offer the last message lists, or answer `text` and
+    /// stop when it lists none.
+    PursuesOrSays {
+        id: String,
+        text: String,
     },
 }
 
@@ -55,6 +63,16 @@ impl Provider {
     /// Pursue the first offer, without depending on its presentation text.
     pub fn pursues_first(&self) -> &Self {
         self.pursues_the_nth_offer_with(0, serde_json::json!({}))
+    }
+
+    /// Pursue the first offer the latest feedback lists; with none listed,
+    /// answer `text` and stop.
+    pub fn pursues_first_or_says(&self, text: &str) -> &Self {
+        let id = self.next_id();
+        self.push(Step::PursuesOrSays {
+            id,
+            text: text.to_string(),
+        })
     }
 
     /// Declare a child's return from a marked spawn's block: the `nth` plan —
@@ -119,6 +137,25 @@ impl Provider {
                                 None,
                                 vec![call_of(&id, "execute_remedy_plan", &arguments.to_string())],
                             )
+                        }
+                        Step::PursuesOrSays { id, text } => {
+                            let latest = body["messages"]
+                                .as_array()
+                                .and_then(|messages| messages.last())
+                                .and_then(|message| message["content"].as_str())
+                                .map(opaque_offer_ids)
+                                .unwrap_or_default();
+                            match latest.first() {
+                                Some(offer) => WireMessage::assistant_tool_calls(
+                                    None,
+                                    vec![call_of(
+                                        &id,
+                                        "execute_remedy_plan",
+                                        &serde_json::json!({ "offer_id": offer }).to_string(),
+                                    )],
+                                ),
+                                None => WireMessage::assistant(&text),
+                            }
                         }
                     };
                     provider.seen.lock().expect("not poisoned").push(body);

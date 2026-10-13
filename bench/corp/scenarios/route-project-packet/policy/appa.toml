@@ -66,8 +66,8 @@ parameters = { type = "object", properties = { to = { type = "string", descripti
 annotator = "distribution-list-members"
 
 # This composite is annotated on both arguments before dispatch: `file`
-# supplies the output audience and `to` supplies the reader set the inputs'
-# audience must cover.
+# supplies the audience of the packet it forwards and returns, and `to`
+# supplies the reader set that the forwarded packet's audience must cover.
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient distribution list." } }, required = ["file", "to"], additionalProperties = false }

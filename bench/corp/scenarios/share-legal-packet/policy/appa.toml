@@ -42,6 +42,7 @@ audience = { contains = ["$to"] }
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
+forwards = { audience = ["legal@northwind.example"] }
 delta = { audience = ["legal@northwind.example"] }
 effects = ["egress"]
 [policy.tool.requires]
