@@ -343,8 +343,12 @@ fn setup_notices<'a>(
 ) -> serde_json::Value {
     let notices: Vec<serde_json::Value> = batteries
         .into_iter()
-        // A validated battery declares every target or none.
-        .map(|(name, battery)| (name, battery, battery.credentials_for(target).unwrap_or_default()))
+        .map(|(name, battery)| {
+            let credentials = battery
+                .credentials_for(target)
+                .expect("validated batteries declare every target or none");
+            (name, battery, credentials)
+        })
         .filter(|(_, battery, credentials)| !credentials.is_empty() || !battery.setup.is_empty())
         .map(|(name, battery, credentials)| {
             let credentials: Vec<serde_json::Value> = credentials

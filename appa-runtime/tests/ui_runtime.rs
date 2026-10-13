@@ -341,3 +341,109 @@ async fn setup_asks_for_the_credentials_of_the_deployment_target() {
     assert!(link.is_empty(), "an unknown target announces no page");
     assert!(!invalid.0.wait().unwrap().success());
 }
+
+/// The page reads a runtime's credentials only when it serves the page's deployment target:
+/// a multi-user runtime is not the single-user page's runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_refuses_a_runtime_of_another_deployment_target() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let battery = dir.path().join("batteries/team");
+    std::fs::create_dir_all(&battery).unwrap();
+    let config = dir.path().join("appa.toml");
+    std::fs::write(
+        &config,
+        "include = [\"batteries/team/appa.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 4096\n",
+    )
+    .unwrap();
+    std::fs::write(
+        battery.join("appa-package.toml"),
+        "schema = 1\nname = \"team\"\ndescription = \"Target runtime fixture\"\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        battery.join("appa.toml"),
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/team/read\"\ndelta = {}\n",
+    )
+    .unwrap();
+    std::fs::write(battery.join("single-user.toml"), "[policy]\nversion = 2\n").unwrap();
+    std::fs::write(battery.join("multi-user.toml"), "[policy]\nversion = 2\n").unwrap();
+    appa_package::validate_package(&battery).expect("valid fixture package");
+
+    let mut runtime = Process(
+        Command::new(env!("CARGO_BIN_EXE_appa"))
+            .args(["runtime", "--listen", "127.0.0.1:0", "--config"])
+            .arg(&config)
+            .arg("--db")
+            .arg(dir.path().join("appa.db"))
+            .env_remove("APPA_BATTERIES_DIR")
+            .env_remove("APPA_MODULES_DIR")
+            .env("APPA_BATTERY_TARGET", "multi-user")
+            .stdout(Stdio::piped())
+            .stderr(std::fs::File::create(dir.path().join("runtime.log")).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let first_line = |process: &mut Process| {
+        let mut line = String::new();
+        std::io::BufReader::new(process.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        line.trim().to_owned()
+    };
+    let url = first_line(&mut runtime);
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "stdout={url:?}; stderr={}",
+        std::fs::read_to_string(dir.path().join("runtime.log")).unwrap()
+    );
+
+    let ui = |target: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
+        command
+            .args([
+                "ui",
+                "--no-open",
+                "--battery",
+                "team",
+                "--runtime-url",
+                &url,
+                "--config",
+            ])
+            .arg(&config)
+            .env_remove("APPA_BATTERIES_DIR")
+            .env_remove("APPA_BATTERY_TARGET")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(target) = target {
+            command.env("APPA_BATTERY_TARGET", target);
+        }
+        Process(command.spawn().unwrap())
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let state = |link: String| {
+        let client = client.clone();
+        async move {
+            let origin = url::Url::parse(&link).unwrap().origin().ascii_serialization();
+            client
+                .get(format!("{origin}/api/state"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    let mut single = ui(None);
+    assert!(state(first_line(&mut single)).await["runtime"].is_null());
+
+    let mut multi = ui(Some("multi-user"));
+    let served = state(first_line(&mut multi)).await;
+    assert_eq!(served["runtime"]["target"], "multi-user");
+}

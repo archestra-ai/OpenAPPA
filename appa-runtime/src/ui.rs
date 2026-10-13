@@ -121,29 +121,27 @@ impl Local {
             };
             // Name the cause and the one command that restores the store.
             let fix = "Run `appa plugin install claude-code` to restore the installed batteries.";
-            let validated = appa_package::validate_package(&dir).map(|package| {
-                let credentials = match &package.role {
-                    appa_package::Role::Battery(declared) if package.name.as_str() == battery.name => Some(
-                        declared
+            match appa_package::validate_package(&dir) {
+                Ok(package) => match &package.role {
+                    appa_package::Role::Battery(declared) if package.name.as_str() == battery.name => {
+                        let credentials = declared
                             .credentials_for(self.target)
-                            .map(|credentials| credentials.into_iter().map(str::to_owned).collect::<Vec<_>>()),
-                    ),
-                    _ => None,
-                };
-                (package, credentials)
-            });
-            match validated {
-                Ok((package, Some(Ok(credentials)))) => entries.push(BatteryEntry {
-                    name: battery.name,
-                    dir,
-                    package,
-                    credentials,
-                }),
-                Ok((_, Some(Err(missing)))) => errors.push(format!("{}: {missing}. {fix}", battery.name)),
-                Ok((_, None)) => errors.push(format!(
-                    "{}: the installed manifest does not describe this battery. {fix}",
-                    battery.name
-                )),
+                            .expect("validated batteries declare every target or none")
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect();
+                        entries.push(BatteryEntry {
+                            name: battery.name,
+                            dir,
+                            package,
+                            credentials,
+                        });
+                    }
+                    _ => errors.push(format!(
+                        "{}: the installed manifest does not describe this battery. {fix}",
+                        battery.name
+                    )),
+                },
                 Err(error) => errors.push(format!(
                     "{}: APPA cannot read the installed battery: {error}. {fix}",
                     battery.name
@@ -190,7 +188,8 @@ impl Local {
         .ok()
         .flatten()?;
         let path = data.get("config")?.as_str()?;
-        if !same_config(Path::new(path), &self.config) {
+        let target = appa_package::BatteryTarget::parse(data.get("target")?.as_str()?)?;
+        if !same_config(Path::new(path), &self.config) || target != self.target {
             return None;
         }
         Some(data)
