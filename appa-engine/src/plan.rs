@@ -605,17 +605,21 @@ pub(crate) fn enumerate_plans(
         }
     }
     needs.refuse_if_any()?;
-    Ok(
-        least_mandate_first(registry, &block.requirement_gaps, candidates, context)
-            .into_iter()
-            .enumerate()
-            .map(|(position, candidate)| ExecutableRemedyPlan {
-                id: PlanId(position as u32),
-                steps: candidate.steps,
-                required: candidate.required,
-            })
-            .collect(),
+    Ok(least_mandate_first(
+        registry,
+        &block.requirement_gaps,
+        candidates,
+        &check::forwarded_label(contract, check::CallReads::Resolved(call)).audience,
+        context,
     )
+    .into_iter()
+    .enumerate()
+    .map(|(position, candidate)| ExecutableRemedyPlan {
+        id: PlanId(position as u32),
+        steps: candidate.steps,
+        required: candidate.required,
+    })
+    .collect())
 }
 
 /// The membership atoms enumeration read without a pinned answer, aggregated across every
@@ -659,9 +663,10 @@ fn least_mandate_first(
     registry: &Registry,
     gaps: &[Gap],
     candidates: Vec<PlanCandidate>,
+    forwarded: &Audience,
     context: &MembershipContext<'_>,
 ) -> Vec<PlanCandidate> {
-    let reads = RankingReads::resolve(registry, gaps, &candidates);
+    let reads = RankingReads::resolve(registry, gaps, &candidates, forwarded);
     // Each candidate's power on each gap, computed once: the selection compares them many times.
     let powers: Vec<Vec<GapPower<'_>>> = candidates
         .iter()
@@ -719,7 +724,14 @@ struct RankingReads<'a> {
 }
 
 impl<'a> RankingReads<'a> {
-    fn resolve(registry: &'a Registry, gaps: &[Gap], candidates: &'a [PlanCandidate]) -> RankingReads<'a> {
+    /// A substitution's power is its target met with what the call forwards: the hop replaces
+    /// the arguments only, as the route ranking reads it.
+    fn resolve(
+        registry: &'a Registry,
+        gaps: &[Gap],
+        candidates: &'a [PlanCandidate],
+        forwarded: &Audience,
+    ) -> RankingReads<'a> {
         let mut reads = RankingReads {
             ceilings: BTreeMap::new(),
             targets: BTreeMap::new(),
@@ -750,7 +762,7 @@ impl<'a> RankingReads<'a> {
                     reads
                         .targets
                         .entry(sanitizer)
-                        .or_insert_with(|| Audience::of_declared(to));
+                        .or_insert_with(|| Audience::of_declared(to).combine(forwarded));
                 }
             }
         }

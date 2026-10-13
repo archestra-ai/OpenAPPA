@@ -359,6 +359,7 @@ def test_an_annotation_forwarding_inside_the_mandate_loads(tmp_path: Path) -> No
     [
         ('{ audience = ["mallory@evil.example"] }', "forwards.audience names .* outside the mandate"),
         ('{ trust = "suspicious" }', "forwards.trust 'suspicious' is outside the mandate"),
+        ('{ trust = ["internal"] }', "forwards.trust must be a rank name"),
         ('{ audience = { contains = ["alice@northwind.example"] } }', "forwards.audience is not a wire audience"),
         ('{ effects = ["egress"] }', "forwards takes only trust and audience"),
         ('"public"', "forwards takes only trust and audience"),

@@ -1940,8 +1940,10 @@ fn configured_audience_vocabulary(
             continue;
         };
         // A placeholder names no audience until a call does; the omitted bound stays static.
-        if let Some(DeltaAudience::Static(audience)) = &tool.delta.audience {
-            vocabulary.add_declared(audience);
+        for delta in [&tool.delta, &tool.forwards] {
+            if let Some(DeltaAudience::Static(audience)) = &delta.audience {
+                vocabulary.add_declared(audience);
+            }
         }
         for requirement in &tool.requires.label.audience {
             match requirement {
@@ -2529,6 +2531,9 @@ mod tests {
         reads.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
             "insider",
         )])));
+        reads.forwards.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "courier",
+        )])));
         let mut sends = tool("send");
         sends.requires.label.audience = vec![
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::Union(
@@ -2604,7 +2609,8 @@ mod tests {
             .annotator_mandate(&AnnotatorName::new("open"))
             .expect("open is registered");
         // The whole chain, every configured named audience (referenced or not), every group
-        // reference and reader a declaration, a bound, a ceiling, or a transition writes.
+        // reference and reader a declaration (its delta, forwards or requirement), a bound, a
+        // ceiling, or a transition writes.
         assert_eq!(
             open.audiences().entries().collect::<Vec<_>>(),
             [
@@ -2614,6 +2620,7 @@ mod tests {
                 "@unreferenced",
                 "@slack:user-group/oncall",
                 "auditor",
+                "courier",
                 "desk",
                 "hr",
                 "insider",

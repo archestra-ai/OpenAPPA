@@ -332,6 +332,8 @@ def _within_mandate(
         )
     for field, holder in (*labels.items(), ("requires", requires)):
         trust = holder.get("trust")
+        if trust is not None and not isinstance(trust, str):
+            raise ScenarioError(f"{name}: {location}.annotation.{field}.trust must be a rank name")
         if trust is not None and spec.ranks is not None and trust not in spec.ranks:
             raise ScenarioError(f"{name}: {location}.annotation.{field}.trust {trust!r} is outside the mandate")
         audience = holder.get("audience")
