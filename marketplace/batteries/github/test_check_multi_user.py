@@ -1,4 +1,6 @@
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import io
 import json
 from pathlib import Path
 import stat
@@ -7,9 +9,15 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+
+sys.path.insert(0, str(Path(__file__).parent))
+import check  # noqa: E402
 
 
 SCRIPT = Path(__file__).with_name("check-multi-user.py")
+API_ROOT = "https://github.example/api/v3"
+LISTING = f"{API_ROOT}/installation/repositories?per_page=1"
 
 
 class Loopback:
@@ -62,10 +70,26 @@ def run_script(env):
 
 class InstallationCheck(unittest.TestCase):
     def verdict(self, status, answer, headers=()):
-        with Loopback(status, answer, headers) as github:
+        def open_url(request, timeout):
+            self.assertEqual(request.full_url, LISTING)
+            self.assertEqual(request.get_header("Authorization"), "Bearer ghs-installation")
+            self.assertEqual(timeout, 4)
+            body = io.BytesIO(json.dumps(answer).encode())
+            if status == 200:
+                return body
+            message = HTTPMessage()
+            for name, value in headers:
+                message[name] = value
+            raise urllib.error.HTTPError(request.full_url, status, "fixture", message, body)
+
+        environ = {"APPA_PROVIDER_GITHUB_TOKEN": "ghs-installation", "GITHUB_API_URL": API_ROOT}
+        return check.check_installation(environ=environ, open_url=open_url)
+
+    def test_the_script_checks_the_installation_over_the_wire(self):
+        with Loopback(200, {"total_count": 3, "repositories": [{"full_name": "acme/widget"}]}) as github:
             result = run_script(github.env())
         self.assertEqual(github.seen, [("/installation/repositories?per_page=1", "Bearer ghs-installation")])
-        return result
+        self.assertEqual(result, {"status": "ready", "authentication": "token", "reason": "verified"})
 
     def test_an_installation_covering_a_repository_is_ready(self):
         self.assertEqual(

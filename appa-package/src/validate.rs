@@ -219,11 +219,11 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             }
             battery.audiences = base.audiences;
             battery.credentials = base.credentials;
-            let runs_a_helper = |command: &[String]| match command {
-                [interpreter, helper] => {
-                    interpreter == "python3" && battery.helpers.iter().any(|declared| declared.as_str() == helper)
-                }
-                _ => false,
+            let runs_a_helper = |command: &[String]| {
+                runs_a_declared_helper(
+                    &command.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &battery.helpers,
+                )
             };
             let target_commands: Vec<&[String]> = battery
                 .targets
@@ -907,7 +907,9 @@ fn check_binding(
     let mut credential = None;
     for (key, value) in table {
         match key.as_str() {
-            "command" if runs_a_declared_helper(value, helpers) => transports += 1,
+            "command" if string_argv(value).is_some_and(|argv| runs_a_declared_helper(&argv, helpers)) => {
+                transports += 1;
+            }
             "builtin" if external.starts_with("sanitizers.") && names_a_stock_sanitizer(value) => {
                 transports += 1;
                 stock = true;
@@ -990,14 +992,15 @@ fn declares_selectors(value: &Value) -> bool {
 
 /// A battery ships the programs it runs, so an argv is exactly `python3` and one
 /// of the helpers this manifest declares.
-fn runs_a_declared_helper(command: &Value, helpers: &[RelativePath]) -> bool {
-    let Some(argv) = command.as_array() else {
-        return false;
-    };
-    match argv.iter().map(Value::as_str).collect::<Option<Vec<_>>>().as_deref() {
-        Some(["python3", helper]) => helpers.iter().any(|declared| declared.as_str() == *helper),
+fn runs_a_declared_helper(argv: &[&str], helpers: &[RelativePath]) -> bool {
+    match argv {
+        ["python3", helper] => helpers.iter().any(|declared| declared.as_str() == *helper),
         _ => false,
     }
+}
+
+fn string_argv(command: &Value) -> Option<Vec<&str>> {
+    command.as_array()?.iter().map(Value::as_str).collect()
 }
 
 /// The one deployment setting a fragment carries: `confined_results` naming
@@ -1642,6 +1645,11 @@ mod tests {
             "[externals.sanitizers.mask]\nbuiltin = \"llm\"\n",
             // A command beside a url is still a url binding on the wire.
             "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
+            // A command is exactly python3 on one of the manifest's helpers.
+            "[externals.audience.github]\ncommand = [\"python3\", \"check-multi-user.py\"]\n",
+            "[externals.audience.github]\ncommand = [\"sh\", \"audience-source.py\"]\n",
+            "[externals.audience.github]\ncommand = [\"python3\"]\n",
+            "[externals.audience.github]\ncommand = [\"python3\", 3]\n",
             // An external kind only a root config binds.
             "[externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-opus-5\"\n",
         ] {

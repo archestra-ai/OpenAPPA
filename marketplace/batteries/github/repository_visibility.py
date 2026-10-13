@@ -67,41 +67,19 @@ from dataclasses import dataclass
 import json
 import os
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_token import api_root, resolve_token  # noqa: E402
+from github_audience import rest_api  # noqa: E402
+from github_token import resolve_token  # noqa: E402
 
 
-API_ROOT = api_root(os.environ)
 CONTENT = "github.repository-visibility"
 READERS = "github.repository-readers"
-TIMEOUT_SECONDS = 30
 # create_or_update_file and push_files carry the file content inside the consult.
 MAX_INPUT_BYTES = 4 * 1024 * 1024
-
-
-def rest_api(token):
-    def call(path):
-        request = urllib.request.Request(
-            f"{API_ROOT}{path}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(f"GET {path} failed: {error.code}") from error
-
-    return call
 
 
 def repository_of(consult):

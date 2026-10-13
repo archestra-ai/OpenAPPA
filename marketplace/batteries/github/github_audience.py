@@ -48,9 +48,9 @@ def rest_api(token):
         except urllib.error.HTTPError as error:
             match error.code:
                 case 404:
-                    raise NotFound(path) from error
+                    raise NotFound(f"GET {path} failed: 404") from error
                 case 403:
-                    raise Forbidden(path) from error
+                    raise Forbidden(f"GET {path} failed: 403") from error
                 case status:
                     raise RuntimeError(f"GET {path} failed: {status}") from error
 
