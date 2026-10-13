@@ -138,6 +138,9 @@ struct FaultPoints {
 pub struct Log {
     root: TrajectoryId,
     facts: Vec<Fact>,
+    /// How many facts the log holds after each batch, so the facts of one batch can be told
+    /// from the next.
+    batch_ends: Vec<usize>,
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
@@ -319,6 +322,22 @@ impl Log {
     /// never a count of facts.
     pub fn basis(&self) -> u64 {
         self.basis
+    }
+
+    /// The facts of every batch after position `basis`, one slice per batch in log order.
+    /// `None` when this read stands before `basis`.
+    pub fn batches_after(&self, basis: u64) -> Option<impl Iterator<Item = &[Fact]>> {
+        let first = usize::try_from(basis).ok().filter(|first| *first <= self.batch_ends.len())?;
+        let start = match first {
+            0 => 0,
+            first => self.batch_ends[first - 1],
+        };
+        let ends = &self.batch_ends[first..];
+        Some(ends.iter().scan(start, |start, end| {
+            let batch = &self.facts[*start..*end];
+            *start = *end;
+            Some(batch)
+        }))
     }
 
     pub fn policy_file(&self) -> &[u8] {
@@ -534,6 +553,87 @@ pub enum AppendError {
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
+}
+
+/// One read-decide-append step on one root's log; see [`LogStore::step`]. An append ends the
+/// step; dropping it without one writes nothing.
+pub struct Step<'a> {
+    store: &'a LogStore,
+    root: TrajectoryId,
+    backend: StepBackend<'a>,
+}
+
+enum StepBackend<'a> {
+    /// Borrows nothing; the lifetime is the PostgreSQL step's.
+    Sqlite(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "postgres")]
+    Postgres(postgres::PostgresStep<'a>),
+}
+
+impl Step<'_> {
+    /// The root's log as it stands within this step.
+    pub fn log(&self) -> Result<Log, ReadError> {
+        match &self.backend {
+            StepBackend::Sqlite(_) => self.store.log(&self.root),
+            #[cfg(feature = "postgres")]
+            StepBackend::Postgres(step) => {
+                #[cfg(feature = "fault-injection")]
+                self.store.read_refused()?;
+                step.log()
+            }
+        }
+    }
+
+    /// [`LogStore::append`] within this step.
+    pub fn append(self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
+        self.write(based_on, encode(facts, None), None, None)
+    }
+
+    /// [`LogStore::append_host`] within this step.
+    pub fn append_host(self, based_on: &Log, facts: &[Fact], observation: &HostObservation) -> Result<(), AppendError> {
+        let key = observation.key();
+        self.write(based_on, encode(facts, Some(observation)), key.as_deref(), None)
+    }
+
+    /// [`LogStore::append_holding_embedded_read`] within this step.
+    pub fn append_holding_embedded_read(
+        self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: Option<&HostObservation>,
+        hold: &embedded::EmbeddedAppendHold<'_>,
+    ) -> Result<(), AppendError> {
+        let key = observation.and_then(HostObservation::key);
+        self.write(based_on, encode(facts, observation), key.as_deref(), Some(hold))
+    }
+
+    fn write(
+        self,
+        based_on: &Log,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+        hold: Option<&embedded::EmbeddedAppendHold<'_>>,
+    ) -> Result<(), AppendError> {
+        if based_on.root != self.root {
+            return Err(AppendError::Conflict { current: 0 });
+        }
+        match self.backend {
+            StepBackend::Sqlite(_) => match hold {
+                None => self.store.append_at(&based_on.root, based_on.basis, bytes, key),
+                Some(hold) => match &self.store.store {
+                    Store::Sqlite(sqlite) => {
+                        sqlite
+                            .appender()
+                            .append_holding_read(&based_on.root, based_on.basis, &bytes, key, hold)
+                    }
+                    #[cfg(feature = "postgres")]
+                    Store::Postgres(_) => unreachable!("a SQLite step belongs to a SQLite store"),
+                },
+            },
+            #[cfg(feature = "postgres")]
+            StepBackend::Postgres(step) => step.append(based_on.basis, bytes, key, hold),
+        }
+    }
 }
 
 impl LogStore {
@@ -1055,6 +1155,24 @@ impl LogStore {
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, bytes, key.as_deref(), hold),
         }
+    }
+
+    /// Begin one read-decide-append step on `root`'s log. On PostgreSQL the step is one
+    /// transaction that holds the root's row lock from its read to its append, so the writers
+    /// of one family take turns rather than losing the compare-and-swap to each other; the lock
+    /// and the connection last for this step only. On SQLite the step adds nothing to the
+    /// compare-and-swap. Every read and append of the step goes through the [`Step`].
+    pub fn step(&self, root: &TrajectoryId) -> Result<Step<'_>, ReadError> {
+        let backend = match &self.store {
+            Store::Sqlite(_) => StepBackend::Sqlite(std::marker::PhantomData),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => StepBackend::Postgres(pg.step(root)?),
+        };
+        Ok(Step {
+            store: self,
+            root: root.clone(),
+            backend,
+        })
     }
 
     /// The receiver's unexpired messages it was not yet told of, oldest first. Each is told
@@ -2617,10 +2735,142 @@ mod tests {
             .with_client(move |client| {
                 for root in &roots {
                     client.execute("DELETE FROM openappa_events WHERE root=$1", &[&root.as_str()])?;
+                    client.execute("DELETE FROM openappa_roots WHERE root=$1", &[&root.as_str()])?;
                 }
                 Ok(())
             })
             .expect("the test roots clean up");
+    }
+
+    /// Whether a connection other than `store`'s can lock `root`'s family row right now.
+    #[cfg(feature = "postgres")]
+    fn postgres_root_is_free(store: &LogStore, root: &TrajectoryId) -> bool {
+        let key = root.as_str().to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                let mut transaction = client.transaction()?;
+                let free = match transaction
+                    .query_opt("SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT", &[&key])
+                {
+                    Ok(row) => row.is_some(),
+                    Err(error) if error.code() == Some(&::postgres::error::SqlState::LOCK_NOT_AVAILABLE) => false,
+                    Err(error) => return Err(error.into()),
+                };
+                transaction.rollback()?;
+                Ok(free)
+            })
+            .expect("the lock attempt answers")
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_step_holds_its_root_from_the_read_to_the_append() {
+        let store = postgres_store(3);
+        let root = postgres_root(&store, "step");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        assert!(postgres_root_is_free(&store, &root), "an opened root has its row, and nobody holds it");
+
+        let step = store.step(&root).expect("the step begins");
+        let log = step.log().expect("the step reads");
+        assert!(!postgres_root_is_free(&store, &root), "the step holds the family's row");
+        step.append(&log, &boundary).expect("the step appends");
+        assert!(postgres_root_is_free(&store, &root), "the append ends the step");
+        assert_eq!(store.log(&root).expect("the log reads").basis(), 2);
+
+        let step = store.step(&root).expect("a second step begins");
+        let _ = step.log().expect("the step reads");
+        drop(step);
+        assert!(postgres_root_is_free(&store, &root), "a dropped step lets the row go");
+        assert_eq!(
+            store.log(&root).expect("the log reads").basis(),
+            2,
+            "a dropped step wrote nothing"
+        );
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_concurrent_steps_of_one_family_all_append() {
+        let writers = 12;
+        let store = std::sync::Arc::new(postgres_store(writers + 1));
+        let root = postgres_root(&store, "steps");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(writers));
+        let handles: Vec<_> = (0..writers)
+            .map(|_| {
+                let (store, root, barrier) = (store.clone(), root.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let boundary = vec![Fact::Boundary {
+                        trajectory: root.clone(),
+                        kind: appa_engine::fact::BoundaryKind::VoidReturn,
+                    }];
+                    barrier.wait();
+                    let step = store.step(&root).expect("the step begins");
+                    let log = step.log().expect("the step reads");
+                    step.append(&log, &boundary)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("the writer finishes")
+                .expect("no writer loses its append: the steps take turns");
+        }
+        assert_eq!(store.log(&root).expect("the log reads").basis(), writers as u64 + 1);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_cached_log_reads_new_batches_and_drops_a_rewritten_tail() {
+        let reader = postgres_store(1);
+        let writer = postgres_store(1);
+        let root = postgres_root(&writer, "cached");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        let first = reader.log(&root).expect("the log reads");
+        writer
+            .append(&writer.log(&root).expect("the log reads"), &boundary)
+            .expect("another store appends");
+        let second = reader.log(&root).expect("the log reads again");
+        assert_eq!(second.basis(), first.basis() + 1, "the cached read sees the new batch");
+        assert_eq!(second, writer.log(&root).expect("the writer reads"), "and equals a cold read");
+
+        // The last batch the reader cached is replaced behind its back.
+        let key = root.as_str().to_owned();
+        writer
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute(
+                    "UPDATE openappa_events SET payload = $2 WHERE root = $1 AND seq = 1",
+                    &[&key, &b"[]".to_vec()],
+                )?;
+                Ok(())
+            })
+            .expect("the batch is rewritten");
+        let reread = reader.log(&root).expect("the rewritten log reads");
+        assert_eq!(reread.basis(), 2);
+        assert!(
+            reread.batches_after(1).expect("the batch exists").all(<[Fact]>::is_empty),
+            "the reader drops its cached copy and reads the stored batch"
+        );
+        forget_postgres_roots(&writer, vec![root]);
     }
 
     #[cfg(feature = "postgres")]
@@ -2784,8 +3034,8 @@ mod tests {
             .expect("the test receipt cleans up");
     }
 
-    /// Every writer serializes on `pg_advisory_xact_lock(hashtextextended(key, 0))` under a
-    /// key other processes share, so the key and its hash are a wire format: a session lock
+    /// Every receipt writer serializes on `pg_advisory_xact_lock(hashtextextended(key, 0))` under
+    /// a key other processes share, so the key and its hash are a wire format: a session lock
     /// held on exactly that key by another connection must stop each write until released.
     #[cfg(feature = "postgres")]
     #[test]
@@ -2794,8 +3044,6 @@ mod tests {
         let store = postgres_store(2);
         let unique = tempfile::tempdir().expect("a unique namespace exists");
         let suffix = unique.path().display().to_string();
-        // Opened before both connections are leased: an unleased store needs one of its own.
-        let root = postgres_root(&store, "locked");
         let (holder, writer) = (store.lease().unwrap(), store.lease().unwrap());
         writer
             .postgres()
@@ -2820,30 +3068,6 @@ mod tests {
                 })
                 .expect("the holder takes or gives up the lock");
         };
-
-        let boundary = vec![Fact::Boundary {
-            trajectory: root.clone(),
-            kind: appa_engine::fact::BoundaryKind::VoidReturn,
-        }];
-        hold(root.as_str(), true);
-        let before = writer.log(&root).expect("a read takes no lock");
-        assert!(matches!(
-            writer.append(&before, &boundary),
-            Err(AppendError::Postgres(_))
-        ));
-        hold(root.as_str(), false);
-        writer.append(&before, &boundary).expect("the released root appends");
-
-        let created = TrajectoryId::new(format!("pg-test:created:{suffix}"));
-        hold(created.as_str(), true);
-        assert!(matches!(
-            writer.create_root(opening(&created), POLICY.as_bytes()),
-            Err(CreateError::Postgres(_))
-        ));
-        hold(created.as_str(), false);
-        writer
-            .create_root(opening(&created), POLICY.as_bytes())
-            .expect("the released root opens");
 
         let organization = format!("lock-org:{suffix}");
         let session_id = format!("lock-session:{suffix}");
@@ -2925,7 +3149,6 @@ mod tests {
         })
         .expect("the test receipts clean up");
         drop((holder, writer));
-        forget_postgres_roots(&store, vec![root, created]);
     }
 
     /// A host whose receipt tables are keyed without the organization, or with its columns in

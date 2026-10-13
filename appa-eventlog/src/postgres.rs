@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use ::postgres::Client;
+use ::postgres::{Client, GenericClient};
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
@@ -28,7 +28,7 @@ use crate::embedded::{
     DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
     StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
 };
-use crate::encoding::{contiguous, decoded, opening_key};
+use crate::encoding::{contiguous, contiguous_from, decoded, extend, opening_key};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, SessionScope, StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim,
@@ -310,6 +310,100 @@ impl Drop for Lease {
 pub(crate) struct PostgresStore {
     pool: Arc<Pool>,
     lease: Option<LeasedPostgres>,
+    /// Shared with every lease of this store.
+    logs: Arc<LogCache>,
+}
+
+/// How many facts the cached logs of one store hold at most, together. A log read past the
+/// bound is still read, from its first batch.
+const CACHED_FACTS: usize = 250_000;
+
+/// The logs this process read last, so a later read of the same root decodes only the batches
+/// accepted since. Batches are append-only, so a cached log stays a true prefix; a read still
+/// fetches the cached log's last batch again and drops the entry when the stored bytes differ,
+/// which catches a log that was removed or rewritten behind the cache.
+#[derive(Default)]
+struct LogCache {
+    entries: Mutex<CachedLogs>,
+}
+
+#[derive(Default)]
+struct CachedLogs {
+    logs: std::collections::HashMap<String, CachedLog>,
+    /// Roots in the order they were cached, oldest first.
+    order: std::collections::VecDeque<String>,
+    facts: usize,
+}
+
+#[derive(Clone)]
+struct CachedLog {
+    log: Log,
+    last_batch: Vec<u8>,
+}
+
+impl LogCache {
+    fn entries(&self) -> std::sync::MutexGuard<'_, CachedLogs> {
+        self.entries
+            .lock()
+            .expect("the log cache mutex is never poisoned: no panic runs while it is held")
+    }
+
+    fn get(&self, root: &str) -> Option<CachedLog> {
+        self.entries().logs.get(root).cloned()
+    }
+
+    fn forget(&self, root: &str) {
+        let mut entries = self.entries();
+        if let Some(gone) = entries.logs.remove(root) {
+            entries.facts -= gone.log.facts().len();
+            entries.order.retain(|cached| cached != root);
+        }
+    }
+
+    /// Keep `log` unless the cache already holds a later read of its root.
+    fn keep(&self, log: &Log, last_batch: &[u8]) {
+        let root = log.root().as_str();
+        let size = log.facts().len();
+        let mut entries = self.entries();
+        if size > CACHED_FACTS || entries.logs.get(root).is_some_and(|cached| cached.log.basis() >= log.basis()) {
+            return;
+        }
+        match entries.logs.remove(root) {
+            Some(older) => entries.facts -= older.log.facts().len(),
+            None => entries.order.push_back(root.to_owned()),
+        }
+        while entries.facts + size > CACHED_FACTS {
+            let Some(oldest) = entries.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = entries.logs.remove(&oldest) {
+                entries.facts -= gone.log.facts().len();
+            }
+        }
+        if !entries.order.iter().any(|cached| cached == root) {
+            entries.order.push_back(root.to_owned());
+        }
+        entries.facts += size;
+        entries.logs.insert(
+            root.to_owned(),
+            CachedLog {
+                log: log.clone(),
+                last_batch: last_batch.to_vec(),
+            },
+        );
+    }
+}
+
+/// One read-decide-append step on one root's log: a transaction on one connection that holds
+/// the root's row lock from the read to the append, so writers of a family take turns instead
+/// of losing a compare-and-swap to each other. The lock and the connection are held for this
+/// step only; dropping the step without an append rolls the transaction back.
+pub(crate) struct PostgresStep<'a> {
+    store: &'a PostgresStore,
+    /// The connection checked out for this step when the store is not leased.
+    own: Option<Lease>,
+    root: TrajectoryId,
+    open: bool,
 }
 
 /// The connection a leased store runs on, for the host's own SQL. Only a leased store hands
@@ -349,7 +443,11 @@ impl PostgresStore {
         });
         // The first connection opens now, so a missing host migration refuses startup.
         drop(pool.checkout()?);
-        Ok(Self { pool, lease: None })
+        Ok(Self {
+            pool,
+            lease: None,
+            logs: Arc::default(),
+        })
     }
 
     /// A store pinned to one pooled connection; an unleased store takes a connection per
@@ -364,6 +462,7 @@ impl PostgresStore {
             lease: Some(LeasedPostgres {
                 lease: self.pool.checkout()?,
             }),
+            logs: Arc::clone(&self.logs),
         })
     }
 
@@ -854,22 +953,20 @@ impl PostgresStore {
         let id = root.as_str().to_owned();
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
-        let created = self.serialized::<_, PostgresError>(id.clone(), move |client| {
-            if client
-                .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
-                .is_some()
-            {
-                return Ok(false);
-            }
-            client.execute(
+        let created = self.query(move |client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute(
                 "INSERT INTO openappa_policy_files (hash, bytes) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 &[&hash, &policy],
             )?;
-            client.execute(
-                "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, 0, $2)",
+            // The (root, seq) key refuses a second opening; the root's row is what its writers lock.
+            let inserted = transaction.execute(
+                "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, 0, $2) ON CONFLICT (root, seq) DO NOTHING",
                 &[&id, &bytes],
             )?;
-            Ok(true)
+            transaction.execute("INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING", &[&id])?;
+            transaction.commit()?;
+            Ok(inserted == 1)
         })?;
         if !created {
             return Err(CreateError::AlreadyExists {
@@ -880,25 +977,97 @@ impl PostgresStore {
     }
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
+        match &self.lease {
+            Some(leased) => self.log_on(leased.lease.worker(), root),
+            None => {
+                let lease = self.pool.checkout().map_err(PostgresError::from)?;
+                self.log_on(lease.worker(), root)
+            }
+        }
+    }
+
+    /// Read `root`'s log on `worker`'s connection, decoding only what the cache lacks.
+    fn log_on(&self, worker: &Worker, root: &TrajectoryId) -> Result<Log, ReadError> {
         let id = root.as_str().to_owned();
-        let batches = self.query(move |client| {
-            let rows = client.query(
-                "SELECT seq, payload FROM openappa_events WHERE root = $1 ORDER BY seq",
-                &[&id],
-            )?;
-            contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
-                .map_err(|gap| PostgresError(gap.to_string()))
+        let cached = self.logs.get(&id);
+        // A cached log is read again from its last batch, which must still be the stored one.
+        let from = cached.as_ref().map_or(0, |cached| cached.log.basis() - 1);
+        let (prefix, rows) = worker.run({
+            let id = id.clone();
+            move |state| {
+                // The batches before the cached last one are not read again, only counted, so a
+                // removed row still refuses the log as a gap.
+                let prefix: i64 = match from {
+                    0 => 0,
+                    from => state
+                        .client
+                        .query_one(
+                            "SELECT count(*) FROM openappa_events WHERE root = $1 AND seq < $2",
+                            &[&id, &(from as i64)],
+                        )?
+                        .get(0),
+                };
+                let rows = state.client.query(
+                    "SELECT seq, payload FROM openappa_events WHERE root = $1 AND seq >= $2 ORDER BY seq",
+                    &[&id, &(from as i64)],
+                )?;
+                let rows = contiguous_from(from, rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+                    .map_err(|gap| PostgresError(gap.to_string()))?;
+                Ok((prefix as u64, rows))
+            }
         })?;
-        let hash = opening_key(root, &batches)?.as_str().to_owned();
-        let lookup = hash.clone();
-        let policy = self
-            .query(move |client| {
-                Ok(client
-                    .query_opt("SELECT bytes FROM openappa_policy_files WHERE hash = $1", &[&lookup])?
-                    .map(|row| row.get::<_, Vec<u8>>(0)))
-            })?
-            .ok_or(ReadError::PolicyFileMissing { key: hash })?;
-        decoded(root, batches, policy)
+        let (log, last_batch) = match cached {
+            Some(CachedLog { mut log, last_batch }) if prefix == from && rows.first() == Some(&last_batch) => {
+                let mut batches = rows.into_iter().skip(1).collect::<Vec<_>>();
+                let last = batches.last().cloned().unwrap_or(last_batch);
+                extend(&mut log, std::mem::take(&mut batches))?;
+                (log, last)
+            }
+            Some(_) => {
+                self.logs.forget(&id);
+                return self.log_on(worker, root);
+            }
+            None => {
+                let hash = opening_key(root, &rows)?.as_str().to_owned();
+                let lookup = hash.clone();
+                let policy = worker
+                    .run(move |state| {
+                        Ok(state
+                            .client
+                            .query_opt("SELECT bytes FROM openappa_policy_files WHERE hash = $1", &[&lookup])?
+                            .map(|row| row.get::<_, Vec<u8>>(0)))
+                    })?
+                    .ok_or(ReadError::PolicyFileMissing { key: hash })?;
+                let last = rows.last().cloned().unwrap_or_default();
+                (decoded(root, rows, policy)?, last)
+            }
+        };
+        self.logs.keep(&log, &last_batch);
+        Ok(log)
+    }
+
+    /// Begin one read-decide-append step on `root`: a transaction holding the root's row lock.
+    pub(super) fn step(&self, root: &TrajectoryId) -> Result<PostgresStep<'_>, PostgresError> {
+        let own = match &self.lease {
+            Some(_) => None,
+            None => Some(self.pool.checkout()?),
+        };
+        // Open from the first statement on, so a failed lock still rolls the transaction back.
+        let step = PostgresStep {
+            store: self,
+            own,
+            root: root.clone(),
+            open: true,
+        };
+        let key = root.as_str().to_owned();
+        step.worker().run(move |state| {
+            // A step dropped without an answer from its thread leaves the reset to end it.
+            state.host_sql = true;
+            state.client.batch_execute("BEGIN")?;
+            lock_root(&mut state.client, &key)?;
+            Ok(())
+        })?;
+        Ok(step)
     }
 
     pub(super) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
@@ -1022,34 +1191,16 @@ impl PostgresStore {
         bytes: Vec<u8>,
         key: Option<&str>,
     ) -> Result<(), AppendError> {
-        let root = root.as_str().to_owned();
-        let key = key.map(str::to_owned);
-        let conflict = self.serialized::<_, PostgresError>(root.clone(), move |client| {
-            let current = client
-                .query_one(
-                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
-                    &[&root],
-                )?
-                .get::<_, i64>(0) as u64;
-            if current != basis {
-                return Ok(Some(current));
+        let batch = Batch::new(root, basis, bytes, key, None);
+        self.query(move |client| {
+            let mut transaction = client.transaction()?;
+            let written = batch.write(&mut transaction)?;
+            if written == Written::Done {
+                transaction.commit()?;
             }
-            client.execute(
-                "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3)",
-                &[&root, &(current as i64), &bytes],
-            )?;
-            if let Some(key) = key {
-                client.execute(
-                    "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    &[&key, &root],
-                )?;
-            }
-            Ok(None)
-        })?;
-        if let Some(current) = conflict {
-            return Err(AppendError::Conflict { current });
-        }
-        Ok(())
+            Ok(written)
+        })?
+        .into()
     }
 
     pub(super) fn append_holding_read(
@@ -1060,47 +1211,182 @@ impl PostgresStore {
         key: Option<&str>,
         hold: &crate::embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
-        let root_lock = root.as_str().to_owned();
-        let root = root.as_str().to_owned();
-        let key = key.map(str::to_owned);
-        let id = hold.id.to_owned();
-        let call_id = hold.call_id.to_owned();
-        let generation = hold.generation;
-        let bind = hold.bind;
-        let bound = serde_json::json!({"generation": generation, "kind": TICKET_BOUND});
-        self.serialized::<_, PostgresError>(root_lock, move |client| {
-            let current = client
-                .query_one(
-                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
-                    &[&root],
-                )?
-                .get::<_, i64>(0) as u64;
-            if current != basis {
-                return Ok(Err(AppendError::Conflict { current }));
+        let batch = Batch::new(root, basis, bytes, key, Some(HeldRead::new(hold)));
+        self.query(move |client| {
+            let mut transaction = client.transaction()?;
+            let written = batch.write(&mut transaction)?;
+            if written == Written::Done {
+                transaction.commit()?;
             }
+            Ok(written)
+        })?
+        .into()
+    }
+}
+
+impl PostgresStep<'_> {
+    fn worker(&self) -> &Worker {
+        match (&self.own, &self.store.lease) {
+            (Some(own), _) => own.worker(),
+            (None, Some(leased)) => leased.lease.worker(),
+            (None, None) => unreachable!("a step on an unleased store checks out its own connection"),
+        }
+    }
+
+    /// The root's log as it stands while this step holds the root.
+    pub(super) fn log(&self) -> Result<Log, ReadError> {
+        self.store.log_on(self.worker(), &self.root)
+    }
+
+    /// Append one batch at `basis` and end the step. A conflict writes nothing.
+    pub(super) fn append(
+        mut self,
+        basis: u64,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+        hold: Option<&crate::embedded::EmbeddedAppendHold<'_>>,
+    ) -> Result<(), AppendError> {
+        let batch = Batch::new(&self.root, basis, bytes, key, hold.map(HeldRead::new));
+        let written = self.worker().run(move |state| {
+            let written = batch.write(&mut state.client)?;
+            if written == Written::Done {
+                state.client.batch_execute("COMMIT")?;
+            }
+            Ok(written)
+        })?;
+        if written == Written::Done {
+            self.open = false;
+        }
+        written.into()
+    }
+}
+
+impl Drop for PostgresStep<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // Should the connection not answer, the pool's reset ends the transaction instead.
+            let _ = self
+                .worker()
+                .run(|state| Ok(state.client.batch_execute("ROLLBACK")?));
+        }
+    }
+}
+
+/// Lock `root`'s family row for the rest of the transaction, creating the row on first use.
+/// Writers of one family serialize on it; the lock ends with the transaction.
+fn lock_root(client: &mut Client, root: &str) -> Result<(), ::postgres::Error> {
+    let lock = "SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE";
+    if client.query_opt(lock, &[&root])?.is_some() {
+        return Ok(());
+    }
+    client.execute("INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING", &[&root])?;
+    client.query_one(lock, &[&root])?;
+    Ok(())
+}
+
+/// One batch to write at one position of one root's log.
+struct Batch {
+    root: String,
+    basis: u64,
+    bytes: Vec<u8>,
+    key: Option<String>,
+    hold: Option<HeldRead>,
+}
+
+/// The embedded read a batch binds, which must still be this read's when the batch lands.
+struct HeldRead {
+    id: String,
+    call_id: String,
+    generation: i64,
+    bind: bool,
+}
+
+impl HeldRead {
+    fn new(hold: &crate::embedded::EmbeddedAppendHold<'_>) -> HeldRead {
+        HeldRead {
+            id: hold.id.to_owned(),
+            call_id: hold.call_id.to_owned(),
+            generation: hold.generation,
+            bind: hold.bind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Written {
+    Done,
+    /// The position is taken; the log stands at this position now.
+    Conflict(u64),
+    ReadClaimLost,
+}
+
+impl From<Written> for Result<(), AppendError> {
+    fn from(written: Written) -> Self {
+        match written {
+            Written::Done => Ok(()),
+            Written::Conflict(current) => Err(AppendError::Conflict { current }),
+            Written::ReadClaimLost => Err(AppendError::ReadClaimLost),
+        }
+    }
+}
+
+impl Batch {
+    fn new(
+        root: &TrajectoryId,
+        basis: u64,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+        hold: Option<HeldRead>,
+    ) -> Batch {
+        Batch {
+            root: root.as_str().to_owned(),
+            basis,
+            bytes,
+            key: key.map(str::to_owned),
+            hold,
+        }
+    }
+
+    /// Write this batch inside the caller's transaction. The `(root, seq)` key is the
+    /// compare-and-swap: a position another writer took inserts nothing.
+    fn write(&self, client: &mut impl GenericClient) -> Result<Written, PostgresError> {
+        let current: i64 = client
+            .query_one(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
+                &[&self.root],
+            )?
+            .get(0);
+        if current as u64 != self.basis {
+            return Ok(Written::Conflict(current as u64));
+        }
+        if let Some(hold) = &self.hold {
+            let bound = serde_json::json!({"generation": hold.generation, "kind": TICKET_BOUND});
             let changed = client.execute(
                 "UPDATE openappa_embedded_peer_messages
                  SET decision = CASE WHEN $6 THEN $5 ELSE decision END
                  WHERE root = $1 AND id = $2 AND read_call_id = $3 AND status = 'read'
                    AND decision->>'kind' IN ('opening', 'bound')
                    AND (decision->>'generation')::bigint = $4",
-                &[&root, &id, &call_id, &generation, &bound, &bind],
+                &[&self.root, &hold.id, &hold.call_id, &hold.generation, &bound, &hold.bind],
             )?;
             if changed != 1 {
-                return Ok(Err(AppendError::ReadClaimLost));
+                return Ok(Written::ReadClaimLost);
             }
+        }
+        let inserted = client.execute(
+            "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3) ON CONFLICT (root, seq) DO NOTHING",
+            &[&self.root, &(self.basis as i64), &self.bytes],
+        )?;
+        if inserted == 0 {
+            return Ok(Written::Conflict(self.basis + 1));
+        }
+        if let Some(key) = &self.key {
             client.execute(
-                "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3)",
-                &[&root, &(current as i64), &bytes],
+                "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&key, &self.root],
             )?;
-            if let Some(key) = key {
-                client.execute(
-                    "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    &[&key, &root],
-                )?;
-            }
-            Ok(Ok(()))
-        })?
+        }
+        Ok(Written::Done)
     }
 }
 

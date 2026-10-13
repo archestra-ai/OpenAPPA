@@ -9,6 +9,9 @@ CREATE TABLE openappa_events (
     CONSTRAINT openappa_events_seq_nonnegative CHECK (seq >= 0)
 );
 
+-- One row per family root. Writers of a family lock it for one read-decide-append step.
+CREATE TABLE openappa_roots (root TEXT PRIMARY KEY);
+
 CREATE TABLE openappa_file_events (
     workspace text NOT NULL,
     seq bigint NOT NULL,

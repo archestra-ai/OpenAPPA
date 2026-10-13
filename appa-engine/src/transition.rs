@@ -615,13 +615,23 @@ pub enum ViewMismatch {
     ForeignPolicy,
 }
 
+/// Why [`crate::Engine::admit_batch`] did not advance a view: the batch's records failed the
+/// validator, or the view is not one this engine built.
+#[derive(Debug, thiserror::Error)]
+pub enum BatchRefusal {
+    #[error(transparent)]
+    Transition(#[from] TransitionRefusal),
+    #[error(transparent)]
+    View(#[from] ViewMismatch),
+}
+
 /// The engine's derived working picture of one family log: the validated records and
 /// the projection built from them. Opaque and disposable — the runtime stores it for the next
 /// event, but every constructor and mutator here belongs to the engine.
 ///
 /// Equality is equality of the derived picture: a view advanced batch by batch equals the view
 /// a replay of the same log builds, because both reach the log through the one fold.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
     policy: PolicyIdentityV1,
