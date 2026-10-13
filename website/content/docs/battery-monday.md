@@ -40,7 +40,9 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   external destinations.
 - **Notifications:** `create_notification` also checks its `user_id` recipient
   against the input audience. A monday audience source resolves that user to a
-  confirmed email; absent, inactive, or unconfirmed users are refused.
+  confirmed email; absent, inactive, or unconfirmed users are refused. The
+  single-user and multi-user targets both carry this check; the base policy
+  alone accepts only public notification input.
 - **External submissions:** WorkForm submissions and feedback to monday require
   public input and review. Their internal responses mean the exact
   call also needs an authority permitted to approve audience expansion.

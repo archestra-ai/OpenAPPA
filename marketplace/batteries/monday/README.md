@@ -12,6 +12,19 @@ covers authentication. The rules use the inspected
 and authenticated hosted `tools/list`. The hosted build is not pinned to that
 public source revision.
 
+## Targets
+
+`appa.toml` is the base policy; a deployment composes one target policy
+over it, whose rules run first. Both targets bind the `monday` audience
+source and give `create_notification` its recipient check, described below.
+
+- **single-user** (`single-user.toml`) — one person's API token.
+- **multi-user** (`multi-user.toml`) — an app token with `users:read`
+  that every agent shares. The same policy and helper: the source names the
+  recipient by confirmed email and never asks who owns the token.
+- **base alone** — no helper and no lookup: `create_notification`
+  requires trusted public input and review; every other rule is the same.
+
 ## Rules
 
 *Internal reads* — queries and results stay within `internal`. Trust follows
@@ -67,8 +80,8 @@ session's trust. These tools are:
 `update_folder`, `update_form`, `update_workspace`, `vibe_create`, `vibe_delete`,
 `vibe_publication`, `vibe_update`.
 
-`create_notification` additionally requires that its `user_id` recipient can
-read the input. The `monday` audience source looks up that user's confirmed
+Under a target, `create_notification` additionally requires that its `user_id`
+recipient can read the input. The `monday` audience source looks up that user's confirmed
 email through the monday Users API. It refuses absent, inactive, or
 unconfirmed users and lookup errors. The contract requires trusted input and
 `monday-review`; its result is `internal`.

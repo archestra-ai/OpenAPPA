@@ -1,0 +1,18 @@
+# monday battery, multi-user target: an app token every agent shares. The same
+# rule as the single-user target; the `monday` audience source names the
+# recipient by the confirmed email the monday Users API reports, never relative
+# to the token's owner. These rules run before the base policy's.
+
+[policy]
+version = 2
+
+[externals.audience.monday]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_MONDAY_TOKEN"
+selectors = [{ template = "user/<id>" }]
+
+[[policy.tool]]
+name = "mcp/monday/create_notification"
+delta = { audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
+effects = ["monday.sensitive"]
