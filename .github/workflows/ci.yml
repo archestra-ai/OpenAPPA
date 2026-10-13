@@ -328,7 +328,7 @@ jobs:
       - name: Test amppa against the runtime
         run: bun test integrations/amp
 
-      - name: Test Appencode against the runtime
+      - name: Test AppenCode against the runtime
         working-directory: integrations/opencode
         run: bun install --frozen-lockfile && bun run check && bun test
 

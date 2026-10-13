@@ -93,7 +93,7 @@ export default Plugin.define({
     yield* ctx.permission.hook('evaluate', event => Effect.sync(() => {
       if (event.action === 'execute' || event.action === 'subagent') {
         event.effect = 'deny'
-        event.message = 'Appencode v1 covers direct tools, not Code Mode or subagent returns.'
+        event.message = 'AppenCode v1 covers direct tools, not Code Mode or subagent returns.'
       }
     }))
 
@@ -103,7 +103,7 @@ export default Plugin.define({
         delete event.tools.execute
         delete event.tools.subagent
         event.system.push({ type: 'text', text: context ||
-          'Appencode checks direct tool flows through APPA. Use the offered remedy tool, then retry. Do not bypass refused flows.' })
+          'AppenCode checks direct tool flows through APPA. Use the offered remedy tool, then retry. Do not bypass refused flows.' })
       },
       catch: failure,
     }).pipe(Effect.orDie))

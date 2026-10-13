@@ -1,4 +1,4 @@
-# Starting policy for Appencode v1, not a general-purpose coding policy.
+# Starting policy for AppenCode v1, not a general-purpose coding policy.
 # Undeclared tools are refused. Code Mode and subagents are refused by the plugin.
 [policy]
 version = 2

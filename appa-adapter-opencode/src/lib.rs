@@ -1,4 +1,4 @@
-//! Server-side identification for Appencode, the OpenCode V2 plugin.
+//! Server-side identification for AppenCode, the OpenCode V2 plugin.
 //! The plugin obtains namespaces from the registry, never by splitting OpenCode's
 //! flattened dispatch names. Namespaced tools cross as `mcp__<namespace>__<name>`.
 //! V1 refuses subagents and Code Mode in the host; it claims no child lifecycle.

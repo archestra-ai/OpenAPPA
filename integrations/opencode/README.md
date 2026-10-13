@@ -1,6 +1,6 @@
-# Appencode v1 — OpenAPPA for OpenCode V2
+# AppenCode v1 — OpenAPPA for OpenCode V2
 
-Appencode checks direct OpenCode tool calls and results through APPA's runtime.
+AppenCode checks direct OpenCode tool calls and results through APPA's runtime.
 It targets `@opencode/cli` and `@opencode/plugin` 2.0.28. It does not support
 OpenCode V1's `@opencode-ai/plugin` API.
 
@@ -137,7 +137,7 @@ registers no sanitizer.
   General shell access requires separate confinement and appropriate contracts.
 - OpenCode, its plugin host, installed plugins, and APPA are trusted. Hooks run
   in registration order. A later plugin can change an approved call before
-  execution; Appencode can detect changed arguments at result admission, but
+  execution; AppenCode can detect changed arguments at result admission, but
   cannot undo side effects. Plugin unload removes protection.
 
 The issue [OpenAPPA #590](https://github.com/archestra-ai/OpenAPPA/issues/590)
@@ -145,7 +145,7 @@ informed the adapter layout. Its V1 tool names and proposed spawn mapping are
 not the V2 contract. The
 [OpenCode sandbox plugin](https://github.com/isanchez31/opencode-sandbox-plugin)
 provides useful shell-sandbox design, but its V1 `bash` hooks do not run under
-this V2 API and it does not mediate native file tools. It is not an Appencode
+this V2 API and it does not mediate native file tools. It is not an AppenCode
 dependency or a claimed security boundary.
 
 To uninstall, remove the plugin entry and reload OpenCode. Stop the runtime
