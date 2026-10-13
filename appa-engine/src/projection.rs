@@ -1422,6 +1422,7 @@ mod tests {
             call.digest(),
             crate::contract::ProducedAnnotation {
                 delta: crate::contract::Delta::NONE,
+                forwards: crate::contract::Delta::NONE,
                 emits: EffectSet::default(),
                 requires: crate::contract::Requires::default(),
             },

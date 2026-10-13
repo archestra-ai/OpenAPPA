@@ -3512,6 +3512,7 @@ mod tests {
             bound_to.digest(),
             crate::contract::ProducedAnnotation {
                 delta: produced.delta,
+                forwards: produced.forwards,
                 emits: produced.emits,
                 requires: produced.requires,
             },
@@ -11733,6 +11734,58 @@ mod tests {
         );
         assert_eq!(blocked.len(), 1);
         assert_eq!(required_includes(&blocked[0].call), outsider.clone());
+    }
+
+    /// A produced `forwards` is held to the annotator's mandate exactly as its `delta` is: live,
+    /// the proposal is refused; on replay, a record carrying it is forged evidence.
+    #[test]
+    fn a_produced_forwards_outside_the_mandate_is_refused_live_and_on_replay() {
+        let notify = plain_tool("notify");
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators.push(annotator_with_readers("acl", &["insider"]));
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([ReaderId::new("insider")])));
+        let log = vec![opened(&e)];
+        let unpinned = call("notify", json!({ "room": "lobby" }));
+        let forwarding = |reader: &str| {
+            let mut produced = notify.clone();
+            produced.forwards = Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    reader,
+                )]))),
+            };
+            pinned_for(produced, "acl", &unpinned)
+        };
+
+        let outside = unpinned.clone().with_annotation(Some(forwarding("outsider")));
+        assert!(matches!(
+            e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![raw(&outside)])),
+            Err(TransitionError::InvalidAnnotation { .. })
+        ));
+
+        let within = unpinned.clone().with_annotation(Some(forwarding("insider")));
+        let decision = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![raw(&within)]))
+            .expect("the batch decides");
+        assert_eq!(tool_names(answered(&decision).0), ["notify"]);
+        let mut facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+        for fact in &mut facts {
+            match fact {
+                Fact::ProposalBatchDecided { proposals, .. } => {
+                    for proposal in proposals.iter_mut() {
+                        *proposal = proposal.clone().with_annotation(Some(forwarding("outsider")));
+                    }
+                }
+                Fact::DispatchOpened { annotation, .. } => *annotation = Some(forwarding("outsider")),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, facts].concat()),
+            Err(TransitionRefusal::ForgedEvidence)
+        );
     }
 
     fn audience_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {

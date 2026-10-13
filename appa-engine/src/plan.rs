@@ -1771,6 +1771,7 @@ mod tests {
             unpinned.digest(),
             ProducedAnnotation {
                 delta: annotation.delta,
+                forwards: annotation.forwards,
                 emits: annotation.emits,
                 requires: annotation.requires,
             },
@@ -1945,6 +1946,7 @@ mod tests {
             unpinned.digest(),
             ProducedAnnotation {
                 delta: pinned.delta,
+                forwards: pinned.forwards,
                 emits: pinned.emits,
                 requires: pinned.requires,
             },

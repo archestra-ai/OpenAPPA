@@ -371,17 +371,19 @@ pub(crate) fn validate_annotation(
         DeclaredAudience::Public => true,
         DeclaredAudience::Union(clause) => mandate.permits_clause(clause),
     };
-    if let Some(trust) = annotation.delta.trust
-        && !mandate.permits_trust(trust)
-    {
-        return Err(outside("the produced delta trust is outside the mandate"));
-    }
-    match annotation.delta.audience.as_ref() {
-        Some(DeltaAudience::Static(audience)) if !permits_declared(audience) => {
-            return Err(outside("the produced delta audience is outside the mandate"));
+    for (field, delta) in [("delta", &annotation.delta), ("forwards", &annotation.forwards)] {
+        if delta.trust.is_some_and(|trust| !mandate.permits_trust(trust)) {
+            return Err(outside(&format!("the produced {field} trust is outside the mandate")));
         }
-        Some(DeltaAudience::Selector(_)) => return Err(outside("a produced annotation reads a placeholder")),
-        Some(DeltaAudience::Static(_)) | None => {}
+        match delta.audience.as_ref() {
+            Some(DeltaAudience::Static(audience)) if !permits_declared(audience) => {
+                return Err(outside(&format!(
+                    "the produced {field} audience is outside the mandate"
+                )));
+            }
+            Some(DeltaAudience::Selector(_)) => return Err(outside("a produced annotation reads a placeholder")),
+            Some(DeltaAudience::Static(_)) | None => {}
+        }
     }
     if annotation
         .requires
@@ -542,6 +544,7 @@ mod tests {
     fn produced_of(annotation: ToolAnnotation) -> ProducedAnnotation {
         ProducedAnnotation {
             delta: annotation.delta,
+            forwards: annotation.forwards,
             emits: annotation.emits,
             requires: annotation.requires,
         }
@@ -865,6 +868,12 @@ mod tests {
                     "support",
                 )]))),
             },
+            forwards: Delta {
+                trust: Some(Trust::new(0)),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support",
+                )]))),
+            },
             emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -893,6 +902,22 @@ mod tests {
             },
             ToolAnnotation {
                 delta: Delta {
+                    trust: None,
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                        "stranger",
+                    )]))),
+                },
+                ..annotation("lookup")
+            },
+            ToolAnnotation {
+                forwards: Delta {
+                    trust: Some(Trust::new(1)),
+                    audience: None,
+                },
+                ..annotation("lookup")
+            },
+            ToolAnnotation {
+                forwards: Delta {
                     trust: None,
                     audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
                         "stranger",

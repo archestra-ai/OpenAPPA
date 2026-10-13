@@ -197,6 +197,7 @@ static PRODUCED_ANNOTATION: Table = Table {
         ("delta", Rule::Table(&DELTA)),
         // `EffectSet` is `#[serde(transparent)]` over its vector of names.
         ("emits", Rule::Elements(Class::Effect)),
+        ("forwards", Rule::Table(&DELTA)),
         ("requires", Rule::Table(&REQUIRES)),
     ],
 };

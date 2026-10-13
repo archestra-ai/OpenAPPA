@@ -654,6 +654,7 @@ mod tests {
                     trust: Some(crate::label::Trust::new(0)),
                     audience: None,
                 },
+                forwards: Delta::NONE,
                 emits: Default::default(),
                 requires: Requires::default(),
             },

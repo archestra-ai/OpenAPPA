@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
-    HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
+    ContextArtifact, HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
 
@@ -2600,11 +2600,13 @@ impl RuntimeEngine {
             .iter()
             .map(|includes| AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())))
             .collect();
+        let delta = |answered: &AnswerDelta| Delta {
+            trust: answered.trust.as_deref().map(rank),
+            audience: answered.audience.clone().map(DeltaAudience::Static),
+        };
         ProducedAnnotation {
-            delta: Delta {
-                trust: answer.delta_trust.as_deref().map(rank),
-                audience: answer.delta_audience.clone().map(DeltaAudience::Static),
-            },
+            delta: delta(&answer.delta),
+            forwards: delta(&answer.forwards),
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
             requires: Requires {
@@ -4315,7 +4317,7 @@ mod tests {
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
-    use crate::consult::{AnnotationAnswer, HistoryEntry, SanitizerPoint};
+    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
@@ -4597,8 +4599,11 @@ mod tests {
         );
 
         let answer = AnnotationAnswer {
-            delta_trust: Some("trusted".to_string()),
-            delta_audience: Some(DeclaredAudience::Public),
+            delta: AnswerDelta {
+                trust: Some("trusted".to_string()),
+                audience: Some(DeclaredAudience::Public),
+            },
+            forwards: AnswerDelta::default(),
             required_trust: None,
             required_audience: None,
             history: Vec::new(),
@@ -4646,8 +4651,11 @@ mod tests {
             annotator: "classifier".to_string(),
             call: asked,
             answer: AnnotationAnswer {
-                delta_trust: Some("suspicious".to_string()),
-                delta_audience: None,
+                delta: AnswerDelta {
+                    trust: Some("suspicious".to_string()),
+                    audience: None,
+                },
+                forwards: AnswerDelta::default(),
                 required_trust: None,
                 required_audience: None,
                 history: Vec::new(),
@@ -4723,8 +4731,11 @@ mod tests {
         );
 
         let answer = || AnnotationAnswer {
-            delta_trust: Some("suspicious".to_string()),
-            delta_audience: Some(DeclaredAudience::Public),
+            delta: AnswerDelta {
+                trust: Some("suspicious".to_string()),
+                audience: Some(DeclaredAudience::Public),
+            },
+            forwards: AnswerDelta::default(),
             required_trust: Some("trusted".to_string()),
             required_audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
             history: vec![HistoryEntry::Excludes("send".to_string())],

@@ -710,10 +710,10 @@ mod tests {
                 ResultTrust::Trusted => None,
             };
             let expected_required_trust = example.requires_trusted.then(|| "signed".to_string());
-            assert_eq!(decoded.delta_trust, expected_delta_trust, "{}", example.call);
+            assert_eq!(decoded.delta.trust, expected_delta_trust, "{}", example.call);
             assert_eq!(decoded.required_trust, expected_required_trust, "{}", example.call);
             assert_eq!(
-                decoded.delta_audience.is_some(),
+                decoded.delta.audience.is_some(),
                 example.delta_audience != ResultAudience::Public,
                 "{}",
                 example.call
