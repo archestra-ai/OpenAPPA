@@ -126,7 +126,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let contained = Contained::new(dir, &manifest_path);
     match &mut package.role {
         Role::Battery(battery) => {
-            let policy = contained.resolve(&battery.base, "battery.base", EntryKind::File)?;
+            let policy = contained.resolve(&battery.base, "battery.policy", EntryKind::File)?;
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
@@ -134,7 +134,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             // The loader finds the manifest beside the included base, and helper
             // commands run from the including policy's directory.
             if battery.targets.is_some() && policy.parent() != Some(contained.root.as_path()) {
-                return Err(PackageError::TargetedPolicyOutsidePackageRoot { field: "battery.base" });
+                return Err(PackageError::TargetedPolicyOutsidePackageRoot {
+                    field: "battery.policy",
+                });
             }
             if let Some(targets) = &mut battery.targets {
                 for target in BatteryTarget::ALL {
@@ -1132,7 +1134,9 @@ mod tests {
         .unwrap();
         assert!(matches!(
             validate_package(directory.path()),
-            Err(PackageError::TargetedPolicyOutsidePackageRoot { field: "battery.base" })
+            Err(PackageError::TargetedPolicyOutsidePackageRoot {
+                field: "battery.policy"
+            })
         ));
 
         let versioned = MULTI_USER_POLICY.replace("version = 2", "version = 1");

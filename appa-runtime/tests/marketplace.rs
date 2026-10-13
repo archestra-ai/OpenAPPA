@@ -623,7 +623,7 @@ fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
         let package = tempfile::tempdir().expect("a temp dir is creatable");
         std::fs::write(
             package.path().join("appa-package.toml"),
-            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
         )
         .expect("the manifest is writable");
         std::fs::write(package.path().join("single-user.toml"), "[policy]\nversion = 2\n")
