@@ -225,6 +225,7 @@ struct AppState {
     adapter: appa_runtime_api::Adapter,
     config: PathBuf,
     battery_dirs: Vec<PathBuf>,
+    target: appa_package::BatteryTarget,
     battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
@@ -306,12 +307,13 @@ async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries
     axum::Json(catalog)
 }
 
-/// What `appa ui` reads while this runtime serves: its configuration, the batteries it
-/// includes, and which tokens and programs this process itself can reach. Loopback
-/// management only.
+/// What `appa ui` reads while this runtime serves: its configuration and deployment
+/// target, the batteries it includes, and which tokens and programs this process itself
+/// can reach. Loopback management only.
 async fn prerequisites(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "config": state.config,
+        "target": state.target.as_str(),
         "included": state.runtime.included_batteries(),
         "prerequisites": crate::ui::runtime_prerequisites(&state.config, &state.battery_dirs).unwrap_or_default(),
     }))
@@ -505,6 +507,13 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let target = match crate::config::battery_target() {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let file_tracking = config.file_tracking.clone();
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
@@ -575,6 +584,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         config: config_path,
         battery_state: Arc::clone(&battery_state),
         battery_dirs,
+        target,
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
     };

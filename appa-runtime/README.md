@@ -84,8 +84,8 @@ empty environment value. Otherwise APPA supplies the saved value under the same
 battery CLI fallbacks available. Each helper receives only its declared APPA
 credential. Embedding hosts, including Archestra, retain environment-only behavior.
 
-While a runtime is running, the page's prerequisite inspection and connection
-checks run in the runtime's environment, through its loopback-only `/prerequisites`
+While a runtime of the same configuration and deployment target is running, the
+page's prerequisite inspection and connection checks run in the runtime's environment, through its loopback-only `/prerequisites`
 and `/battery-check` routes. Without a runtime they run in the environment of
 `appa ui`, which can differ, for example in `PATH`.
 The page configures battery helpers; it does not authenticate MCP connectors.
