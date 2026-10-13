@@ -222,6 +222,28 @@ fn multi_user_needs_the_root_host_members_roster() {
     );
 }
 
+/// The shared kagent runtime's bootstrap root, as appa-guide includes the battery into it
+/// under multi-user: the include plus the empty `host-members` roster it appends.
+#[test]
+fn the_kagent_bootstrap_composes_with_the_battery_for_multi_user() {
+    let bootstrap = std::fs::read_to_string(repo_root().join("charts/appa-runtime/files/appa.toml")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("appa.toml");
+    std::fs::write(
+        &root,
+        format!(
+            "include = [\"batteries/github/appa.toml\"]\n\n{bootstrap}\n[externals.audience.host-members]\nreaders = {{}}\n"
+        ),
+    )
+    .unwrap();
+    Config::load_for_target(
+        &root,
+        &[repo_root().join("marketplace/batteries")],
+        BatteryTarget::MultiUser,
+    )
+    .expect("the guide-installed multi-user root composes");
+}
+
 /// The two target policies differ in their helpers alone: the same rules, the same
 /// declarations, and the same externals bound.
 #[test]

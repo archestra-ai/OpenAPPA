@@ -48,6 +48,7 @@ POLICY_CONFIGMAP = os.environ.get("APPA_POLICY_CONFIGMAP_NAME")
 POLICY_CONFIGMAP_KEY = os.environ.get("APPA_POLICY_CONFIGMAP_KEY", "appa.toml")
 RUNTIME_RELEASE = os.environ.get("APPA_RUNTIME_RELEASE_NAME")
 BATTERY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 MANAGEMENT_LOCK = Path(
     os.environ.get(
         "APPA_GUIDE_MANAGEMENT_LOCK", "/var/lib/appa/.appa-guide-management.lock"
@@ -224,6 +225,34 @@ def with_battery_include(root: str, battery: str) -> tuple[str, bool]:
     return root[:start] + replacement + root[end:], True
 
 
+def with_lookup_rosters(
+    root: str, battery: str, directories: list[Path], target: str
+) -> str:
+    """Append an empty readers roster for each lookup the battery's target policy
+    routes to the root, so the include composes; an empty roster denies until filled."""
+    directory = next(
+        d / battery for d in directories if (d / battery / "appa.toml").is_file()
+    )
+    package = tomllib.loads(
+        (directory / "appa-package.toml").read_text(encoding="utf-8")
+    )
+    selected = package["battery"].get("targets", {}).get(target)
+    if selected is None:
+        return root
+    policy = tomllib.loads((directory / selected["policy"]).read_text(encoding="utf-8"))
+    declared = tomllib.loads(root).get("externals", {}).get("audience", {})
+    lookups = {
+        entry["lookup"]
+        for entry in policy.get("externals", {}).get("audience", {}).values()
+        if "lookup" in entry
+    }
+    return root + "".join(
+        f"\n[externals.audience.{name if BARE_KEY.fullmatch(name) else json.dumps(name)}]\n"
+        "readers = {}\n"
+        for name in sorted(lookups - declared.keys())
+    )
+
+
 def validate_policy(root: str) -> None:
     with tempfile.NamedTemporaryFile(
         "w", suffix=".toml", encoding="utf-8"
@@ -366,6 +395,12 @@ def include_battery(request: dict) -> dict:
     candidate, changed = with_battery_include(current, battery)
     if not changed:
         return {**runtime_state(), "changed": False, "battery": battery}
+    candidate = with_lookup_rosters(
+        candidate,
+        battery,
+        battery_dirs(),
+        os.environ.get("APPA_BATTERY_TARGET", "single-user"),
+    )
     validate_policy(candidate)
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": True, "battery": battery, "reload": reloaded}

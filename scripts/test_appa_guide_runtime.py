@@ -126,6 +126,25 @@ class AppaGuideRuntimeTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(unchanged, expanded)
 
+    def test_battery_include_adds_the_roster_its_target_looks_up(self) -> None:
+        repository = SCRIPT.parent.parent
+        batteries = [repository / "marketplace/batteries"]
+        bootstrap = (repository / "charts/appa-runtime/files/appa.toml").read_text()
+        root, _ = guide.with_battery_include(bootstrap, "github")
+
+        multi = guide.with_lookup_rosters(root, "github", batteries, "multi-user")
+        audience = tomllib.loads(multi)["externals"]["audience"]
+        self.assertEqual(audience, {"host-members": {"readers": {}}})
+        self.assertTrue(
+            guide.preserves_policy_shape(tomllib.loads(root), tomllib.loads(multi))
+        )
+        self.assertEqual(
+            guide.with_lookup_rosters(multi, "github", batteries, "multi-user"), multi
+        )
+        self.assertEqual(
+            guide.with_lookup_rosters(root, "github", batteries, "single-user"), root
+        )
+
     def test_demo_policy_preserves_the_bootstrap_shape(self) -> None:
         repository = SCRIPT.parent.parent
         bootstrap = tomllib.loads(
