@@ -1,9 +1,9 @@
 //! Server-side identification for AppenCode, the OpenCode V2 plugin.
 //! The plugin obtains namespaces from the registry, never by splitting OpenCode's
 //! flattened dispatch names. Namespaced tools cross as `mcp__<namespace>__<name>`.
-//! V1 refuses subagents and Code Mode in the host; it claims no child lifecycle.
+//! Only the plugin-owned foreground tool starts checked child trajectories.
 
-use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal};
+use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, SpawnKind};
 
 const CONTROL: &str = "mcp__appa__execute_remedy_plan";
 
@@ -32,7 +32,10 @@ fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
     } else {
         CanonicalTool::of("host", "opencode", raw).map_err(|error| malformed(error.to_string()))?
     };
-    Ok(IdentifiedTool { canonical, spawn: None })
+    Ok(IdentifiedTool {
+        canonical,
+        spawn: (raw == "appa_subagent").then_some(SpawnKind::Single),
+    })
 }
 
 fn spell(tool: &CanonicalTool) -> Option<String> {
@@ -68,6 +71,11 @@ mod tests {
             assert_eq!(identified.spawn, None);
             assert_eq!(spell(&identified.canonical).as_deref(), Some(raw));
         }
+        let spawn = identify_tool("appa_subagent").unwrap();
+        assert_eq!(spawn.canonical.as_str(), "host/opencode/appa_subagent");
+        assert_eq!(spawn.spawn, Some(SpawnKind::Single));
+        assert_eq!(spell(&spawn.canonical).as_deref(), Some("appa_subagent"));
+        assert_eq!(identify_tool("mcp__other__appa_subagent").unwrap().spawn, None);
         for raw in ["", "mcp__", "mcp__server", "mcp____tool", "mcp__x__", "a/b", "a b"] {
             assert!(identify_tool(raw).is_err(), "{raw}");
         }
