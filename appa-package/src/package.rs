@@ -9,7 +9,6 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use thiserror::Error;
 
 use crate::manifest::{ManifestError, SCHEMA};
 use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, RelativePath, lower_kebab};
@@ -115,18 +114,41 @@ pub struct TargetPolicy {
     pub credentials: Vec<String>,
 }
 
-/// A battery that declares targets has no target policy for the one requested.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("the battery has no policy for the `{0}` target")]
-pub struct MissingTarget(pub BatteryTarget);
+/// A battery's target policies: one for every target, so a deployment of any
+/// target finds its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPolicies {
+    pub single_user: TargetPolicy,
+    pub multi_user: TargetPolicy,
+}
 
-/// A battery: a base policy file with optional per-target policies, the hosts
+impl TargetPolicies {
+    pub fn get(&self, target: BatteryTarget) -> &TargetPolicy {
+        match target {
+            BatteryTarget::SingleUser => &self.single_user,
+            BatteryTarget::MultiUser => &self.multi_user,
+        }
+    }
+
+    pub fn get_mut(&mut self, target: BatteryTarget) -> &mut TargetPolicy {
+        match target {
+            BatteryTarget::SingleUser => &mut self.single_user,
+            BatteryTarget::MultiUser => &mut self.multi_user,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (BatteryTarget, &TargetPolicy)> {
+        BatteryTarget::ALL.into_iter().map(|target| (target, self.get(target)))
+    }
+}
+
+/// A battery: a base policy file with a policy for every target or none, the hosts
 /// it is written for, the namespaces its contracts may name, and the helper
 /// programs its externals may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Battery {
     pub base: RelativePath,
-    pub targets: BTreeMap<BatteryTarget, TargetPolicy>,
+    pub targets: Option<TargetPolicies>,
     pub hosts: Vec<Host>,
     /// The tool namespaces this battery covers. A battery usually covers the
     /// one namespace its own name spells, which is why the field defaults to
@@ -162,14 +184,10 @@ pub struct Battery {
 impl Battery {
     /// The policies a deployment of `target` includes, target policy first. A battery
     /// without targets, or a deployment that names none, includes the base alone.
-    pub fn compose_order(&self, target: Option<BatteryTarget>) -> Result<Vec<&RelativePath>, MissingTarget> {
-        match target {
-            Some(target) if !self.targets.is_empty() => self
-                .targets
-                .get(&target)
-                .map(|target_policy| vec![&target_policy.policy, &self.base])
-                .ok_or(MissingTarget(target)),
-            _ => Ok(vec![&self.base]),
+    pub fn compose_order(&self, target: Option<BatteryTarget>) -> Vec<&RelativePath> {
+        match (target, &self.targets) {
+            (Some(target), Some(targets)) => vec![&targets.get(target).policy, &self.base],
+            _ => vec![&self.base],
         }
     }
 }
@@ -364,7 +382,7 @@ impl RawBattery {
                 });
             }
         };
-        let mut targets = BTreeMap::new();
+        let mut declared = BTreeMap::new();
         for (target, target_policy) in self.targets {
             let parsed = BatteryTarget::parse(&target).ok_or_else(|| ManifestError::Target {
                 path: path.to_path_buf(),
@@ -375,8 +393,24 @@ impl RawBattery {
                 audiences: Vec::new(),
                 credentials: Vec::new(),
             };
-            targets.insert(parsed, target_policy);
+            declared.insert(parsed, target_policy);
         }
+        let partial = |missing| ManifestError::PartialTargets {
+            path: path.to_path_buf(),
+            missing,
+        };
+        let targets = match (
+            declared.remove(&BatteryTarget::SingleUser),
+            declared.remove(&BatteryTarget::MultiUser),
+        ) {
+            (Some(single_user), Some(multi_user)) => Some(TargetPolicies {
+                single_user,
+                multi_user,
+            }),
+            (None, None) => None,
+            (None, Some(_)) => return Err(partial(BatteryTarget::SingleUser)),
+            (Some(_), None) => return Err(partial(BatteryTarget::MultiUser)),
+        };
         let mut hosts = Vec::new();
         for host in self.hosts {
             hosts.push(Host::parse(&host).ok_or(ManifestError::Host {
@@ -594,7 +628,7 @@ mod tests {
             package.battery().unwrap(),
             &Battery {
                 base: RelativePath::parse("appa.toml").unwrap(),
-                targets: BTreeMap::new(),
+                targets: None,
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
@@ -610,6 +644,7 @@ mod tests {
 
     const TARGETED: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
          [battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n\
+         [battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n\
          [battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
 
     #[test]
@@ -618,14 +653,35 @@ mod tests {
         let battery = package.battery().unwrap();
 
         assert_eq!(battery.base.as_str(), "appa.toml");
+        let targets = battery.targets.as_ref().unwrap();
         assert_eq!(
-            battery.targets.keys().copied().collect::<Vec<_>>(),
-            vec![BatteryTarget::MultiUser]
+            targets.get(BatteryTarget::SingleUser).policy.as_str(),
+            "single-user.toml"
         );
-        assert_eq!(
-            battery.targets[&BatteryTarget::MultiUser].policy.as_str(),
-            "multi-user.toml"
-        );
+        assert_eq!(targets.get(BatteryTarget::MultiUser).policy.as_str(), "multi-user.toml");
+    }
+
+    /// A battery that declares targets declares every one of them; a battery
+    /// that declares none is the base alone.
+    #[test]
+    fn a_battery_declares_every_target_or_none() {
+        let without =
+            |target: &str| TARGETED.replace(&format!("[battery.targets.{target}]\npolicy = \"{target}.toml\"\n"), "");
+        assert!(matches!(
+            manifest(&without("single-user")),
+            Err(ManifestError::PartialTargets {
+                missing: BatteryTarget::SingleUser,
+                ..
+            })
+        ));
+        assert!(matches!(
+            manifest(&without("multi-user")),
+            Err(ManifestError::PartialTargets {
+                missing: BatteryTarget::MultiUser,
+                ..
+            })
+        ));
+        assert_eq!(manifest(BATTERY).unwrap().battery().unwrap().targets, None);
     }
 
     #[test]
@@ -657,24 +713,18 @@ mod tests {
         }
 
         assert_eq!(
-            names(targeted.compose_order(Some(BatteryTarget::MultiUser)).unwrap()),
+            names(targeted.compose_order(Some(BatteryTarget::MultiUser))),
             vec!["multi-user.toml", "appa.toml"]
         );
         assert_eq!(
-            targeted.compose_order(Some(BatteryTarget::SingleUser)),
-            Err(MissingTarget(BatteryTarget::SingleUser))
+            names(targeted.compose_order(Some(BatteryTarget::SingleUser))),
+            vec!["single-user.toml", "appa.toml"]
         );
-        assert_eq!(names(targeted.compose_order(None).unwrap()), vec!["appa.toml"]);
+        assert_eq!(names(targeted.compose_order(None)), vec!["appa.toml"]);
 
         let plain = manifest(BATTERY).unwrap();
         assert_eq!(
-            names(
-                plain
-                    .battery()
-                    .unwrap()
-                    .compose_order(Some(BatteryTarget::SingleUser))
-                    .unwrap()
-            ),
+            names(plain.battery().unwrap().compose_order(Some(BatteryTarget::SingleUser))),
             vec!["appa.toml"]
         );
     }
