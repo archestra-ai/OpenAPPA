@@ -397,7 +397,9 @@ impl LogCache {
             let Some(oldest) = entries.order.pop_front() else {
                 break;
             };
-            if let Some(gone) = entries.logs.remove(&oldest) {
+            let gone = entries.logs.remove(&oldest);
+            debug_assert!(gone.is_some(), "every root in the order has a cached log");
+            if let Some(gone) = gone {
                 entries.facts -= gone.log.facts().len();
             }
         }
@@ -1181,8 +1183,28 @@ impl PostgresStore {
 
     /// Read `root`'s log on `worker`'s connection, decoding only what the cache lacks.
     fn log_on(&self, worker: &Worker, root: &TrajectoryId) -> Result<Log, ReadError> {
+        let cached = self.logs.get(root.as_str());
+        match self.read_log(worker, root, cached)? {
+            Some(log) => Ok(log),
+            // The cached copy no longer matches what is stored: read the whole log once.
+            None => {
+                self.logs.forget(root.as_str());
+                Ok(self
+                    .read_log(worker, root, None)?
+                    .expect("a read without a cached copy has nothing to mismatch"))
+            }
+        }
+    }
+
+    /// Read `root`'s log, extending `cached` when it is still a prefix of what is stored.
+    /// `None` when `cached` no longer matches the stored log.
+    fn read_log(
+        &self,
+        worker: &Worker,
+        root: &TrajectoryId,
+        cached: Option<CachedLog>,
+    ) -> Result<Option<Log>, ReadError> {
         let id = root.as_str().to_owned();
-        let cached = self.logs.get(&id);
         // A cached log is read again from its last batch, which must still be the stored one.
         let from = cached.as_ref().map_or(0, |cached| cached.log.basis() - 1);
         let (prefix, rows) = worker.run({
@@ -1217,8 +1239,7 @@ impl PostgresStore {
                 (log, last)
             }
             Some(_) => {
-                self.logs.forget(&id);
-                return self.log_on(worker, root);
+                return Ok(None);
             }
             None => {
                 let hash = opening_key(root, &rows)?.as_str().to_owned();
@@ -1236,10 +1257,12 @@ impl PostgresStore {
             }
         };
         self.logs.keep(&log, &last_batch);
-        Ok(log)
+        Ok(Some(log))
     }
 
     /// Begin one read-decide-append step on `root`: a transaction holding the root's row lock.
+    /// A leased store runs the step on its own connection, so the host must not have a
+    /// transaction of its own open there until the step ends.
     pub(super) fn step(&self, root: &TrajectoryId) -> Result<PostgresStep<'_>, PostgresError> {
         let own = match &self.lease {
             Some(_) => None,

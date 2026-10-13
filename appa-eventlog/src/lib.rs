@@ -1210,8 +1210,10 @@ impl LogStore {
     /// Begin one read-decide-append step on `root`'s log. On PostgreSQL the step is one
     /// transaction that holds the root's row lock from its read to its append, so the writers
     /// of one family take turns rather than losing the compare-and-swap to each other; the lock
-    /// and the connection last for this step only. On SQLite the step adds nothing to the
-    /// compare-and-swap. Every read and append of the step goes through the [`Step`].
+    /// and the connection last for this step only. On a leased store the step runs on the
+    /// lease's connection, so the host keeps no transaction of its own open there until the
+    /// step ends. On SQLite the step adds nothing to the compare-and-swap. Every read and
+    /// append of the step goes through the [`Step`].
     pub fn step(&self, root: &TrajectoryId) -> Result<Step<'_>, ReadError> {
         let backend = match &self.store {
             Store::Sqlite(_) => StepBackend::Sqlite(std::marker::PhantomData),
