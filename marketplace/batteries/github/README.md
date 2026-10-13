@@ -58,6 +58,16 @@ mapping the enterprise's members can relax that. A summary of a private
 repository's issues can go back into that repository's issues and not
 into a public one.
 
+A write's result is labelled only when it returns stored text beyond
+the call's own arguments. `sub_issue_write` returns the parent issue its
+`issue_number` names, title and body included: the result gets the
+repository's audience, as an `issue_read` of that issue does, and keeps
+the session's trust only when the `github` context answer for that issue
+shows the same authorship an `issue_read` needs. Without that answer it
+is `suspicious`, on a private repository too. Every other write returns
+identifiers, URLs, SHAs, or a fixed message, and its `delta` is empty.
+The annotator's mandate admits `suspicious` for this.
+
 *Writes that name no existing repository* — `create_repository` runs
 with trusted public data.
 

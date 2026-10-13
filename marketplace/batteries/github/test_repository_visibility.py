@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 
 
@@ -15,6 +16,39 @@ ANNOTATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ANNOTATOR)
 
 COLLABORATORS = "@github:repo/acme/api/collaborators"
+# The parent issue sub_issue_write returns, trimmed to the shape: github-mcp-server
+# v2.0.2 marshals the REST issue whole (pkg/github/issues.go:1847,1885,1941), and its
+# tests answer with the issue `issue_number` names (pkg/github/issues_test.go:5776,5810).
+# Kept here, not beside the scripts: every non-test file of the battery ships.
+SUB_ISSUE_WRITE = {
+    "id": 1042,
+    "number": 42,
+    "title": "Parent issue an outside contributor opened",
+    "body": "Stored text the parent issue's author wrote.",
+    "user": {"login": "mallory"},
+    "author_association": "NONE",
+    "labels": [{"name": "enhancement"}],
+    "state": "open",
+    "html_url": "https://github.com/acme/api/issues/42",
+}
+# Writes whose result carries identifiers, URLs, SHAs, or a fixed message only.
+ARGUMENT_ONLY_WRITES = [
+    "fork_repository",
+    "create_branch",
+    "create_or_update_file",
+    "push_files",
+    "delete_file",
+    "issue_write",
+    "add_issue_comment",
+    "create_pull_request",
+    "update_pull_request",
+    "update_pull_request_branch",
+    "merge_pull_request",
+    "pull_request_review_write",
+    "add_comment_to_pending_review",
+    "add_reply_to_pull_request_comment",
+    "request_copilot_review",
+]
 
 
 class Loopback:
@@ -259,6 +293,119 @@ class AnswerTests(unittest.TestCase):
         )
 
 
+def write(tool, context, **arguments):
+    """The parsed call for a write named the way the policy binds it."""
+    artifact = {
+        "args": {"name": f"mcp/github/{tool}", "arguments": {"owner": "acme", "repo": "api", **arguments}},
+        "context": {"github": context},
+    }
+    return ANNOTATOR.repository_of(consult(name=ANNOTATOR.READERS, artifact=artifact))[3]
+
+
+def sub_issue_write(context, method="add", issue_number=42):
+    return write("sub_issue_write", context, method=method, issue_number=issue_number, sub_issue_id=SUB_ISSUE_WRITE["id"])
+
+
+def write_delta(call, repository=PUBLIC):
+    return ANNOTATOR.annotation(ANNOTATOR.READERS, call, repository, "acme", "api")["delta"]
+
+
+def parent(*participants, **item):
+    return discussion(list(participants), kind="issue", number=SUB_ISSUE_WRITE["number"], **item)
+
+
+class WriteResultTests(unittest.TestCase):
+    def test_a_parent_issue_the_team_alone_wrote_keeps_trust_and_the_repository_audience(self):
+        for method in ["add", "remove", "reprioritize"]:
+            call = sub_issue_write(parent(member("ana"), member("bo", "COLLABORATOR")), method)
+            self.assertEqual(write_delta(call, PUBLIC), {"audience": "public"}, method)
+            for repository in [PRIVATE, INTERNAL]:
+                self.assertEqual(write_delta(call, repository), {"audience": [COLLABORATORS]}, method)
+
+    def test_a_parent_issue_an_outsider_wrote_is_suspicious(self):
+        author = member(SUB_ISSUE_WRITE["user"]["login"], SUB_ISSUE_WRITE["author_association"])
+        for participants in [[author], [member("ana"), author]]:
+            call = sub_issue_write(parent(*participants))
+            self.assertEqual(write_delta(call, PUBLIC), {"trust": "suspicious", "audience": "public"})
+            self.assertEqual(write_delta(call, PRIVATE), {"trust": "suspicious", "audience": [COLLABORATORS]})
+        edited = sub_issue_write(parent(member("ana"), last_editors=["mallory"]))
+        self.assertEqual(write_delta(edited, PRIVATE)["trust"], "suspicious")
+
+    def test_a_parent_issue_without_whole_evidence_is_suspicious_on_a_private_repository_too(self):
+        team = member("ana")
+        unattended = parent(team)
+        unattended["answer"]["issue"]["participants"] = []
+        for call in [
+            sub_issue_write(None),
+            sub_issue_write({"error": "non_success status=1"}),
+            sub_issue_write({"answer": None}),
+            sub_issue_write(parent(team, truncated=True)),
+            sub_issue_write(parent(team, name="acme/other")),
+            sub_issue_write(parent(team), issue_number=43),
+            sub_issue_write(parent(team), issue_number="42"),
+            sub_issue_write(discussion([team], kind="pull_request", number=42)),
+            sub_issue_write(unattended),
+        ]:
+            self.assertEqual(write_delta(call, PRIVATE), {"trust": "suspicious", "audience": [COLLABORATORS]}, call)
+
+    def test_a_write_returning_only_its_own_arguments_leaves_the_session_as_is(self):
+        outsider = discussion([member("mallory", "NONE")], kind="issue", number=42)
+        for tool in ARGUMENT_ONLY_WRITES:
+            for repository in [PUBLIC, PRIVATE, INTERNAL]:
+                self.assertEqual(write_delta(write(tool, outsider, issue_number=42, pullNumber=42), repository), {}, tool)
+
+    def test_issue_write_returns_an_id_and_url_whether_it_creates_or_updates(self):
+        # pkg/github/issues.go:3369 (create) and :3605 (update) answer a MinimalResponse.
+        outsider = discussion([member("mallory", "NONE")], kind="issue", number=42)
+        create = write("issue_write", outsider, method="create", title="x", body="y")
+        update = write("issue_write", outsider, method="update", issue_number=42, body="y")
+        self.assertEqual(create.number, None)
+        self.assertEqual(update.number, 42)
+        for call in [create, update]:
+            self.assertEqual(write_delta(call, PRIVATE), {})
+
+    def test_a_labelled_write_result_leaves_the_requirement_as_is(self):
+        call = sub_issue_write(None)
+        self.assertEqual(
+            ANNOTATOR.annotation(ANNOTATOR.READERS, call, PRIVATE, "acme", "api")["requires"],
+            {"trust": "trusted", "audience": {"contains": [COLLABORATORS]}, "history": [], "attention": []},
+        )
+
+
+class MandateTests(unittest.TestCase):
+    """Every answer stays within the mandate the shipped policy declares, so the
+    engine never refuses it as outside its mandate."""
+
+    POLICY = tomllib.loads(Path(__file__).with_name("appa.toml").read_text())["policy"]
+
+    def mandate(self, name):
+        [declared] = [annotator for annotator in self.POLICY["annotator"] if annotator["name"] == name]
+        audiences = {audience.replace("$owner", "acme").replace("$repo", "api") for audience in declared["audiences"]}
+        return set(declared["ranks"]), audiences
+
+    def assert_within(self, answer, ranks, audiences):
+        delta, requires = answer["delta"], answer["requires"]
+        for trust in [delta.get("trust"), requires.get("trust")]:
+            self.assertTrue(trust is None or trust in ranks, answer)
+        written = [delta.get("audience"), requires.get("audience", {}).get("contains")]
+        for audience in written:
+            self.assertTrue(audience in (None, "public") or set(audience) <= audiences, answer)
+
+    def test_every_answer_is_within_its_annotators_mandate(self):
+        team = parent(member("ana"))
+        outsider = parent(member("mallory", "NONE"))
+        calls = [sub_issue_write(context) for context in [team, outsider, None]]
+        calls += [write(tool, outsider, issue_number=42) for tool in ARGUMENT_ONLY_WRITES]
+        calls += [FILE_READ, ANNOTATOR.Call("issue_read", 42, team), ANNOTATOR.Call("issue_read", 42, outsider)]
+        fork = ANNOTATOR.Repository("public", fork=True)
+        for name in [ANNOTATOR.READERS, ANNOTATOR.CONTENT]:
+            ranks, audiences = self.mandate(name)
+            self.assertEqual(audiences, {COLLABORATORS}, name)
+            for call in calls:
+                for repository in [PUBLIC, PRIVATE, INTERNAL, fork]:
+                    self.assert_within(ANNOTATOR.annotation(name, call, repository, "acme", "api"), ranks, audiences)
+
+
 class ConsultTests(unittest.TestCase):
     def test_the_repository_is_read_from_the_calls_arguments(self):
         self.assertEqual(ANNOTATOR.repository_of(consult()), (ANNOTATOR.CONTENT, "acme", "api", FILE_READ))
@@ -323,6 +470,14 @@ class EnvelopeTests(unittest.TestCase):
             result = self.run_script(request, github.env())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["answer"]["requires"]["audience"], {"contains": [COLLABORATORS]})
+
+    def test_a_sub_issue_write_without_context_is_suspicious_end_to_end(self):
+        arguments = {"method": "add", "owner": "acme", "repo": "api", "issue_number": 42, "sub_issue_id": 1042}
+        request = consult(name=ANNOTATOR.READERS, artifact={"args": {"name": "mcp/github/sub_issue_write", "arguments": arguments}})
+        with Loopback({"/repos/acme/api": {"visibility": "private", "fork": False}}) as github:
+            result = self.run_script(request, github.env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"trust": "suspicious", "audience": [COLLABORATORS]})
 
     def test_a_missing_token_is_a_failure_before_any_network(self):
         # A PATH with no gh on it: neither the variable nor a CLI login answers.
