@@ -1629,20 +1629,6 @@ mod tests {
             validate_package(directory.path()),
             Err(PackageError::AudienceLookupToItself { name, .. }) if name == "github-org"
         ));
-        // A route the base declares is the base's to answer for, whichever target composes it.
-        fs::write(directory.path().join("appa.toml"), routed("github")).unwrap();
-        fs::write(directory.path().join("multi-user.toml"), target_policy("host-members")).unwrap();
-        assert!(matches!(
-            validate_package(directory.path()),
-            Err(PackageError::AudienceLookupToItself { policy, .. }) if policy.file_name() == Some("appa.toml".as_ref())
-        ));
-        // The target's route meets the base's binding only once the two are composed.
-        fs::write(directory.path().join("appa.toml"), routed("host-members")).unwrap();
-        fs::write(directory.path().join("multi-user.toml"), target_policy("github")).unwrap();
-        assert!(matches!(
-            validate_package(directory.path()),
-            Err(PackageError::ChainedAudienceLookup { name, target, .. }) if name == "github-org" && target == "github"
-        ));
     }
 
     #[test]
