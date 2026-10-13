@@ -70,12 +70,12 @@ class NotFound(Exception):
     """Linear answered that the entity does not exist."""
 
 
-def graphql(token):
+def graphql(authorization):
     def call(query, **variables):
         request = urllib.request.Request(
             API_URL,
             data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
-            headers={"Authorization": token, "Content-Type": "application/json"},
+            headers={"Authorization": authorization, "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             body = json.load(response)
@@ -303,7 +303,7 @@ def answer(call, artifact):
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
-def check_declaration(request):
+def check_declaration(request, templates):
     """The policy's declared templates against the ones this script serves.
 
     The binding beside this script declares them to the policy, and the
@@ -312,36 +312,43 @@ def check_declaration(request):
     is read; the exit status 2 tells it apart from a provider failure.
     """
     declared = request.get("declaration", {}).get("templates")
-    if declared != SERVED_TEMPLATES:
+    if declared != templates:
         print(
-            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
+            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {templates!r}",
             file=sys.stderr,
         )
         raise SystemExit(2)
 
 
-def main():
-    request = json.load(sys.stdin)
-
-    if request.get("version") != 1:
-        raise ValueError("unsupported request version")
-    if request.get("kind") != "audience":
-        raise ValueError("unexpected consult kind")
-    if request.get("name") != SOURCE_NAME:
-        raise ValueError("unexpected source name")
-    check_declaration(request)
-
-    token = os.environ.get(TOKEN_VAR)
-    if not token:
-        raise RuntimeError(f"{TOKEN_VAR} is not set")
-
-    json.dump({"version": 1, "answer": answer(graphql(token), request.get("artifact"))}, sys.stdout)
-    sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
+def serve(templates, respond, authorization):
+    """Answer the consult on stdin with `respond`, serving `templates` and
+    sending the token as `authorization` spells it."""
     try:
-        main()
+        request = json.load(sys.stdin)
+
+        if request.get("version") != 1:
+            raise ValueError("unsupported request version")
+        if request.get("kind") != "audience":
+            raise ValueError("unexpected consult kind")
+        if request.get("name") != SOURCE_NAME:
+            raise ValueError("unexpected source name")
+        check_declaration(request, templates)
+
+        token = os.environ.get(TOKEN_VAR)
+        if not token:
+            raise RuntimeError(f"{TOKEN_VAR} is not set")
+
+        json.dump({"version": 1, "answer": respond(graphql(authorization(token)), request.get("artifact"))}, sys.stdout)
+        sys.stdout.write("\n")
     except Exception as error:
         print(f"linear audience source: {error}", file=sys.stderr)
         raise SystemExit(1)
+
+
+def personal_key(token):
+    """A personal API key goes as is."""
+    return token
+
+
+if __name__ == "__main__":
+    serve(SERVED_TEMPLATES, answer, personal_key)
