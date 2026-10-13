@@ -15,6 +15,11 @@ SCRIPT = Path(__file__).with_name("audience-source-multi-user.py")
 CHECK = Path(__file__).with_name("check-multi-user.py")
 TEMPLATES = ["members", "group/<name>", "genie-space/<id>/readers"]
 LOGIN = {
+    "APPA_PROVIDER_DATABRICKS_HOST": "https://workspace.example",
+    "APPA_PROVIDER_DATABRICKS_CLIENT_ID": "principal-fixture",
+    "APPA_PROVIDER_DATABRICKS_CLIENT_SECRET": "secret-fixture",
+}
+CLI_LOGIN = {
     "DATABRICKS_HOST": "https://workspace.example",
     "DATABRICKS_CLIENT_ID": "principal-fixture",
     "DATABRICKS_CLIENT_SECRET": "secret-fixture",
@@ -61,11 +66,21 @@ def as_principal(*args):
 
 class EnvironmentTests(unittest.TestCase):
     def test_only_the_principals_login_reaches_the_cli(self):
-        environ = {"PATH": "/bin", **LOGIN, **PERSONAL, "DATABRICKS_CONFIG_FILE": "/home/ana/.databrickscfg"}
+        environ = {
+            "PATH": "/bin",
+            **LOGIN,
+            **PERSONAL,
+            "DATABRICKS_CONFIG_FILE": "/home/ana/.databrickscfg",
+            "DATABRICKS_HOST": "https://personal.example",
+        }
         self.assertEqual(
             service_principal.environment(environ),
-            {"PATH": "/bin", **LOGIN, "DATABRICKS_AUTH_TYPE": "oauth-m2m", "DATABRICKS_CONFIG_FILE": os.devnull},
+            {"PATH": "/bin", **CLI_LOGIN, "DATABRICKS_AUTH_TYPE": "oauth-m2m", "DATABRICKS_CONFIG_FILE": os.devnull},
         )
+
+    def test_the_cli_login_variables_alone_are_no_login(self):
+        with self.assertRaises(service_principal.MissingLogin):
+            service_principal.environment({"PATH": "/bin", **CLI_LOGIN})
 
     def test_a_missing_or_blank_login_variable_is_refused(self):
         for name in LOGIN:
@@ -113,7 +128,7 @@ class SourceTests(unittest.TestCase):
 
     def test_without_the_principals_login_the_cli_never_runs(self):
         cli = FakeDatabricks("echo '[]'")
-        environ = {key: value for key, value in cli.environ().items() if key != "DATABRICKS_CLIENT_SECRET"}
+        environ = {key: value for key, value in cli.environ().items() if key != "APPA_PROVIDER_DATABRICKS_CLIENT_SECRET"}
         result = self.run_script({"selector": "members"}, environ)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout, "")
@@ -131,7 +146,7 @@ class CheckTests(unittest.TestCase):
 
     def test_a_missing_login_needs_configuration_without_the_cli(self):
         cli = FakeDatabricks("echo '{\"id\": \"1\"}'")
-        environ = {key: value for key, value in cli.environ().items() if key != "DATABRICKS_HOST"}
+        environ = {key: value for key, value in cli.environ().items() if key != "APPA_PROVIDER_DATABRICKS_HOST"}
         self.assertEqual(
             check.check_service_principal(environ),
             {"status": "needs_configuration", "authentication": "token", "reason": "missing_configuration"},

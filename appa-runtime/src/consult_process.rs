@@ -21,7 +21,7 @@ pub(crate) async fn run_command(
     deadline: tokio::time::Instant,
     max_body_bytes: usize,
     mut transcript: Option<Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
+    credentials: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> CommandRun {
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     let command = command.clone();
@@ -33,7 +33,7 @@ pub(crate) async fn run_command(
             deadline,
             cancelled,
             transcript.as_mut(),
-            credential,
+            credentials,
         )
         .await;
         CommandRun { output, transcript }
@@ -278,7 +278,7 @@ async fn run_command_process(
     deadline: tokio::time::Instant,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
     seen: Option<&mut Transcript>,
-    credential: Option<(std::ffi::OsString, std::ffi::OsString)>,
+    credentials: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<Vec<u8>, NoAnswerReason> {
     use std::process::Stdio;
 
@@ -294,13 +294,13 @@ async fn run_command_process(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
-    // variable, reaches the child. The binding's own provider credential is put back
-    // afterwards, so a command inherits the one variable it reads and no other's.
+    // variable, reaches the child. The binding's own provider credentials are put back
+    // afterwards, so a command inherits the variables it reads and no other's.
     let parent: Vec<_> = std::env::vars_os().collect();
     configured
         .env_clear()
         .envs(without_runtime_variables(parent))
-        .envs(credential);
+        .envs(credentials);
 
     let mut process = CommandProcess::spawn(&mut configured)?;
     let tail = process.child_mut().stderr.take().map(stderr_tail);

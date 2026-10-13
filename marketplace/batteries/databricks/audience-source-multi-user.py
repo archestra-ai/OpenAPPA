@@ -4,9 +4,9 @@ one answer out.
 The single-user source's selectors and member lookup without `viewer`: the
 login is a service principal's, with no person behind it. Readers are spelled
 as databricks_audience.py spells them, a user by the address they sign in
-with. Every CLI command runs as the service principal DATABRICKS_HOST,
-DATABRICKS_CLIENT_ID, and DATABRICKS_CLIENT_SECRET name, and as nobody else
-(see service_principal.py).
+with. Every CLI command runs as the service principal the binding's
+APPA_PROVIDER_DATABRICKS_HOST, _CLIENT_ID, and _CLIENT_SECRET name, and as
+nobody else (see service_principal.py).
 """
 
 import os

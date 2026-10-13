@@ -452,9 +452,9 @@ esac
         // this binary writes the environment.
         unsafe {
             std::env::set_var("PATH", path);
-            std::env::set_var("DATABRICKS_HOST", "https://workspace.example");
-            std::env::set_var("DATABRICKS_CLIENT_ID", "principal-fixture");
-            std::env::set_var("DATABRICKS_CLIENT_SECRET", "secret-fixture");
+            std::env::set_var("APPA_PROVIDER_DATABRICKS_HOST", "https://workspace.example");
+            std::env::set_var("APPA_PROVIDER_DATABRICKS_CLIENT_ID", "principal-fixture");
+            std::env::set_var("APPA_PROVIDER_DATABRICKS_CLIENT_SECRET", "secret-fixture");
             std::env::set_var("DATABRICKS_TOKEN", "dapi-personal-fixture");
             std::env::set_var("DATABRICKS_CONFIG_PROFILE", "personal");
         }

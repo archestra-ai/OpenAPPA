@@ -35,6 +35,6 @@ setup = [
   "Bind both managed servers: `appa battery install databricks --server <genie-server> --server <sql-server>`.",
   "Install the Databricks CLI where the APPA runtime runs: https://docs.databricks.com/aws/en/dev-tools/cli/install",
   "Create a service principal in the workspace and an OAuth secret for it: https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m",
-  "Set `DATABRICKS_HOST` to the workspace URL, and `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` to the service principal's client id and secret, in the runtime's environment. No CLI profile or personal login is used.",
+  "Set `APPA_PROVIDER_DATABRICKS_HOST` to the workspace URL, and `APPA_PROVIDER_DATABRICKS_CLIENT_ID` and `APPA_PROVIDER_DATABRICKS_CLIENT_SECRET` to the service principal's client id and secret. No CLI profile or personal login is used.",
   "The service principal must read SCIM users and groups, and the permissions of each Genie space your rules name.",
 ]

@@ -42,9 +42,11 @@ root's mappings read.
 - **multi-user** (`multi-user.toml`) — a service principal's OAuth
   login, with no viewer. `audience-source-multi-user.py` serves the same
   selectors and member lookup without `viewer`, people still named by
-  the address they sign in with, and runs the CLI from
+  the address they sign in with, and runs the CLI from the
+  `APPA_PROVIDER_DATABRICKS_HOST`, `_CLIENT_ID`, and `_CLIENT_SECRET`
+  credentials its binding forwards, handed to the CLI as
   `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, and
-  `DATABRICKS_CLIENT_SECRET` alone: it drops every other `DATABRICKS_*`
+  `DATABRICKS_CLIENT_SECRET`, alone: it drops every other `DATABRICKS_*`
   variable, pins the CLI's auth type to `oauth-m2m`, and empties its
   config file, so neither a profile in `~/.databrickscfg` nor a cached
   `databricks auth login` stands in for the principal.
