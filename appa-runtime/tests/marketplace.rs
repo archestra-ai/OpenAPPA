@@ -642,7 +642,7 @@ fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
 
         let order = validate_package(package.path()).map(|validated| match validated.role {
             Role::Battery(battery) => battery
-                .compose_order(Some(appa_package::BatteryTarget::MultiUser))
+                .compose_order(appa_package::BatteryTarget::MultiUser)
                 .into_iter()
                 .map(|policy| policy.as_str().to_owned())
                 .collect::<Vec<_>>(),
