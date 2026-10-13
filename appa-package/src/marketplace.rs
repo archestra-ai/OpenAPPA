@@ -419,6 +419,7 @@ mod tests {
                     policy: crate::RelativePath::parse("target.toml").unwrap(),
                     audiences: vec!["slack".to_owned()],
                     credentials: vec![],
+                    readiness: None,
                 };
                 battery.targets = Some(TargetPolicies {
                     single_user: target_policy.clone(),

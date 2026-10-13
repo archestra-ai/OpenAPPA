@@ -55,7 +55,8 @@ spelling; the script refuses a consult whose mandate does not (exit
 status 2) before it reads a token.
 
 Credentials come from APPA_PROVIDER_GITHUB_TOKEN, else the GitHub CLI's
-login (see github_token.py); the API root is GITHUB_API_URL when set (a
+login (see github_token.py); a multi-user deployment runs
+repository-visibility-multi-user.py, which reads the variable alone; the API root is GITHUB_API_URL when set (a
 GitHub Enterprise Server's /api/v3), else api.github.com. A repository
 the token cannot see, or any GitHub error, exits nonzero: the runtime
 treats that as no answer and refuses the operation, so nothing is
@@ -338,22 +339,23 @@ def annotation(name, call, repository, owner, repo):
             raise ValueError(f"unexpected annotator name {name!r}")
 
 
-def main():
-    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    if len(raw) > MAX_INPUT_BYTES:
-        raise ValueError("the consult is too large")
-    consult = json.loads(raw)
-    name, owner, repo, call = repository_of(consult)
-    check_declaration(consult, owner, repo)
-
-    repository = repository_facts(rest_api(resolve_token()), owner, repo)
-    json.dump({"version": 1, "answer": annotation(name, call, repository, owner, repo)}, sys.stdout)
-    sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
+def main(token):
+    """Answers the consult on stdin with the token `token()` returns."""
     try:
-        main()
+        raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+        if len(raw) > MAX_INPUT_BYTES:
+            raise ValueError("the consult is too large")
+        consult = json.loads(raw)
+        name, owner, repo, call = repository_of(consult)
+        check_declaration(consult, owner, repo)
+
+        repository = repository_facts(rest_api(token()), owner, repo)
+        json.dump({"version": 1, "answer": annotation(name, call, repository, owner, repo)}, sys.stdout)
+        sys.stdout.write("\n")
     except Exception as error:
         print(f"github repository annotator: {error}", file=sys.stderr)
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main(resolve_token)

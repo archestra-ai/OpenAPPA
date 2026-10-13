@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("repository-visibility.py")
+MULTI_USER_SCRIPT = Path(__file__).with_name("repository-visibility-multi-user.py")
 SPEC = importlib.util.spec_from_file_location("repository_visibility", SCRIPT)
 ANNOTATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ANNOTATOR)
@@ -505,9 +507,9 @@ class ConsultTests(unittest.TestCase):
 
 
 class EnvelopeTests(unittest.TestCase):
-    def run_script(self, request, env):
+    def run_script(self, request, env, script=SCRIPT):
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            [sys.executable, str(script)],
             input=json.dumps(request),
             capture_output=True,
             text=True,
@@ -554,6 +556,27 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("APPA_PROVIDER_GITHUB_TOKEN", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_a_multi_user_deployment_answers_under_its_token(self):
+        with Loopback({"/repos/acme/api": {"visibility": "private", "fork": False}}) as github:
+            result = self.run_script(consult(), github.env(), MULTI_USER_SCRIPT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(github.seen, [("/repos/acme/api", "Bearer ghp-fixture")])
+        self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"audience": [COLLABORATORS]})
+
+    def test_a_multi_user_deployment_never_asks_gh_for_a_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "argv"
+            gh = Path(directory) / "gh"
+            gh.write_text(f"#!/bin/sh\necho called > {record}\necho gho-someones-login\n")
+            gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+            with Loopback({"/repos/acme/api": {"visibility": "private", "fork": False}}) as github:
+                env = github.env() | {"PATH": f"{directory}:/usr/bin:/bin", "APPA_PROVIDER_GITHUB_TOKEN": ""}
+                result = self.run_script(consult(), env, MULTI_USER_SCRIPT)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertFalse(record.exists())
+            self.assertEqual(github.seen, [])
 
     def test_a_mandate_naming_another_collection_is_refused_before_the_token_is_read(self):
         for audiences in [["@github:repo/acme/other/collaborators"], ["github:internal"], []]:

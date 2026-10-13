@@ -112,6 +112,9 @@ pub struct TargetPolicy {
     pub policy: RelativePath,
     pub audiences: Vec<String>,
     pub credentials: Vec<String>,
+    /// The readiness command a deployment of this target runs in place of the
+    /// base's, validated like it.
+    pub readiness: Option<Vec<String>>,
 }
 
 /// A battery's target policies: one for every target, so a deployment of any
@@ -205,6 +208,19 @@ impl Battery {
             }
         }
         credentials
+    }
+
+    /// The readiness command a deployment of `target` runs: its target policy's,
+    /// else the base's; empty when the battery declares none.
+    pub fn readiness_command(&self, target: BatteryTarget) -> &[String] {
+        let base = self
+            .readiness
+            .as_ref()
+            .map_or(&[][..], |readiness| &readiness.command[..]);
+        match &self.targets {
+            Some(targets) => targets.get(target).readiness.as_deref().unwrap_or(base),
+            None => base,
+        }
     }
 }
 
@@ -384,6 +400,7 @@ struct RawBattery {
 #[serde(deny_unknown_fields)]
 struct RawTargetPolicy {
     policy: String,
+    readiness: Option<Vec<String>>,
 }
 
 impl RawBattery {
@@ -399,6 +416,7 @@ impl RawBattery {
                 policy: relative(&target_policy.policy, parsed.policy_field(), path)?,
                 audiences: Vec::new(),
                 credentials: Vec::new(),
+                readiness: target_policy.readiness,
             };
             declared.insert(parsed, target_policy);
         }
@@ -666,6 +684,33 @@ mod tests {
             "single-user.toml"
         );
         assert_eq!(targets.get(BatteryTarget::MultiUser).policy.as_str(), "multi-user.toml");
+    }
+
+    #[test]
+    fn a_target_policy_readiness_command_replaces_the_bases_for_its_target_alone() {
+        let package = manifest(&format!(
+            "{TARGETED}readiness = [\"python3\", \"check-multi-user.py\"]\n\n\
+             [battery.readiness]\ncommand = [\"python3\", \"check.py\"]\n"
+        ))
+        .unwrap();
+        let battery = package.battery().unwrap();
+
+        assert_eq!(
+            battery.readiness_command(BatteryTarget::MultiUser),
+            ["python3", "check-multi-user.py"]
+        );
+        assert_eq!(
+            battery.readiness_command(BatteryTarget::SingleUser),
+            ["python3", "check.py"]
+        );
+        assert!(
+            manifest(TARGETED)
+                .unwrap()
+                .battery()
+                .unwrap()
+                .readiness_command(BatteryTarget::MultiUser)
+                .is_empty()
+        );
     }
 
     /// A battery that declares targets declares every one of them; a battery

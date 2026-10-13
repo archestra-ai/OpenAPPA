@@ -84,16 +84,22 @@ impl BatteryEntry {
             .expect("catalog contains batteries")
             .credentials_for(target)
     }
-    /// The CLI logins that stand in for a variable a deployment of `target` reads.
+    /// The CLI logins that stand in for a variable a deployment of `target` reads. A
+    /// CLI login is one person's, so a multi-user deployment takes none.
     fn cli_alternatives(&self, target: appa_package::BatteryTarget) -> Vec<&appa_package::CliAlternative> {
-        let bound = self.credentials(target);
-        self.battery()
-            .expect("catalog contains batteries")
-            .readiness
-            .iter()
-            .flat_map(|readiness| &readiness.cli_alternatives)
-            .filter(|alt| bound.contains(&alt.credential.as_str()))
-            .collect()
+        match target {
+            appa_package::BatteryTarget::MultiUser => Vec::new(),
+            appa_package::BatteryTarget::SingleUser => {
+                let bound = self.credentials(target);
+                self.battery()
+                    .expect("catalog contains batteries")
+                    .readiness
+                    .iter()
+                    .flat_map(|readiness| &readiness.cli_alternatives)
+                    .filter(|alt| bound.contains(&alt.credential.as_str()))
+                    .collect()
+            }
+        }
     }
 }
 impl Local {
@@ -978,25 +984,43 @@ mod tests {
         assert_eq!(result.status, readiness::Status::Ready);
     }
 
-    /// A CLI login stands in for a variable only where the deployment's target reads it:
-    /// the page offers it, and the runtime inspects its executable, for that target alone.
-    #[tokio::test]
-    async fn cli_alternatives_follow_the_credentials_of_the_deployment_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut args = fixture(dir.path());
-        let battery = dir.path().join("batteries/team");
+    /// A targeted `team` battery: each target policy binds its own variable, each with a
+    /// CLI alternative, and the multi-user target runs its own readiness check.
+    fn team_fixture(dir: &Path) -> Local {
+        let mut args = fixture(dir);
+        let battery = dir.join("batteries/team");
         std::fs::create_dir_all(&battery).unwrap();
-        std::fs::write(battery.join("appa-package.toml"), "schema = 1\nname = \"team\"\ndescription = \"Team\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n[battery.readiness]\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-team-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_TOKEN\"\nlogin_hint = \"appa-team-fixture-cli login\"\n").unwrap();
+        std::fs::write(battery.join("appa-package.toml"), "schema = 1\nname = \"team\"\ndescription = \"Team\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\", \"check.py\", \"check-multi-user.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\nreadiness = [\"python3\", \"check-multi-user.py\"]\n[battery.readiness]\ncommand = [\"python3\", \"check.py\"]\nrequired_executables = [\"python3\"]\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-team-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_TOKEN\"\nlogin_hint = \"appa-team-fixture-cli login\"\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-other-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_ORG_TOKEN\"\nlogin_hint = \"appa-other-fixture-cli login\"\n").unwrap();
         std::fs::write(battery.join("appa.toml"), "[policy]\nversion = 2\n").unwrap();
-        std::fs::write(battery.join("single-user.toml"), "[policy]\nversion = 2\n").unwrap();
-        std::fs::write(battery.join("multi-user.toml"), "[policy]\nversion = 2\n[externals.audience.team]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"APPA_PROVIDER_TEAM_TOKEN\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }]\n").unwrap();
+        let binding = |variable: &str| {
+            format!(
+                "[policy]\nversion = 2\n[externals.audience.team]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"{variable}\"\nselectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+            )
+        };
+        std::fs::write(battery.join("single-user.toml"), binding("APPA_PROVIDER_TEAM_TOKEN")).unwrap();
+        std::fs::write(battery.join("multi-user.toml"), binding("APPA_PROVIDER_TEAM_ORG_TOKEN")).unwrap();
         std::fs::write(battery.join("source.py"), "print('{}')\n").unwrap();
+        std::fs::write(
+            battery.join("check.py"),
+            "print('{\"status\":\"ready\",\"authentication\":\"cli\",\"reason\":\"verified\"}')\n",
+        )
+        .unwrap();
+        std::fs::write(battery.join("check-multi-user.py"), "print('{\"status\":\"needs_configuration\",\"authentication\":\"token\",\"reason\":\"not_an_installation\"}')\n").unwrap();
         args.battery = vec!["team".into()];
-        let mut local = Local::new(&args).unwrap();
+        Local::new(&args).unwrap()
+    }
+
+    /// A CLI login stands in for a variable only where a single-user deployment reads it:
+    /// the page offers it, and the runtime inspects its executable, for that target alone.
+    /// A multi-user deployment takes no one's login.
+    #[tokio::test]
+    async fn cli_alternatives_follow_the_credentials_of_a_single_user_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut local = team_fixture(dir.path());
 
         for (target, offered) in [
-            (appa_package::BatteryTarget::SingleUser, false),
-            (appa_package::BatteryTarget::MultiUser, true),
+            (appa_package::BatteryTarget::SingleUser, vec!["appa-team-fixture-cli"]),
+            (appa_package::BatteryTarget::MultiUser, vec![]),
         ] {
             local.target = target;
             let snapshot = local.snapshot().await.unwrap();
@@ -1007,18 +1031,49 @@ mod tests {
                 .find(|battery| battery["name"] == "team")
                 .unwrap()
                 .clone();
-            assert_eq!(
-                team["alternatives"].as_array().unwrap().is_empty(),
-                !offered,
-                "{target}"
-            );
+            let alternatives: Vec<&str> = team["alternatives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|alt| alt["executable"].as_str().unwrap())
+                .collect();
+            assert_eq!(alternatives, offered, "{target}");
             let prerequisites = local.prerequisites().unwrap();
-            assert_eq!(
-                prerequisites["executables"].get("appa-team-fixture-cli").is_some(),
-                offered,
-                "{target}"
-            );
+            for executable in ["appa-team-fixture-cli", "appa-other-fixture-cli"] {
+                assert_eq!(
+                    prerequisites["executables"].get(executable).is_some(),
+                    offered.contains(&executable),
+                    "{target}"
+                );
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn a_deployment_runs_its_targets_readiness_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = team_fixture(dir.path());
+        let (entries, errors) = local.catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        let team = entries.iter().find(|entry| entry.name == "team").unwrap();
+
+        let single = readiness::check(
+            &team.dir,
+            team.battery().unwrap(),
+            appa_package::BatteryTarget::SingleUser,
+            &local.store,
+        )
+        .await;
+        assert!(matches!(single.reason, readiness::Reason::Verified));
+        let multi = readiness::check(
+            &team.dir,
+            team.battery().unwrap(),
+            appa_package::BatteryTarget::MultiUser,
+            &local.store,
+        )
+        .await;
+        assert_eq!(multi.status, readiness::Status::NeedsConfiguration);
+        assert!(matches!(multi.reason, readiness::Reason::NotAnInstallation));
     }
 
     #[tokio::test]

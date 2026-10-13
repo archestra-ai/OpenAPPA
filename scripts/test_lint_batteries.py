@@ -161,6 +161,21 @@ class BatteryLinterTests(unittest.TestCase):
         (directory / "multi-user.toml").unlink()
         self.assertEqual(self.kinds(directory), ["invalid manifest"])
 
+    def test_readiness_checks_reach_the_helpers_they_run(self):
+        directory = self.make_battery(
+            [["python3", "entry.py"]],
+            ["entry.py", "check.py", "check_multi.py"],
+            {"entry.py": "pass\n", "check.py": "pass\n", "check_multi.py": "import check\n"},
+        )
+        self.assertIn("unused manifest helper", self.kinds(directory))
+        manifest = directory / "appa-package.toml"
+        manifest.write_text(
+            manifest.read_text()
+            + '\n[battery.readiness]\ncommand = ["python3", "check.py"]\n'
+            + '\n[battery.targets.multi-user]\npolicy = "appa.toml"\nreadiness = ["python3", "check_multi.py"]\n'
+        )
+        self.assertEqual(self.kinds(directory), [])
+
     def test_commands_are_discovered_inside_nested_toml_values(self):
         directory = self.make_battery(
             [],

@@ -35,6 +35,10 @@ pub(super) enum Reason {
     MissingExecutable,
     InvalidCredential,
     InsufficientAccess,
+    /// A multi-user deployment's token is a person's, not an app installation's.
+    NotAnInstallation,
+    /// The app installation behind a multi-user deployment's token covers no repository.
+    NoRepositories,
     ProviderUnavailable,
     CheckFailed,
     CheckTimedOut,
@@ -117,7 +121,7 @@ pub(super) async fn check(
             Err(_) => return CheckResult::new(Status::Unavailable, Reason::CheckFailed),
         }
     }
-    let Some(readiness) = readiness.filter(|r| !r.command.is_empty()) else {
+    let [program, arguments @ ..] = battery.readiness_command(target) else {
         // Without a check, only presence is knowable: a set variable is not a verified one.
         return if environment.len() == credentials.len() {
             CheckResult::new(Status::Ready, Reason::Configured)
@@ -125,9 +129,9 @@ pub(super) async fn check(
             CheckResult::new(Status::NeedsConfiguration, Reason::MissingCredential)
         };
     };
-    let mut command = tokio::process::Command::new(&readiness.command[0]);
+    let mut command = tokio::process::Command::new(program);
     command
-        .args(&readiness.command[1..])
+        .args(arguments)
         .current_dir(dir)
         .env_clear()
         .envs(crate::consult_process::without_runtime_variables(
