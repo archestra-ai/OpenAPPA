@@ -150,7 +150,14 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            let base = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+            let base_document = read_document(&policy)?;
+            let base = check_policy(
+                &policy,
+                &package.name,
+                &battery.namespaces,
+                &battery.helpers,
+                &base_document,
+            )?;
             // The loader finds the manifest beside the included base, and helper
             // commands run from the including policy's directory.
             if battery.targets.is_some() && policy.parent() != Some(contained.root.as_path()) {
@@ -159,7 +166,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 });
             }
             if let Some(targets) = &mut battery.targets {
-                check_stands_alone(&policy, &base)?;
+                check_stands_alone(&policy, &base_document, &base.tools)?;
                 for target in BatteryTarget::ALL {
                     let target_policy = targets.get_mut(target);
                     let field = target.policy_field();
@@ -173,7 +180,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                         return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
                     }
                     let policy = target_path;
-                    let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+                    let document = read_document(&policy)?;
+                    let bindings =
+                        check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers, &document)?;
                     check_composes(&policy, &base, &bindings)?;
                     check_variants(&policy, &bindings.tools, &base.tools)?;
                     target_policy.audiences = bindings.audiences;
@@ -284,6 +293,17 @@ pub const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator",
 /// Those of them that are arrays of named declarations.
 const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "sanitizer"];
 
+fn read_document(policy: &Path) -> Result<Value, PackageError> {
+    let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
+        policy: policy.to_path_buf(),
+        source,
+    })?;
+    toml::from_str(&text).map_err(|source| PackageError::PolicySyntax {
+        policy: policy.to_path_buf(),
+        source,
+    })
+}
+
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
 /// declared helpers, and it names only contracts in the namespaces it declares.
@@ -295,16 +315,8 @@ fn check_policy(
     name: &PackageName,
     namespaces: &[Namespace],
     helpers: &[RelativePath],
+    document: &Value,
 ) -> Result<PolicyBindings, PackageError> {
-    let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
-        policy: policy.to_path_buf(),
-        source,
-    })?;
-    let document: Value = toml::from_str(&text).map_err(|source| PackageError::PolicySyntax {
-        policy: policy.to_path_buf(),
-        source,
-    })?;
-
     // Named on its own because it is the mistake a battery author makes: a
     // battery is included, and cannot include in turn.
     if document.get("include").is_some() {
@@ -378,8 +390,8 @@ fn check_policy(
         .iter()
         .flat_map(|namespace| ["mcp", "host", "agent"].map(|family| format!("{family}/{namespace}/")))
         .collect();
-    check_named(policy, &document)?;
-    let tools = declared_contracts(policy, &document)?;
+    check_named(policy, document)?;
+    let tools = declared_contracts(policy, document)?;
     for contract in &tools {
         if !covered.iter().any(|prefix| contract.starts_with(prefix)) {
             return Err(PackageError::PolicyForeignContract {
@@ -393,40 +405,33 @@ fn check_policy(
             });
         }
     }
-    let entries = || {
-        document
-            .get("externals")
-            .and_then(Value::as_table)
-            .into_iter()
-            .flatten()
-            .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
-            .flat_map(|(section, entries)| {
-                entries.iter().map(move |(name, binding)| {
-                    let external = NamedExternal {
-                        section: section.clone(),
-                        name: name.clone(),
-                    };
-                    (external, binding.get("command").is_some())
-                })
-            })
-    };
     Ok(PolicyBindings {
         version,
         audiences,
         credentials,
-        externals: entries().map(|(external, _)| external).collect(),
-        helpers: entries()
-            .filter(|(_, runs)| *runs)
-            .map(|(external, _)| external)
-            .collect(),
-        source_mentions: source_mentions(&document),
+        externals: externals(document).map(|(external, _)| external).collect(),
         tools,
-        annotator_uses: declarations(&document, "tool")
-            .filter_map(|tool| tool.get("annotator").and_then(Value::as_str))
-            .map(str::to_owned)
-            .collect(),
-        declarations: named_declarations(&document),
+        declarations: named_declarations(document),
     })
+}
+
+/// Every `[externals.<section>.<name>]` entry, and whether it runs a helper `command`.
+fn externals(document: &Value) -> impl Iterator<Item = (NamedExternal, bool)> + '_ {
+    document
+        .get("externals")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
+        .flat_map(|(section, entries)| {
+            entries.iter().map(move |(name, binding)| {
+                let external = NamedExternal {
+                    section: section.clone(),
+                    name: name.clone(),
+                };
+                (external, binding.get("command").is_some())
+            })
+        })
 }
 
 /// Every field that holds an audience list, as `(declaration kind, path within it)`.
@@ -442,7 +447,7 @@ const AUDIENCE_FIELDS: [(&str, &[&str]); 7] = [
 
 /// The `@<provider>:<selector>` entries the fragment's audience lists name; a named
 /// group (`@finance`) carries no provider.
-fn source_mentions(document: &Value) -> Vec<String> {
+fn source_mentions(document: &Value) -> impl Iterator<Item = &str> {
     AUDIENCE_FIELDS
         .iter()
         .flat_map(|(kind, path)| {
@@ -455,37 +460,34 @@ fn source_mentions(document: &Value) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .filter(|entry| entry.starts_with('@') && entry.contains(':'))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// A targeted battery's base is loaded alone wherever the sandbox is off, so it
 /// runs no helper, and every tool and annotator it names resolves within it.
-fn check_stands_alone(policy: &Path, base: &PolicyBindings) -> Result<(), PackageError> {
-    if let Some(external) = base.helpers.first() {
+fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(), PackageError> {
+    if let Some((external, _)) = externals(base).find(|(_, runs)| *runs) {
         return Err(PackageError::BaseRunsHelper {
             policy: policy.to_path_buf(),
-            external: external.clone(),
+            external,
         });
     }
-    if let Some(entry) = base.source_mentions.first() {
+    if let Some(entry) = source_mentions(base).next() {
         return Err(PackageError::BaseMentionsSource {
             policy: policy.to_path_buf(),
-            entry: entry.clone(),
+            entry: entry.to_owned(),
         });
     }
-    let declared = |name: &str| {
-        base.declarations
-            .iter()
-            .any(|declaration| declaration.kind == DeclarationKind::Annotator && declaration.name == name)
-    };
-    if let Some(annotator) = base.annotator_uses.iter().find(|annotator| !declared(annotator)) {
+    let declared: BTreeSet<&str> = declarations(base, "annotator")
+        .filter_map(|annotator| annotator.get("name").and_then(Value::as_str))
+        .collect();
+    let uses = declarations(base, "tool").filter_map(|tool| tool.get("annotator").and_then(Value::as_str));
+    if let Some(annotator) = uses.into_iter().find(|annotator| !declared.contains(annotator)) {
         return Err(PackageError::BaseUsesTargetAnnotator {
             policy: policy.to_path_buf(),
-            annotator: annotator.clone(),
+            annotator: annotator.to_owned(),
         });
     }
-    check_variants(policy, &base.tools, &[])
+    check_variants(policy, tools, &[])
 }
 
 /// The engine picks a tool's first matching variant, the composed order running
@@ -548,13 +550,8 @@ struct PolicyBindings {
     audiences: Vec<String>,
     credentials: Vec<String>,
     externals: BTreeSet<NamedExternal>,
-    /// The externals that run a helper `command`.
-    helpers: Vec<NamedExternal>,
-    source_mentions: Vec<String>,
     /// The declared tool contracts, canonical and in declaration order.
     tools: Vec<String>,
-    /// The annotators its tools name with `annotator`.
-    annotator_uses: Vec<String>,
     declarations: BTreeSet<NamedDeclaration>,
 }
 
