@@ -60,6 +60,7 @@ struct Local {
     dirs: Vec<PathBuf>,
     selected: BTreeSet<String>,
     store: CredentialStore,
+    target: appa_package::BatteryTarget,
     runtime_url: String,
     checks: Mutex<BTreeMap<String, readiness::CheckResult>>,
     gate: tokio::sync::Mutex<()>,
@@ -69,6 +70,8 @@ struct BatteryEntry {
     name: String,
     dir: PathBuf,
     package: appa_package::Package,
+    /// The variables the battery reads for this deployment's target.
+    credentials: Vec<String>,
 }
 impl BatteryEntry {
     fn battery(&self) -> Option<&appa_package::Battery> {
@@ -91,11 +94,13 @@ impl Local {
             args.batteries_dir.clone()
         };
         let store = CredentialStore::for_config(&config)?;
+        let target = crate::config::battery_target().map_err(|error| error.to_string())?;
         Ok(Self {
             config,
             dirs,
             selected: args.battery.iter().cloned().collect(),
             store,
+            target,
             runtime_url: args.runtime_url.clone(),
             checks: Mutex::new(BTreeMap::new()),
             gate: tokio::sync::Mutex::new(()),
@@ -116,18 +121,26 @@ impl Local {
             };
             // Name the cause and the one command that restores the store.
             let fix = "Run `appa plugin install claude-code` to restore the installed batteries.";
-            match appa_package::validate_package(&dir) {
-                Ok(package)
-                    if package.name.as_str() == battery.name
-                        && matches!(&package.role, appa_package::Role::Battery(_)) =>
-                {
-                    entries.push(BatteryEntry {
-                        name: battery.name,
-                        dir,
-                        package,
-                    });
-                }
-                Ok(_) => errors.push(format!(
+            let validated = appa_package::validate_package(&dir).map(|package| {
+                let credentials = match &package.role {
+                    appa_package::Role::Battery(declared) if package.name.as_str() == battery.name => Some(
+                        declared
+                            .credentials_for(self.target)
+                            .map(|credentials| credentials.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+                    ),
+                    _ => None,
+                };
+                (package, credentials)
+            });
+            match validated {
+                Ok((package, Some(Ok(credentials)))) => entries.push(BatteryEntry {
+                    name: battery.name,
+                    dir,
+                    package,
+                    credentials,
+                }),
+                Ok((_, Some(Err(missing)))) => errors.push(format!("{}: {missing}. {fix}", battery.name)),
+                Ok((_, None)) => errors.push(format!(
                     "{}: the installed manifest does not describe this battery. {fix}",
                     battery.name
                 )),
@@ -200,7 +213,7 @@ impl Local {
             let checks = self.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             entries.iter().map(|entry| {
             let battery = entry.battery().expect("catalog contains batteries");
-            let credentials: Vec<_> = battery.credentials.iter().map(|var| {
+            let credentials: Vec<_> = entry.credentials.iter().map(|var| {
                 let env = std::env::var_os(var);
                 if let Some(status) = runtime_info.as_ref().and_then(|r| r["prerequisites"]["credentials"].get(var)) {
                     let mut status = status.clone(); status["variable"] = json!(var);
@@ -288,8 +301,8 @@ async fn check_entries(entries: Vec<BatteryEntry>, store: CredentialStore) -> BT
         .map(move |entry| {
             let store = store.clone();
             async move {
-                let result =
-                    readiness::check(&entry.dir, entry.battery().expect("catalog contains batteries"), &store).await;
+                let battery = entry.battery().expect("catalog contains batteries");
+                let result = readiness::check(&entry.dir, battery, &entry.credentials, &store).await;
                 (entry.name, result)
             }
         })
@@ -316,7 +329,7 @@ pub(crate) fn runtime_prerequisites(config: &Path, dirs: &[PathBuf]) -> Result<V
     let mut executables = BTreeMap::new();
     for entry in entries {
         let battery = entry.battery().expect("catalog contains batteries");
-        for var in &battery.credentials {
+        for var in &entry.credentials {
             let env = std::env::var_os(var);
             credentials.insert(var.clone(), json!({"source": if env.is_some() { "environment" } else if saved.contains_key(var) { "database" } else { "missing" },
                 "available": env.as_ref().is_some_and(|v| !v.is_empty()) || (env.is_none() && saved.contains_key(var)), "saved": saved.contains_key(var)}));
@@ -441,10 +454,7 @@ struct Changes {
 async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) -> ApiResult {
     let _gate = web.local.gate.lock().await;
     let (entries, _) = web.local.catalog();
-    let allowed: BTreeSet<_> = entries
-        .iter()
-        .flat_map(|entry| &entry.battery().expect("battery").credentials)
-        .collect();
+    let allowed: BTreeSet<_> = entries.iter().flat_map(|entry| &entry.credentials).collect();
     if changes.credentials.keys().any(|key| !allowed.contains(key))
         || changes
             .batteries
@@ -464,8 +474,6 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
         .filter(|entry| {
             changes.batteries.contains(&entry.name)
                 || entry
-                    .battery()
-                    .expect("battery")
                     .credentials
                     .iter()
                     .any(|variable| changes.credentials.contains_key(variable))
@@ -902,9 +910,8 @@ mod tests {
         let (entries, _) = local.catalog();
         let entry = &entries[0];
         let mut battery = entry.battery().unwrap().clone();
-        battery.credentials.clear();
         battery.readiness.as_mut().unwrap().command.clear();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &[], &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
         battery
             .readiness
@@ -912,7 +919,7 @@ mod tests {
             .unwrap()
             .required_executables
             .push("appa-missing-fixture-cli".into());
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &[], &local.store).await;
         assert_eq!(result.status, readiness::Status::NeedsConfiguration);
     }
 
@@ -925,7 +932,7 @@ mod tests {
         let entry = &entries[0];
         let mut battery = entry.battery().unwrap().clone();
         battery.readiness = None;
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &entry.credentials, &local.store).await;
         assert_eq!(result.status, readiness::Status::NeedsConfiguration);
         assert!(matches!(result.reason, readiness::Reason::MissingCredential));
         local
@@ -935,15 +942,14 @@ mod tests {
                 Some("fixture-only-secret".into()),
             )]))
             .unwrap();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &entry.credentials, &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
         assert!(matches!(result.reason, readiness::Reason::Configured));
-        battery.credentials.clear();
         local
             .store
             .update(&BTreeMap::from([("APPA_PROVIDER_DEMO_TOKEN".into(), None)]))
             .unwrap();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &[], &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
     }
 
@@ -956,7 +962,7 @@ mod tests {
         assert!(errors.is_empty());
         let entry = entries.pop().unwrap();
         std::fs::write(entry.dir.join("check.py"), "print('{\"status\":\"ready\",\"authentication\":\"token\",\"reason\":\"verified\",\"message\":\"secret\"}')").unwrap();
-        let result = readiness::check(&entry.dir, entry.battery().unwrap(), &local.store).await;
+        let result = readiness::check(&entry.dir, entry.battery().unwrap(), &entry.credentials, &local.store).await;
         assert!(matches!(result.reason, readiness::Reason::CheckFailed));
         let mut battery = entry.battery().unwrap().clone();
         battery
@@ -965,7 +971,7 @@ mod tests {
             .unwrap()
             .required_executables
             .push("appa-no-such-fixture-executable".into());
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, &entry.credentials, &local.store).await;
         assert!(matches!(result.reason, readiness::Reason::MissingExecutable));
     }
 }

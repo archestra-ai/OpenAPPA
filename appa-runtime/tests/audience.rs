@@ -583,9 +583,10 @@ fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
     const ROOT: &str = "[policy]\nversion = 2\n\n[policy.audience]\ninternal = [\"team:members\"]\n";
     const ROOT_BINDING: &str = "\n[externals.audience.team]\nurl = \"http://127.0.0.1:9/audience\"\nselectors = [{ template = \"members\", feeds = \"internal\" }]\n";
     let declaring = format!("[policy]\nversion = 2\n{ROOT_BINDING}");
-    let battery = |policy| HostedBattery {
+    let battery = |base| HostedBattery {
         name: "team",
-        policy,
+        base,
+        target: None,
         token_env: &[],
     };
     let compose = |root: &str, batteries: &[HostedBattery<'_>]| {

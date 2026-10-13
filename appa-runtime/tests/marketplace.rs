@@ -669,6 +669,94 @@ fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
     }
 }
 
+/// An include of a battery's base composes the deployment target's policy with it: each
+/// target binds its own external, a battery without targets loads its base under
+/// either, and a manifest without the chosen target is refused.
+#[test]
+fn an_included_battery_loads_its_policy_for_the_deployment_target() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let audience = |name: &str| {
+        format!(
+            "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+        )
+    };
+    let deployment = |manifest_targets: &str, target_policies: &[(&str, &str)]| {
+        let deployment = tempfile::tempdir().expect("a temp dir is creatable");
+        let battery = deployment.path().join("probe");
+        std::fs::create_dir(&battery).expect("the battery dir is creatable");
+        let base = if target_policies.is_empty() { "policy" } else { "base" };
+        std::fs::write(
+            battery.join("appa-package.toml"),
+            format!(
+                "schema = 1\nname = \"probe\"\ndescription = \"a battery\"\n\n[battery]\n{base} = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{manifest_targets}"
+            ),
+        )
+        .expect("the manifest is writable");
+        std::fs::write(
+            battery.join("appa.toml"),
+            format!(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{}",
+                audience("probe")
+            ),
+        )
+        .expect("the base is writable");
+        for (file, external) in target_policies {
+            std::fs::write(
+                battery.join(file),
+                format!("[policy]\nversion = 2\n\n{}", audience(external)),
+            )
+            .expect("the target policy is writable");
+        }
+        std::fs::write(battery.join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+        std::fs::write(
+            deployment.path().join("appa.toml"),
+            "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("the root config is writable");
+        deployment
+    };
+    let load = |deployment: &tempfile::TempDir, target| {
+        Config::load_for_target(&deployment.path().join("appa.toml"), &[], target)
+    };
+    let externals = |config: Config| config.externals.audience.into_keys().collect::<Vec<_>>();
+
+    const BOTH: &str = "\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
+    let targeted = deployment(
+        BOTH,
+        &[("single-user.toml", "probe-solo"), ("multi-user.toml", "probe-org")],
+    );
+    validate_package(&targeted.path().join("probe")).expect("the targeted package validates");
+    assert_eq!(
+        externals(load(&targeted, BatteryTarget::MultiUser).expect("multi-user loads")),
+        ["probe", "probe-org"]
+    );
+    assert_eq!(
+        externals(load(&targeted, BatteryTarget::SingleUser).expect("single-user loads")),
+        ["probe", "probe-solo"]
+    );
+
+    let plain = deployment("", &[]);
+    for target in BatteryTarget::ALL {
+        assert_eq!(
+            externals(load(&plain, target).expect("the base loads")),
+            ["probe"],
+            "{target}"
+        );
+    }
+
+    let partial = deployment(
+        "\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        &[("multi-user.toml", "probe-org")],
+    );
+    assert!(matches!(
+        load(&partial, BatteryTarget::SingleUser),
+        Err(ConfigError::MissingBatteryTarget { battery, target: BatteryTarget::SingleUser }) if battery == "probe"
+    ));
+}
+
 /// Every rule the two crates share, not a sample of it.
 ///
 /// `a_battery_that_validates_loads` walks fragments on each rule's edge, which
