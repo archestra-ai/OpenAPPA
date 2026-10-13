@@ -64,9 +64,12 @@ mod tests {
             let Role::Battery(declared) = &package.role else {
                 panic!("{} is not a battery", battery.name);
             };
-            for policy in std::iter::once(&declared.base)
-                .chain(declared.targets.values().map(|target_policy| &target_policy.policy))
-            {
+            for policy in std::iter::once(&declared.base).chain(
+                declared
+                    .targets
+                    .iter()
+                    .flat_map(|targets| targets.iter().map(|(_, target_policy)| &target_policy.policy)),
+            ) {
                 assert!(
                     battery.file(policy.as_str()).is_some(),
                     "{}: {}",

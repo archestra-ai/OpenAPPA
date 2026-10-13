@@ -87,11 +87,6 @@ pub enum PackageError {
         variable: String,
         prefix: CredentialPrefix,
     },
-    #[error("battery `{battery}` declares targets but not `{target}`; it must declare every target")]
-    BatteryMissingTarget {
-        battery: PackageName,
-        target: BatteryTarget,
-    },
     #[error("{policy} uses policy version {found}, but the battery's base uses {base}")]
     TargetPolicyVersion { policy: PathBuf, base: i64, found: i64 },
     #[error("{policy} declares `{external}`, which the battery's base already declares")]
@@ -136,37 +131,30 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
             let base = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
-            if !battery.targets.is_empty()
-                && let Some(target) = BatteryTarget::ALL
-                    .into_iter()
-                    .find(|target| !battery.targets.contains_key(target))
-            {
-                return Err(PackageError::BatteryMissingTarget {
-                    battery: package.name.clone(),
-                    target,
-                });
-            }
             // The loader finds the manifest beside the included base, and helper
             // commands run from the including policy's directory.
-            if !battery.targets.is_empty() && policy.parent() != Some(contained.root.as_path()) {
+            if battery.targets.is_some() && policy.parent() != Some(contained.root.as_path()) {
                 return Err(PackageError::TargetedPolicyOutsidePackageRoot { field: "battery.base" });
             }
-            for (target, target_policy) in &mut battery.targets {
-                let field = target.policy_field();
-                let target_path = contained.resolve(&target_policy.policy, field, EntryKind::File)?;
-                // The loader includes each resolved file once, so a target policy that
-                // is the base would be refused as a duplicate include.
-                if target_path == policy {
-                    return Err(PackageError::TargetPolicyIsBase { field });
+            if let Some(targets) = &mut battery.targets {
+                for target in BatteryTarget::ALL {
+                    let target_policy = targets.get_mut(target);
+                    let field = target.policy_field();
+                    let target_path = contained.resolve(&target_policy.policy, field, EntryKind::File)?;
+                    // The loader includes each resolved file once, so a target policy that
+                    // is the base would be refused as a duplicate include.
+                    if target_path == policy {
+                        return Err(PackageError::TargetPolicyIsBase { field });
+                    }
+                    if target_path.parent() != Some(contained.root.as_path()) {
+                        return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
+                    }
+                    let policy = target_path;
+                    let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+                    check_composes(&policy, &base, &bindings)?;
+                    target_policy.audiences = bindings.audiences;
+                    target_policy.credentials = bindings.credentials;
                 }
-                if target_path.parent() != Some(contained.root.as_path()) {
-                    return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
-                }
-                let policy = target_path;
-                let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
-                check_composes(&policy, &base, &bindings)?;
-                target_policy.audiences = bindings.audiences;
-                target_policy.credentials = bindings.credentials;
             }
             battery.audiences = base.audiences;
             battery.credentials = base.credentials;
@@ -185,12 +173,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                             && battery
                                 .credentials
                                 .iter()
-                                .chain(
-                                    battery
-                                        .targets
-                                        .values()
-                                        .flat_map(|target_policy| &target_policy.credentials),
-                                )
+                                .chain(battery.targets.iter().flat_map(|targets| {
+                                    targets.iter().flat_map(|(_, target_policy)| &target_policy.credentials)
+                                }))
                                 .any(|credential| credential == &alt.credential)
                             && !alt.login_hint.trim().is_empty()
                             && !alt.login_hint.contains(['\n', '\r'])
@@ -997,7 +982,11 @@ mod tests {
         let validated = package.battery().unwrap();
         assert_eq!(validated.audiences, vec!["github"]);
         assert!(validated.credentials.is_empty());
-        let multi_user = &validated.targets[&crate::package::BatteryTarget::MultiUser];
+        let multi_user = validated
+            .targets
+            .as_ref()
+            .unwrap()
+            .get(crate::package::BatteryTarget::MultiUser);
         assert_eq!(multi_user.audiences, vec!["github-org"]);
         assert_eq!(multi_user.credentials, vec!["APPA_PROVIDER_GITHUB_ORG_TOKEN"]);
 
@@ -1153,8 +1142,7 @@ mod tests {
         ));
     }
 
-    /// A battery that declares targets declares every one of them; a battery
-    /// that declares none is the base alone.
+    /// A partial target declaration is refused as the manifest is read.
     #[test]
     fn a_battery_declares_every_target_or_none() {
         let only_multi_user = battery(BATTERY_POLICY);
@@ -1166,8 +1154,10 @@ mod tests {
         fs::write(only_multi_user.path().join("multi-user.toml"), MULTI_USER_POLICY).unwrap();
         assert!(matches!(
             validate_package(only_multi_user.path()),
-            Err(PackageError::BatteryMissingTarget { battery, target: BatteryTarget::SingleUser })
-                if battery.to_string() == "github"
+            Err(PackageError::Manifest(ManifestError::PartialTargets {
+                missing: BatteryTarget::SingleUser,
+                ..
+            }))
         ));
 
         validate_package(battery(BATTERY_POLICY).path()).unwrap();

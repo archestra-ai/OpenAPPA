@@ -185,8 +185,8 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
             .chain(
                 battery
                     .targets
-                    .values()
-                    .flat_map(|target_policy| &target_policy.audiences),
+                    .iter()
+                    .flat_map(|targets| targets.iter().flat_map(|(_, target_policy)| &target_policy.audiences)),
             )
             .collect();
         for provider in providers {
@@ -238,7 +238,7 @@ struct RawEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::{BatteryTarget, TargetPolicy};
+    use crate::package::{TargetPolicies, TargetPolicy};
 
     const DIGEST: &str = "sha256:2619322b5feb343f951e2ed55ab86948a93d9460eea0fc70d46a20fdb9f87dec";
 
@@ -415,16 +415,15 @@ mod tests {
         let with_target_policies = |name: &str, audiences: &[&str]| {
             let mut package = battery_with_audiences(name, &[name], audiences);
             if let Role::Battery(battery) = &mut package.role {
-                for target in [BatteryTarget::SingleUser, BatteryTarget::MultiUser] {
-                    battery.targets.insert(
-                        target,
-                        TargetPolicy {
-                            policy: crate::RelativePath::parse("target.toml").unwrap(),
-                            audiences: vec!["slack".to_owned()],
-                            credentials: vec![],
-                        },
-                    );
-                }
+                let target_policy = TargetPolicy {
+                    policy: crate::RelativePath::parse("target.toml").unwrap(),
+                    audiences: vec!["slack".to_owned()],
+                    credentials: vec![],
+                };
+                battery.targets = Some(TargetPolicies {
+                    single_user: target_policy.clone(),
+                    multi_user: target_policy,
+                });
             }
             package
         };
