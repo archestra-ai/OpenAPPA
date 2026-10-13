@@ -43,7 +43,7 @@ def rollback_consult(endpoint):
 
 # The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
 # `remedy_instruction`). A `{"remedy": ...}` turn names one of them.
-ACCEPT = "Accept this change"
+ACCEPT = "Accept narrower readers"
 APPROVAL = "Submit for approval"
 
 # The reserved call's answer when a plan releases the call

@@ -5,7 +5,7 @@ The native kagent model clients reach this server over HTTP. No kagent model
 factory or plugin code is patched. Send a user message containing JSON:
 {"case":"read-then-write","appa_script":[{"tool":"get_file_contents",
 "args":{"owner":"acme","repo":"docs","path":"README.md"}},
-{"remedy":"accept this change"},{"text":"done"}]}
+{"remedy":"accept lower trust"},{"text":"done"}]}
 
 GET /state exposes bounded model transcripts and actual MCP calls. POST /state
 with an empty JSON object resets them. These unauthenticated fixtures belong

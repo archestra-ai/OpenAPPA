@@ -3855,7 +3855,7 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
                 "Run the tool and withhold its result".to_string()
             };
         }
-        match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
+        match (needs_approval, plan.narrowing(), plan.sanitizer()) {
             (true, _, Some(sanitizer)) => {
                 format!(
                     "Submit for approval and use sanitizer {}'s result",
@@ -3865,11 +3865,33 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             (false, _, Some(sanitizer)) => {
                 format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
             }
-            (true, true, None) => "Submit for approval and accept this change for the rest of this session".to_string(),
-            (false, true, None) => "Accept this change for the rest of this session".to_string(),
-            (true, false, None) => "Submit for approval".to_string(),
-            (false, false, None) => "Apply the offered remedy".to_string(),
+            (true, Some(narrowing), None) => format!(
+                "Submit for approval and accept {} for the rest of this session",
+                narrowing_change(narrowing)
+            ),
+            (false, Some(narrowing), None) => {
+                format!("Accept {} for the rest of this session", narrowing_change(narrowing))
+            }
+            (true, None, None) => "Submit for approval".to_string(),
+            (false, None, None) => "Apply the offered remedy".to_string(),
         }
+    }
+}
+
+/// The change a narrowing plan asks the model to accept, in the words of the reasons
+/// `narrowing_feedback` gives: "session trust would fall", "allowed readers would narrow".
+fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
+    // The engine builds a narrowing only where the label moves, so one dimension changes.
+    debug_assert_ne!(narrowing.from, narrowing.to, "a narrowing changes trust or readers");
+    match (
+        narrowing.from.trust != narrowing.to.trust,
+        narrowing.from.audience != narrowing.to.audience,
+    ) {
+        (true, true) => "lower trust and narrower readers",
+        (true, false) => "lower trust",
+        (false, true) => "narrower readers",
+        // The assert above rules this out; a release build keeps a neutral label.
+        (false, false) => "this change",
     }
 }
 
@@ -3901,10 +3923,14 @@ fn remedy_instruction(
     if let Some(sanitizer) = plan.return_step() {
         return return_instruction(sanitizer, id, spelling, control, &description, include_display_plan);
     }
-    let mut instruction = format!(
-        "  - {description}:\n    {}",
-        remedy_call(control, id, "", &description, include_display_plan)
-    );
+    let call = remedy_call(control, id, "", &description, include_display_plan);
+    // The display plan is the call's own `plan` argument, so it names the remedy. A second
+    // label line would print the same text twice.
+    let mut instruction = if include_display_plan {
+        format!("  - {call}")
+    } else {
+        format!("  - {description}:\n    {call}")
+    };
     let needs_approval = !plan.required.is_empty();
     if needs_approval {
         if include_display_plan {
@@ -4054,8 +4080,11 @@ fn block_feedback(
         ));
     }
 
+    // Name the call the way the model spelled it, never its arguments.
+    let target = naming.model_spelling(target);
+    let target = target.as_str();
     let mut lines = vec![
-        "[appa] Blocked: this call cannot run yet.".to_string(),
+        format!("[appa] Blocked: {} cannot run yet.", terminal_safe(target)),
         String::new(),
         "Why:".to_string(),
     ];
@@ -4939,6 +4968,94 @@ mod tests {
         assert!(instruction.contains("`audience` to the narrowest audience its data may be confined to"));
         assert!(instruction.contains("Remove either field from the call when that dimension"));
         assert!(instruction.contains("Each call in a fan-out declares its own"));
+    }
+
+    #[test]
+    fn a_narrowing_remedy_names_the_change_once_and_the_headline_names_the_tool() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::ReaderId;
+        use appa_engine::label::{Audience, Label};
+
+        let from = Label::new(Trust::new(2), Audience::public());
+        let narrower = Audience::restricted([ReaderId::new("alice")]);
+        let cases = [
+            (Label::new(Trust::new(0), Audience::public()), "lower trust"),
+            (Label::new(Trust::new(2), narrower.clone()), "narrower readers"),
+            (
+                Label::new(Trust::new(0), narrower.clone()),
+                "lower trust and narrower readers",
+            ),
+        ];
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        for (to, change) in cases {
+            for (include_display_plan, required) in [(false, false), (false, true), (true, false), (true, true)] {
+                let planned = PlannedBlock {
+                    raw: RawBlock {
+                        requirement_gaps: vec![],
+                        narrowing: Some(Narrowing {
+                            from: from.clone(),
+                            to: to.clone(),
+                        }),
+                    },
+                    plans: vec![RemedyPlan::Executable(ExecutableRemedyPlan {
+                        id: PlanId::new(1),
+                        steps: vec![RemedyStep::Accept(Narrowing {
+                            from: from.clone(),
+                            to: to.clone(),
+                        })],
+                        required: if required {
+                            vec![appa_engine::plan::RequiredRuling {
+                                authority: appa_engine::names::AuthorityName::new("officer"),
+                                covers: Vec::new(),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
+                    })],
+                    fork_advice: None,
+                };
+                let options = EmbeddedPresentationOptions {
+                    control_tool: "approve_remedy".to_string(),
+                    supports_delegation: false,
+                    include_display_plan,
+                };
+                let feedback = block_feedback(
+                    &planned,
+                    &[(OfferId("0123456789abcdef".to_string()), PlanId::new(1))],
+                    policy.engine().registry(),
+                    &ReturnBounds {
+                        label: appa_engine::label::Label::top(),
+                        lowest: Trust::new(0),
+                    },
+                    ToolNaming::AsAuthored,
+                    "send_mail",
+                    &options,
+                );
+                let label = if required {
+                    format!("Submit for approval and accept {change} for the rest of this session")
+                } else {
+                    format!("Accept {change} for the rest of this session")
+                };
+                let text = feedback.text;
+                assert!(text.starts_with("[appa] Blocked: send_mail cannot run yet."), "{text}");
+                assert_eq!(text.matches(&label).count(), 1, "the label appears once: {text}");
+                assert!(!text.contains("Accept this change"), "{text}");
+                if include_display_plan {
+                    assert!(
+                        text.contains(&format!(
+                            "  - approve_remedy(offer_id: \"0123456789abcdef\", plan: \"{label}\")"
+                        )),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        feedback.display.expect("display plan").plans[0].text.split('\n').next(),
+                        Some(label.as_str())
+                    );
+                } else {
+                    assert!(text.contains(&format!("  - {label}:\n    ")), "{text}");
+                }
+            }
+        }
     }
 
     #[test]

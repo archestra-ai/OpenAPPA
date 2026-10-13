@@ -208,8 +208,8 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
 def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> None:
     # An executable offer: the model accepts it with the control tool.
     offered = (
-        "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - session trust would fall\n\nContinue:\n"
-        "  - Accept this change for the rest of this session:\n"
+        "[appa] Blocked: read_record cannot run yet.\n\nWhy:\n  - session trust would fall\n\nContinue:\n"
+        "  - Accept lower trust for the rest of this session:\n"
         '    execute_remedy_plan(offer_id: "a6b41f1968b6fa7d")'
     )
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": offered})
@@ -224,7 +224,7 @@ def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> Non
 
     # A redispatch remedy: the model runs the named tool and proposes again.
     redispatch = (
-        "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - requires a prior identity.verified effect\n\n"
+        "[appa] Blocked: write_record cannot run yet.\n\nWhy:\n  - requires a prior identity.verified effect\n\n"
         "Continue:\n  - Run log_verification first; it clears: requires a prior identity.verified effect."
     )
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": redispatch})
@@ -239,7 +239,8 @@ def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> Non
 
     # A gap with no remedy is terminal: no authority may waive a trust floor.
     terminal = (
-        "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - trust is suspicious, below the required floor internal"
+        "[appa] Blocked: write_record cannot run yet.\n\nWhy:\n"
+        "  - trust is suspicious, below the required floor internal"
     )
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": terminal})
     try:
