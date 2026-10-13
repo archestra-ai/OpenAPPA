@@ -106,6 +106,10 @@ pub enum PackageError {
         "{policy} is a targeted battery's base, which loads alone and so names no audience source, yet names `{entry}`"
     )]
     BaseMentionsSource { policy: PathBuf, entry: String },
+    #[error(
+        "{policy} is a targeted battery's base, which loads alone, yet a tool names annotator `{annotator}` it does not declare"
+    )]
+    BaseUsesTargetAnnotator { policy: PathBuf, annotator: String },
     #[error("{policy} names `{tool}` without a bare variant, so a call outside its selectors falls through to `*`")]
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
@@ -417,6 +421,10 @@ fn check_policy(
             .collect(),
         source_mentions: source_mentions(&document),
         tools,
+        annotator_uses: declarations(&document, "tool")
+            .filter_map(|tool| tool.get("annotator").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect(),
         declarations: named_declarations(&document),
     })
 }
@@ -452,7 +460,7 @@ fn source_mentions(document: &Value) -> Vec<String> {
 }
 
 /// A targeted battery's base is loaded alone wherever the sandbox is off, so it
-/// runs no helper and every tool it names resolves within it.
+/// runs no helper, and every tool and annotator it names resolves within it.
 fn check_stands_alone(policy: &Path, base: &PolicyBindings) -> Result<(), PackageError> {
     if let Some(external) = base.helpers.first() {
         return Err(PackageError::BaseRunsHelper {
@@ -466,6 +474,17 @@ fn check_stands_alone(policy: &Path, base: &PolicyBindings) -> Result<(), Packag
             entry: entry.clone(),
         });
     }
+    let declared = |name: &str| {
+        base.declarations
+            .iter()
+            .any(|declaration| declaration.kind == DeclarationKind::Annotator && declaration.name == name)
+    };
+    if let Some(annotator) = base.annotator_uses.iter().find(|annotator| !declared(annotator)) {
+        return Err(PackageError::BaseUsesTargetAnnotator {
+            policy: policy.to_path_buf(),
+            annotator: annotator.clone(),
+        });
+    }
     check_variants(policy, &base.tools, &[])
 }
 
@@ -474,26 +493,29 @@ fn check_stands_alone(policy: &Path, base: &PolicyBindings) -> Result<(), Packag
 /// does not shadow `base`'s patterned ones, and every tool `policy` names has a bare
 /// variant here or in `base`, so no call falls through to `*`.
 fn check_variants(policy: &Path, tools: &[String], base: &[String]) -> Result<(), PackageError> {
-    let split = |variant: &str| {
-        (
-            variant.split('(').next().unwrap_or(variant).to_owned(),
-            !variant.contains('('),
-        )
-    };
+    fn split(variant: &str) -> (&str, bool) {
+        match variant.split_once('(') {
+            Some((tool, _)) => (tool, false),
+            None => (variant, true),
+        }
+    }
+    let patterned: BTreeSet<&str> = base
+        .iter()
+        .map(|other| split(other))
+        .filter_map(|(tool, is_bare)| (!is_bare).then_some(tool))
+        .collect();
     let mut bare = BTreeSet::new();
     for variant in tools {
         let refused = match split(variant) {
-            (tool, _) if bare.contains(&tool) => PackageError::UnreachableVariant {
+            (tool, _) if bare.contains(tool) => PackageError::UnreachableVariant {
                 policy: policy.to_path_buf(),
-                tool,
+                tool: tool.to_owned(),
                 variant: variant.clone(),
             },
-            (tool, true) if base.iter().any(|other| split(other) == (tool.clone(), false)) => {
-                PackageError::TargetShadowsBase {
-                    policy: policy.to_path_buf(),
-                    tool,
-                }
-            }
+            (tool, true) if patterned.contains(tool) => PackageError::TargetShadowsBase {
+                policy: policy.to_path_buf(),
+                tool: tool.to_owned(),
+            },
             (tool, is_bare) => {
                 bare.extend(is_bare.then_some(tool));
                 continue;
@@ -513,7 +535,7 @@ fn check_variants(policy: &Path, tools: &[String], base: &[String]) -> Result<()
     {
         Some(tool) => Err(PackageError::ToolWithoutBareVariant {
             policy: policy.to_path_buf(),
-            tool,
+            tool: tool.to_owned(),
         }),
         None => Ok(()),
     }
@@ -531,6 +553,8 @@ struct PolicyBindings {
     source_mentions: Vec<String>,
     /// The declared tool contracts, canonical and in declaration order.
     tools: Vec<String>,
+    /// The annotators its tools name with `annotator`.
+    annotator_uses: Vec<String>,
     declarations: BTreeSet<NamedDeclaration>,
 }
 
@@ -1726,6 +1750,30 @@ mod tests {
         }
         let group = "[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = { audience = [\"@finance\"] }\n";
         validate_package(targeted(&declaring(group), MULTI_USER_POLICY).path()).unwrap();
+    }
+
+    /// Loaded alone, a targeted base resolves its tools' annotators within itself, so
+    /// one declared only by the target policies leaves the base unloadable.
+    #[test]
+    fn a_targeted_base_declares_the_annotators_its_tools_use() {
+        let annotator = "[[policy.annotator]]\nname = \"classifier\"\n";
+        let base =
+            format!("{TARGETED_BASE}\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n");
+        let with_targets = |base: &str, target_tail: &str| {
+            let directory = targeted(base, &format!("{MULTI_USER_POLICY}\n{target_tail}"));
+            fs::write(
+                directory.path().join("single-user.toml"),
+                format!("{SINGLE_USER_POLICY}\n{target_tail}"),
+            )
+            .unwrap();
+            directory
+        };
+
+        assert!(matches!(
+            validate_package(with_targets(&base, annotator).path()),
+            Err(PackageError::BaseUsesTargetAnnotator { annotator, .. }) if annotator == "classifier"
+        ));
+        validate_package(with_targets(&format!("{base}\n{annotator}"), "").path()).unwrap();
     }
 
     /// The engine picks a tool's first matching variant, target policy before base, and a
