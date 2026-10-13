@@ -119,6 +119,8 @@ pub enum PackageError {
     },
     #[error("{policy} names `{tool}` without a bare variant, so a call outside its selectors falls through to `*`")]
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
+    #[error("{policy} is a targeted battery's base, which loads alone, yet binds `{external}` without declaring it")]
+    BaseBindingUndeclared { policy: PathBuf, external: NamedExternal },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
     UnreachableVariant {
         policy: PathBuf,
@@ -486,6 +488,24 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
         });
     }
     let bound: BTreeSet<NamedExternal> = externals(base).map(|(external, _)| external).collect();
+    let declared = named_declarations(base);
+    let undeclared = bound.iter().find(|external| {
+        DeclarationKind::ALL
+            .into_iter()
+            .filter(|kind| kind.section() == external.section)
+            .any(|kind| {
+                !declared.contains(&NamedDeclaration {
+                    kind,
+                    name: external.name.clone(),
+                })
+            })
+    });
+    if let Some(external) = undeclared {
+        return Err(PackageError::BaseBindingUndeclared {
+            policy: policy.to_path_buf(),
+            external: external.clone(),
+        });
+    }
     let unbound = DeclarationKind::ALL
         .into_iter()
         .flat_map(|kind| {
@@ -1866,6 +1886,29 @@ mod tests {
         ] {
             validate_package(with_targets(&base, "").path()).unwrap();
         }
+    }
+
+    /// Loaded alone, a targeted base must declare each binding it carries, or the runtime
+    /// refuses it as undeclared. A sanitizer's stock builtin is the one binding a base may
+    /// carry without running a helper, so the check is exercised through it.
+    #[test]
+    fn a_targeted_base_declares_every_binding_it_carries() {
+        let declaration = "[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n";
+        let base = format!("{TARGETED_BASE}\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n");
+        let directory = targeted(&base, &format!("{MULTI_USER_POLICY}\n{declaration}"));
+        fs::write(
+            directory.path().join("single-user.toml"),
+            format!("{SINGLE_USER_POLICY}\n{declaration}"),
+        )
+        .unwrap();
+        let expected = NamedExternal {
+            section: "sanitizers".to_owned(),
+            name: "mask".to_owned(),
+        };
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::BaseBindingUndeclared { external, .. }) if external == expected
+        ));
     }
 
     /// The engine picks a tool's first matching variant, target policy before base, and a
