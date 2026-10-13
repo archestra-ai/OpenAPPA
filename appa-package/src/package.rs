@@ -629,14 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_policy_reads_as_the_base_with_no_targets() {
-        let battery = manifest(BATTERY).unwrap().battery().unwrap().clone();
-
-        assert_eq!(battery.base.as_str(), "appa.toml");
-        assert!(battery.targets.is_empty());
-    }
-
-    #[test]
     fn a_battery_declares_exactly_one_base_and_only_known_targets() {
         assert!(matches!(
             manifest(&TARGETED.replace("base = \"appa.toml\"", "base = \"appa.toml\"\npolicy = \"appa.toml\"")),

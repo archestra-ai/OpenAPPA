@@ -103,8 +103,8 @@ pub enum PackageError {
     },
     #[error("`{field}` names the battery's base policy, which a deployment of the target already includes")]
     TargetPolicyIsBase { field: &'static str },
-    #[error("`{field}` is outside the base policy's directory, where the battery's helper commands run")]
-    TargetPolicyOutsideBaseDirectory { field: &'static str },
+    #[error("`{field}` is outside the package root, where a battery with targets keeps its policies")]
+    TargetedPolicyOutsidePackageRoot { field: &'static str },
     #[error("{policy} declares `{contract}`, which is outside the namespaces it covers ({namespaces})")]
     PolicyForeignContract {
         policy: PathBuf,
@@ -146,6 +146,11 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     target,
                 });
             }
+            // The loader finds the manifest beside the included base, and helper
+            // commands run from the including policy's directory.
+            if !battery.targets.is_empty() && policy.parent() != Some(contained.root.as_path()) {
+                return Err(PackageError::TargetedPolicyOutsidePackageRoot { field: "battery.base" });
+            }
             for (target, target_policy) in &mut battery.targets {
                 let field = target.policy_field();
                 let target_path = contained.resolve(&target_policy.policy, field, EntryKind::File)?;
@@ -154,8 +159,8 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 if target_path == policy {
                     return Err(PackageError::TargetPolicyIsBase { field });
                 }
-                if target_path.parent() != policy.parent() {
-                    return Err(PackageError::TargetPolicyOutsideBaseDirectory { field });
+                if target_path.parent() != Some(contained.root.as_path()) {
+                    return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
                 }
                 let policy = target_path;
                 let bindings = check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
@@ -1117,9 +1122,28 @@ mod tests {
         .unwrap();
         assert!(matches!(
             validate_package(directory.path()),
-            Err(PackageError::TargetPolicyOutsideBaseDirectory {
+            Err(PackageError::TargetedPolicyOutsidePackageRoot {
                 field: "battery.targets.multi-user.policy"
             })
+        ));
+
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        fs::create_dir(directory.path().join("policies")).unwrap();
+        for policy in ["appa.toml", "single-user.toml", "multi-user.toml"] {
+            fs::rename(
+                directory.path().join(policy),
+                directory.path().join("policies").join(policy),
+            )
+            .unwrap();
+        }
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}{BOTH_TARGETS}").replace("policy = \"", "policy = \"policies/"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetedPolicyOutsidePackageRoot { field: "battery.base" })
         ));
 
         let versioned = MULTI_USER_POLICY.replace("version = 2", "version = 1");
