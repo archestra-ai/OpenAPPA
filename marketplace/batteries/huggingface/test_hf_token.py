@@ -51,6 +51,16 @@ class ResolveToken(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             HF_TOKEN.resolve_token({})
 
+    def test_a_multi_user_deployment_reads_the_variable_alone(self):
+        self.stored("hf_stored")
+        environ = {"HOME": self.home.name}
+        self.assertEqual(HF_TOKEN.Deployment.SINGLE_USER.token(environ), "hf_stored")
+        with self.assertRaises(RuntimeError):
+            HF_TOKEN.Deployment.MULTI_USER.token(environ)
+        with self.assertRaises(RuntimeError):
+            HF_TOKEN.env_token({**environ, "APPA_PROVIDER_HUGGINGFACE_TOKEN": "  "})
+        self.assertEqual(HF_TOKEN.Deployment.MULTI_USER.token({**environ, "APPA_PROVIDER_HUGGINGFACE_TOKEN": " hf_var\n"}), "hf_var")
+
     def test_the_hub_root_is_hf_endpoint(self):
         self.assertEqual(HF_TOKEN.hub_root({}), "https://huggingface.co")
         self.assertEqual(HF_TOKEN.hub_root({"HF_ENDPOINT": "http://127.0.0.1:9/"}), "http://127.0.0.1:9")
