@@ -41,6 +41,14 @@ delta = {}
 name = "mcp/archestra/load_skill"
 delta = {}
 
+# --- reporting: yell files a guardrails report with the organization's
+# admins. It is how an agent escalates a block, so no label a session
+# picked up can refuse it ---
+
+[[policy.tool]]
+name = "mcp/archestra/yell"
+delta = {}
+
 # --- projects ---
 
 [[policy.tool]]
