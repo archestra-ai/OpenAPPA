@@ -185,7 +185,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 });
             }
             if battery.targets.is_none() {
-                check_lookup_routes(&policy, &[&base])?;
+                check_lookup_routes(&[(&policy, &base)])?;
             }
             if let Some(targets) = &mut battery.targets {
                 check_stands_alone(&policy, &base_document, &base.tools)?;
@@ -201,13 +201,18 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     if target_path.parent() != Some(contained.root.as_path()) {
                         return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
                     }
-                    let policy = target_path;
-                    let document = read_document(&policy)?;
-                    let bindings =
-                        check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers, &document)?;
-                    check_composes(&policy, &base, &bindings)?;
-                    check_variants(&policy, &bindings.tools, &base.tools)?;
-                    check_lookup_routes(&policy, &[&base, &bindings])?;
+                    let policy_path = target_path;
+                    let document = read_document(&policy_path)?;
+                    let bindings = check_policy(
+                        &policy_path,
+                        &package.name,
+                        &battery.namespaces,
+                        &battery.helpers,
+                        &document,
+                    )?;
+                    check_composes(&policy_path, &base, &bindings)?;
+                    check_variants(&policy_path, &bindings.tools, &base.tools)?;
+                    check_lookup_routes(&[(&policy, &base), (&policy_path, &bindings)])?;
                     target_policy.audiences = bindings.audiences;
                     target_policy.credentials = bindings.credentials;
                 }
@@ -751,11 +756,14 @@ fn check_composes(policy: &Path, base: &PolicyBindings, target_policy: &PolicyBi
 
 /// The loader follows a lookup route one hop: it refuses a route whose destination
 /// routes its own lookups. `layers` are the policies one deployment includes
-/// together; a destination none of them binds is the root's, which the loader
+/// together, each with the path of the file declaring its bindings; a destination none of them binds is the root's, which the loader
 /// checks against the composed config.
-fn check_lookup_routes(policy: &Path, layers: &[&PolicyBindings]) -> Result<(), PackageError> {
-    let routed = |name: &str| layers.iter().any(|layer| layer.lookups.contains_key(name));
-    for (name, target) in layers.iter().flat_map(|layer| &layer.lookups) {
+fn check_lookup_routes(layers: &[(&Path, &PolicyBindings)]) -> Result<(), PackageError> {
+    let routed = |name: &str| layers.iter().any(|(_, layer)| layer.lookups.contains_key(name));
+    for (policy, (name, target)) in layers
+        .iter()
+        .flat_map(|(policy, layer)| layer.lookups.iter().map(move |route| (*policy, route)))
+    {
         match (name == target, routed(target)) {
             (true, _) => {
                 return Err(PackageError::AudienceLookupToItself {
@@ -1620,6 +1628,13 @@ mod tests {
         assert!(matches!(
             validate_package(directory.path()),
             Err(PackageError::AudienceLookupToItself { name, .. }) if name == "github-org"
+        ));
+        // A route the base declares is the base's to answer for, whichever target composes it.
+        fs::write(directory.path().join("appa.toml"), routed("github")).unwrap();
+        fs::write(directory.path().join("multi-user.toml"), target_policy("host-members")).unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::AudienceLookupToItself { policy, .. }) if policy.file_name() == Some("appa.toml".as_ref())
         ));
         // The target's route meets the base's binding only once the two are composed.
         fs::write(directory.path().join("appa.toml"), routed("host-members")).unwrap();
