@@ -286,8 +286,13 @@ builtin = "redact-email"
     const denied = await plugin.emit('tool.call', call('read_web_page', { url: 'https://example.com/?q=private' }))
     expect(denied.action).toBe('reject-and-continue')
     expect(denied.message).toContain('audience')
-    // A duplicate report cannot be admitted as a new, unlabelled value.
-    expect((await plugin.emit('tool.result', { ...privateRead, status: 'done', output: 'private' })).status).toBe('error')
+    // An identical report replays its admission without clearing the private label.
+    expect(await plugin.emit('tool.result', { ...privateRead, status: 'done', output: 'private' })).toBeUndefined()
+    expect((await plugin.emit('tool.call', call('read_web_page', { url: 'https://example.com/?q=private-after-retry' }))).action)
+      .toBe('reject-and-continue')
+    // A different body is not the committed outcome and must not reach Amp.
+    expect((await plugin.emit('tool.result', { ...privateRead, status: 'done', output: 'FORGED public replacement' })).status)
+      .toBe('error')
   })
 
   test('private error text narrows the trajectory too', async () => {
