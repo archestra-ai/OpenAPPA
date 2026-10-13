@@ -520,7 +520,7 @@ async fn a_withholding_that_cannot_be_written_does_not_exit_zero() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_decision_that_cannot_be_written_does_not_exit_zero() {
     for answer in [
-        r#"{"protocol":1,"decision":"deny_call","feedback":"[appa] Blocked: this call cannot run yet."}"#,
+        r#"{"protocol":1,"decision":"deny_call","feedback":"[appa] Blocked: send_mail cannot run yet."}"#,
         r#"{"protocol":1,"decision":"block","reason":"denied"}"#,
         r#"{"protocol":1,"decision":"replace_output","output":"[appa] the output is confined"}"#,
         r#"{"protocol":1,"decision":"deliver_value","value":"{\"ticket\":\"scrubbed\"}"}"#,

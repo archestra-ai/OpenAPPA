@@ -90,7 +90,7 @@ def test_the_sanitized_remedy_delivers_a_derivation_and_withholds_the_secret(sta
     assert len(reads) == 2, f"the read was proposed, denied, and proposed again: {reads}"
     feedback = str(reads[0].get("result", ""))
     assert reads[0].get("appa") == "denied", f"the read is denied first: {reads[0]}"
-    assert "Accept this change" in feedback, f"the deny offers the narrowing: {feedback}"
+    assert "Accept narrower readers" in feedback, f"the deny offers the narrowing: {feedback}"
     assert "Use sanitizer strip-secret-values" in feedback, f"the deny offers the sanitizer: {feedback}"
     remedies = task.responses("execute_remedy_plan")
     assert remedies, "the reserved call answered the model"
@@ -178,7 +178,7 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
                 "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},
             },
-            {"remedy": "accept this change"},
+            {"remedy": "accept lower trust"},
             {
                 "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},

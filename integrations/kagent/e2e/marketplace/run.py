@@ -273,10 +273,10 @@ class Acceptance:
         read = {"tool": "get_file_contents", "args": {"owner": "acme", "repo": "public", "path": "README.md"}}
         write = {"tool": "issue_write", "args": {"owner": "acme", "repo": "public", "title": "test", "body": "operator text"}}
         # Each proposed GitHub call is one visibility lookup; a re-proposal after
-        # `accept this change` stands on the annotation pinned to the open offer.
+        # `accept lower trust` stands on the annotation pinned to the open offer.
         for case, script, expected_reads, expected_writes, denials, lookups in (
             ("read-refused", [read, {"text": "done"}], 0, 0, 1, 1),
-            ("tainted-write-refused", [read, {"remedy": "accept this change"}, read, write, {"text": "done"}], 1, 0, 2, 2),
+            ("tainted-write-refused", [read, {"remedy": "accept lower trust"}, read, write, {"text": "done"}], 1, 0, 2, 2),
             ("trusted-write", [write, {"text": "done"}], 0, 1, 0, 1),
         ):
             http(fixture_url + "/state", {})
