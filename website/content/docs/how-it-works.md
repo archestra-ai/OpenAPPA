@@ -39,7 +39,8 @@ OpenAPPA operates with three concepts:
    Every tool has a contract in the OpenAPPA policy. The contract tells OpenAPPA how the tool interacts with the agent's security state:
 
    - **`delta`:** How data returned by the tool changes the security label.
-   - **`requires`:** Which requirements the session must satisfy for OpenAPPA to allow the action.
+   - **`forwards`:** The label of content the tool sends beyond its arguments, such as a stored file that it mails. Most tools omit it.
+   - **`requires`:** Which requirements the data the call sends must satisfy for OpenAPPA to allow the action. OpenAPPA checks them before the call: against the session's label, combined with `forwards`.
    - **`effects`:** Which effects are recorded after a tool runs successfully.
 
    OpenAPPA uses the first explicit contract whose argument selectors match. If none match, the policy can route the call through a wildcard (`name = "*"`) annotator. Once a contract matches, a schema error refuses the call without falling through.
@@ -108,7 +109,7 @@ See [Sanitizers in Policy configuration](/contracts#sanitizers) for service conf
 
 ### Annotators
 
-An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), the restrictions of content it sends (`forwards`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
 
 For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 

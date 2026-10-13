@@ -93,8 +93,9 @@ better as a result.
 **Vocabulary**
 
 - Use APPA's defined terms consistently. Terms that readers must type in TOML
-  or use through an API, including `delta`, `requires`, `emits`, `attention`,
-  `contains`, `within`, and `permits`, must be taught rather than paraphrased away.
+  or use through an API, including `delta`, `forwards`, `requires`, `emits`,
+  `attention`, `contains`, `within`, and `permits`, must be taught rather than
+  paraphrased away.
 - Prefer plain technical English and the shortest accurate term. Reference documentation MUST follow ASD-STE100 (Simplified Technical English): short sentences (maximum 20–25 words), active voice, precise technical vocabulary, zero conversational fluff or oversimplification, and strict preservation of technical and modal nuances (such as capability `can` vs action `does`, `MUST`, `MAY`, `MUST NOT`). Gloss specialized IFC or security vocabulary at first use; omit it when it adds no precision.
 - Reader-facing prose may explain a wire term in ordinary language. Show the
   exact wire term where readers need to recognize or type it.
