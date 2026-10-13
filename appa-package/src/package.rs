@@ -65,7 +65,7 @@ impl fmt::Display for ImageReference {
     }
 }
 
-/// The deployment shape a battery add-on is written for.
+/// The deployment shape a battery target policy is written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BatteryTarget {
     SingleUser,
@@ -73,6 +73,8 @@ pub enum BatteryTarget {
 }
 
 impl BatteryTarget {
+    pub const ALL: [Self; 2] = [Self::SingleUser, Self::MultiUser];
+
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "single-user" => Some(Self::SingleUser),
@@ -88,7 +90,7 @@ impl BatteryTarget {
         }
     }
 
-    /// The manifest field that names this target's add-on policy.
+    /// The manifest field that names this target's policy.
     pub(crate) fn policy_field(self) -> &'static str {
         match self {
             Self::SingleUser => "battery.targets.single-user.policy",
@@ -107,24 +109,24 @@ impl fmt::Display for BatteryTarget {
 /// credentials are read from its own policy by `validate_package`, as the
 /// base's are.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BatteryAddon {
+pub struct TargetPolicy {
     pub policy: RelativePath,
     pub audiences: Vec<String>,
     pub credentials: Vec<String>,
 }
 
-/// A battery that declares targets has no add-on for the one requested.
+/// A battery that declares targets has no target policy for the one requested.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("the battery declares no add-on for the `{0}` target")]
+#[error("the battery has no policy for the `{0}` target")]
 pub struct MissingTarget(pub BatteryTarget);
 
-/// A battery: a base policy file with optional per-target add-ons, the hosts
+/// A battery: a base policy file with optional per-target policies, the hosts
 /// it is written for, the namespaces its contracts may name, and the helper
 /// programs its externals may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Battery {
     pub base: RelativePath,
-    pub targets: BTreeMap<BatteryTarget, BatteryAddon>,
+    pub targets: BTreeMap<BatteryTarget, TargetPolicy>,
     pub hosts: Vec<Host>,
     /// The tool namespaces this battery covers. A battery usually covers the
     /// one namespace its own name spells, which is why the field defaults to
@@ -158,14 +160,14 @@ pub struct Battery {
 }
 
 impl Battery {
-    /// The policies a deployment of `target` includes, add-on first. A battery
+    /// The policies a deployment of `target` includes, target policy first. A battery
     /// without targets, or a deployment that names none, includes the base alone.
     pub fn compose_order(&self, target: Option<BatteryTarget>) -> Result<Vec<&RelativePath>, MissingTarget> {
         match target {
             Some(target) if !self.targets.is_empty() => self
                 .targets
                 .get(&target)
-                .map(|addon| vec![&addon.policy, &self.base])
+                .map(|target_policy| vec![&target_policy.policy, &self.base])
                 .ok_or(MissingTarget(target)),
             _ => Ok(vec![&self.base]),
         }
@@ -331,7 +333,7 @@ struct RawBattery {
     policy: Option<String>,
     base: Option<String>,
     #[serde(default)]
-    targets: BTreeMap<String, RawAddon>,
+    targets: BTreeMap<String, RawTargetPolicy>,
     hosts: Vec<String>,
     #[serde(default)]
     namespaces: Vec<String>,
@@ -347,7 +349,7 @@ struct RawBattery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAddon {
+struct RawTargetPolicy {
     policy: String,
 }
 
@@ -363,17 +365,17 @@ impl RawBattery {
             }
         };
         let mut targets = BTreeMap::new();
-        for (target, addon) in self.targets {
+        for (target, target_policy) in self.targets {
             let parsed = BatteryTarget::parse(&target).ok_or_else(|| ManifestError::Target {
                 path: path.to_path_buf(),
                 target,
             })?;
-            let addon = BatteryAddon {
-                policy: relative(&addon.policy, parsed.policy_field(), path)?,
+            let target_policy = TargetPolicy {
+                policy: relative(&target_policy.policy, parsed.policy_field(), path)?,
                 audiences: Vec::new(),
                 credentials: Vec::new(),
             };
-            targets.insert(parsed, addon);
+            targets.insert(parsed, target_policy);
         }
         let mut hosts = Vec::new();
         for host in self.hosts {
@@ -611,7 +613,7 @@ mod tests {
          [battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
 
     #[test]
-    fn a_battery_parses_its_base_and_target_add_ons() {
+    fn a_battery_parses_its_base_and_target_policies() {
         let package = manifest(TARGETED).unwrap();
         let battery = package.battery().unwrap();
 
@@ -655,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_order_puts_the_target_add_on_before_the_base() {
+    fn compose_order_puts_the_target_policy_before_the_base() {
         let targeted = manifest(TARGETED).unwrap();
         let targeted = targeted.battery().unwrap();
         fn names(order: Vec<&RelativePath>) -> Vec<&str> {

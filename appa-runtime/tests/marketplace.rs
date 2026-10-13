@@ -604,8 +604,8 @@ fn includes_load(package: &Path, policies: &[&str]) -> bool {
     Config::load(&root).is_ok()
 }
 
-/// A target's deployment includes its add-on beside the base. A targeted
-/// battery that validates loads in its compose order, and one whose add-on
+/// A target's deployment includes its target policy beside the base. A targeted
+/// battery that validates loads in its compose order, and one whose target policy
 /// redeclares an external of its base is refused by both crates.
 #[test]
 fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
@@ -616,16 +616,18 @@ fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
              selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
         )
     };
-    for (what, addon_audience, composes) in [
+    for (what, target_audience, composes) in [
         ("a distinct external", "probe-org", true),
         ("the base's external", "probe", false),
     ] {
         let package = tempfile::tempdir().expect("a temp dir is creatable");
         std::fs::write(
             package.path().join("appa-package.toml"),
-            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+            "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\nbase = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
         )
         .expect("the manifest is writable");
+        std::fs::write(package.path().join("single-user.toml"), "[policy]\nversion = 2\n")
+            .expect("the single-user target policy is writable");
         std::fs::write(
             package.path().join("appa.toml"),
             format!("[policy]\nversion = 2\n{tool}\n{}", audience("probe")),
@@ -633,9 +635,9 @@ fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
         .expect("the base is writable");
         std::fs::write(
             package.path().join("multi-user.toml"),
-            format!("[policy]\nversion = 2\n\n{}", audience(addon_audience)),
+            format!("[policy]\nversion = 2\n\n{}", audience(target_audience)),
         )
-        .expect("the add-on is writable");
+        .expect("the target policy is writable");
         std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
 
         let order = validate_package(package.path()).map(|validated| match validated.role {
