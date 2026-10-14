@@ -338,6 +338,30 @@ jobs:
         working-directory: integrations/opencode
         run: bun install --frozen-lockfile && bun run check && bun test
 
+      # Keep the published CLI and its binary install out of the SDK test lane.
+      # Inference is a local scripted SSE fixture: no provider key or model usage.
+      - name: Install the pinned OpenCode CLI
+        working-directory: integrations/opencode/smoke
+        run: bun install --frozen-lockfile
+
+      - name: Exercise the real OpenCode CLI with deterministic inference
+        timeout-minutes: 3
+        run: python3 integrations/opencode/smoke/run.py --output "${{ runner.temp }}/appencode-smoke"
+
+      - name: Upload AppenCode smoke evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appencode-smoke
+          path: |
+            ${{ runner.temp }}/appencode-smoke/*.log
+            ${{ runner.temp }}/appencode-smoke/*.jsonl
+            ${{ runner.temp }}/appencode-smoke/*.stderr
+            ${{ runner.temp }}/appencode-smoke/mcp.json
+            ${{ runner.temp }}/appencode-smoke/appa.db*
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Setup uv for OTLP verification
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
