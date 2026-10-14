@@ -56,11 +56,15 @@ checkout's `integrations/opencode` directory. V2 uses `plugins`, not `plugin`:
   "plugins": ["/absolute/path/to/OpenAPPA/integrations/opencode"],
   "mcp": {
     "servers": {
-      "appa": { "type": "remote", "url": "http://127.0.0.1:8789/mcp", "oauth": false }
+      "appa": { "type": "remote", "url": "http://127.0.0.1:8789/mcp", "oauth": false, "codemode": false }
     }
   }
 }
 ```
+
+Set `codemode` to `false` so OpenCode does not instruct the model to use
+the disabled `execute` tool. AppenCode exposes MCP tools directly. Use the
+same setting for other MCP servers connected to this protected deployment.
 
 Keep the exact MCP server name `appa`. Connect it before protected work;
 the agent needs its `appa_execute_remedy_plan` tool to execute remedy plans.
