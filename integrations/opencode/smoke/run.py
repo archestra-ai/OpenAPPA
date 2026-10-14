@@ -327,6 +327,7 @@ def run(output):
                                 "type": "remote",
                                 "url": f"{runtime_url}/mcp",
                                 "oauth": False,
+                                "codemode": False,
                             }
                         }
                     },
