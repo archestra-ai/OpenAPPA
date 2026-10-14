@@ -372,8 +372,8 @@ async fn admitted(runtime: &Arc<Runtime>, read: ProposedCall) -> (String, String
     label.clone()
 }
 
-/// Each target labels a read of one issue with that issue's readers, asking the `linear`
-/// source for them.
+/// Each target labels a read of one issue with that issue's readers, and asks the `linear`
+/// source for them once a later call's requirement reads that label.
 #[tokio::test]
 async fn each_target_labels_an_issue_read_with_its_readers() {
     for target in [BatteryTarget::SingleUser, BatteryTarget::MultiUser] {
@@ -387,6 +387,11 @@ async fn each_target_labels_an_issue_read_with_its_readers() {
             ("trusted".to_string(), "@linear:issue/ENG-1/readers".to_string()),
             "{target:?}"
         );
+        propose(
+            &runtime,
+            call("save_comment", serde_json::json!({"issueId": "ENG-2", "body": "x"})),
+        )
+        .await;
         assert!(
             reads.0.lock().unwrap().contains(&"issue/ENG-1/readers".to_string()),
             "{target:?}"
