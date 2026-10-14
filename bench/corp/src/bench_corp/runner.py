@@ -44,12 +44,17 @@ from .scenario import AnnotatorAnswer, AuthorityAnswer, SanitizerAnswer, Scenari
 # would also count the demo's startup banner and every block-feedback line,
 # which both mention execute_remedy_plan.
 #
-# The APPA count is *policy events*, not blocks. `Fact::BlockFeedback` carries
-# no semantic kind — it is the one channel for refusals, acknowledgements
-# (a void return's "no result returned to the parent") and join notifications
-# alike — so the demo prints them identically and no regex can separate them.
-# Counting them together is honest; calling the total "blocked" was not.
-_APPA_POLICY_EVENT = re.compile(r"^appa:.*\bblock", re.IGNORECASE | re.MULTILINE)
+# The APPA count is the agent's block records: a blocked call, a blocked
+# output, a blocked child return (each also covers an operational refusal the
+# runtime withheld the same way). It is anchored on the record kind after the
+# trajectory tag, because the free text in other records — what the model
+# says, a fork's errand, proposed arguments — mentions "block" freely. The tag
+# pattern assumes the corp harness's ids (`appa-corp-agent`, `:c<n>` children),
+# which never contain `]`.
+_APPA_POLICY_EVENT = re.compile(
+    r"^appa: \[[^\]]+\] (?:blocked \S+:|the output was blocked:|the child's return was blocked:)",
+    re.MULTILINE,
+)
 _FIDES_BLOCK = re.compile(r"\bBLOCKED\b")
 _REMEDY = re.compile(r"^appa: remedy authorized\b", re.MULTILINE)
 _PROVIDER_ATTEMPTS = re.compile(r"^appa:.*inference completed after (\d+) provider attempts$", re.MULTILINE)

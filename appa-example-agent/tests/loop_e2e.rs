@@ -399,6 +399,63 @@ async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
 }
 
 #[tokio::test]
+async fn the_parent_records_the_spawn_result_it_reads() {
+    for child_says in [Some("The answer is forty-two."), Some(""), None] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let provider = Provider::default();
+        let script = provider
+            .calls("delegate", serde_json::json!({"task": "Find the answer."}))
+            .declares_the_return()
+            .calls("delegate", serde_json::json!({"task": "Find the answer."}));
+        match child_says {
+            Some(text) => script.says(text),
+            None => script.says_nothing(),
+        }
+        .says("Done.");
+        let host = ToolHost::default();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let agent =
+            delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await).with_observer(tx);
+        agent.run(root(), "Delegate it.", Default::default()).await;
+        drop(agent);
+        let records = root_records(rx).await;
+
+        let spawn = appa_example_agent::CallId("call_2".to_string());
+        assert_eq!(
+            records
+                .iter()
+                .filter_map(|record| match record {
+                    appa_example_agent::Record::Returned { call, body } if *call == spawn => Some(body.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![provider.tool_result(4, "call_2")],
+            "{child_says:?}: the parent records exactly what its spawn call returned. Recorded: {records:?}",
+        );
+        assert!(
+            !records.iter().any(|record| matches!(
+                record,
+                appa_example_agent::Record::Substituted { call, .. } if *call == spawn
+            )),
+            "{child_says:?}: the spawn's close is not recorded as its output. Recorded: {records:?}",
+        );
+    }
+}
+
+async fn root_records(
+    mut rx: tokio::sync::mpsc::Receiver<appa_example_agent::Recorded>,
+) -> Vec<appa_example_agent::Record> {
+    let mut records = Vec::new();
+    while let Some(recorded) = rx.recv().await {
+        if recorded.trajectory == root() {
+            records.push(recorded.record);
+        }
+    }
+    records
+}
+
+#[tokio::test]
 async fn a_child_is_not_offered_another_spawn_or_told_to_delegate_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
@@ -620,6 +677,7 @@ context_control = true
         .says("Alice Chen, SSN 4821-9930")
         .says("The child ended; I will not repeat its work.");
 
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
     let agent = delegating(
         agent(
             runtime(&dir, policy, &externals),
@@ -632,12 +690,28 @@ context_control = true
     .with_limits(Limits {
         max_inference_rounds: 10,
         ..Limits::default()
-    });
+    })
+    .with_observer(tx);
     let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
+    drop(agent);
+    let records = root_records(rx).await;
 
     assert_eq!(
         outcome,
         Outcome::Answer("The child ended; I will not repeat its work.".to_string())
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, appa_example_agent::Record::ReturnBlocked { .. })),
+        "the parent records the blocked return. Recorded: {records:?}",
+    );
+    assert!(
+        !records.iter().any(|record| matches!(
+            record,
+            appa_example_agent::Record::Returned { .. } | appa_example_agent::Record::Substituted { .. }
+        )),
+        "and no admitted return or spawn-close output. Recorded: {records:?}",
     );
     let feedback = provider.tool_result(7, "call_2");
     assert!(feedback.contains("its return value was not admitted"));
