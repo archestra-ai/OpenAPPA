@@ -13325,6 +13325,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: true,
+                preserving_output: true,
             }),
             "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
              return sanitizer can"
@@ -13361,8 +13362,10 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Within,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a drop the floor permits is to be accepted here, not delegated again"
+            "a drop the floor permits is to be accepted here, not delegated again, unless the offered output \
+             sanitizer keeps this trajectory's label"
         );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
@@ -13387,6 +13390,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
         );
@@ -13413,6 +13417,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "with no return sanitizer registered, no grandchild can take the drop either"
         );
@@ -13444,6 +13449,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a sanitizer whose `from` the suspicious value fails would refuse the child's return"
         );
@@ -13464,8 +13470,46 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route, \
+             and offered on the read's output it keeps this trajectory's label"
+        );
+    }
+
+    #[test]
+    fn an_output_sanitizer_that_leaves_a_narrowing_does_not_preserve_the_label() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let log = vec![opened(&e)];
+        let read = call("read_suspicious_internal", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .any(|plan| plan.sanitizer().is_some()),
+            "the trust-lifting sanitizer is offered on the read's output"
+        );
+        assert!(
+            matches!(
+                block.block.fork_advice,
+                Some(crate::plan::ForkAdvice::Narrowing {
+                    preserving_output: false,
+                    ..
+                })
+            ),
+            "the offer still narrows the audience, so it keeps no label: {:?}",
+            block.block.fork_advice
         );
     }
 

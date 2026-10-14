@@ -83,15 +83,21 @@ pub(crate) struct StaticAnnotation<'a>(&'a ToolAnnotation);
 #[error("the annotation reads its call's arguments")]
 pub(crate) struct NotStatic;
 
-impl<'a> StaticAnnotation<'a> {
-    pub(crate) fn of(annotation: &'a ToolAnnotation) -> Result<StaticAnnotation<'a>, NotStatic> {
-        let placeholder = annotation.requires.audience_requirements().iter().any(|requirement| {
+impl ToolAnnotation {
+    /// Does an audience `includes` requirement name its recipients from the call's arguments?
+    pub(crate) fn reads_recipients(&self) -> bool {
+        self.requires.audience_requirements().iter().any(|requirement| {
             matches!(
                 requirement,
                 AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_))
             )
-        });
-        if placeholder || annotation.delta.selector_placeholder().is_some() {
+        })
+    }
+}
+
+impl<'a> StaticAnnotation<'a> {
+    pub(crate) fn of(annotation: &'a ToolAnnotation) -> Result<StaticAnnotation<'a>, NotStatic> {
+        if annotation.reads_recipients() || annotation.delta.selector_placeholder().is_some() {
             return Err(NotStatic);
         }
         Ok(StaticAnnotation(annotation))
