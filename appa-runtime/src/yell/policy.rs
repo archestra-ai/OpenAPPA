@@ -82,6 +82,7 @@ static TOOL: Table = Table {
         ("description", Rule::Never),
         ("tags", Rule::Elements(Class::Tag)),
         ("delta", Rule::Table(&LABEL_WRITE)),
+        ("forwards", Rule::Table(&LABEL_WRITE)),
         ("requires", Rule::Table(&REQUIRES)),
         ("effects", Rule::Elements(Class::Effect)),
         // The parameter schema a deployment authored for this tool. Its property names and

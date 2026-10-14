@@ -27,9 +27,10 @@
 //!   disagree with the log because a record and its key row commit or roll back together;
 //! - file roots, a derived root-to-workspace lookup written in the same transaction as the
 //!   authoritative `RootBound` workspace event;
-//! - operations and processed results — typed receipts for idempotent claims. They are not
-//!   engine facts. SQLite and Memory keep them beside the log; PostgreSQL hosts install the
-//!   equivalent `openappa_*` tables through their own migrations;
+//! - operations and processed results — typed receipts for idempotent claims, each pending one
+//!   under the lease of the owner that claimed it. They are not engine facts. SQLite and Memory
+//!   keep them beside the log; PostgreSQL hosts install the equivalent `openappa_*` tables
+//!   through their own migrations;
 //! - held peer messages — a message body one root holds for another until the receiver takes
 //!   it. The body lives only there, never in the log.
 //!
@@ -86,8 +87,8 @@ use sqlite::Sqlite;
 use embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, ReadTake};
 pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
 pub use receipts::{
-    OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest,
-    ReceiptBinding, ReceiptError, SessionScope,
+    LeaseOwner, LeaseValueError, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
+    ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptLease, Renewal, SessionScope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +139,9 @@ struct FaultPoints {
 pub struct Log {
     root: TrajectoryId,
     facts: Vec<Fact>,
+    /// How many facts the log holds after each batch, so the facts of one batch can be told
+    /// from the next.
+    batch_ends: Vec<usize>,
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
@@ -319,6 +323,24 @@ impl Log {
     /// never a count of facts.
     pub fn basis(&self) -> u64 {
         self.basis
+    }
+
+    /// The facts of every batch after position `basis`, one slice per batch in log order.
+    /// `None` when this read stands before `basis`.
+    pub fn batches_after(&self, basis: u64) -> Option<impl Iterator<Item = &[Fact]>> {
+        let first = usize::try_from(basis)
+            .ok()
+            .filter(|first| *first <= self.batch_ends.len())?;
+        let start = match first {
+            0 => 0,
+            first => self.batch_ends[first - 1],
+        };
+        let ends = &self.batch_ends[first..];
+        Some(ends.iter().scan(start, |start, end| {
+            let batch = &self.facts[*start..*end];
+            *start = *end;
+            Some(batch)
+        }))
     }
 
     pub fn policy_file(&self) -> &[u8] {
@@ -534,6 +556,86 @@ pub enum AppendError {
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
+}
+
+/// One read-decide-append step on one root's log; see [`LogStore::step`]. An append ends the
+/// step; dropping it without one writes nothing. On PostgreSQL the step holds the family's row
+/// lock from its read to its append; on SQLite it relies on the compare-and-swap alone.
+pub struct Step<'a> {
+    store: &'a LogStore,
+    root: TrajectoryId,
+    backend: StepBackend<'a>,
+}
+
+enum StepBackend<'a> {
+    /// Borrows nothing; the lifetime is the PostgreSQL step's.
+    Sqlite(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "postgres")]
+    Postgres(postgres::PostgresStep<'a>),
+}
+
+impl Step<'_> {
+    /// The root's log as it stands within this step.
+    pub fn log(&self) -> Result<Log, ReadError> {
+        match &self.backend {
+            StepBackend::Sqlite(_) => self.store.log(&self.root),
+            #[cfg(feature = "postgres")]
+            StepBackend::Postgres(step) => {
+                #[cfg(feature = "fault-injection")]
+                self.store.read_refused()?;
+                step.log()
+            }
+        }
+    }
+
+    /// [`LogStore::append`] within this step.
+    pub fn append(self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
+        self.write(based_on, encode(facts, None), None, None)
+    }
+
+    /// [`LogStore::append_host`] within this step.
+    pub fn append_host(self, based_on: &Log, facts: &[Fact], observation: &HostObservation) -> Result<(), AppendError> {
+        let key = observation.key();
+        self.write(based_on, encode(facts, Some(observation)), key.as_deref(), None)
+    }
+
+    /// [`LogStore::append_holding_embedded_read`] within this step.
+    pub fn append_holding_embedded_read(
+        self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: Option<&HostObservation>,
+        hold: &embedded::EmbeddedAppendHold<'_>,
+    ) -> Result<(), AppendError> {
+        let key = observation.and_then(HostObservation::key);
+        self.write(based_on, encode(facts, observation), key.as_deref(), Some(hold))
+    }
+
+    fn write(
+        self,
+        based_on: &Log,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+        hold: Option<&embedded::EmbeddedAppendHold<'_>>,
+    ) -> Result<(), AppendError> {
+        assert_eq!(based_on.root, self.root, "a step appends only to the log it read");
+        match self.backend {
+            StepBackend::Sqlite(_) => match hold {
+                None => self.store.append_at(&based_on.root, based_on.basis, bytes, key),
+                Some(hold) => match &self.store.store {
+                    Store::Sqlite(sqlite) => {
+                        sqlite
+                            .appender()
+                            .append_holding_read(&based_on.root, based_on.basis, &bytes, key, hold)
+                    }
+                    #[cfg(feature = "postgres")]
+                    Store::Postgres(_) => unreachable!("a SQLite step belongs to a SQLite store"),
+                },
+            },
+            #[cfg(feature = "postgres")]
+            StepBackend::Postgres(step) => step.append(based_on.basis, bytes, key, hold),
+        }
+    }
 }
 
 impl LogStore {
@@ -818,47 +920,95 @@ impl LogStore {
         }
     }
 
-    /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
-    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
+    /// Claims an operation receipt under `lease` before starting work. Completed receipts return
+    /// saved decisions; a pending one is the caller's again, taken over once its lease has run
+    /// out, or held by its live owner.
+    pub fn claim_operation(
+        &self,
+        request: OperationRequest,
+        lease: &ReceiptLease,
+    ) -> Result<OperationClaim, ReceiptError> {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.claim_operation(&request),
+            Store::Sqlite(sqlite) => sqlite.claim_operation(&request, lease),
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.claim_operation(request),
+            Store::Postgres(pg) => pg.claim_operation(request, lease.clone()),
         }
     }
 
-    /// Completes a claimed operation receipt with its final decision.
-    pub fn complete_operation(&self, key: OperationKey, decision: serde_json::Value) -> Result<(), ReceiptError> {
+    /// Completes a claimed operation receipt with its final decision, only while `owner` still
+    /// holds its lease.
+    pub fn complete_operation(
+        &self,
+        key: OperationKey,
+        decision: serde_json::Value,
+        owner: &LeaseOwner,
+    ) -> Result<(), ReceiptError> {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.complete_operation(&key, &decision),
+            Store::Sqlite(sqlite) => sqlite.complete_operation(&key, &decision, owner),
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.complete_operation(key, decision),
+            Store::Postgres(pg) => pg.complete_operation(key, decision, owner.clone()),
         }
     }
 
-    /// Claims a durable processed-result receipt before result processing.
+    /// Claims a durable processed-result receipt under `lease` before result processing, as
+    /// [`LogStore::claim_operation`] claims an operation.
     pub fn claim_processed_result(
         &self,
         request: ProcessedResultRequest,
+        lease: &ReceiptLease,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.claim_processed_result(&request),
+            Store::Sqlite(sqlite) => sqlite.claim_processed_result(&request, lease),
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.claim_processed_result(request),
+            Store::Postgres(pg) => pg.claim_processed_result(request, lease.clone()),
         }
     }
 
-    /// Completes a processed-result receipt with its approved output and decision.
+    /// Completes a processed-result receipt with its approved output and decision, only while
+    /// `owner` still holds its lease.
     pub fn complete_processed_result(
         &self,
         key: ProcessedResultKey,
         approved_output: String,
         decision: serde_json::Value,
+        owner: &LeaseOwner,
     ) -> Result<(), ReceiptError> {
         match &self.store {
-            Store::Sqlite(sqlite) => sqlite.complete_processed_result(&key, &approved_output, &decision),
+            Store::Sqlite(sqlite) => sqlite.complete_processed_result(&key, &approved_output, &decision, owner),
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision),
+            Store::Postgres(pg) => pg.complete_processed_result(key, approved_output, decision, owner.clone()),
+        }
+    }
+
+    /// Extends the lease on each listed receipt still pending under the lease's owner, in one
+    /// transaction. [`Renewal::Lost`] when any listed receipt is gone or another owner took it
+    /// over, pending or complete; a receipt the caller completed is kept.
+    pub fn renew_receipts(
+        &self,
+        lease: &ReceiptLease,
+        operations: &[OperationKey],
+        results: &[ProcessedResultKey],
+    ) -> Result<Renewal, ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.renew_receipts(lease, operations, results),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.renew_receipts(lease.clone(), operations.to_vec(), results.to_vec()),
+        }
+    }
+
+    /// Ends `owner`'s lease on each listed receipt still pending under it, so the next claim by
+    /// another owner recovers it at once and drives its work again. The rows stay, with the
+    /// input they recorded; completed receipts and other owners' receipts are untouched.
+    pub fn release_receipts(
+        &self,
+        owner: &LeaseOwner,
+        operations: &[OperationKey],
+        results: &[ProcessedResultKey],
+    ) -> Result<(), ReceiptError> {
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.release_receipts(owner, operations, results),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.release_receipts(owner.clone(), operations.to_vec(), results.to_vec()),
         }
     }
 
@@ -1055,6 +1205,26 @@ impl LogStore {
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, bytes, key.as_deref(), hold),
         }
+    }
+
+    /// Begin one read-decide-append step on `root`'s log. On PostgreSQL the step is one
+    /// transaction that holds the root's row lock from its read to its append, so the writers
+    /// of one family take turns rather than losing the compare-and-swap to each other; the lock
+    /// and the connection last for this step only. On a leased store the step runs on the
+    /// lease's connection, so the host keeps no transaction of its own open there until the
+    /// step ends. On SQLite the step adds nothing to the compare-and-swap. Every read and
+    /// append of the step goes through the [`Step`].
+    pub fn step(&self, root: &TrajectoryId) -> Result<Step<'_>, ReadError> {
+        let backend = match &self.store {
+            Store::Sqlite(_) => StepBackend::Sqlite(std::marker::PhantomData),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => StepBackend::Postgres(pg.step(root)?),
+        };
+        Ok(Step {
+            store: self,
+            root: root.clone(),
+            backend,
+        })
     }
 
     /// The receiver's unexpired messages it was not yet told of, oldest first. Each is told
@@ -1323,7 +1493,7 @@ mod tests {
     }
 
     /// A database file holding `root()`, rewritten to look as a build at `version` left it:
-    /// stamped `version`, without the tables later versions added.
+    /// stamped `version`, without the tables and columns later versions added.
     fn written_at(version: i64) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
@@ -1332,8 +1502,15 @@ mod tests {
             .create_root(opening(&root()), POLICY.as_bytes())
             .expect("the root opens");
         let old = rusqlite::Connection::open(&path).expect("the file reopens");
-        old.execute_batch("DROP TABLE held_peer_messages; DROP TABLE archived_roots;")
-            .expect("the later tables drop");
+        old.execute_batch(
+            "DROP TABLE held_peer_messages; DROP TABLE archived_roots;
+             ALTER TABLE operations DROP COLUMN lease_owner;
+             ALTER TABLE operations DROP COLUMN lease_expires_at;
+             ALTER TABLE processed_results DROP COLUMN lease_owner;
+             ALTER TABLE processed_results DROP COLUMN lease_expires_at;
+             ALTER TABLE processed_results DROP COLUMN completed_at;",
+        )
+        .expect("the later tables and columns drop");
         old.pragma_update(None, "user_version", version)
             .expect("the version moves back");
         (dir, path)
@@ -1350,6 +1527,54 @@ mod tests {
         );
         drop(store);
         LogStore::open(Backend::Sqlite { path }).expect("the upgraded database is current");
+    }
+
+    /// A pending receipt a database carried from before receipts held leases has none once
+    /// upgraded, so the next claim recovers it.
+    #[test]
+    fn an_upgraded_pending_receipt_is_recovered() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
+        let old = rusqlite::Connection::open(&path).expect("the file reopens");
+        old.execute_batch(
+            "ALTER TABLE operations DROP COLUMN lease_owner;
+             ALTER TABLE operations DROP COLUMN lease_expires_at;
+             ALTER TABLE processed_results DROP COLUMN lease_owner;
+             ALTER TABLE processed_results DROP COLUMN lease_expires_at;
+             ALTER TABLE processed_results DROP COLUMN completed_at;",
+        )
+        .expect("the lease columns drop");
+        old.execute(
+            "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
+             VALUES ('org', 'caller', 'session', 'op-1', 'root', ?1, 'pending')",
+            [r#"{"version":1,"binding":"caller","semantic":{"tool":"wire"}}"#],
+        )
+        .expect("the pending receipt lands");
+        old.pragma_update(None, "user_version", 7)
+            .expect("the version moves back");
+        drop(old);
+
+        let store = LogStore::open(Backend::Sqlite { path }).expect("the database upgrades");
+        let request = OperationRequest {
+            key: OperationKey {
+                session: SessionScope {
+                    organization_id: "org".to_owned(),
+                    session_id: "session".to_owned(),
+                },
+                binding: caller_binding(),
+                operation_id: "op-1".to_owned(),
+            },
+            root: TrajectoryId::new("root"),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        assert_eq!(
+            store
+                .claim_operation(request, &receipt_lease("a"))
+                .expect("the claim resolves"),
+            OperationClaim::Recovered
+        );
     }
 
     #[test]
@@ -2007,6 +2232,14 @@ mod tests {
         }
     }
 
+    pub(crate) fn lease_owner(name: &str) -> LeaseOwner {
+        LeaseOwner::parse(name).expect("the owner is well formed")
+    }
+
+    pub(crate) fn receipt_lease(name: &str) -> ReceiptLease {
+        ReceiptLease::new(lease_owner(name), Duration::from_secs(60)).expect("the lease is well formed")
+    }
+
     fn typed_receipts_are_idempotent_and_fail_closed(store: &LogStore, suffix: &str) {
         let session = receipt_session(suffix);
         let root = TrajectoryId::new(format!("receipt-root:{suffix}"));
@@ -2020,21 +2253,22 @@ mod tests {
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
+        let (lease, other) = (receipt_lease("a"), receipt_lease("b"));
         assert!(matches!(
-            store.claim_operation(request.clone()),
+            store.claim_operation(request.clone(), &lease),
             Ok(OperationClaim::Claimed)
         ));
         assert!(matches!(
-            store.claim_operation(request.clone()),
-            Err(ReceiptError::Pending)
+            store.claim_operation(request.clone(), &other),
+            Ok(OperationClaim::Held)
         ));
         let decision = serde_json::json!({"decision":"mcp_result"});
         store
-            .complete_operation(request.key.clone(), decision.clone())
+            .complete_operation(request.key.clone(), decision.clone(), lease.owner())
             .expect("the claimed operation completes");
         assert_eq!(
             store
-                .claim_operation(request.clone())
+                .claim_operation(request.clone(), &other)
                 .expect("the completed operation replays"),
             OperationClaim::Complete {
                 decision: decision.clone()
@@ -2043,7 +2277,7 @@ mod tests {
         let mut changed = request.clone();
         changed.input = serde_json::json!({"offer_id": "other"});
         assert!(matches!(
-            store.claim_operation(changed),
+            store.claim_operation(changed, &lease),
             Err(ReceiptError::InputMismatch)
         ));
 
@@ -2056,16 +2290,21 @@ mod tests {
             root: root.clone(),
         };
         assert!(matches!(
-            store.claim_processed_result(result.clone()),
+            store.claim_processed_result(result.clone(), &lease),
             Ok(ProcessedResultClaim::Claimed)
         ));
         assert!(store.has_pending_receipts(&root).expect("the pending receipt checks"));
         store
-            .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
+            .complete_processed_result(
+                result.key.clone(),
+                "approved".to_owned(),
+                decision.clone(),
+                lease.owner(),
+            )
             .expect("the processed result completes");
         assert_eq!(
             store
-                .claim_processed_result(result)
+                .claim_processed_result(result, &other)
                 .expect("the processed result replays"),
             ProcessedResultClaim::Complete {
                 approved_output: "approved".to_owned(),
@@ -2089,16 +2328,19 @@ mod tests {
         drop(store);
         let reopened = LogStore::open(Backend::Sqlite { path }).expect("the store reopens");
         assert!(matches!(
-            reopened.claim_operation(OperationRequest {
-                key: OperationKey {
-                    session: receipt_session("sqlite"),
-                    binding: caller_binding(),
-                    operation_id: "remedy-1".to_owned(),
+            reopened.claim_operation(
+                OperationRequest {
+                    key: OperationKey {
+                        session: receipt_session("sqlite"),
+                        binding: caller_binding(),
+                        operation_id: "remedy-1".to_owned(),
+                    },
+                    root: TrajectoryId::new("receipt-root:sqlite"),
+                    input: serde_json::json!({"offer_id": "0123456789abcdef"}),
+                    context: None,
                 },
-                root: TrajectoryId::new("receipt-root:sqlite"),
-                input: serde_json::json!({"offer_id": "0123456789abcdef"}),
-                context: None,
-            }),
+                &receipt_lease("b")
+            ),
             Ok(OperationClaim::Complete { .. })
         ));
     }
@@ -2116,11 +2358,15 @@ mod tests {
             context: None,
         };
         assert_eq!(
-            memory().claim_operation(request.clone()).expect("the operation claims"),
+            memory()
+                .claim_operation(request.clone(), &receipt_lease("a"))
+                .expect("the operation claims"),
             OperationClaim::Claimed
         );
         assert_eq!(
-            memory().claim_operation(request).expect("the other store claims"),
+            memory()
+                .claim_operation(request, &receipt_lease("b"))
+                .expect("the other store claims"),
             OperationClaim::Claimed,
             "Memory receipts are private to the store that wrote them"
         );
@@ -2156,47 +2402,53 @@ mod tests {
             root: TrajectoryId::new(format!("receipt-root:{session_id}")),
         };
 
+        let (lease, other) = (receipt_lease("a"), receipt_lease("b"));
         for scope in [&first, &second] {
             assert_eq!(
-                store.claim_operation(operation(scope)).unwrap(),
+                store.claim_operation(operation(scope), &lease).unwrap(),
                 OperationClaim::Claimed
             );
             assert_eq!(
-                store.claim_processed_result(result(scope)).unwrap(),
+                store.claim_processed_result(result(scope), &lease).unwrap(),
                 ProcessedResultClaim::Claimed
             );
         }
         let decided = |scope: &SessionScope| serde_json::json!({"decision": scope.organization_id});
         store
-            .complete_operation(operation(&first).key, decided(&first))
+            .complete_operation(operation(&first).key, decided(&first), lease.owner())
             .expect("the first organization completes its operation");
         store
-            .complete_processed_result(result(&first).key, "first".to_owned(), decided(&first))
+            .complete_processed_result(result(&first).key, "first".to_owned(), decided(&first), lease.owner())
             .expect("the first organization completes its result");
-        assert!(matches!(
-            store.claim_operation(operation(&second)),
-            Err(ReceiptError::Pending)
-        ));
-        assert!(matches!(
-            store.claim_processed_result(result(&second)),
-            Err(ReceiptError::Pending)
-        ));
+        assert_eq!(
+            store.claim_operation(operation(&second), &other).unwrap(),
+            OperationClaim::Held
+        );
+        assert_eq!(
+            store.claim_processed_result(result(&second), &other).unwrap(),
+            ProcessedResultClaim::Held
+        );
         store
-            .complete_operation(operation(&second).key, decided(&second))
+            .complete_operation(operation(&second).key, decided(&second), lease.owner())
             .expect("the second organization completes its operation");
         store
-            .complete_processed_result(result(&second).key, "second".to_owned(), decided(&second))
+            .complete_processed_result(
+                result(&second).key,
+                "second".to_owned(),
+                decided(&second),
+                lease.owner(),
+            )
             .expect("the second organization completes its result");
 
         for (scope, output) in [(&first, "first"), (&second, "second")] {
             assert_eq!(
-                store.claim_operation(operation(scope)).unwrap(),
+                store.claim_operation(operation(scope), &other).unwrap(),
                 OperationClaim::Complete {
                     decision: decided(scope)
                 }
             );
             assert_eq!(
-                store.claim_processed_result(result(scope)).unwrap(),
+                store.claim_processed_result(result(scope), &other).unwrap(),
                 ProcessedResultClaim::Complete {
                     approved_output: output.to_owned(),
                     decision: decided(scope),
@@ -2421,21 +2673,22 @@ mod tests {
             input: serde_json::json!({"offer_id": "0123456789abcdef"}),
             context: None,
         };
+        let (lease, other) = (receipt_lease("a"), receipt_lease("b"));
         assert!(matches!(
-            store.claim_operation(request.clone()),
+            store.claim_operation(request.clone(), &lease),
             Ok(OperationClaim::Claimed)
         ));
         assert!(matches!(
-            store.claim_operation(request.clone()),
-            Err(ReceiptError::Pending)
+            store.claim_operation(request.clone(), &other),
+            Ok(OperationClaim::Held)
         ));
         let decision = serde_json::json!({"decision":"mcp_result"});
         store
-            .complete_operation(request.key.clone(), decision.clone())
+            .complete_operation(request.key.clone(), decision.clone(), lease.owner())
             .expect("the claimed operation completes");
         assert_eq!(
             store
-                .claim_operation(request.clone())
+                .claim_operation(request.clone(), &other)
                 .expect("the completed operation replays"),
             OperationClaim::Complete {
                 decision: decision.clone()
@@ -2444,7 +2697,7 @@ mod tests {
         let mut changed = request.clone();
         changed.input = serde_json::json!({"offer_id": "other"});
         assert!(matches!(
-            store.claim_operation(changed),
+            store.claim_operation(changed, &lease),
             Err(ReceiptError::InputMismatch)
         ));
 
@@ -2457,16 +2710,21 @@ mod tests {
             root: root.clone(),
         };
         assert!(matches!(
-            store.claim_processed_result(result.clone()),
+            store.claim_processed_result(result.clone(), &lease),
             Ok(ProcessedResultClaim::Claimed)
         ));
         assert!(store.has_pending_receipts(&root).expect("the pending receipt checks"));
         store
-            .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
+            .complete_processed_result(
+                result.key.clone(),
+                "approved".to_owned(),
+                decision.clone(),
+                lease.owner(),
+            )
             .expect("the processed result completes");
         assert_eq!(
             store
-                .claim_processed_result(result)
+                .claim_processed_result(result, &other)
                 .expect("the processed result replays"),
             ProcessedResultClaim::Complete {
                 approved_output: "approved".to_owned(),
@@ -2484,7 +2742,7 @@ mod tests {
             ..request.clone()
         };
         store
-            .claim_operation(session_bound)
+            .claim_operation(session_bound, &lease)
             .expect("the session-bound operation claims");
         let session_id = session.session_id.clone();
         let callers: Vec<(String, Option<String>)> = pg
@@ -2617,10 +2875,153 @@ mod tests {
             .with_client(move |client| {
                 for root in &roots {
                     client.execute("DELETE FROM openappa_events WHERE root=$1", &[&root.as_str()])?;
+                    client.execute("DELETE FROM openappa_roots WHERE root=$1", &[&root.as_str()])?;
                 }
                 Ok(())
             })
             .expect("the test roots clean up");
+    }
+
+    /// Whether a connection other than `store`'s can lock `root`'s family row right now.
+    #[cfg(feature = "postgres")]
+    fn postgres_root_is_free(store: &LogStore, root: &TrajectoryId) -> bool {
+        let key = root.as_str().to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                let mut transaction = client.transaction()?;
+                let free = match transaction.query_opt(
+                    "SELECT 1 FROM openappa_roots WHERE root = $1 FOR UPDATE NOWAIT",
+                    &[&key],
+                ) {
+                    Ok(row) => row.is_some(),
+                    Err(error) if error.code() == Some(&::postgres::error::SqlState::LOCK_NOT_AVAILABLE) => false,
+                    Err(error) => return Err(error.into()),
+                };
+                transaction.rollback()?;
+                Ok(free)
+            })
+            .expect("the lock attempt answers")
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_step_holds_its_root_from_the_read_to_the_append() {
+        let store = postgres_store(3);
+        let root = postgres_root(&store, "step");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        assert!(
+            postgres_root_is_free(&store, &root),
+            "an opened root has its row, and nobody holds it"
+        );
+
+        let step = store.step(&root).expect("the step begins");
+        let log = step.log().expect("the step reads");
+        assert!(!postgres_root_is_free(&store, &root), "the step holds the family's row");
+        step.append(&log, &boundary).expect("the step appends");
+        assert!(postgres_root_is_free(&store, &root), "the append ends the step");
+        assert_eq!(store.log(&root).expect("the log reads").basis(), 2);
+
+        let step = store.step(&root).expect("a second step begins");
+        let _ = step.log().expect("the step reads");
+        drop(step);
+        assert!(postgres_root_is_free(&store, &root), "a dropped step lets the row go");
+        assert_eq!(
+            store.log(&root).expect("the log reads").basis(),
+            2,
+            "a dropped step wrote nothing"
+        );
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_concurrent_steps_of_one_family_all_append() {
+        let writers = 12;
+        let store = std::sync::Arc::new(postgres_store(writers + 1));
+        let root = postgres_root(&store, "steps");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(writers));
+        let handles: Vec<_> = (0..writers)
+            .map(|_| {
+                let (store, root, barrier) = (store.clone(), root.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let boundary = vec![Fact::Boundary {
+                        trajectory: root.clone(),
+                        kind: appa_engine::fact::BoundaryKind::VoidReturn,
+                    }];
+                    barrier.wait();
+                    let step = store.step(&root).expect("the step begins");
+                    let log = step.log().expect("the step reads");
+                    step.append(&log, &boundary)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("the writer finishes")
+                .expect("no writer loses its append: the steps take turns");
+        }
+        assert_eq!(store.log(&root).expect("the log reads").basis(), writers as u64 + 1);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_cached_log_reads_new_batches_and_drops_a_rewritten_tail() {
+        let reader = postgres_store(1);
+        let writer = postgres_store(1);
+        let root = postgres_root(&writer, "cached");
+        let boundary = vec![Fact::Boundary {
+            trajectory: root.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        let first = reader.log(&root).expect("the log reads");
+        writer
+            .append(&writer.log(&root).expect("the log reads"), &boundary)
+            .expect("another store appends");
+        let second = reader.log(&root).expect("the log reads again");
+        assert_eq!(second.basis(), first.basis() + 1, "the cached read sees the new batch");
+        assert_eq!(
+            second,
+            writer.log(&root).expect("the writer reads"),
+            "and equals a cold read"
+        );
+
+        // The last batch the reader cached is replaced behind its back.
+        let key = root.as_str().to_owned();
+        writer
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.execute(
+                    "UPDATE openappa_events SET payload = $2 WHERE root = $1 AND seq = 1",
+                    &[&key, &b"[]".to_vec()],
+                )?;
+                Ok(())
+            })
+            .expect("the batch is rewritten");
+        let reread = reader.log(&root).expect("the rewritten log reads");
+        assert_eq!(reread.basis(), 2);
+        assert!(
+            reread
+                .batches_after(1)
+                .expect("the batch exists")
+                .all(<[Fact]>::is_empty),
+            "the reader drops its cached copy and reads the stored batch"
+        );
+        forget_postgres_roots(&writer, vec![root]);
     }
 
     #[cfg(feature = "postgres")]
@@ -2699,31 +3100,87 @@ mod tests {
         );
     }
 
+    /// A transaction host SQL leaves open on a lease ends when the connection returns to the
+    /// pool: its writes roll back and the row locks it held are free. Two leases claiming one
+    /// receipt contend on the receipt's own row.
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
-    fn postgres_session_locks_and_receipt_keys_contend_across_leases() {
+    fn postgres_a_returned_connection_ends_its_transaction_and_receipts_contend_across_leases() {
         let store = postgres_store(2);
         let unique = tempfile::tempdir().expect("a unique namespace exists");
         let suffix = unique.path().display().to_string();
+        let inbox = format!("lease-inbox:{suffix}");
+        let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
+        let returned = backend_pid(&a);
+        let held = inbox.clone();
+        a.postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute("INSERT INTO openappa_peer_inboxes (receiver) VALUES ($1)", &[&held])?;
+                client.batch_execute("BEGIN")?;
+                client.query_one(
+                    "SELECT 1 FROM openappa_peer_inboxes WHERE receiver = $1 FOR UPDATE",
+                    &[&held],
+                )?;
+                client.execute(
+                    "INSERT INTO openappa_peer_inboxes (receiver) VALUES ($1)",
+                    &[&format!("{held}:uncommitted")],
+                )?;
+                Ok(())
+            })
+            .expect("the host leaves a transaction open");
         let try_lock = |lease: &LogStore| {
-            let key = suffix.clone();
+            let receiver = inbox.clone();
             lease
                 .postgres()
                 .unwrap()
                 .with_client(move |client| {
-                    Ok(client
-                        .query_one("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", &[&key])?
-                        .get::<_, bool>(0))
+                    match client.query_one(
+                        "SELECT 1 FROM openappa_peer_inboxes WHERE receiver = $1 FOR UPDATE NOWAIT",
+                        &[&receiver],
+                    ) {
+                        Ok(_) => Ok(true),
+                        Err(error) if error.code() == Some(&::postgres::error::SqlState::LOCK_NOT_AVAILABLE) => {
+                            Ok(false)
+                        }
+                        Err(error) => Err(error.into()),
+                    }
                 })
                 .expect("the lock attempt answers")
         };
-        let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
-        assert!(try_lock(&a));
-        assert!(!try_lock(&b), "a session lock held on one lease excludes another lease");
+        assert!(
+            !try_lock(&b),
+            "a row lock held in one lease's transaction excludes another lease"
+        );
         drop(a);
-        assert!(try_lock(&b), "a returned connection gives up the session locks it held");
-        drop(b);
+        assert!(try_lock(&b), "a returned connection's transaction has ended");
+        let a = store.lease().unwrap();
+        assert_eq!(
+            backend_pid(&a),
+            returned,
+            "the pool hands the returned connection out again"
+        );
+        let (fresh, uncommitted) = {
+            let receiver = format!("{inbox}:uncommitted");
+            a.postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    let row = client.query_one(
+                        "SELECT txid_current_if_assigned() IS NULL, \
+                                (SELECT COUNT(*) FROM openappa_peer_inboxes WHERE receiver = $1)",
+                        &[&receiver],
+                    )?;
+                    Ok((row.get::<_, bool>(0), row.get::<_, i64>(1)))
+                })
+                .expect("the returned connection answers")
+        };
+        assert!(
+            fresh,
+            "the returned connection is no longer inside the transaction that wrote"
+        );
+        assert_eq!(uncommitted, 0, "what the open transaction wrote rolled back");
+        drop((a, b));
 
         let request = OperationRequest {
             key: OperationKey {
@@ -2739,37 +3196,32 @@ mod tests {
             context: None,
         };
         let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
+        let leases = [receipt_lease("a"), receipt_lease("b")];
         let barrier = std::sync::Barrier::new(2);
         let claims = std::thread::scope(|scope| {
             let (barrier, request) = (&barrier, &request);
-            [&a, &b]
-                .map(|lease| {
+            [(&a, &leases[0]), (&b, &leases[1])]
+                .map(|(store, lease)| {
                     scope.spawn(move || {
                         barrier.wait();
-                        lease.claim_operation(request.clone())
+                        store.claim_operation(request.clone(), lease)
                     })
                 })
                 .map(|claim| claim.join().unwrap())
         });
-        assert_eq!(
-            claims
-                .iter()
-                .filter(|claim| matches!(claim, Ok(OperationClaim::Claimed)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            claims
-                .iter()
-                .filter(|claim| matches!(claim, Err(ReceiptError::Pending)))
-                .count(),
-            1
-        );
+        let winner = claims
+            .iter()
+            .position(|claim| matches!(claim, Ok(OperationClaim::Claimed)))
+            .expect("one lease claims");
+        assert!(matches!(claims[1 - winner], Ok(OperationClaim::Held)), "{claims:?}");
         let decision = serde_json::json!({"decision": "allow_call"});
-        a.complete_operation(request.key.clone(), decision.clone())
+        [&a, &b][winner]
+            .complete_operation(request.key.clone(), decision.clone(), leases[winner].owner())
             .expect("the claim completes");
         assert_eq!(
-            b.claim_operation(request.clone()).unwrap(),
+            [&a, &b][1 - winner]
+                .claim_operation(request.clone(), &leases[1 - winner])
+                .unwrap(),
             OperationClaim::Complete { decision },
             "the other lease replays what the first completed"
         );
@@ -2779,153 +3231,788 @@ mod tests {
             .unwrap()
             .with_client(move |client| {
                 client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+                client.execute("DELETE FROM openappa_peer_inboxes WHERE receiver = $1", &[&inbox])?;
                 Ok(())
             })
-            .expect("the test receipt cleans up");
+            .expect("the test rows clean up");
     }
 
-    /// Every writer serializes on `pg_advisory_xact_lock(hashtextextended(key, 0))` under a
-    /// key other processes share, so the key and its hash are a wire format: a session lock
-    /// held on exactly that key by another connection must stop each write until released.
+    /// One operation and one result request in a session of their own.
     #[cfg(feature = "postgres")]
-    #[test]
-    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
-    fn postgres_writers_serialize_on_their_advisory_lock_keys() {
-        let store = postgres_store(2);
-        let unique = tempfile::tempdir().expect("a unique namespace exists");
-        let suffix = unique.path().display().to_string();
-        // Opened before both connections are leased: an unleased store needs one of its own.
-        let root = postgres_root(&store, "locked");
-        let (holder, writer) = (store.lease().unwrap(), store.lease().unwrap());
-        writer
-            .postgres()
-            .unwrap()
-            .with_client(|client| {
-                client.batch_execute("SET lock_timeout = '200ms'")?;
-                Ok(())
-            })
-            .expect("the writer bounds its lock waits");
-        let hold = |key: &str, held: bool| {
-            let key = key.to_owned();
-            holder
-                .postgres()
-                .unwrap()
-                .with_client(move |client| {
-                    let sql = match held {
-                        true => "SELECT pg_advisory_lock(hashtextextended($1, 0))",
-                        false => "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
-                    };
-                    client.query_one(sql, &[&key])?;
-                    Ok(())
-                })
-                .expect("the holder takes or gives up the lock");
-        };
-
-        let boundary = vec![Fact::Boundary {
-            trajectory: root.clone(),
-            kind: appa_engine::fact::BoundaryKind::VoidReturn,
-        }];
-        hold(root.as_str(), true);
-        let before = writer.log(&root).expect("a read takes no lock");
-        assert!(matches!(
-            writer.append(&before, &boundary),
-            Err(AppendError::Postgres(_))
-        ));
-        hold(root.as_str(), false);
-        writer.append(&before, &boundary).expect("the released root appends");
-
-        let created = TrajectoryId::new(format!("pg-test:created:{suffix}"));
-        hold(created.as_str(), true);
-        assert!(matches!(
-            writer.create_root(opening(&created), POLICY.as_bytes()),
-            Err(CreateError::Postgres(_))
-        ));
-        hold(created.as_str(), false);
-        writer
-            .create_root(opening(&created), POLICY.as_bytes())
-            .expect("the released root opens");
-
-        let organization = format!("lock-org:{suffix}");
-        let session_id = format!("lock-session:{suffix}");
+    fn postgres_receipts() -> (OperationRequest, ProcessedResultRequest) {
+        let suffix = uuid::Uuid::new_v4().to_string();
         let session = SessionScope {
-            organization_id: organization.clone(),
-            session_id: session_id.clone(),
+            organization_id: format!("lease-org:{suffix}"),
+            session_id: format!("lease-session:{suffix}"),
         };
-        let pg = writer.postgres().unwrap();
-        let receipt_root = TrajectoryId::new(format!("lock-root:{suffix}"));
-
-        let request = OperationRequest {
+        let root = TrajectoryId::new(format!("lease-root:{suffix}"));
+        let operation = OperationRequest {
             key: OperationKey {
                 session: session.clone(),
                 binding: caller_binding(),
                 operation_id: "op-1".to_owned(),
             },
-            root: receipt_root.clone(),
+            root: root.clone(),
             input: serde_json::json!({"tool": "wire"}),
             context: None,
         };
-        let decision = serde_json::json!({"decision": "allow_call"});
-        let key = format!("openappa-operation:{organization}:{session_id}:op-1");
-        hold(&key, true);
-        assert!(matches!(
-            writer.claim_operation(request.clone()),
-            Err(ReceiptError::Storage(_))
-        ));
-        hold(&key, false);
-        assert_eq!(
-            writer.claim_operation(request.clone()).unwrap(),
-            OperationClaim::Claimed
-        );
-        hold(&key, true);
-        assert!(matches!(
-            writer.complete_operation(request.key.clone(), decision.clone()),
-            Err(ReceiptError::Storage(_))
-        ));
-        hold(&key, false);
-        writer
-            .complete_operation(request.key, decision.clone())
-            .expect("the released operation completes");
-
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
-                session: session.clone(),
+                session,
                 caller_id: Some("caller".to_owned()),
                 tool_call_id: "call-1".to_owned(),
             },
-            root: receipt_root,
+            root,
         };
-        let key = format!("openappa-result:{organization}:{session_id}:call-1");
-        hold(&key, true);
-        assert!(matches!(
-            writer.claim_processed_result(result.clone()),
-            Err(ReceiptError::Storage(_))
-        ));
-        hold(&key, false);
+        (operation, result)
+    }
+
+    /// Run `sql` with the session id as `$1`, on a connection of its own.
+    #[cfg(feature = "postgres")]
+    fn postgres_session_sql(store: &LogStore, sql: &'static str, session: &str) {
+        let session = session.to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                client.batch_execute("BEGIN")?;
+                client.execute(sql, &[&session])?;
+                client.batch_execute("COMMIT")?;
+                Ok(())
+            })
+            .expect("the statement runs");
+    }
+
+    /// Run every lease in the session out, by the database clock.
+    #[cfg(feature = "postgres")]
+    fn lapse_postgres(store: &LogStore, session: &str) {
+        postgres_session_sql(
+            store,
+            "WITH operations AS ( \
+                 UPDATE openappa_operations SET lease_expires_at = now() - interval '1 hour' WHERE session_id = $1 \
+             ) \
+             UPDATE openappa_processed_results SET lease_expires_at = now() - interval '1 hour' WHERE session_id = $1",
+            session,
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    fn forget_postgres_receipts(store: &LogStore, session: &str) {
+        postgres_session_sql(
+            store,
+            "WITH operations AS (DELETE FROM openappa_operations WHERE session_id = $1) \
+             DELETE FROM openappa_processed_results WHERE session_id = $1",
+            session,
+        );
+    }
+
+    /// The lease on the session's `op-1` and `call-1`, in that order: owner, and whether it
+    /// still runs by the database clock.
+    #[cfg(feature = "postgres")]
+    fn postgres_leases(store: &LogStore, session: &str) -> Vec<(Option<String>, bool)> {
+        let session = session.to_owned();
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                Ok(client
+                    .query(
+                        "SELECT 1, lease_owner, COALESCE(lease_expires_at > now(), false) FROM openappa_operations \
+                         WHERE session_id = $1 AND operation_id = 'op-1' \
+                         UNION ALL \
+                         SELECT 2, lease_owner, COALESCE(lease_expires_at > now(), false) FROM openappa_processed_results \
+                         WHERE session_id = $1 AND tool_call_id = 'call-1' \
+                         ORDER BY 1",
+                        &[&session],
+                    )?
+                    .iter()
+                    .map(|row| (row.get(1), row.get(2)))
+                    .collect())
+            })
+            .expect("the leases read")
+    }
+
+    /// A live lease holds every other owner off; its holder claims again even after it ran
+    /// out, since nobody displaced it; and once it has run out by the database clock, the
+    /// next owner recovers the receipt.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_a_lease_holds_off_other_owners_until_it_lapses() {
+        let store = postgres_store(2);
+        let (operation, result) = postgres_receipts();
+        let session = operation.key.session.session_id.clone();
+        let (a, b) = (receipt_lease("a"), receipt_lease("b"));
         assert_eq!(
-            writer.claim_processed_result(result.clone()).unwrap(),
+            store.claim_operation(operation.clone(), &a).unwrap(),
+            OperationClaim::Claimed
+        );
+        assert_eq!(
+            store.claim_processed_result(result.clone(), &a).unwrap(),
             ProcessedResultClaim::Claimed
         );
-        hold(&key, true);
-        assert!(matches!(
-            writer.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone()),
-            Err(ReceiptError::Storage(_))
-        ));
-        hold(&key, false);
-        writer
-            .complete_processed_result(result.key, "approved".to_owned(), decision)
-            .expect("the released result completes");
+        assert_eq!(
+            store.claim_operation(operation.clone(), &b).unwrap(),
+            OperationClaim::Held
+        );
+        assert_eq!(
+            store.claim_processed_result(result.clone(), &b).unwrap(),
+            ProcessedResultClaim::Held
+        );
+        assert_eq!(
+            postgres_leases(&store, &session),
+            [(Some("a".to_owned()), true), (Some("a".to_owned()), true)],
+            "a held claim writes nothing"
+        );
 
-        pg.with_client(move |client| {
-            client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session_id])?;
-            client.execute(
-                "DELETE FROM openappa_processed_results WHERE session_id=$1",
-                &[&session_id],
-            )?;
-            Ok(())
-        })
-        .expect("the test receipts clean up");
-        drop((holder, writer));
-        forget_postgres_roots(&store, vec![root, created]);
+        lapse_postgres(&store, &session);
+        assert_eq!(
+            store.claim_operation(operation.clone(), &a).unwrap(),
+            OperationClaim::Claimed
+        );
+        assert_eq!(
+            store.claim_processed_result(result.clone(), &a).unwrap(),
+            ProcessedResultClaim::Claimed
+        );
+        assert_eq!(
+            postgres_leases(&store, &session),
+            [(Some("a".to_owned()), true), (Some("a".to_owned()), true)],
+            "the holder's claim extends its lease"
+        );
+
+        lapse_postgres(&store, &session);
+        assert_eq!(
+            store.claim_operation(operation.clone(), &b).unwrap(),
+            OperationClaim::Recovered
+        );
+        assert_eq!(
+            store.claim_processed_result(result.clone(), &b).unwrap(),
+            ProcessedResultClaim::Recovered
+        );
+        assert_eq!(
+            postgres_leases(&store, &session),
+            [(Some("b".to_owned()), true), (Some("b".to_owned()), true)],
+            "a recovery takes the lease over"
+        );
+        assert_eq!(
+            store.claim_operation(operation.clone(), &a).unwrap(),
+            OperationClaim::Held,
+            "the displaced owner is held off in turn"
+        );
+
+        // A brief lease runs out on the database clock alone.
+        let brief = ReceiptLease::new(lease_owner("brief"), Duration::from_millis(200)).expect("the lease is valid");
+        let mut briefly = operation.clone();
+        briefly.key.operation_id = "op-brief".to_owned();
+        assert_eq!(
+            store.claim_operation(briefly.clone(), &brief).unwrap(),
+            OperationClaim::Claimed
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match store.claim_operation(briefly.clone(), &b).unwrap() {
+                OperationClaim::Recovered => break,
+                OperationClaim::Held if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                other => panic!("the brief lease never ran out: {other:?}"),
+            }
+        }
+
+        // A pending row written without a lease has no time left.
+        postgres_session_sql(
+            &store,
+            "INSERT INTO openappa_operations (organization_id, caller_id, session_id, operation_id, root, input, status) \
+             SELECT organization_id, caller_id, session_id, 'op-unleased', root, input, 'pending' \
+             FROM openappa_operations WHERE session_id = $1 AND operation_id = 'op-1'",
+            &session,
+        );
+        let mut unleased = operation.clone();
+        unleased.key.operation_id = "op-unleased".to_owned();
+        assert_eq!(store.claim_operation(unleased, &a).unwrap(), OperationClaim::Recovered);
+        forget_postgres_receipts(&store, &session);
+    }
+
+    /// Once another owner recovered a receipt, the owner it displaced can neither complete nor
+    /// renew it, even once the new owner completed it. A completed receipt accepts its own
+    /// completion from anyone.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_a_displaced_owner_can_neither_complete_nor_renew() {
+        let store = postgres_store(2);
+        let (operation, result) = postgres_receipts();
+        let session = operation.key.session.session_id.clone();
+        let (a, b) = (receipt_lease("a"), receipt_lease("b"));
+        let decision = serde_json::json!({"decision": "allow_call"});
+        store.claim_operation(operation.clone(), &a).unwrap();
+        store.claim_processed_result(result.clone(), &a).unwrap();
+        assert_eq!(
+            store
+                .renew_receipts(
+                    &a,
+                    std::slice::from_ref(&operation.key),
+                    std::slice::from_ref(&result.key)
+                )
+                .unwrap(),
+            Renewal::Kept
+        );
+        lapse_postgres(&store, &session);
+        assert_eq!(
+            store.claim_operation(operation.clone(), &b).unwrap(),
+            OperationClaim::Recovered
+        );
+        assert_eq!(
+            store.claim_processed_result(result.clone(), &b).unwrap(),
+            ProcessedResultClaim::Recovered
+        );
+
+        assert!(matches!(
+            store.complete_operation(operation.key.clone(), decision.clone(), a.owner()),
+            Err(ReceiptError::LeaseLost)
+        ));
+        assert!(matches!(
+            store.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone(), a.owner()),
+            Err(ReceiptError::LeaseLost)
+        ));
+        assert_eq!(
+            store
+                .renew_receipts(&a, std::slice::from_ref(&operation.key), &[])
+                .unwrap(),
+            Renewal::Lost
+        );
+        assert_eq!(
+            store
+                .renew_receipts(&a, &[], std::slice::from_ref(&result.key))
+                .unwrap(),
+            Renewal::Lost
+        );
+        assert_eq!(
+            postgres_leases(&store, &session),
+            [(Some("b".to_owned()), true), (Some("b".to_owned()), true)],
+            "a lost renewal extends nothing of another owner's"
+        );
+        assert_eq!(
+            store
+                .renew_receipts(
+                    &b,
+                    std::slice::from_ref(&operation.key),
+                    std::slice::from_ref(&result.key)
+                )
+                .unwrap(),
+            Renewal::Kept
+        );
+
+        let completed = |store: &LogStore| -> bool {
+            let session = session.clone();
+            store
+                .lease()
+                .unwrap()
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    Ok(client
+                        .query_one(
+                            "SELECT completed_at IS NOT NULL FROM openappa_processed_results \
+                             WHERE session_id = $1 AND tool_call_id = 'call-1'",
+                            &[&session],
+                        )?
+                        .get(0))
+                })
+                .expect("the completion time reads")
+        };
+        assert!(!completed(&store), "a pending result has no completion time");
+        store
+            .complete_operation(operation.key.clone(), decision.clone(), b.owner())
+            .expect("the new owner completes");
+        store
+            .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone(), b.owner())
+            .expect("the new owner completes");
+        assert!(completed(&store), "a completed result records when it completed");
+        store
+            .complete_operation(operation.key.clone(), decision.clone(), a.owner())
+            .expect("a completed receipt accepts its own completion from anyone");
+        assert!(matches!(
+            store.complete_operation(
+                operation.key.clone(),
+                serde_json::json!({"decision": "deny"}),
+                a.owner()
+            ),
+            Err(ReceiptError::CompletionMismatch)
+        ));
+        assert_eq!(
+            store
+                .renew_receipts(
+                    &a,
+                    std::slice::from_ref(&operation.key),
+                    std::slice::from_ref(&result.key)
+                )
+                .unwrap(),
+            Renewal::Lost,
+            "a receipt another owner took over and completed stays lost to the displaced one"
+        );
+        assert_eq!(
+            store
+                .renew_receipts(
+                    &b,
+                    std::slice::from_ref(&operation.key),
+                    std::slice::from_ref(&result.key)
+                )
+                .unwrap(),
+            Renewal::Kept,
+            "a receipt its owner completed is kept"
+        );
+        let mut missing = operation.key.clone();
+        missing.operation_id = "op-missing".to_owned();
+        assert_eq!(store.renew_receipts(&a, &[missing], &[]).unwrap(), Renewal::Lost);
+        assert!(!store.has_pending_receipts(&operation.root).unwrap());
+        forget_postgres_receipts(&store, &session);
+    }
+
+    /// A release ends the caller's own leases by the database clock and keeps the rows, so the
+    /// next claim recovers them at once. Completed receipts and other owners' leases are
+    /// untouched.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_a_release_lets_the_next_claim_recover_at_once() {
+        let store = postgres_store(2);
+        let (operation, result) = postgres_receipts();
+        let session = operation.key.session.session_id.clone();
+        let (a, b, c) = (receipt_lease("a"), receipt_lease("b"), receipt_lease("c"));
+        let keyed = |id: &str| {
+            let mut request = operation.clone();
+            request.key.operation_id = id.to_owned();
+            request.context = Some(serde_json::json!({"hook": "pre"}));
+            request
+        };
+        let (mine, theirs, done) = (keyed("op-mine"), keyed("op-theirs"), keyed("op-done"));
+        store.claim_operation(mine.clone(), &a).unwrap();
+        store.claim_operation(theirs.clone(), &b).unwrap();
+        store.claim_operation(done.clone(), &a).unwrap();
+        let decision = serde_json::json!({"decision": "allow_call"});
+        store
+            .complete_operation(done.key.clone(), decision.clone(), a.owner())
+            .unwrap();
+        let mut result_theirs = result.clone();
+        result_theirs.key.tool_call_id = "call-theirs".to_owned();
+        store.claim_processed_result(result.clone(), &a).unwrap();
+        store.claim_processed_result(result_theirs.clone(), &b).unwrap();
+
+        store
+            .release_receipts(
+                a.owner(),
+                &[done.key.clone(), theirs.key.clone(), mine.key.clone()],
+                &[result_theirs.key.clone(), result.key.clone()],
+            )
+            .expect("the release lands");
+        /// One receipt row: its id, status, lease owner, whether that lease still runs, and the
+        /// context its recorded input carries.
+        type Released = (String, String, Option<String>, bool, Option<serde_json::Value>);
+        let listed = session.clone();
+        let remaining: Vec<Released> = store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                Ok(client
+                    .query(
+                        "SELECT operation_id, status, lease_owner, COALESCE(lease_expires_at > now(), false), \
+                                input -> 'context' \
+                         FROM openappa_operations WHERE session_id = $1 \
+                         UNION ALL \
+                         SELECT tool_call_id, status, lease_owner, COALESCE(lease_expires_at > now(), false), NULL \
+                         FROM openappa_processed_results WHERE session_id = $1 \
+                         ORDER BY 1",
+                        &[&listed],
+                    )?
+                    .iter()
+                    .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4)))
+                    .collect())
+            })
+            .expect("the receipts read");
+        let hook = Some(serde_json::json!({"hook": "pre"}));
+        let row = |id: &str, status: &str, holder: &str, live: bool, context: &Option<serde_json::Value>| {
+            (
+                id.to_owned(),
+                status.to_owned(),
+                Some(holder.to_owned()),
+                live,
+                context.clone(),
+            )
+        };
+        assert_eq!(
+            remaining,
+            [
+                row("call-1", "pending", "a", false, &None),
+                row("call-theirs", "pending", "b", true, &None),
+                row("op-done", "complete", "a", true, &hook),
+                row("op-mine", "pending", "a", false, &hook),
+                row("op-theirs", "pending", "b", true, &hook),
+            ],
+            "a release ends the caller's pending leases and deletes nothing"
+        );
+        assert_eq!(
+            store.claim_operation(mine, &c).unwrap(),
+            OperationClaim::Recovered,
+            "released work is recovered at once"
+        );
+        assert_eq!(
+            store.claim_processed_result(result, &c).unwrap(),
+            ProcessedResultClaim::Recovered
+        );
+        assert_eq!(
+            store.claim_operation(theirs, &c).unwrap(),
+            OperationClaim::Held,
+            "another owner's lease is untouched"
+        );
+        assert_eq!(
+            store.claim_processed_result(result_theirs, &c).unwrap(),
+            ProcessedResultClaim::Held
+        );
+        assert_eq!(
+            store.claim_operation(done, &c).unwrap(),
+            OperationClaim::Complete { decision }
+        );
+        forget_postgres_receipts(&store, &session);
+    }
+
+    /// Owners racing to claim one receipt from leases of their own: the primary key admits one
+    /// row, so exactly one claims and every other is held off.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_concurrent_claims_admit_exactly_one_owner() {
+        const OWNERS: usize = 8;
+        let store = postgres_store(OWNERS);
+        let (operation, result) = postgres_receipts();
+        let session = operation.key.session.session_id.clone();
+        let leased: Vec<LogStore> = (0..OWNERS)
+            .map(|_| store.lease().expect("a connection leases"))
+            .collect();
+        let leases: Vec<ReceiptLease> = (0..OWNERS)
+            .map(|index| receipt_lease(&format!("owner-{index}")))
+            .collect();
+        let barrier = std::sync::Barrier::new(OWNERS);
+        let (operations, results): (Vec<_>, Vec<_>) = std::thread::scope(|scope| {
+            let racers: Vec<_> = leased
+                .iter()
+                .zip(&leases)
+                .map(|(store, lease)| {
+                    let (barrier, operation, result) = (&barrier, &operation, &result);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let claimed = store.claim_operation(operation.clone(), lease).unwrap();
+                        barrier.wait();
+                        (claimed, store.claim_processed_result(result.clone(), lease).unwrap())
+                    })
+                })
+                .collect();
+            racers
+                .into_iter()
+                .map(|racer| racer.join().expect("the racer finishes"))
+                .unzip()
+        });
+        let count = |claims: &[OperationClaim], wanted: &OperationClaim| claims.iter().filter(|c| *c == wanted).count();
+        assert_eq!(count(&operations, &OperationClaim::Claimed), 1, "{operations:?}");
+        assert_eq!(count(&operations, &OperationClaim::Held), OWNERS - 1, "{operations:?}");
+        let count = |claims: &[ProcessedResultClaim], wanted: &ProcessedResultClaim| {
+            claims.iter().filter(|c| *c == wanted).count()
+        };
+        assert_eq!(count(&results, &ProcessedResultClaim::Claimed), 1, "{results:?}");
+        assert_eq!(count(&results, &ProcessedResultClaim::Held), OWNERS - 1, "{results:?}");
+        drop(leased);
+        forget_postgres_receipts(&store, &session);
+    }
+
+    /// Holders racing on one receiver serialize on its inbox row, so the quota trims exactly.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_held_peer_quota_holds_under_concurrent_holds() {
+        const HOLDERS: usize = 8;
+        const EACH: usize = 4;
+        const QUOTA: usize = 5;
+        let store = postgres_store(HOLDERS);
+        let receiver = TrajectoryId::new(format!("held-quota:{}", uuid::Uuid::new_v4()));
+        let leased: Vec<LogStore> = (0..HOLDERS)
+            .map(|_| store.lease().expect("a connection leases"))
+            .collect();
+        let now = SystemTime::now();
+        let barrier = std::sync::Barrier::new(HOLDERS);
+        std::thread::scope(|scope| {
+            for (holder, store) in leased.iter().enumerate() {
+                let (barrier, receiver) = (&barrier, &receiver);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for index in 0..EACH {
+                        let body = format!("{holder}:{index}");
+                        store
+                            .hold_peer_message(
+                                receiver,
+                                PeerDigest::of_body(&body),
+                                &Label::top(),
+                                &body,
+                                now,
+                                Duration::from_secs(600),
+                                QUOTA,
+                            )
+                            .expect("the message is held");
+                    }
+                });
+            }
+        });
+        drop(leased);
+        assert_eq!(
+            store.peer_notices(&receiver, now).expect("the notices read").len(),
+            QUOTA,
+            "concurrent holds never leave the receiver over its quota"
+        );
+        let cleaned = receiver.as_str().to_owned();
+        store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                let remaining: i64 = client
+                    .query_one(
+                        "SELECT COUNT(*) FROM openappa_held_peer_messages WHERE receiver = $1",
+                        &[&cleaned],
+                    )?
+                    .get(0);
+                client.execute(
+                    "DELETE FROM openappa_held_peer_messages WHERE receiver = $1",
+                    &[&cleaned],
+                )?;
+                client.execute("DELETE FROM openappa_peer_inboxes WHERE receiver = $1", &[&cleaned])?;
+                assert_eq!(remaining, QUOTA as i64);
+                Ok(())
+            })
+            .expect("the held rows clean up");
+    }
+
+    /// Senders racing into one family serialize on its root row, so the unread quota holds;
+    /// every other embedded write runs under the same lock.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_embedded_peer_quota_holds_under_concurrent_sends() {
+        const SENDERS: usize = 8;
+        const OPEN: usize = 2;
+        let store = postgres_store(SENDERS);
+        let root = TrajectoryId::new(format!("embedded-root:{}", uuid::Uuid::new_v4()));
+        let (sender, recipient) = (
+            TrajectoryId::new("embedded-sender"),
+            TrajectoryId::new("embedded-recipient"),
+        );
+        let send = |store: &LogStore, dispatch: String| {
+            store
+                .claim_embedded_peer(
+                    &root,
+                    &sender,
+                    &recipient,
+                    None,
+                    &dispatch,
+                    &PeerDigest::of_body(&dispatch),
+                    &Label::top(),
+                    &dispatch,
+                    SystemTime::now(),
+                )
+                .expect("the send answers")
+        };
+        for index in 0..embedded::UNREAD_QUOTA - OPEN {
+            assert!(matches!(
+                send(&store, format!("dispatch-{index}")),
+                EmbeddedClaim::Stored(_)
+            ));
+        }
+        let leased: Vec<LogStore> = (0..SENDERS)
+            .map(|_| store.lease().expect("a connection leases"))
+            .collect();
+        let barrier = std::sync::Barrier::new(SENDERS);
+        let claims: Vec<EmbeddedClaim> = std::thread::scope(|scope| {
+            let racers: Vec<_> = leased
+                .iter()
+                .enumerate()
+                .map(|(index, store)| {
+                    let (barrier, send) = (&barrier, &send);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        send(store, format!("race-{index}"))
+                    })
+                })
+                .collect();
+            racers.into_iter().map(|racer| racer.join().unwrap()).collect()
+        });
+        drop(leased);
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, EmbeddedClaim::Stored(_)))
+                .count(),
+            OPEN,
+            "{claims:?}"
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, EmbeddedClaim::Quota))
+                .count(),
+            SENDERS - OPEN
+        );
+        let inbox = store
+            .list_embedded_peer(&root, &recipient, SystemTime::now())
+            .expect("the inbox lists");
+        assert_eq!(inbox.len(), embedded::UNREAD_QUOTA);
+
+        let (read, direct) = (&inbox[0], &inbox[1]);
+        let ReadTake::Ready(claim) = store
+            .claim_embedded_read(&root, &read.id, &recipient, "call-read", "{}")
+            .expect("the read claims")
+        else {
+            panic!("the held message is ready to read");
+        };
+        assert!(
+            store
+                .release_embedded_read(&root, &read.id, "call-read", claim.generation)
+                .expect("the release answers")
+        );
+        let ReadTake::Ready(claim) = store
+            .claim_embedded_read(&root, &read.id, &recipient, "call-read", "{}")
+            .expect("the read claims again")
+        else {
+            panic!("the released message is ready to read again");
+        };
+        assert!(
+            store
+                .finish_embedded_read(&root, &read.id, "call-read", claim.generation, r#"{"kind":"finished"}"#)
+                .expect("the finish answers")
+        );
+        assert!(matches!(
+            store
+                .take_embedded_direct(
+                    &root,
+                    &direct.id,
+                    &sender,
+                    &recipient,
+                    &PeerDigest::parse(&direct.digest).expect("the digest parses")
+                )
+                .expect("the direct take answers"),
+            DirectTake::Taken(_)
+        ));
+
+        let cleaned = root.as_str().to_owned();
+        store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute(
+                    "DELETE FROM openappa_embedded_peer_messages WHERE root = $1",
+                    &[&cleaned],
+                )?;
+                client.execute("DELETE FROM openappa_roots WHERE root = $1", &[&cleaned])?;
+                Ok(())
+            })
+            .expect("the embedded rows clean up");
+    }
+
+    /// The workspace position is the primary key: of appends racing at one basis exactly one
+    /// lands, and a loser's root binding rolls back with it. A bound root refuses another
+    /// workspace.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_stale_workspace_append_conflicts_and_a_root_binds_one_workspace() {
+        const WRITERS: usize = 4;
+        let store = postgres_store(WRITERS);
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let (workspace, other) = (format!("pg-workspace:{suffix}"), format!("pg-workspace-other:{suffix}"));
+        for opened in [&workspace, &workspace, &other] {
+            store
+                .open_workspace(opened, "policy", &Label::top())
+                .expect("the workspace opens");
+        }
+        let stale = store.workspace_log(&workspace).expect("the workspace reads");
+        assert_eq!(stale.basis, 1, "a second opening writes nothing");
+        let roots: Vec<TrajectoryId> = (0..WRITERS)
+            .map(|index| TrajectoryId::new(format!("pg-workspace-root:{index}:{suffix}")))
+            .collect();
+        let leased: Vec<LogStore> = (0..WRITERS)
+            .map(|_| store.lease().expect("a connection leases"))
+            .collect();
+        let barrier = std::sync::Barrier::new(WRITERS);
+        let appended: Vec<_> = std::thread::scope(|scope| {
+            let racers: Vec<_> = leased
+                .iter()
+                .zip(&roots)
+                .map(|(store, root)| {
+                    let (barrier, stale) = (&barrier, &stale);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store.append_workspace(stale, &files::WorkspaceEvent::RootBound { root: root.clone() })
+                    })
+                })
+                .collect();
+            racers.into_iter().map(|racer| racer.join().unwrap()).collect()
+        });
+        drop(leased);
+        let winner = appended.iter().position(Result::is_ok).expect("one append lands");
+        for (index, outcome) in appended.iter().enumerate().filter(|(index, _)| *index != winner) {
+            assert!(
+                matches!(outcome, Err(files::FileStoreError::Conflict { expected: 1, actual: 2 })),
+                "{index}: {outcome:?}"
+            );
+            assert_eq!(
+                store.workspace_for_root(&roots[index]).unwrap(),
+                None,
+                "a losing append's root binding rolled back"
+            );
+        }
+        assert_eq!(
+            store.workspace_for_root(&roots[winner]).unwrap(),
+            Some(workspace.clone())
+        );
+        store
+            .bind_workspace_root(&workspace, &roots[winner])
+            .expect("an identical binding is idempotent");
+
+        let other_log = store.workspace_log(&other).expect("the other workspace reads");
+        assert!(matches!(
+            store.append_workspace(
+                &other_log,
+                &files::WorkspaceEvent::RootBound {
+                    root: roots[winner].clone()
+                }
+            ),
+            Err(files::FileStoreError::Configuration(_))
+        ));
+        assert_eq!(
+            store.workspace_log(&other).expect("the other workspace reads").basis,
+            1,
+            "a refused binding writes no event"
+        );
+
+        store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                for cleaned in [&workspace, &other] {
+                    client.execute("DELETE FROM openappa_file_events WHERE workspace = $1", &[cleaned])?;
+                    client.execute("DELETE FROM openappa_file_roots WHERE workspace = $1", &[cleaned])?;
+                }
+                Ok(())
+            })
+            .expect("the workspace rows clean up");
     }
 
     /// A host whose receipt tables are keyed without the organization, or with its columns in

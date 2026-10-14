@@ -31,7 +31,6 @@ version = 2
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
 delta = { audience = ["internal"] }
-requires = { audience = { within = ["internal"] } }
 "#;
 
 /// The host's control tool as its model sees it.

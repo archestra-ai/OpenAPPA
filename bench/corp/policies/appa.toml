@@ -168,12 +168,14 @@ delta = {}
 trust = "internal"
 audience = { contains = ["$to"] }
 
-# The composite reads finance before its email side effect. Its finance delta
-# therefore participates in the pre-dispatch recipient check.
+# The composite reads a finance file server-side and emails it. `forwards`
+# labels that packet, so the recipient check covers it before dispatch; the
+# result returns the packet too, so `delta` carries the same finance label.
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
 effects = ["egress"]
+forwards = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 [policy.tool.requires]

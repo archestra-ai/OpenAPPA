@@ -24,6 +24,9 @@
 # may open the pull requests merged into it, and so does a fork's, which
 # came from its parent. A private or internal repository that is no fork
 # keeps the session's trust for its content.
+# A write's result is labelled only when it returns stored text: the
+# parent issue `sub_issue_write` returns gets the label a read of that
+# issue gets, and is `suspicious` without the provider's answer.
 #
 # Searches and org-level listings name no single repository and reach
 # public repositories as well as every private one the token sees, so
@@ -49,10 +52,10 @@ ranks = ["suspicious"]
 audiences = ["@github:repo/$owner/$repo/collaborators"]
 marks = []
 
-# What a write into one repository needs.
+# What a write into one repository needs, and what its result returns.
 [[policy.annotator]]
 name = "github.repository-readers"
-ranks = ["trusted"]
+ranks = ["suspicious", "trusted"]
 audiences = ["@github:repo/$owner/$repo/collaborators"]
 marks = []
 

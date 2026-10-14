@@ -138,13 +138,14 @@ pub(crate) struct RawTool {
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     pub(crate) delta: Option<RawDelta>,
+    pub(crate) forwards: Option<RawDelta>,
     pub(crate) requires: Option<RawRequires>,
     #[serde(default)]
     pub(crate) effects: Vec<String>,
     pub(crate) implementation: Option<toml::Value>,
     pub(crate) parameters: Option<serde_json::Value>,
     /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
-    /// the static `delta`/`requires`/`effects` — a declaration carries one recipe.
+    /// the static `delta`/`forwards`/`requires`/`effects` — a declaration carries one recipe.
     pub(crate) annotator: Option<String>,
 }
 
@@ -169,7 +170,9 @@ pub(crate) struct RawRequires {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRequiresAudience {
     pub(crate) contains: Option<Vec<String>>,
-    pub(crate) within: Option<Vec<String>>,
+    /// Parsed so a policy writing it still loads, then dropped: an upper bound on the audience
+    /// is satisfied by any narrowing and prevents no disclosure, so APPA keeps no such requirement.
+    pub(crate) within: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]

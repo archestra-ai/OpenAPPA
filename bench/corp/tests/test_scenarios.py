@@ -123,6 +123,9 @@ def test_route_project_packet_has_annotated_source_and_recipient_answers() -> No
             "contains"
         ]
     )
+    for to in ("onyx-steering@northwind.example", "finance-all@northwind.example"):
+        share = answers[("packet-share-acl", canonical_args({"file": packet, "to": to}))]
+        assert share["forwards"]["audience"] == permitted
 
 
 def test_performance_feedback_isolates_each_personal_file() -> None:
@@ -230,6 +233,41 @@ audiences = ["alice@northwind.example"]
         load_scenario(root)
 
 
+@pytest.mark.parametrize(
+    "audience",
+    [
+        '{ within = ["alice@northwind.example"] }',
+        '{ contains = ["alice@northwind.example"], within = ["alice@northwind.example"] }',
+    ],
+)
+def test_an_annotation_requiring_within_refuses_at_load(tmp_path: Path, audience: str) -> None:
+    manifest = (
+        _with_policy_profile(_MINIMAL)
+        + f"""
+[[annotator_answer]]
+annotator = "document-acl"
+args = {{ subject = "alice.md" }}
+annotation = {{ delta = {{}}, requires = {{ audience = {audience}, history = [], attention = [] }}, emits = [] }}
+"""
+    )
+    root = _write_scenario(tmp_path / "within-requirement", manifest)
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        """version = 1
+
+[[policy.annotator]]
+name = "document-acl"
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["alice@northwind.example"]
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+
+    with pytest.raises(ScenarioError):
+        load_scenario(root)
+
+
 @pytest.mark.parametrize("audiences", ['[1]', '"alice@northwind.example"'])
 def test_a_malformed_audience_mandate_is_a_scenario_error(tmp_path: Path, audiences: str) -> None:
     root = _write_scenario(tmp_path / "malformed-mandate", _with_policy_profile(_MINIMAL))
@@ -275,6 +313,63 @@ audiences = ["alice@NORTHWIND.EXAMPLE"]
     (profile_root / "fides.json").write_text("{}\n")
 
     load_scenario(root)
+
+
+def _forwarding_scenario(tmp_path: Path, forwards: str) -> Path:
+    """A scenario whose one annotator answer forwards `forwards` under an alice-only,
+    internal-only mandate."""
+    manifest = (
+        _with_policy_profile(_MINIMAL)
+        + f"""
+[[annotator_answer]]
+annotator = "packet-acl"
+args = {{ file = "alice.md" }}
+annotation = {{ delta = {{}}, forwards = {forwards}, requires = {{ history = [], attention = [] }}, emits = [] }}
+"""
+    )
+    root = _write_scenario(tmp_path / "forwarding", manifest)
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        """version = 2
+trust_chain = ["suspicious", "internal"]
+
+[[policy.annotator]]
+name = "packet-acl"
+inputs = { file = "$tool_call.arguments.file" }
+ranks = ["internal"]
+audiences = ["alice@northwind.example"]
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+    return root
+
+
+def test_an_annotation_forwarding_inside_the_mandate_loads(tmp_path: Path) -> None:
+    forwards = {"trust": "internal", "audience": ["alice@northwind.example"]}
+    root = _forwarding_scenario(tmp_path, '{ trust = "internal", audience = ["alice@northwind.example"] }')
+
+    (answer,) = load_scenario(root).annotator_answers
+
+    assert answer.annotation["forwards"] == forwards
+
+
+@pytest.mark.parametrize(
+    ("forwards", "message"),
+    [
+        ('{ audience = ["mallory@evil.example"] }', "forwards.audience names .* outside the mandate"),
+        ('{ trust = "suspicious" }', "forwards.trust 'suspicious' is outside the mandate"),
+        ('{ trust = ["internal"] }', "forwards.trust must be a rank name"),
+        ('{ audience = { contains = ["alice@northwind.example"] } }', "forwards.audience is not a wire audience"),
+        ('{ effects = ["egress"] }', "forwards takes only trust and audience"),
+        ('"public"', "forwards takes only trust and audience"),
+    ],
+)
+def test_an_annotation_forwarding_outside_the_mandate_refuses_at_load(
+    tmp_path: Path, forwards: str, message: str
+) -> None:
+    with pytest.raises(ScenarioError, match=message):
+        load_scenario(_forwarding_scenario(tmp_path, forwards))
 
 
 def _with_policy_profile(toml: str, declaration: str = '"policy"') -> str:

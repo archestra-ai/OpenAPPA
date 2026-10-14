@@ -414,6 +414,7 @@ fn a_tool_names_an_annotator_or_declares_static_semantics_never_both() {
     assert!(load(&with("description = \"Sends one message.\"\ntags = [\"outbound\"]")).is_ok());
     for (field, statics) in [
         ("delta", "delta = {}"),
+        ("forwards", "forwards = { trust = \"suspicious\" }"),
         ("requires", "requires = { trust = \"trusted\" }"),
         ("effects", "effects = [\"email.sent\"]"),
     ] {
@@ -993,6 +994,43 @@ fn compiled_tool_parameters_are_normalized_in_policy_identity() {
 }
 
 #[test]
+fn a_requires_within_loads_and_imposes_no_requirement() {
+    let config = load(
+        r#"
+version = 2
+
+[[tool]]
+name = "send"
+requires = { audience = { within = ["internal"], contains = ["alice"] } }
+delta = {}
+
+[[tool]]
+name = "post"
+requires = { audience = { within = ["@"] } }
+delta = {}
+"#,
+    )
+    .expect("a policy writing `within` loads");
+    let declared = |name: &str| {
+        config
+            .engine()
+            .registry()
+            .variants(&ToolName::new(name))
+            .next()
+            .and_then(ToolDeclaration::declared)
+            .cloned()
+            .expect("the tool is declared")
+    };
+    assert_eq!(
+        declared("send").requires.audience_requirements(),
+        [AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::restricted([ReaderId::new("alice")])
+        ))]
+    );
+    assert!(declared("post").requires.audience_requirements().is_empty());
+}
+
+#[test]
 fn a_declared_group_mention_loads_when_routed_and_refuses_at_load_when_not() {
     let policy = r#"
 version = 2
@@ -1016,7 +1054,7 @@ delta = { audience = ["auditor", "@team"] }
 
 [[tool]]
 name = "send"
-requires = { audience = { within = ["@team"], contains = ["@board"] } }
+requires = { audience = { contains = ["@board"] } }
 delta = {}
 
 [[authority]]
@@ -1090,10 +1128,10 @@ confined_results = ["read", "send"]
     ));
 
     for (case, replacement) in [
-        ("bare @", "within = [\"@\"]"),
-        ("public beside a group", "within = [\"public\", \"@team\"]"),
+        ("bare @", "contains = [\"@\"]"),
+        ("public beside a group", "contains = [\"public\", \"@board\"]"),
     ] {
-        let malformed = policy.replace("within = [\"@team\"]", replacement);
+        let malformed = policy.replace("contains = [\"@board\"]", replacement);
         assert!(
             matches!(load(&malformed), Err(ConfigError::BadAudience { .. })),
             "{case} loads"
@@ -1261,14 +1299,6 @@ fn a_selector_placeholder_reads_one_declared_collection_per_call() {
             "spelling",
         ),
         (
-            "under within",
-            tool(
-                channel,
-                "requires = { audience = { within = [\"@slack:channel/$channel_id\"] } }",
-            ),
-            "spelling",
-        ),
-        (
             "an argument the schema declares as another type",
             tool(integer, delta),
             "schema",
@@ -1394,7 +1424,7 @@ fn a_provider_enters_the_policy_when_a_contract_or_mandate_names_it() {
     );
     assert_eq!(
         providers(
-            "version = 2\n[[tool]]\nname = \"t\"\nrequires = { audience = { within = [\"@google-workspace:group/eng@corp.com\"] } }\n"
+            "version = 2\n[[tool]]\nname = \"t\"\nrequires = { audience = { contains = [\"@google-workspace:group/eng@corp.com\"] } }\n"
         ),
         ["google-workspace"]
     );
@@ -1402,4 +1432,87 @@ fn a_provider_enters_the_policy_when_a_contract_or_mandate_names_it() {
         providers("version = 2\n[[annotator]]\nname = \"acl\"\naudiences = [\"@slack:user-group/eng\"]\n"),
         ["slack"]
     );
+}
+
+/// `forwards` is a literal: it labels content the call sends whatever its arguments say, so
+/// no entry reads them. It loads like `delta`, and a source collection it names registers
+/// its provider, whose members the check then asks for.
+#[test]
+fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
+    let tool = |forwards: &str| {
+        format!(
+            "version = 2\n[[tool]]\nname = \"mail_report\"\n\
+             parameters = {{ type = \"object\", properties = {{ to = {{ type = \"string\" }} }}, required = [\"to\"] }}\n\
+             forwards = {forwards}\nrequires = {{ audience = {{ contains = [\"alice\"] }} }}\n"
+        )
+    };
+    let config = load(&tool(
+        "{ trust = \"suspicious\", audience = [\"@slack:user-group/eng\"] }",
+    ))
+    .expect("a literal forwards loads");
+    let engine = config.engine();
+    let declared = engine
+        .registry()
+        .variants(&ToolName::new("mail_report"))
+        .next()
+        .and_then(ToolDeclaration::declared)
+        .expect("mail_report is declared")
+        .clone();
+    let eng = GroupRef::Source {
+        provider: "slack".to_string(),
+        selector: "user-group/eng".to_string(),
+    };
+    assert_eq!(declared.forwards.trust, Some(Trust::new(0)));
+    assert_eq!(
+        declared.forwards.audience,
+        Some(DeltaAudience::Static(DeclaredAudience::Union(
+            Clause::new([], [eng.clone()], []).expect("a group clause")
+        )))
+    );
+    assert_eq!(
+        engine.registry().audience().providers().iter().collect::<Vec<_>>(),
+        ["slack"]
+    );
+
+    let trajectory = appa_engine::value::TrajectoryId::new("t");
+    let opening = engine
+        .open_trajectory(&trajectory, appa_engine::profile::PolicyFileKey::of(b"policy"), None)
+        .expect("the trajectory opens")
+        .into_unsealed();
+    let view = engine.view(&trajectory, opening, 1).expect("the opening replays");
+    let asked = engine.handle(
+        &view,
+        appa_engine::transition::EngineEvent::Proposals(appa_engine::transition::ProposalBatch {
+            id: appa_engine::transition::ProposalBatchId::new("b1"),
+            trajectory: trajectory.clone(),
+            provider_results: Vec::new(),
+            proposals: vec![appa_engine::transition::ProposedCall {
+                tool: ToolName::new("mail_report"),
+                arguments: br#"{"to":"alice"}"#.to_vec(),
+                annotation: None,
+            }],
+            spawn: None,
+            offer_nonce: appa_engine::value::OfferNonce::new([7; 32]),
+            evidence: Vec::new(),
+            audience: appa_engine::audience::AudienceEvidence::default(),
+        }),
+    );
+    assert!(
+        matches!(
+            asked,
+            Err(appa_engine::transition::TransitionError::MembershipNeeded { ref needed })
+                if needed.contains(&appa_engine::label::SymbolicAtom::Group(eng.clone()))
+        ),
+        "{asked:?}"
+    );
+
+    for refused in [
+        "{ audience = [\"$to\"] }",
+        "{ audience = [\"@slack:channel/$to\"] }",
+        "{ trust = \"unknown\" }",
+        "{ audience = { resolver = \"acl\" } }",
+        "{ trust = \"suspicious\", annotator = \"acl\" }",
+    ] {
+        assert!(load(&tool(refused)).is_err(), "forwards = {refused} must be refused");
+    }
 }

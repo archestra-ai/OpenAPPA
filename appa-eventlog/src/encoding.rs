@@ -69,15 +69,20 @@ pub(crate) struct SequenceGap {
 
 /// The batches of rows read in `seq` order, refused unless their positions run 0, 1, 2, …
 pub(crate) fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
+    contiguous_from(0, rows)
+}
+
+/// The batches of rows read in `seq` order from position `first`, refused unless their
+/// positions run `first`, `first + 1`, …
+pub(crate) fn contiguous_from(first: u64, rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
     rows.into_iter()
-        .enumerate()
-        .map(|(expected, (found, batch))| match found == expected as i64 {
-            true => Ok(batch),
-            false => Err(SequenceGap {
-                expected: expected as u64,
-                found,
-            }),
-        })
+        .zip(first..)
+        .map(
+            |((found, batch), expected)| match u64::try_from(found) == Ok(expected) {
+                true => Ok(batch),
+                false => Err(SequenceGap { expected, found }),
+            },
+        )
         .collect()
 }
 
@@ -97,26 +102,34 @@ pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Po
 }
 
 pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let basis = batches.len() as u64;
-    let mut facts = Vec::new();
-    let mut host = Vec::new();
-    for (seq, batch) in batches.iter().enumerate() {
-        let record = decode(batch)?;
-        facts.extend(record.facts);
+    let mut log = Log {
+        root: root.clone(),
+        facts: Vec::new(),
+        batch_ends: Vec::new(),
+        basis: 0,
+        policy_file,
+        host: Vec::new(),
+    };
+    extend(&mut log, batches)?;
+    Ok(log)
+}
+
+/// Decode the batches that follow `log` in its root's log onto it, in order. Only the new
+/// batches are decoded: a batch never changes once it is accepted.
+pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
+    for batch in batches {
+        let record = decode(&batch)?;
+        log.facts.extend(record.facts);
+        log.batch_ends.push(log.facts.len());
         if let Some(observation) = record.host {
-            host.push(HostRecord {
-                seq: seq as u64,
+            log.host.push(HostRecord {
+                seq: log.basis,
                 observation,
             });
         }
+        log.basis += 1;
     }
-    Ok(Log {
-        root: root.clone(),
-        facts,
-        basis,
-        policy_file,
-        host,
-    })
+    Ok(())
 }
 
 #[cfg(test)]

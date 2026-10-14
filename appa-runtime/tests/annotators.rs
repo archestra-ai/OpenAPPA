@@ -1300,7 +1300,10 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
 
     annotator.set(
         "classifier",
-        answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
+        answer(
+            serde_json::json!({}),
+            Some(serde_json::json!({ "contains": ["@team"] })),
+        ),
     );
     source.set(&["alice@corp.example"]);
     let consults_before = annotator.requests().len();
@@ -1321,7 +1324,7 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
     let decision = propose(&runtime, fetch("https://c.example")).await;
     assert!(
         matches!(decision, HookDecision::DenyCall { .. }),
-        "the narrowed trajectory is not within the moved group: {decision:?}"
+        "the narrowed trajectory does not cover the moved group: {decision:?}"
     );
     assert_eq!(source.reads().len(), 2);
 
@@ -1332,7 +1335,7 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
         "classifier",
         answer(
             serde_json::json!({}),
-            Some(serde_json::json!({ "within": ["@nobody"] })),
+            Some(serde_json::json!({ "contains": ["@nobody"] })),
         ),
     );
     let refused = propose(&runtime, fetch("https://d.example")).await;
@@ -1345,6 +1348,111 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
     );
     assert_eq!(audit_len(&runtime), before);
     assert_eq!(source.reads().len(), 2);
+}
+
+/// `within` is no `requires.audience` key: an answer writing it is no answer, refused
+/// operationally before any decision or directory read.
+#[tokio::test]
+async fn an_answer_writing_requires_audience_within_is_refused() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (annotator_url, annotator) = serve_annotator().await;
+    let (audience_url, source) = serve_members().await;
+    let runtime = open_runtime(&dir, &symbolic_policy(&annotator_url, &audience_url)).await;
+    let before = audit_len(&runtime);
+
+    annotator.set(
+        "classifier",
+        answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
+    );
+    let refused = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(refused, HookDecision::Refuse { .. }),
+        "an answer writing `within` is no answer, got {refused:?}"
+    );
+    assert_eq!(audit_len(&runtime), before);
+    assert!(source.reads().is_empty());
+}
+
+fn send_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+audiences = ["alice@corp.example", "bob@corp.example"]
+
+[[policy.tool]]
+name = "send"
+parameters = {{ type = "object", properties = {{ to = {{ type = "string" }} }}, required = ["to"] }}
+annotator = "classifier"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.classifier]
+url = "{url}"
+"#
+    )
+}
+
+fn send(to: &str) -> ProposedCall {
+    call("send", serde_json::json!({ "to": to }))
+}
+
+/// The answer a classifier gives `send` to one recipient: the recipient must read what the
+/// call sends, and, when given, the call forwards content only `forwards` may read.
+fn sending(to: &str, forwards: Option<serde_json::Value>) -> Answer {
+    let mut answer = serde_json::json!({
+        "delta": {},
+        "requires": { "audience": { "contains": [to] }, "history": [], "attention": [] },
+        "emits": [],
+    });
+    if let Some(forwards) = forwards {
+        answer["forwards"] = forwards;
+    }
+    Answer::Wire(serde_json::json!({ "version": 1, "answer": answer }))
+}
+
+/// A produced `forwards` is part of what the call sends: the recipient requirement is checked
+/// against it before dispatch, while the same answer without it lets the call through.
+#[tokio::test]
+async fn a_produced_forwards_gates_the_recipient_before_dispatch() {
+    let alice_only = || Some(serde_json::json!({ "audience": ["alice@corp.example"] }));
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    let runtime = open_runtime(&dir, &send_policy(&url)).await;
+
+    annotator.set("classifier", sending("bob@corp.example", alice_only()));
+    let before = audit_len(&runtime);
+    let blocked = propose(&runtime, send("bob@corp.example")).await;
+    assert!(
+        matches!(blocked, HookDecision::DenyCall { .. }),
+        "bob cannot read what the call forwards: {blocked:?}"
+    );
+    assert!(
+        runtime.audit(&root()).expect("the audit reads")[before..]
+            .iter()
+            .all(|entry| !matches!(entry.event, AuditEvent::Released { .. })),
+        "the blocked call is not dispatched"
+    );
+
+    annotator.set("classifier", sending("alice@corp.example", alice_only()));
+    assert_eq!(
+        propose(&runtime, send("alice@corp.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir, &send_policy(&url)).await;
+    annotator.set("classifier", sending("bob@corp.example", None));
+    assert_eq!(
+        propose(&runtime, send("bob@corp.example")).await,
+        HookDecision::AllowCall { spawn: None },
+        "without forwards the call sends only its arguments"
+    );
 }
 
 /// A produced chain word narrows the trajectory symbolically: the delta is offered and
@@ -1364,12 +1472,12 @@ async fn a_produced_chain_word_narrows_the_trajectory_without_a_directory_read()
     assert!(source.reads().is_empty());
 
     // The narrowed trajectory holds `internal` as written: a later call requiring it to
-    // stay within `internal` needs no membership either.
+    // cover `internal` needs no membership either.
     annotator.set(
         "classifier",
         answer(
             serde_json::json!({}),
-            Some(serde_json::json!({ "within": ["internal"] })),
+            Some(serde_json::json!({ "contains": ["internal"] })),
         ),
     );
     assert_eq!(

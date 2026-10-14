@@ -583,6 +583,21 @@ impl ResolvedCall {
         }
     }
 
+    /// Label of the file content the host sends with this call beyond the agent's arguments.
+    /// A replacement overwrites its predecessor without sending it; an edit keeps the
+    /// predecessor's bytes in the file it writes.
+    pub fn forwarded_file_label(&self) -> Label {
+        match &self.file_basis {
+            None | Some(FileBasis::Read(_) | FileBasis::Replace(_)) => Label::top(),
+            Some(FileBasis::Edit(source) | FileBasis::Copy { source, .. } | FileBasis::Move { source, .. }) => {
+                source.label.clone()
+            }
+            Some(FileBasis::Process { inputs, .. }) => inputs
+                .iter()
+                .fold(Label::top(), |label, input| label.combine(&input.label)),
+        }
+    }
+
     /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
     /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever an
     /// Annotator said, which is why anything holding a call by identity alone must compare the call
@@ -639,6 +654,7 @@ mod tests {
                     trust: Some(crate::label::Trust::new(0)),
                     audience: None,
                 },
+                forwards: Delta::NONE,
                 emits: Default::default(),
                 requires: Requires::default(),
             },
@@ -658,6 +674,7 @@ mod tests {
                 ]))),
             },
             parameters: ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: Default::default(),
             requires: Requires::default(),
         }
@@ -724,6 +741,7 @@ mod tests {
                 operation.file_output_label(&contract, &receiving),
                 Some(expected_file.combine(&replaced.label))
             );
+            assert_eq!(operation.forwarded_file_label(), source().label);
         }
     }
 
@@ -759,6 +777,7 @@ mod tests {
             expected,
             operation.output_label(&contract, &receiving).combine(&replaced.label)
         );
+        assert_eq!(operation.forwarded_file_label(), expected);
     }
 
     #[test]

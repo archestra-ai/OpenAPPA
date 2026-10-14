@@ -303,16 +303,16 @@ def audience_entries(value: object, location: str, field: str, name: str) -> lis
     return entries
 
 
-def _audiences_of(value: object, location: str, field: str, name: str) -> list[str]:
-    """Every audience entry an annotation audience field names. A `delta.audience` is a
-    bare value; a `requires.audience` holds a `contains` floor, a `within` cap, or both."""
-    match value:
-        case dict() as bounds if bounds and set(bounds) <= {"contains", "within"}:
-            return [
-                entry
-                for key, bound in bounds.items()
-                for entry in audience_entries(bound, location, f"{field}.{key}", name)
-            ]
+def _audiences_of(holder: str, value: object, location: str, name: str) -> list[str]:
+    """Every audience entry an annotation audience field names. A `delta.audience` or
+    `forwards.audience` is a bare value; a `requires.audience` holds exactly its `contains`
+    floor."""
+    field = f"annotation.{holder}.audience"
+    match holder, value:
+        case "requires", {"contains": bound} if len(value) == 1:
+            return audience_entries(bound, location, f"{field}.contains", name)
+        case "requires", _:
+            raise ScenarioError(f"{name}: {location}.{field} holds exactly a `contains` floor")
         case _:
             return audience_entries(value, location, field, name)
 
@@ -321,21 +321,24 @@ def _within_mandate(
     name: str, location: str, annotation: dict, spec: DeclaredAnnotator
 ) -> None:
     """Refuse at load what the runtime's mandate check would refuse at the first consult."""
-    delta = annotation["delta"]
+    labels = {"delta": annotation["delta"], "forwards": annotation.get("forwards", {})}
     requires = annotation["requires"]
-    if not isinstance(delta, dict) or not set(delta) <= {"trust", "audience"}:
-        raise ScenarioError(f"{name}: {location}.annotation.delta takes only trust and audience")
+    for field, label in labels.items():
+        if not isinstance(label, dict) or not set(label) <= {"trust", "audience"}:
+            raise ScenarioError(f"{name}: {location}.annotation.{field} takes only trust and audience")
     if not set(requires) <= {"trust", "audience", "history", "attention"}:
         raise ScenarioError(
             f"{name}: {location}.annotation.requires takes only trust, audience, history, attention"
         )
-    for field, holder in (("delta", delta), ("requires", requires)):
+    for field, holder in (*labels.items(), ("requires", requires)):
         trust = holder.get("trust")
+        if trust is not None and not isinstance(trust, str):
+            raise ScenarioError(f"{name}: {location}.annotation.{field}.trust must be a rank name")
         if trust is not None and spec.ranks is not None and trust not in spec.ranks:
             raise ScenarioError(f"{name}: {location}.annotation.{field}.trust {trust!r} is outside the mandate")
         audience = holder.get("audience")
         if audience is not None:
-            entries = _audiences_of(audience, location, f"annotation.{field}.audience", name)
+            entries = _audiences_of(field, audience, location, name)
             if spec.audiences is not None and not set(entries) <= spec.audiences:
                 outside = sorted(set(entries) - spec.audiences)
                 raise ScenarioError(f"{name}: {location}.annotation.{field}.audience names {outside} outside the mandate")
@@ -385,9 +388,12 @@ def _annotator_answers_of(
         if not isinstance(args, dict) or not args:
             raise ScenarioError(f"{name}: {location}.args must be a non-empty table")
         annotation = declaration["annotation"]
-        if not isinstance(annotation, dict) or set(annotation) != {"delta", "requires", "emits"}:
+        if not isinstance(annotation, dict) or not (
+            {"delta", "requires", "emits"} <= set(annotation) <= {"delta", "forwards", "requires", "emits"}
+        ):
             raise ScenarioError(
-                f"{name}: {location}.annotation must be a table with exactly: delta, requires, emits"
+                f"{name}: {location}.annotation must be a table with delta, requires, emits, "
+                "and optionally forwards"
             )
         requires = annotation["requires"]
         if (

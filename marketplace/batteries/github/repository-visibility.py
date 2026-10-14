@@ -11,7 +11,7 @@ its visibility:
   github.repository-readers      what a write needs: trusted data that
                                  everyone may see for a public repository,
                                  that the repository's collaborators may
-                                 see otherwise
+                                 see otherwise; and what its result returns
 
 Only `public` is public. A `private` repository is read by its
 collaborators. An Enterprise `internal` one is read by every enterprise
@@ -38,6 +38,15 @@ repository's writers and merged from pull requests its readers open: a
 public repository's readers are anyone, and a fork's content came from
 its parent, so both are `suspicious`; a private or internal repository
 that is not a fork keeps the session's trust.
+
+A write's result is labelled only when it returns stored text beyond the
+call's own arguments. `sub_issue_write` (every method) returns the parent
+issue its `issue_number` names, title and body included; its result gets
+the label an `issue_read` of that issue gets, so it is `suspicious`
+unless the context proves its authorship, on a private repository too.
+Every other write
+returns identifiers, URLs, SHAs, or a fixed message, and its `delta` is
+empty.
 
 A non-public repository's readers are the collection
 `@github:repo/<owner>/<repo>/collaborators`, which the `github` audience
@@ -122,7 +131,7 @@ def repository_of(consult):
 
 @dataclass(frozen=True)
 class Call:
-    """The part of the consult that decides a read's trust: the tool, the
+    """The part of the consult that decides a result's trust: the tool, the
     pull request or issue number it names, and the `github` context entry."""
 
     tool: str
@@ -167,6 +176,9 @@ TEAM = ("OWNER", "MEMBER", "COLLABORATOR")
 NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
 # Reads that return what people wrote on one pull request or issue.
 DISCUSSIONS = {"pull_request_read": "pull_request", "issue_read": "issue"}
+# Writes whose result returns what people wrote on the item the call names
+# (github-mcp-server v2.0.2, pkg/github/issues.go:1847,1885,1941).
+ECHOES = {"sub_issue_write": "issue"}
 # Reads that return what the authors of many of them wrote.
 LISTINGS = {"list_issues": "issues", "list_pull_requests": "pull_requests"}
 
@@ -223,11 +235,11 @@ def context_answer(call, owner, repo):
     return answer if isinstance(named, str) and named.lower() == f"{owner}/{repo}".lower() else None
 
 
-def written_by_the_team(call, owner, repo):
+def written_by_the_team(call, owner, repo, kind):
     """Whether the context shows that only the repository's own people wrote
-    the pull request or issue the call reads."""
+    the pull request or issue (`kind`) the call names."""
     answer = context_answer(call, owner, repo)
-    item = answer.get(DISCUSSIONS[call.tool]) if answer and call.number is not None else None
+    item = answer.get(kind) if answer and call.number is not None else None
     if not isinstance(item, dict):
         return False
     participants = item.get("participants")
@@ -264,18 +276,29 @@ def keeps_trust(call, repository, owner, repo):
     """Trust follows the author: see the module docstring."""
     match call.tool:
         case tool if tool in DISCUSSIONS:
-            return written_by_the_team(call, owner, repo)
+            return written_by_the_team(call, owner, repo, DISCUSSIONS[tool])
         case tool if tool in LISTINGS:
             return listed_by_the_team(call, owner, repo)
         case _:
             return repository.visibility != "public" and not repository.fork
 
 
+def labelled(audience, trusted):
+    return {"audience": audience} if trusted else {"trust": "suspicious", "audience": audience}
+
+
 def read_delta(call, repository, owner, repo):
-    audience = read_by(repository.visibility, owner, repo)
-    if keeps_trust(call, repository, owner, repo):
-        return {"audience": audience}
-    return {"trust": "suspicious", "audience": audience}
+    return labelled(read_by(repository.visibility, owner, repo), keeps_trust(call, repository, owner, repo))
+
+
+def write_delta(call, repository, owner, repo):
+    """What a write's result returns beyond the call's own arguments: see the
+    module docstring."""
+    match ECHOES.get(call.tool):
+        case None:
+            return {}
+        case kind:
+            return labelled(read_by(repository.visibility, owner, repo), written_by_the_team(call, owner, repo, kind))
 
 
 def annotation(name, call, repository, owner, repo):
@@ -289,7 +312,7 @@ def annotation(name, call, repository, owner, repo):
             }
         case "github.repository-readers":
             return {
-                "delta": {},
+                "delta": write_delta(call, repository, owner, repo),
                 "requires": {
                     "trust": "trusted",
                     "audience": {"contains": must_reach(visibility, owner, repo)},

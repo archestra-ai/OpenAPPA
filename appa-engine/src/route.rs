@@ -19,7 +19,7 @@
 //!
 //! **Bound and totality.** [`RouteDepth`] is the number of calls a route spans, the blocked call
 //! included. At `RouteDepth::ONE` the routes are exactly the RMD plans. A tool enters a route
-//! only for a `prior` or cap gap of the call it immediately serves — the blocked call, or a
+//! only for a `prior` gap of the call it immediately serves — the blocked call, or a
 //! preceding tool that needs it first — as `RMD-13` names tool plans; a tool that clears nothing
 //! for the call in front of it is never dispatched. A set of preceding tools is planned once, in
 //! the first order the search meets (tool-name order): every order of the same tools folds the
@@ -531,7 +531,7 @@ impl<'a> Search<'a> {
                 }
             }
         }
-        // A terminal plan covers every gap and no ruling covers `prior` or a cap (CHK-12), so a
+        // A terminal plan covers every gap and no ruling covers `prior` (CHK-12), so a
         // tool that clears something exists only where no terminal plan does: the RMD-13
         // condition on tool plans holds here by construction, at every depth.
         for tool in self
@@ -542,9 +542,7 @@ impl<'a> Search<'a> {
             if path.excludes(&tool.name) {
                 continue;
             }
-            let mut undecided = plan::NeededAtoms::default();
-            let clears = plan::direct_clears(tool, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
-            undecided.refuse_if_any()?;
+            let clears = plan::direct_clears(tool, &eval.requirement_gaps);
             if clears.is_empty() {
                 continue;
             }
@@ -567,7 +565,7 @@ impl<'a> Search<'a> {
     }
 
     /// Every way `tool` runs first from `state`, with `budget` preceding tools still allowed,
-    /// this one included. Its own `prior`/cap gaps recurse into the tools that clear them; any
+    /// this one included. Its own `prior` gaps recurse into the tools that clear them; any
     /// other gap or a call-dependent contract halts the route here.
     fn run(
         &mut self,
@@ -605,11 +603,7 @@ impl<'a> Search<'a> {
             &self.has_reserved(),
             &membership,
         )?;
-        if eval
-            .requirement_gaps
-            .iter()
-            .any(|gap| !matches!(gap, Gap::Prior(_) | Gap::Cap { .. }))
-        {
+        if eval.requirement_gaps.iter().any(|gap| !matches!(gap, Gap::Prior(_))) {
             return halt(Halt::Block(eval.requirement_gaps));
         }
         if eval.requirement_gaps.is_empty() {
@@ -633,10 +627,7 @@ impl<'a> Search<'a> {
             if goal.excludes(&first.name) {
                 continue;
             }
-            let mut undecided = plan::NeededAtoms::default();
-            let first_clears =
-                plan::direct_clears(first, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
-            undecided.refuse_if_any()?;
+            let first_clears = plan::direct_clears(first, &eval.requirement_gaps);
             if first_clears.is_empty() {
                 continue;
             }
@@ -765,7 +756,11 @@ impl<'a> Search<'a> {
                     let crate::authority::DeclaredTransition::Audience { to, .. } = transition else {
                         continue;
                     };
-                    let to = Audience::of_declared(to);
+                    // The hop replaces the arguments only: what the call forwards still
+                    // reaches the sink beside the derived bytes.
+                    let forwarded =
+                        check::forwarded_label(&self.context.contract, CallReads::Resolved(&self.context.call));
+                    let to = Audience::of_declared(to).combine(&forwarded.audience);
                     for gap in gaps {
                         if let Gap::Includes { recipients } = gap
                             && Audience::of_declared(recipients).derives_within_audience(&to, within)
@@ -924,6 +919,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -964,15 +960,6 @@ mod tests {
             .push(AudienceRequirement::Includes(RecipientSpec::Static(
                 DeclaredAudience::literal(recipients),
             )));
-        contract
-    }
-
-    fn requiring_cap(mut contract: ToolAnnotation, cap: Audience) -> ToolAnnotation {
-        contract
-            .requires
-            .label
-            .audience
-            .push(AudienceRequirement::Cap(DeclaredAudience::literal(cap)));
         contract
     }
 
@@ -1419,35 +1406,6 @@ mod tests {
                 ],
                 RouteOutcome::Complete,
                 contingent([tool_outcome("backup"), decision("officer")])
-            )]
-        );
-    }
-
-    #[test]
-    fn a_cap_gap_is_cleared_by_the_call_whose_committed_label_stays_within_it() {
-        let internal = readers(&["insider"]);
-        let registry = Deployment::of(vec![
-            narrowing_to(tool("read_internal"), None, Some(internal.clone())),
-            requiring_cap(tool("wipe"), internal.clone()),
-        ])
-        .registry();
-        let log = vec![opened(TRUSTED, Audience::public())];
-
-        assert_eq!(
-            routes(&registry, &log, &call("wipe", json!({})), depth(2)),
-            vec![route(
-                vec![RouteStep::Precede {
-                    tool: ToolName::new("read_internal"),
-                    clears: vec![Gap::Cap {
-                        cap: DeclaredAudience::literal(internal.clone())
-                    }],
-                    accepts: Some(Narrowing {
-                        from: Label::new(TRUSTED, Audience::public()),
-                        to: Label::new(TRUSTED, internal),
-                    }),
-                }],
-                RouteOutcome::Complete,
-                contingent([tool_outcome("read_internal")])
             )]
         );
     }

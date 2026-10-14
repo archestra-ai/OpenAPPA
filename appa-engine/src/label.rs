@@ -830,7 +830,7 @@ impl Audience {
             .collect()
     }
 
-    fn combine(&self, other: &Self) -> Self {
+    pub(crate) fn combine(&self, other: &Self) -> Self {
         Audience::of_clauses(self.clauses.iter().chain(other.clauses.iter()).cloned())
     }
 
@@ -859,34 +859,6 @@ impl Audience {
         };
         match self.exact_members(context) {
             Ok(held) => Evaluation::of_exact(wanted.is_subset(&held)),
-            Err(needed) => Evaluation::Needs(needed),
-        }
-    }
-
-    /// `⟦self⟧ ⊆ ⟦cap⟧` — the audience stays within the declared cap. Same three steps as
-    /// [`includes`](Self::includes), from the other side.
-    pub(crate) fn within(&self, cap: &DeclaredAudience, context: &MembershipContext<'_>) -> Evaluation {
-        let cap = match cap {
-            DeclaredAudience::Public => return Evaluation::Holds,
-            DeclaredAudience::Union(clause) => clause,
-        };
-        if self.is_public() {
-            // The universe never fits a restricted cap: every denotation here is finite.
-            return Evaluation::Fails;
-        }
-        if self
-            .clauses
-            .iter()
-            .any(|clause| clause.derives_within(cap, context.within))
-        {
-            return Evaluation::Holds;
-        }
-        let allowed = match cap.members(context) {
-            Ok(allowed) => allowed,
-            Err(needed) => return Evaluation::Needs(needed),
-        };
-        match self.exact_members(context) {
-            Ok(held) => Evaluation::of_exact(held.is_subset(&allowed)),
             Err(needed) => Evaluation::Needs(needed),
         }
     }
@@ -990,11 +962,6 @@ impl Label {
     /// Do this label's readers include every named recipient?
     pub(crate) fn covers(&self, recipients: &DeclaredAudience, context: &MembershipContext<'_>) -> Evaluation {
         self.audience.includes(recipients, context)
-    }
-
-    /// Do this label's readers stay within `cap`?
-    pub(crate) fn within_cap(&self, cap: &DeclaredAudience, context: &MembershipContext<'_>) -> Evaluation {
-        self.audience.within(cap, context)
     }
 }
 
@@ -1175,9 +1142,8 @@ mod tests {
             prop_assert_eq!(eval(&Audience::nobody(), &context), Some(BTreeSet::new()));
         }
 
-        /// The four universal edges decide without a single membership answer: public covers
-        /// everything and fits only a public cap; a restricted audience never covers the
-        /// universe and always fits it.
+        /// The universal edges decide without a single membership answer: public covers
+        /// everything; a restricted audience never covers the universe.
         #[test]
         fn universal_edges_decide_without_membership(
             label in label_strategy(),
@@ -1188,11 +1154,9 @@ mod tests {
             let providers = providers();
             let context = MembershipContext::new(&within, &providers, &nothing);
             let restricted = DeclaredAudience::Union(clause);
-            prop_assert_eq!(label.within_cap(&DeclaredAudience::Public, &context), Evaluation::Holds);
             if label.audience.is_public() {
                 prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Holds);
                 prop_assert_eq!(label.covers(&restricted, &context), Evaluation::Holds);
-                prop_assert_eq!(label.within_cap(&restricted, &context), Evaluation::Fails);
             } else {
                 prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Fails);
             }
@@ -1268,12 +1232,6 @@ mod tests {
                 Evaluation::Fails => prop_assert!(!exact_covers, "refuted covers must fail exactly"),
                 Evaluation::Needs(_) => prop_assert!(false, "total assignment cannot leave needs"),
             }
-            let exact_within = contained(&eval(&label.audience, &context), &declared_members(&recipients));
-            match label.within_cap(&recipients, &context) {
-                Evaluation::Holds => prop_assert!(exact_within, "derived within must hold exactly"),
-                Evaluation::Fails => prop_assert!(!exact_within, "refuted within must fail exactly"),
-                Evaluation::Needs(_) => prop_assert!(false, "total assignment cannot leave needs"),
-            }
         }
 
         /// Every admitted value contributes one concrete label, so the trajectory fold is the
@@ -1347,13 +1305,13 @@ mod tests {
     fn the_chain_derives_without_answers() {
         let (nothing, providers, unanswered) = context_free();
         let context = MembershipContext::new(&nothing, &providers, &unanswered);
-        let self_label = Label::new(
+        let internal_label = Label::new(
             Trust::new(1),
-            Audience::of_clauses([clause([ChainAudience::Self_], [], [])]),
+            Audience::of_clauses([clause([ChainAudience::Internal], [], [])]),
         );
-        let internal_cap = DeclaredAudience::Union(clause([ChainAudience::Internal], [], []));
+        let self_recipients = DeclaredAudience::Union(clause([ChainAudience::Self_], [], []));
         assert_eq!(
-            self_label.within_cap(&internal_cap, &context),
+            internal_label.covers(&self_recipients, &context),
             Evaluation::Holds,
             "self ⊆ internal is built in — zero consults"
         );
@@ -1365,10 +1323,13 @@ mod tests {
         let providers = providers();
         let unanswered = Expansions::default();
         let context = MembershipContext::new(&within, &providers, &unanswered);
-        let finance_label = Label::new(Trust::new(1), Audience::of_clauses([clause([], ["finance"], [])]));
-        let internal_cap = DeclaredAudience::Union(clause([ChainAudience::Internal], [], []));
+        let internal_label = Label::new(
+            Trust::new(1),
+            Audience::of_clauses([clause([ChainAudience::Internal], [], [])]),
+        );
+        let finance_recipients = DeclaredAudience::Union(clause([], ["finance"], []));
         assert_eq!(
-            finance_label.within_cap(&internal_cap, &context),
+            internal_label.covers(&finance_recipients, &context),
             Evaluation::Holds,
             "@finance within internal derives symbolically — zero consults"
         );

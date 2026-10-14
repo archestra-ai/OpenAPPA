@@ -9,6 +9,9 @@ CREATE TABLE openappa_events (
     CONSTRAINT openappa_events_seq_nonnegative CHECK (seq >= 0)
 );
 
+-- One row per family root. Writers of a family lock it for one read-decide-append step.
+CREATE TABLE openappa_roots (root TEXT PRIMARY KEY);
+
 CREATE TABLE openappa_file_events (
     workspace text NOT NULL,
     seq bigint NOT NULL,
@@ -58,6 +61,8 @@ CREATE TABLE openappa_operations (
     input jsonb NOT NULL,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_expires_at timestamp with time zone,
     CONSTRAINT openappa_operations_pk PRIMARY KEY (organization_id, session_id, operation_id),
     CONSTRAINT openappa_operations_status CHECK (
         (status = 'pending' AND decision IS NULL)
@@ -76,6 +81,9 @@ CREATE TABLE openappa_processed_results (
     approved_output text,
     decision jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_expires_at timestamp with time zone,
+    completed_at timestamp with time zone,
     CONSTRAINT openappa_results_pk PRIMARY KEY (organization_id, session_id, tool_call_id),
     CONSTRAINT openappa_results_status CHECK (
         (status = 'pending' AND approved_output IS NULL AND decision IS NULL)
@@ -95,6 +103,8 @@ CREATE TABLE openappa_held_peer_messages (
     notified boolean NOT NULL DEFAULT false
 );
 CREATE INDEX openappa_held_peer_messages_receiver_idx ON openappa_held_peer_messages (receiver, seq);
+
+CREATE TABLE openappa_peer_inboxes (receiver TEXT PRIMARY KEY);
 
 CREATE TABLE openappa_embedded_peer_messages (
     seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

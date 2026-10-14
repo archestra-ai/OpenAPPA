@@ -28,7 +28,7 @@ internal = ["people:members"]
 
 [[policy.authority]]
 name = "launchdarkly-operator"
-permits = {{ trust_below = "trusted", attention = ["launchdarkly-review"] }}
+permits = {{ attention = ["launchdarkly-review"] }}
 
 [externals]
 timeout_ms = 30000
@@ -126,7 +126,8 @@ async fn a_read_is_internal_and_suspicious() {
     }
 }
 
-/// A trusted write still waits for the reviewer, and records its effect: the sensitive
+/// A write's own result label never gates it: a trusted write waits only for the reviewer,
+/// whose mandate attends the mark and nothing else, and records its effect: the sensitive
 /// kind for a delete, the ordinary kind for a change.
 #[tokio::test]
 async fn a_write_needs_review_and_records_its_effect() {

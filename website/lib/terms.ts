@@ -27,7 +27,7 @@ const TERMS = {
   sanitizers:
     "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "Can determine a tool call's delta, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
+    "Can determine a tool call's delta, forwards, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
   annotators:
     "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. The jev builtin determines audience and trust only.",
   annotation:
@@ -55,9 +55,11 @@ const TERMS = {
   "Tool(argument:pattern)":
     "An ordered tool contract selector. Every argument:pattern clause must match its top-level argument: a string, or a non-empty array whose every element is a matching string. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback for that tool. If no explicit contract matches, the policy wildcard routes the call through its annotator. A matched contract's schema error does not fall through. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
-    "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged. Its audience may be one selector placeholder such as @slack:channel/$channel_id, resolved from the call's arguments at check time.",
+    "The label of the value a tool call returns. It narrows the trajectory once the agent accepts the narrowing; it never fails a requirement of the call. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged. Its audience may be one selector placeholder such as @slack:channel/$channel_id, resolved from the call's arguments at check time.",
+  forwards:
+    "The label of content a tool call sends beyond its arguments, such as a file the tool reads server-side and mails. Same shape as delta, but static TOML writes only literal readers. requires checks it before the call; an input sanitizer cannot remove it.",
   requires:
-    "The prerequisites for executing a tool call: rules on allowed readers, trust levels, and required history.",
+    "The prerequisites for executing a tool call: rules on allowed readers, trust levels, required history, and attention. OpenAPPA checks them before the call against the trajectory's current label combined with forwards and with the file content the call sends.",
   audience:
     "Who is allowed to see data. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
   trust:
@@ -118,9 +120,9 @@ const TERMS = {
   emits:
     "The effects listed in an annotator's JSON answer. OpenAPPA records them when the tool succeeds. Policy TOML uses the field name effects.",
   contains:
-    "Under requires.audience: the current audience must include these readers; a whole-entry $arg placeholder is allowed only here, and a selector placeholder such as @slack:channel/$channel_id is allowed here and in delta. Under requires.effects: the trajectory already recorded this effect.",
+    "Under requires.audience: the audience of what the call sends (the current label combined with forwards and any file content the call sends) must include these readers; a whole-entry $arg placeholder is allowed only here, and a selector placeholder such as @slack:channel/$channel_id is allowed here and in delta. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
   tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",

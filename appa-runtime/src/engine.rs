@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, ContextArtifact,
-    HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
+    ContextArtifact, HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
 
@@ -775,6 +775,88 @@ pub struct RuntimeEngine {
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: a retired engine decides under the same one.
     naming: ToolNaming,
+    /// The views this engine built last, one per family; see [`RuntimeEngine::rebuild_view`].
+    views: HeldViews,
+}
+
+/// How many families' views one engine holds at most.
+const HELD_VIEWS: usize = 128;
+
+/// The last view this engine built for each of a bounded number of families, so the next read
+/// of a family validates only the batches its log accepted since rather than the whole log.
+#[derive(Default)]
+struct HeldViews {
+    held: std::sync::Mutex<HeldFamilies>,
+}
+
+#[derive(Default)]
+struct HeldFamilies {
+    views: std::collections::HashMap<TrajectoryId, HeldView>,
+    /// Families in the order they were last used, oldest first.
+    order: std::collections::VecDeque<TrajectoryId>,
+}
+
+struct HeldView {
+    view: EngineView,
+    basis: u64,
+    facts: usize,
+    /// The view's last record, which a later log of the family must still hold at that
+    /// position for the view to describe it.
+    last: Option<Fact>,
+}
+
+impl HeldViews {
+    fn held(&self) -> std::sync::MutexGuard<'_, HeldFamilies> {
+        self.held
+            .lock()
+            .expect("the held views mutex is never poisoned: no panic runs while it is held")
+    }
+
+    /// `log`'s view, advanced from a held view of a prefix of `log` through the batches the
+    /// log accepted since. `None` when no held view describes a prefix of `log`, or a batch
+    /// is refused: the caller then rebuilds from the whole log.
+    fn advanced(&self, engine: &Engine, log: &Log) -> Option<EngineView> {
+        let (mut view, basis) = {
+            let held = self.held();
+            let found = held.views.get(log.root())?;
+            let same_prefix = found.basis <= log.basis()
+                && found.facts <= log.facts().len()
+                && found.facts.checked_sub(1).map(|last| &log.facts()[last]) == found.last.as_ref();
+            if !same_prefix {
+                return None;
+            }
+            (found.view.clone(), found.basis)
+        };
+        for batch in log.batches_after(basis)? {
+            engine.admit_batch(&mut view, batch.to_vec()).ok()?;
+        }
+        Some(view)
+    }
+
+    fn keep(&self, log: &Log, view: &EngineView) {
+        let mut held = self.held();
+        // The family was used now, whether or not this view replaces the held one.
+        held.order.retain(|family| family != log.root());
+        held.order.push_back(log.root().clone());
+        if !held
+            .views
+            .get(log.root())
+            .is_some_and(|found| found.basis > log.basis())
+        {
+            let fresh = HeldView {
+                view: view.clone(),
+                basis: log.basis(),
+                facts: log.facts().len(),
+                last: log.facts().last().cloned(),
+            };
+            held.views.insert(log.root().clone(), fresh);
+        }
+        while held.order.len() > HELD_VIEWS {
+            if let Some(oldest) = held.order.pop_front() {
+                held.views.remove(&oldest);
+            }
+        }
+    }
 }
 
 impl RuntimeEngine {
@@ -820,6 +902,7 @@ impl RuntimeEngine {
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
             naming,
+            views: HeldViews::default(),
         }
     }
 
@@ -864,8 +947,28 @@ impl RuntimeEngine {
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
     /// view cannot be built against a log it does not describe.
+    ///
+    /// A family's last view is held, and a later log that still holds that view's records is
+    /// validated only from where the view stands, batch by batch, through the validator a sealed
+    /// batch passes. That view equals the one a replay of the whole log builds; anything the
+    /// advance refuses is judged by that whole replay instead.
     pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
-        self.validated(log.facts().to_vec(), log.root(), log.basis())
+        let view = match self.views.advanced(&self.engine, log) {
+            Some(view) => {
+                // Every debug test build checks the advance against a whole replay.
+                #[cfg(all(test, debug_assertions))]
+                assert_eq!(
+                    view,
+                    self.validated(log.facts().to_vec(), log.root(), log.basis())
+                        .expect("a whole replay accepts every log an advance accepts"),
+                    "an advanced view equals the view a replay of the whole log builds"
+                );
+                view
+            }
+            None => self.validated(log.facts().to_vec(), log.root(), log.basis())?,
+        };
+        self.views.keep(log, &view);
+        Ok(view)
     }
 
     /// Where this trajectory stands in the log:
@@ -1619,7 +1722,6 @@ impl RuntimeEngine {
                 match gap {
                     Gap::TrustFloor { .. } => "trust_floor",
                     Gap::Includes { .. } => "includes",
-                    Gap::Cap { .. } => "cap",
                     Gap::Prior(_) => "prior",
                     Gap::NoPrior(_) => "no_prior",
                     Gap::Attention(_) => "attention",
@@ -2493,20 +2595,18 @@ impl RuntimeEngine {
                 .rank_of(name)
                 .expect("a decoded annotation answer names declared ranks")
         };
-        let mut requirements = Vec::new();
-        if let Some(required) = &answer.required_audience {
-            if let Some(includes) = &required.includes {
-                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())));
-            }
-            if let Some(cap) = &required.cap {
-                requirements.push(AudienceRequirement::Cap(cap.clone()));
-            }
-        }
+        let requirements = answer
+            .required_audience
+            .iter()
+            .map(|includes| AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())))
+            .collect();
+        let delta = |answered: &AnswerDelta| Delta {
+            trust: answered.trust.as_deref().map(rank),
+            audience: answered.audience.clone().map(DeltaAudience::Static),
+        };
         ProducedAnnotation {
-            delta: Delta {
-                trust: answer.delta_trust.as_deref().map(rank),
-                audience: answer.delta_audience.clone().map(DeltaAudience::Static),
-            },
+            delta: delta(&answer.delta),
+            forwards: delta(&answer.forwards),
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
             requires: Requires {
@@ -3587,8 +3687,6 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
                 )
             }
         },
-        // Count only: a cap may read a directory group's members.
-        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -3660,13 +3758,6 @@ fn clause_count(clause: &Clause) -> String {
 
 fn clause_size(clause: &Clause) -> usize {
     clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
-}
-
-fn declared_count(audience: &DeclaredAudience) -> String {
-    match audience {
-        DeclaredAudience::Public => "public".to_string(),
-        DeclaredAudience::Union(clause) => clause_count(clause),
-    }
 }
 
 fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
@@ -4069,6 +4160,15 @@ fn block_feedback(
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
     }
+    if let Some(impact) = planned.narrowing_impact {
+        reasons.push(format!(
+            "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
+            impact.sign_off + impact.blocked,
+            impact.tools,
+            impact.sign_off,
+            impact.blocked
+        ));
+    }
     if planned.plans.iter().any(|plan| match plan {
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
         RemedyPlan::Redispatch(_) => false,
@@ -4217,7 +4317,7 @@ mod tests {
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
-    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
+    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
@@ -4499,8 +4599,11 @@ mod tests {
         );
 
         let answer = AnnotationAnswer {
-            delta_trust: Some("trusted".to_string()),
-            delta_audience: Some(DeclaredAudience::Public),
+            delta: AnswerDelta {
+                trust: Some("trusted".to_string()),
+                audience: Some(DeclaredAudience::Public),
+            },
+            forwards: AnswerDelta::default(),
             required_trust: None,
             required_audience: None,
             history: Vec::new(),
@@ -4548,8 +4651,11 @@ mod tests {
             annotator: "classifier".to_string(),
             call: asked,
             answer: AnnotationAnswer {
-                delta_trust: Some("suspicious".to_string()),
-                delta_audience: None,
+                delta: AnswerDelta {
+                    trust: Some("suspicious".to_string()),
+                    audience: None,
+                },
+                forwards: AnswerDelta::default(),
                 required_trust: None,
                 required_audience: None,
                 history: Vec::new(),
@@ -4625,13 +4731,13 @@ mod tests {
         );
 
         let answer = || AnnotationAnswer {
-            delta_trust: Some("suspicious".to_string()),
-            delta_audience: Some(DeclaredAudience::Public),
+            delta: AnswerDelta {
+                trust: Some("suspicious".to_string()),
+                audience: Some(DeclaredAudience::Public),
+            },
+            forwards: AnswerDelta::default(),
             required_trust: Some("trusted".to_string()),
-            required_audience: Some(RequiredAudienceAnswer {
-                includes: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
-                cap: Some(DeclaredAudience::Public),
-            }),
+            required_audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
             history: vec![HistoryEntry::Excludes("send".to_string())],
             attention: Vec::new(),
             emits: vec!["read".to_string()],
@@ -4661,12 +4767,9 @@ mod tests {
         assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));
         assert_eq!(
             produced.requires.label.audience,
-            vec![
-                AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([ReaderId::new(
-                    "support"
-                )]))),
-                AudienceRequirement::Cap(DeclaredAudience::Public),
-            ]
+            vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                DeclaredAudience::restricted([ReaderId::new("support")])
+            ))]
         );
         assert_eq!(
             produced.requires.history,
@@ -4726,6 +4829,7 @@ mod tests {
                 RemedyPlan::Executable(plan(8)),
             ],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let offers = vec![
             (OfferId("offer-for-8".to_string()), PlanId::new(8)),
@@ -4826,6 +4930,7 @@ mod tests {
             },
             plans: vec![RemedyPlan::Redispatch(redispatch)],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
@@ -4880,6 +4985,7 @@ mod tests {
             },
             plans: vec![RemedyPlan::Executable(plan)],
             fork_advice: None,
+            narrowing_impact: None,
         };
         let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
         let spelling = super::ReturnSpelling {
@@ -5013,6 +5119,7 @@ mod tests {
                         },
                     })],
                     fork_advice: None,
+                    narrowing_impact: None,
                 };
                 let options = EmbeddedPresentationOptions {
                     control_tool: "approve_remedy".to_string(),
@@ -5059,6 +5166,57 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_impact_adds_one_reason() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::{Audience, Label};
+        use appa_engine::plan::NarrowingImpact;
+
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let reasons = |narrowing_impact| {
+            let planned = PlannedBlock {
+                raw: RawBlock {
+                    requirement_gaps: vec![],
+                    narrowing: Some(Narrowing {
+                        from: Label::new(Trust::new(2), Audience::public()),
+                        to: Label::new(Trust::new(0), Audience::public()),
+                    }),
+                },
+                plans: vec![],
+                fork_advice: None,
+                narrowing_impact,
+            };
+            let options = EmbeddedPresentationOptions {
+                control_tool: "approve_remedy".to_string(),
+                supports_delegation: false,
+                include_display_plan: true,
+            };
+            block_feedback(
+                &planned,
+                &[],
+                policy.engine().registry(),
+                &ReturnBounds {
+                    label: Label::top(),
+                    lowest: Trust::new(0),
+                },
+                ToolNaming::AsAuthored,
+                "send_mail",
+                &options,
+            )
+            .display
+            .expect("the display plan is requested")
+            .reasons
+        };
+        let without = reasons(None);
+        let with = reasons(Some(NarrowingImpact {
+            tools: 4,
+            sign_off: 1,
+            blocked: 2,
+        }));
+        assert_eq!(with.len(), without.len() + 1);
+        assert!(with.starts_with(&without));
+    }
+
+    #[test]
     fn embedded_presentation_uses_the_host_control_name_and_omits_delegation_advice() {
         let options = EmbeddedPresentationOptions {
             control_tool: "approve_remedy".to_string(),
@@ -5079,6 +5237,7 @@ mod tests {
                 }],
             })],
             fork_advice: Some(super::ForkAdvice::SameLabel),
+            narrowing_impact: None,
         };
         let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
         let feedback = block_feedback(
@@ -5140,6 +5299,7 @@ mod tests {
                 },
                 plans: vec![],
                 fork_advice: None,
+                narrowing_impact: None,
             };
             block_feedback(
                 &planned,

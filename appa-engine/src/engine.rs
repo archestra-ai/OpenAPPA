@@ -14,7 +14,7 @@ use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom}
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
-use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
+use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV2};
 use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry, ToolKind};
@@ -61,7 +61,7 @@ pub enum ForkStatus {
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
-    identity: PolicyIdentityV1,
+    identity: PolicyIdentityV2,
     dialect: PolicyDialectVersion,
 }
 
@@ -90,7 +90,7 @@ impl Engine {
         let profile = DeploymentProfile::declare(declaration.clone())?;
         let registry = Registry::build(config, planner_cap, profile)?;
         profile::validate_coverage(&registry, &declaration)?;
-        let identity = PolicyIdentityV1::of_registry(&registry);
+        let identity = PolicyIdentityV2::of_registry(&registry);
         Ok(Engine {
             registry,
             identity,
@@ -106,7 +106,7 @@ impl Engine {
         self.registry.profile()
     }
 
-    pub fn identity(&self) -> PolicyIdentityV1 {
+    pub fn identity(&self) -> PolicyIdentityV2 {
         self.identity
     }
 
@@ -137,6 +137,24 @@ impl Engine {
     ) -> Result<EngineView, TransitionRefusal> {
         let projection = self.replay(family, &records, revision)?;
         Ok(EngineView::validated(projection, self.identity, family.clone()))
+    }
+
+    /// Advance `view` by one batch its log accepted after the position `view` stands at. The
+    /// batch's records pass the validator a sealed batch passes, resumed where `view` stands,
+    /// and fold forward through [`EngineView::advance`]; a view advanced batch by batch equals
+    /// the view [`Engine::view`] builds from the whole log. A runtime holding a view reads only
+    /// the batches after it this way; anything refused here it rebuilds through `view`.
+    pub fn admit_batch(
+        &self,
+        view: &mut EngineView,
+        records: Vec<Fact>,
+    ) -> Result<(), crate::transition::BatchRefusal> {
+        if view.policy() != self.identity {
+            return Err(crate::transition::ViewMismatch::ForeignPolicy.into());
+        }
+        let batch = self.seal(view, records)?;
+        view.advance(&batch)?;
+        Ok(())
     }
 
     /// The validator over a bare record stream, for tests that pin a refusal without holding a
@@ -3494,6 +3512,7 @@ mod tests {
             bound_to.digest(),
             crate::contract::ProducedAnnotation {
                 delta: produced.delta,
+                forwards: produced.forwards,
                 emits: produced.emits,
                 requires: produced.requires,
             },
@@ -3573,6 +3592,7 @@ mod tests {
             tags: vec![],
             delta,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -3922,6 +3942,7 @@ mod tests {
                 )]))),
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3941,6 +3962,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
             requires: Requires::default(),
         };
@@ -4290,42 +4312,60 @@ mod tests {
         assert_eq!(check(&e, &log, &call("get_ticket", json!({}))), CheckOutcome::Allow);
     }
 
-    #[test]
-    fn an_includes_requirement_reads_the_committed_label() {
-        let b_reader = Audience::restricted([ReaderId::new("b")]);
-        let share = ToolAnnotation {
+    fn gated(name: &str, delta: Delta, forwards: Delta, requires: LabelRequirements) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            name: ToolName::new("share"),
+            name: ToolName::new(name),
             tags: vec![],
-            delta: Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
-                    "a",
-                )]))),
-            },
             parameters: crate::params::ToolParameters::open(),
+            delta,
+            forwards,
             emits: EffectSet::default(),
             requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::literal(b_reader.clone()),
-                    ))],
-                },
+                label: requires,
                 ..Requires::default()
             },
+        }
+    }
+
+    fn readers(names: &[&str]) -> DeclaredAudience {
+        DeclaredAudience::restricted(names.iter().map(|name| ReaderId::new(*name)))
+    }
+
+    fn contains(recipients: RecipientSpec) -> LabelRequirements {
+        LabelRequirements {
+            trust_floor: None,
+            audience: vec![AudienceRequirement::Includes(recipients)],
+        }
+    }
+
+    fn floor(trust: Trust) -> LabelRequirements {
+        LabelRequirements {
+            trust_floor: Some(trust),
+            audience: vec![],
+        }
+    }
+
+    /// The delta labels what the call returns: a `contains` the session covers holds even when
+    /// the call's own result would narrow the audience below the recipient.
+    #[test]
+    fn a_delta_audience_labels_the_result_and_never_gates_the_call() {
+        let narrowing = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(readers(&["a"]))),
         };
+        let share = gated(
+            "share",
+            narrowing,
+            Delta::NONE,
+            contains(RecipientSpec::Static(readers(&["b"]))),
+        );
         let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
         let e = engine_at(vec![share], known(TRUSTED, both.clone()));
         let log = vec![opened(&e)];
         match check(&e, &log, &call("share", json!({}))) {
             CheckOutcome::Block(block) => {
-                assert_eq!(
-                    block.requirement_gaps,
-                    vec![Gap::Includes {
-                        recipients: DeclaredAudience::literal(b_reader)
-                    }]
-                );
+                assert_eq!(block.requirement_gaps, vec![]);
                 assert_eq!(
                     block.narrowing,
                     Some(crate::check::Narrowing {
@@ -4334,77 +4374,81 @@ mod tests {
                     })
                 );
             }
-            other => panic!("expected the committed-label includes gap, got {other:?}"),
+            other => panic!("expected the narrowing alone, got {other:?}"),
         }
     }
 
     #[test]
-    fn a_trust_floor_reads_the_committed_label() {
-        let risky = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("risky"),
-            tags: vec![],
-            delta: Delta {
-                trust: Some(SUSPICIOUS),
-                audience: None,
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
+    fn a_delta_trust_labels_the_result_and_never_gates_the_call() {
+        let lowering = Delta {
+            trust: Some(SUSPICIOUS),
+            audience: None,
         };
-        let e = engine(vec![risky]);
+        let e = engine(vec![gated("risky", lowering, Delta::NONE, floor(TRUSTED))]);
         let log = vec![opened(&e)];
         match check(&e, &log, &call("risky", json!({}))) {
             CheckOutcome::Block(block) => {
-                assert_eq!(
-                    block.requirement_gaps,
-                    vec![Gap::TrustFloor {
-                        required: TRUSTED,
-                        actual: SUSPICIOUS,
-                    }]
-                );
+                assert_eq!(block.requirement_gaps, vec![]);
                 assert!(block.narrowing.is_some());
             }
-            other => panic!("expected the committed-label trust gap, got {other:?}"),
+            other => panic!("expected the narrowing alone, got {other:?}"),
         }
     }
 
+    /// What the call sends beyond the arguments gates it: a trusted session cannot lift
+    /// suspicious forwarded content over a trust floor, and the trajectory does not narrow.
     #[test]
-    fn a_read_that_narrows_into_the_cap_passes_the_cap() {
-        let a_reader = Audience::restricted([ReaderId::new("a")]);
-        let scoped = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("scoped"),
-            tags: vec![],
-            delta: Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a_reader.clone()))),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a_reader))],
-                },
-                ..Requires::default()
-            },
+    fn forwarded_content_below_the_floor_blocks_the_call() {
+        let forwards = Delta {
+            trust: Some(SUSPICIOUS),
+            audience: None,
         };
-        let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-        let e = engine_at(vec![scoped], known(TRUSTED, both));
+        let e = engine(vec![gated("mail_report", Delta::NONE, forwards, floor(TRUSTED))]);
         let log = vec![opened(&e)];
-        match check(&e, &log, &call("scoped", json!({}))) {
+        assert_eq!(
+            check(&e, &log, &call("mail_report", json!({}))),
+            CheckOutcome::Block(crate::check::RawBlock {
+                requirement_gaps: vec![Gap::TrustFloor {
+                    required: TRUSTED,
+                    actual: SUSPICIOUS,
+                }],
+                narrowing: None,
+            })
+        );
+    }
+
+    #[test]
+    fn forwarded_content_bounds_the_recipients_a_call_reaches() {
+        let forwards = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(readers(&["a"]))),
+        };
+        let share = ToolAnnotation {
+            parameters: crate::params::test_string_argument_schema("to"),
+            ..gated(
+                "share_packet",
+                Delta::NONE,
+                forwards,
+                contains(RecipientSpec::Placeholder("to".into())),
+            )
+        };
+        let e = engine(vec![share]);
+        let log = vec![opened(&e)];
+        assert_eq!(
+            check(&e, &log, &call("share_packet", json!({ "to": "a" }))),
+            CheckOutcome::Allow
+        );
+        match check(&e, &log, &call("share_packet", json!({ "to": "b" }))) {
             CheckOutcome::Block(block) => {
-                assert!(block.requirement_gaps.is_empty(), "narrowing into the cap is not a gap");
-                assert!(block.narrowing.is_some());
+                assert_eq!(
+                    block.requirement_gaps,
+                    vec![Gap::Includes {
+                        recipients: readers(&["b"])
+                    }]
+                );
+                assert_eq!(block.narrowing, None);
             }
-            other => panic!("expected a narrowing-only soft block, got {other:?}"),
+            other => panic!("expected the forwarded audience gap, got {other:?}"),
         }
     }
 
@@ -4415,6 +4459,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new(kind)]).unwrap(),
             requires: Requires::default(),
         }
@@ -4427,6 +4472,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![requirement],
@@ -4753,6 +4799,7 @@ mod tests {
                 audience: None,
             },
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
             requires: Requires::default(),
         };
@@ -4954,6 +5001,7 @@ mod tests {
                         audience: None,
                     },
                     parameters: crate::params::ToolParameters::open(),
+                    forwards: Delta::NONE,
                     emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
                     requires: Requires::default(),
                 },
@@ -5501,6 +5549,7 @@ mod tests {
                 "required": ["body"],
             }))
             .unwrap(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -6781,6 +6830,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -7014,6 +7064,7 @@ mod tests {
                 tags: vec![],
                 delta: Delta::NONE,
                 parameters: crate::params::ToolParameters::open(),
+                forwards: Delta::NONE,
                 emits: EffectSet::default(),
                 requires: Requires {
                     label: LabelRequirements {
@@ -7120,6 +7171,7 @@ mod tests {
             tags: vec![],
             delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -8839,6 +8891,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
@@ -8866,6 +8919,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Requires::default(),
         };
@@ -8913,6 +8967,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -9036,6 +9091,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -9089,6 +9145,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -9150,6 +9207,7 @@ mod tests {
             }))
             .unwrap(),
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -9465,6 +9523,7 @@ mod tests {
                 "additionalProperties": false,
             }))
             .unwrap(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -10129,6 +10188,7 @@ mod tests {
             tags: vec![],
             delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -11676,6 +11736,58 @@ mod tests {
         assert_eq!(required_includes(&blocked[0].call), outsider.clone());
     }
 
+    /// A produced `forwards` is held to the annotator's mandate exactly as its `delta` is: live,
+    /// the proposal is refused; on replay, a record carrying it is forged evidence.
+    #[test]
+    fn a_produced_forwards_outside_the_mandate_is_refused_live_and_on_replay() {
+        let notify = plain_tool("notify");
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators.push(annotator_with_readers("acl", &["insider"]));
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([ReaderId::new("insider")])));
+        let log = vec![opened(&e)];
+        let unpinned = call("notify", json!({ "room": "lobby" }));
+        let forwarding = |reader: &str| {
+            let mut produced = notify.clone();
+            produced.forwards = Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    reader,
+                )]))),
+            };
+            pinned_for(produced, "acl", &unpinned)
+        };
+
+        let outside = unpinned.clone().with_annotation(Some(forwarding("outsider")));
+        assert!(matches!(
+            e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![raw(&outside)])),
+            Err(TransitionError::InvalidAnnotation { .. })
+        ));
+
+        let within = unpinned.clone().with_annotation(Some(forwarding("insider")));
+        let decision = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![raw(&within)]))
+            .expect("the batch decides");
+        assert_eq!(tool_names(answered(&decision).0), ["notify"]);
+        let mut facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+        for fact in &mut facts {
+            match fact {
+                Fact::ProposalBatchDecided { proposals, .. } => {
+                    for proposal in proposals.iter_mut() {
+                        *proposal = proposal.clone().with_annotation(Some(forwarding("outsider")));
+                    }
+                }
+                Fact::DispatchOpened { annotation, .. } => *annotation = Some(forwarding("outsider")),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, facts].concat()),
+            Err(TransitionRefusal::ForgedEvidence)
+        );
+    }
+
     fn audience_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {
         let mut send = plain_tool("send");
         send.parameters = crate::params::test_string_argument_schema("to");
@@ -12260,16 +12372,18 @@ mod tests {
         cfg.audience = slack_groups(&["team"]);
         let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
         let log = vec![opened(&e)];
-        let capped = {
+        let requiring = {
             let mut produced = notify.clone();
-            produced.requires.label.audience = vec![AudienceRequirement::Cap(group_audience("team"))];
+            produced.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                group_audience("team"),
+            ))];
             let unpinned = call("notify", json!({}));
             raw(&unpinned
                 .clone()
                 .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
         };
         let batch_with =
-            |evidence: crate::audience::AudienceEvidence| evidenced_batch("b1", vec![capped.clone()], evidence);
+            |evidence: crate::audience::AudienceEvidence| evidenced_batch("b1", vec![requiring.clone()], evidence);
 
         assert_eq!(
             e.handle(
@@ -12279,7 +12393,7 @@ mod tests {
             Err(TransitionError::MembershipNeeded {
                 needed: vec![group_atom("team")]
             }),
-            "the produced cap is read extensionally, so the act asks for exactly its group"
+            "the produced `contains` is read extensionally, so the act asks for exactly its group"
         );
 
         let team = |members: Vec<ReaderId>| source_evidence(vec![user_group("team", members)]);
@@ -12288,7 +12402,7 @@ mod tests {
             .handle(&viewing(&e, &log), batch_with(evidence.clone()))
             .expect("the batch decides under the pinned answer");
         let (released, blocked) = answered(&decision);
-        assert_eq!(released.len(), 1, "alice is a team member, so the cap holds");
+        assert_eq!(released.len(), 1, "the team is alice alone, so the label covers it");
         assert!(blocked.is_empty());
         let facts = appended_facts(decision);
         assert!(
@@ -14191,12 +14305,15 @@ mod tests {
             tool
         }
 
-        fn capped_send() -> ToolAnnotation {
+        fn team_send() -> ToolAnnotation {
             let mut send = plain_tool("send");
             send.requires = Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(grouped(&["auditor"], &["team"]))],
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(grouped(
+                        &[],
+                        &["team"],
+                    )))],
                 },
                 ..Requires::default()
             };
@@ -14349,24 +14466,43 @@ mod tests {
         fn a_route_reads_the_answers_the_block_recorded_over_any_fresh_answer() {
             use crate::route::{RouteDepth, RouteOutcome, RouteStep};
 
-            let mut seen = plain_tool("seen");
-            seen.delta = Delta {
-                trust: None,
-                audience: Some(DeltaAudience::Static(grouped(&[], &["board"]))),
+            let officer = crate::authority::Authority {
+                name: AuthorityName::new("officer"),
+                mandate: crate::authority::Mandate {
+                    reader_ceiling: Some(grouped(&[], &["team"])),
+                    ..crate::authority::Mandate::default()
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            };
+            let mut send = plain_tool("send");
+            send.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::restricted([corp_reader("bob")]),
+                    ))],
+                },
+                ..Requires::default()
             };
             let e = grouped_engine(
-                config(vec![capped_send(), seen], vec![]),
+                config(vec![send], vec![officer]),
                 &[],
-                known(TRUSTED, readers(&["alice"])),
+                known(TRUSTED, Audience::restricted([corp_reader("alice")])),
             );
             let log = vec![opened(&e)];
-            let recorded_answers = source_evidence(vec![user_group("board", vec![]), user_group("team", vec![])]);
+            let bob_in_team = || user_group("team", vec![slack_member("slack:UB", Some("bob@corp.com"))]);
             let decided = e
                 .handle(
                     &viewing(&e, &log),
-                    act_batch("b1", vec![], vec![raw(&call("send", json!({})))], recorded_answers),
+                    act_batch(
+                        "b1",
+                        vec![],
+                        vec![raw(&call("send", json!({})))],
+                        source_evidence(vec![bob_in_team()]),
+                    ),
                 )
-                .expect("the tool plans of the block read `board`, so the batch answers it too");
+                .expect("the officer's ceiling plans the block, so the batch answers `team`");
             let log = [log, appended_facts(decided)].concat();
             let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
             let subject = crate::basis::SubjectKey::Call {
@@ -14374,39 +14510,24 @@ mod tests {
                 batch: crate::transition::ProposalBatchId::new("b1"),
                 position: 0,
             };
-            let cap = crate::check::Gap::Cap {
-                cap: grouped(&["auditor"], &["team"]),
-            };
             let routes = |answers: crate::audience::AudienceEvidence| {
                 e.recovery_routes(&view, &subject, &answers, RouteDepth::new(2).unwrap())
                     .expect("the recorded answers stand")
             };
 
-            let narrowed = Audience::of_clauses([
-                crate::label::Clause::new([], [], [ReaderId::new("alice")]).expect("a reader clause"),
-                crate::label::Clause::new([], [crate::label::GroupRef::Named(GroupName::new("board"))], [])
-                    .expect("a group clause"),
-            ]);
             let recorded = routes(no_answers());
             assert_eq!(recorded.len(), 1);
             assert_eq!(recorded[0].outcome, RouteOutcome::Complete);
             assert!(
                 matches!(
                     &recorded[0].steps[..],
-                    [RouteStep::Precede { tool, clears, accepts: Some(narrowing) }]
-                        if tool.as_str() == "seen"
-                            && clears == &vec![cap.clone()]
-                            && narrowing.to.audience == narrowed
+                    [RouteStep::Authorize { authority, .. }] if authority.as_str() == "officer"
                 ),
-                "`seen` narrows `alice` by the symbolic `board`, empty under the recorded answer, within \
-                 the cap the recorded empty `team` leaves at `auditor`: {:?}",
+                "the recorded `team` answer puts bob under the officer's ceiling: {:?}",
                 recorded[0].steps
             );
             assert_eq!(
-                routes(source_evidence(vec![
-                    user_group("board", vec![]),
-                    user_group("team", vec![])
-                ])),
+                routes(source_evidence(vec![bob_in_team()])),
                 recorded,
                 "restating the answers the block consumed reads them once"
             );
@@ -14415,17 +14536,14 @@ mod tests {
                     e.recovery_routes(
                         &view,
                         &subject,
-                        &source_evidence(vec![user_group(
-                            "team",
-                            vec![slack_member("slack:UA", Some("alice@corp.com"))]
-                        )]),
+                        &source_evidence(vec![user_group("team", vec![])]),
                         RouteDepth::ONE
                     ),
                     Err(crate::route::RouteError::Evidence(
                         crate::audience::EvidenceRefusal::ContradictedPin { .. }
                     ))
                 ),
-                "a fresh answer that would lift the cap contradicts the answer the block consumed"
+                "a fresh answer that would drop the route contradicts the answer the block consumed"
             );
             assert!(matches!(
                 e.recovery_routes(
@@ -14476,9 +14594,9 @@ mod tests {
         }
 
         #[test]
-        fn a_cap_written_with_a_group_decides_by_the_answer_and_an_empty_answer_is_valid() {
+        fn a_contains_written_with_a_group_decides_by_the_answer_and_an_empty_answer_is_valid() {
             let e = grouped_engine(
-                config(vec![capped_send()], vec![]),
+                config(vec![team_send()], vec![]),
                 &[],
                 known(TRUSTED, Audience::restricted([corp_reader("alice")])),
             );
@@ -14492,18 +14610,19 @@ mod tests {
                 })
             );
 
+            let outsider = source_evidence(vec![user_group(
+                "team",
+                vec![slack_member("slack:UB", Some("bob@corp.com"))],
+            )]);
             let decided = e
-                .handle(
-                    &viewing(&e, &log),
-                    act_batch("b1", vec![], send(), source_evidence(vec![user_group("team", vec![])])),
-                )
-                .expect("an empty answer decides");
+                .handle(&viewing(&e, &log), act_batch("b1", vec![], send(), outsider))
+                .expect("a member answer decides");
             let (released, blocked) = answered(&decided);
             assert!(released.is_empty());
             assert_eq!(
                 blocked[0].block.raw.requirement_gaps,
-                vec![crate::check::Gap::Cap {
-                    cap: grouped(&["auditor"], &["team"])
+                vec![crate::check::Gap::Includes {
+                    recipients: grouped(&[], &["team"])
                 }]
             );
             assert_eq!(
@@ -14511,18 +14630,15 @@ mod tests {
                 Ok(())
             );
 
-            let answer = source_evidence(vec![user_group(
-                "team",
-                vec![slack_member("slack:UA", Some("alice@corp.com"))],
-            )]);
+            let empty = source_evidence(vec![user_group("team", vec![])]);
             let released = e
-                .handle(&viewing(&e, &log), act_batch("b2", vec![], send(), answer.clone()))
-                .expect("a member answer decides");
+                .handle(&viewing(&e, &log), act_batch("b2", vec![], send(), empty.clone()))
+                .expect("an empty answer decides");
             assert_eq!(tool_names(answered(&released).0), ["send"]);
             let facts = appended_facts(released);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
-                Fact::DispatchOpened { evidence, .. } if evidence == &answer
+                Fact::DispatchOpened { evidence, .. } if evidence == &empty
             )));
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
@@ -14530,20 +14646,20 @@ mod tests {
 
         #[test]
         fn one_act_reads_one_answer_for_a_group_two_sites_read() {
-            // A cap the current symbolic audience does not structurally derive: reading it
+            // A recipient the current symbolic audience does not structurally cover: reading it
             // takes the group's members.
-            let mut alice_capped = plain_tool("send");
-            alice_capped.requires = Requires {
+            let mut to_alice = plain_tool("send");
+            to_alice.requires = Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-                        Audience::restricted([corp_reader("alice")]),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::literal(Audience::restricted([corp_reader("alice")])),
                     ))],
                 },
                 ..Requires::default()
             };
             let e = grouped_engine(
-                config(vec![team_delta("seen"), alice_capped], vec![]),
+                config(vec![team_delta("seen"), to_alice], vec![]),
                 &["seen"],
                 known(TRUSTED, Audience::public()),
             );
@@ -14576,7 +14692,7 @@ mod tests {
                     fact,
                     Fact::ValueAdmitted { value, .. } if value.label.audience == symbolic("team")
                 )),
-                "the admitted label stays symbolic while the cap reads the same act's answer"
+                "the admitted label stays symbolic while `contains` reads the same act's answer"
             );
             assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
         }
@@ -14702,9 +14818,9 @@ mod tests {
                     .expect("the covering declaration declares");
                 crate::profile::identity_of(cfg, &profile)
             };
-            let forward = config(vec![capped_send(), team_delta("read")], vec![]);
-            let backward = config(vec![team_delta("read"), capped_send()], vec![]);
-            let mut remapped = config(vec![capped_send(), team_delta("read")], vec![]);
+            let forward = config(vec![team_send(), team_delta("read")], vec![]);
+            let backward = config(vec![team_delta("read"), team_send()], vec![]);
+            let mut remapped = config(vec![team_send(), team_delta("read")], vec![]);
             remapped.audience.groups[0].from = vec![crate::audience::SelectorSpec {
                 provider: "slack".to_string(),
                 selector: "user-group/other".to_string(),

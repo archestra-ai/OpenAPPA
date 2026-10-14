@@ -25,7 +25,10 @@
 //! derivation never denies; a missing answer is a membership ask, never a label state.
 //!
 //! Every released tool call carries one complete concrete annotation
-//! ([`contract::ToolAnnotation`]): its delta, its requirements, and the effects it emits.
+//! ([`contract::ToolAnnotation`]): its delta, what it forwards, its requirements, and the
+//! effects it emits. The delta labels the call's result and narrows the trajectory once the
+//! call succeeds; it never gates the call. `forwards` labels content the call itself sends
+//! beyond the agent's arguments, such as a file a tool reads server-side and mails.
 //! The [`contract::ToolDeclaration`] names the annotation's one producer — `Declared`, the
 //! declaration is its own annotation, or `Annotated`, a registered Annotator consulted per
 //! call whose answer is bounded by its mandate and pinned ([`contract::PinnedAnnotation`])
@@ -78,12 +81,16 @@
 //!   A copy or move puts the source's Label there even though the trajectory never sees the
 //!   bytes, and a replacement drops the Label of the content it destroyed.
 //!
-//! Checking a call's requirements reads both: the committed label a successful call would
-//! leave the trajectory at, folded with the content the call would publish. So a copy into a
-//! destination is checked against the source's Label, and no narrowing of the trajectory can
-//! make that requirement go away. A file call that fails admits its error text at the same
-//! value Label a success would have used ([`transition::ToolOutcome::FailureWithBody`]), so
-//! an error can never say more than the call it came from.
+//! Checking a call's requirements reads neither. It reads what the call sends, before the
+//! call runs: the trajectory's current label, met with the annotation's `forwards` and the
+//! file content the host sends with the call
+//! ([`value::ResolvedCall::forwarded_file_label`]) — an edit's predecessor, a copy's or a
+//! move's source, a process's inputs, never a replacement's predecessor. So a copy into a
+//! destination is checked against the source's Label, and an input substitution, which
+//! replaces only the arguments, replaces only the current label in the `contains` check. A
+//! file call that fails admits its error text at the same value Label a success would have
+//! used ([`transition::ToolOutcome::FailureWithBody`]), so an error can never say more than
+//! the call it came from.
 //!
 pub mod admit;
 pub mod audience;

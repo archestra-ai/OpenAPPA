@@ -16,7 +16,7 @@ use crate::fact::{
 use crate::label::{Expansions, Label, MembershipContext};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::PolicyIdentityV1;
+use crate::profile::PolicyIdentityV2;
 use crate::projection::{Projection, Views};
 use crate::value::{
     ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
@@ -557,7 +557,7 @@ pub struct EngineDecision {
 pub struct ValidatedFactBatch {
     facts: Vec<Fact>,
     basis: u64,
-    policy: PolicyIdentityV1,
+    policy: PolicyIdentityV2,
     family: TrajectoryId,
 }
 
@@ -567,7 +567,7 @@ impl ValidatedFactBatch {
     pub(crate) fn seal(
         facts: Vec<Fact>,
         basis: u64,
-        policy: PolicyIdentityV1,
+        policy: PolicyIdentityV2,
         family: TrajectoryId,
     ) -> ValidatedFactBatch {
         ValidatedFactBatch {
@@ -584,7 +584,7 @@ impl ValidatedFactBatch {
         self.basis
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV1 {
+    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
         self.policy
     }
 
@@ -615,23 +615,33 @@ pub enum ViewMismatch {
     ForeignPolicy,
 }
 
+/// Why [`crate::Engine::admit_batch`] did not advance a view: the batch's records failed the
+/// validator, or the view is not one this engine built.
+#[derive(Debug, thiserror::Error)]
+pub enum BatchRefusal {
+    #[error(transparent)]
+    Transition(#[from] TransitionRefusal),
+    #[error(transparent)]
+    View(#[from] ViewMismatch),
+}
+
 /// The engine's derived working picture of one family log: the validated records and
 /// the projection built from them. Opaque and disposable — the runtime stores it for the next
 /// event, but every constructor and mutator here belongs to the engine.
 ///
 /// Equality is equality of the derived picture: a view advanced batch by batch equals the view
 /// a replay of the same log builds, because both reach the log through the one fold.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
-    policy: PolicyIdentityV1,
+    policy: PolicyIdentityV2,
     family: TrajectoryId,
 }
 
 impl EngineView {
     /// Take the projection a [`Sequence`] validated. Crate-private: the public entry is
     /// `Engine::view`, which runs that validation.
-    pub(crate) fn validated(projection: Projection, policy: PolicyIdentityV1, family: TrajectoryId) -> EngineView {
+    pub(crate) fn validated(projection: Projection, policy: PolicyIdentityV2, family: TrajectoryId) -> EngineView {
         EngineView {
             projection,
             policy,
@@ -669,7 +679,7 @@ impl EngineView {
         self.projection.offer_trajectory(offer)
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV1 {
+    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
         self.policy
     }
 
@@ -3412,6 +3422,7 @@ mod tests {
             name: ToolName::new("note"),
             tags: vec![],
             delta: crate::contract::Delta::NONE,
+            forwards: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {

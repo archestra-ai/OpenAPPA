@@ -184,6 +184,7 @@ class McpTargets(unittest.TestCase):
             ("issue_read", {"method": "get", "owner": "acme", "repo": "api", "issue_number": 7}, 7),
             ("add_issue_comment", {"owner": "acme", "repo": "api", "issue_number": 7, "body": "x"}, 7),
             ("merge_pull_request", {"owner": "acme", "repo": "api", "pullNumber": 3}, 3),
+            ("sub_issue_write", {"method": "add", "owner": "acme", "repo": "api", "issue_number": 42, "sub_issue_id": 1042}, 42),
             ("pull_request_read", {"owner": "acme", "repo": "api", "pullNumber": True}, None),
             ("pull_request_read", {"owner": "acme", "repo": "api", "pullNumber": "12"}, None),
         ]:

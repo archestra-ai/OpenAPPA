@@ -205,11 +205,24 @@ reason the tools exist, and mixing them up is the easiest way to misread this su
 | `Process` | trajectory ⊓ delta | trajectory ⊓ every declared input ⊓ delta |
 
 ⊓ is [`Label::combine`](../appa-engine/src/label.rs): minimum trust, intersected audiences.
-The tool's `delta` is its policy contract; a file call is checked with the same engine
-machinery as any other call. Requirements are checked against the content that flows to the
-destination, so a `Copy` into a restricted destination is refused on the source's Label even
-though the acknowledgement never carries it. Failure text is admitted at the same value
-Label a success would have used, so an error can never say more than the call it came from.
+The tool's `delta` labels its result. A file call is checked with the same engine machinery
+as any other call.
+
+Requirements are checked before the call runs, against what the call sends: trajectory ⊓
+the tool's `forwards` ⊓ the file content the call sends. The `delta` is not part of this
+label.
+
+| Operation | File content the call sends |
+| --- | --- |
+| `Read` | none |
+| `Write` | none: the predecessor is overwritten, not sent |
+| `Edit` | predecessor |
+| `Copy` / `Move` | source |
+| `Process` | every declared input |
+
+So a `Copy` into a restricted destination is refused on the source's Label, although the
+acknowledgement does not carry that Label. Failure text is admitted at the same value Label
+a success would have used, so an error can never say more than the call it came from.
 
 An `Edit` records the predecessor version as a content dependency. A `Write` records none:
 replacement destroys content rather than deriving from it, so history is not a dependency.

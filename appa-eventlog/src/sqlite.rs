@@ -23,14 +23,14 @@ use crate::encoding::encode;
 use crate::encoding::{contiguous, decoded, opening_key};
 use crate::held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage, NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
-    Completion, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
-    ProcessedResultRequest, ReceiptError, SessionScope, StoredJson, StoredOperation, StoredOperationInput,
-    StoredResult, resolve_operation_claim, resolve_operation_completion, resolve_result_claim,
-    resolve_result_completion,
+    Completion, LeaseOwner, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
+    ProcessedResultRequest, ReceiptError, ReceiptLease, Renewal, SessionScope, StoredJson, StoredLease,
+    StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim, resolve_operation_completion,
+    resolve_result_claim, resolve_result_completion,
 };
 use crate::{AppendError, CreateError, Log, OpenError, ReadError};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// The oldest version a database upgrades from. A fresh database installs [`BASE_SCHEMA`] at
 /// this version and then runs every step of [`UPGRADES`], so the fresh and the upgraded paths
@@ -54,6 +54,13 @@ const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
     "CREATE TABLE archived_roots (
          root TEXT PRIMARY KEY
      );",
+    // Lease expiries and completion times are unix milliseconds. A pending receipt carried
+    // forward has no lease, so its next claim recovers it.
+    "ALTER TABLE operations ADD COLUMN lease_owner TEXT;
+     ALTER TABLE operations ADD COLUMN lease_expires_at INTEGER;
+     ALTER TABLE processed_results ADD COLUMN lease_owner TEXT;
+     ALTER TABLE processed_results ADD COLUMN lease_expires_at INTEGER;
+     ALTER TABLE processed_results ADD COLUMN completed_at INTEGER;",
 ];
 
 const BASE_SCHEMA: &str = "CREATE TABLE logs (
@@ -468,22 +475,45 @@ impl Sqlite {
         Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
-    pub(crate) fn claim_operation(&self, request: &OperationRequest) -> Result<OperationClaim, ReceiptError> {
+    pub(crate) fn claim_operation(
+        &self,
+        request: &OperationRequest,
+        lease: &ReceiptLease,
+    ) -> Result<OperationClaim, ReceiptError> {
         immediate(&mut self.connection(), |connection| {
-            let claim = resolve_operation_claim(read_operation(connection, &request.key)?, request)?;
-            if claim == OperationClaim::Claimed {
-                let stored = serde_json::to_string(&StoredOperationInput::from_request(request))
+            let now = millis(SystemTime::now());
+            let expires_at = now.saturating_add(lease.ttl_millis());
+            let Some(stored) = read_operation(connection, &request.key, now)? else {
+                let input = serde_json::to_string(&StoredOperationInput::from_request(request))
                     .map_err(|error| ReceiptError::storage(error.to_string()))?;
                 connection.execute(
-                    "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
-                     VALUES (?1,?2,?3,?4,?5,?6,'pending')",
+                    "INSERT INTO operations
+                         (organization_id, caller_id, session_id, operation_id, root, input, status, lease_owner, lease_expires_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,'pending',?7,?8)",
                     params![
                         request.key.session.organization_id,
                         request.key.binding.caller_id(),
                         request.key.session.session_id,
                         request.key.operation_id,
                         request.root.as_str(),
-                        stored,
+                        input,
+                        lease.owner().as_str(),
+                        expires_at,
+                    ],
+                )?;
+                return Ok(OperationClaim::Claimed);
+            };
+            let claim = resolve_operation_claim(stored, request, lease.owner())?;
+            if claim.holds() {
+                connection.execute(
+                    "UPDATE operations SET lease_owner=?4, lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
+                    params![
+                        request.key.session.organization_id,
+                        request.key.session.session_id,
+                        request.key.operation_id,
+                        lease.owner().as_str(),
+                        expires_at,
                     ],
                 )?;
             }
@@ -491,10 +521,15 @@ impl Sqlite {
         })
     }
 
-    pub(crate) fn complete_operation(&self, key: &OperationKey, decision: &Value) -> Result<(), ReceiptError> {
+    pub(crate) fn complete_operation(
+        &self,
+        key: &OperationKey,
+        decision: &Value,
+        owner: &LeaseOwner,
+    ) -> Result<(), ReceiptError> {
         immediate(&mut self.connection(), |connection| {
-            let existing = read_operation(connection, key)?;
-            if let Completion::Write = resolve_operation_completion(existing, key, decision)? {
+            let existing = read_operation(connection, key, millis(SystemTime::now()))?;
+            if let Completion::Write = resolve_operation_completion(existing, key, decision, owner)? {
                 let encoded =
                     serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
                 connection.execute(
@@ -515,19 +550,39 @@ impl Sqlite {
     pub(crate) fn claim_processed_result(
         &self,
         request: &ProcessedResultRequest,
+        lease: &ReceiptLease,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
         immediate(&mut self.connection(), |connection| {
-            let claim = resolve_result_claim(read_result(connection, &request.key)?, request)?;
-            if claim == ProcessedResultClaim::Claimed {
+            let now = millis(SystemTime::now());
+            let expires_at = now.saturating_add(lease.ttl_millis());
+            let Some(stored) = read_result(connection, &request.key, now)? else {
                 connection.execute(
-                    "INSERT INTO processed_results (organization_id, caller_id, session_id, tool_call_id, root, status)
-                     VALUES (?1,?2,?3,?4,?5,'pending')",
+                    "INSERT INTO processed_results
+                         (organization_id, caller_id, session_id, tool_call_id, root, status, lease_owner, lease_expires_at)
+                     VALUES (?1,?2,?3,?4,?5,'pending',?6,?7)",
                     params![
                         request.key.session.organization_id,
                         request.key.caller_id,
                         request.key.session.session_id,
                         request.key.tool_call_id,
                         request.root.as_str(),
+                        lease.owner().as_str(),
+                        expires_at,
+                    ],
+                )?;
+                return Ok(ProcessedResultClaim::Claimed);
+            };
+            let claim = resolve_result_claim(stored, request, lease.owner())?;
+            if claim.holds() {
+                connection.execute(
+                    "UPDATE processed_results SET lease_owner=?4, lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
+                    params![
+                        request.key.session.organization_id,
+                        request.key.session.session_id,
+                        request.key.tool_call_id,
+                        lease.owner().as_str(),
+                        expires_at,
                     ],
                 )?;
             }
@@ -540,21 +595,125 @@ impl Sqlite {
         key: &ProcessedResultKey,
         approved_output: &str,
         decision: &Value,
+        owner: &LeaseOwner,
     ) -> Result<(), ReceiptError> {
         immediate(&mut self.connection(), |connection| {
-            let existing = read_result(connection, key)?;
-            if let Completion::Write = resolve_result_completion(existing, key, approved_output, decision)? {
+            let now = millis(SystemTime::now());
+            let existing = read_result(connection, key, now)?;
+            if let Completion::Write = resolve_result_completion(existing, key, approved_output, decision, owner)? {
                 let encoded =
                     serde_json::to_string(decision).map_err(|error| ReceiptError::storage(error.to_string()))?;
                 connection.execute(
-                    "UPDATE processed_results SET status='complete', approved_output=?4, decision=?5
+                    "UPDATE processed_results SET status='complete', approved_output=?4, decision=?5, completed_at=?6
                      WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
                     params![
                         key.session.organization_id,
                         key.session.session_id,
                         key.tool_call_id,
                         approved_output,
-                        encoded
+                        encoded,
+                        now,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn renew_receipts(
+        &self,
+        lease: &ReceiptLease,
+        operations: &[OperationKey],
+        results: &[ProcessedResultKey],
+    ) -> Result<Renewal, ReceiptError> {
+        immediate(&mut self.connection(), |connection| {
+            let expires_at = millis(SystemTime::now()).saturating_add(lease.ttl_millis());
+            let mut renewal = Renewal::Kept;
+            for key in operations {
+                let (organization, session, id) =
+                    (&key.session.organization_id, &key.session.session_id, &key.operation_id);
+                let renewed = connection.execute(
+                    "UPDATE operations SET lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3
+                       AND status='pending' AND lease_owner=?4",
+                    params![organization, session, id, lease.owner().as_str(), expires_at],
+                )?;
+                if renewed == 0 {
+                    let kept: Option<i64> = connection
+                        .query_row(
+                            "SELECT 1 FROM operations
+                             WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3
+                               AND status='complete' AND lease_owner=?4",
+                            params![organization, session, id, lease.owner().as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if kept.is_none() {
+                        renewal = Renewal::Lost;
+                    }
+                }
+            }
+            for key in results {
+                let (organization, session, id) =
+                    (&key.session.organization_id, &key.session.session_id, &key.tool_call_id);
+                let renewed = connection.execute(
+                    "UPDATE processed_results SET lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3
+                       AND status='pending' AND lease_owner=?4",
+                    params![organization, session, id, lease.owner().as_str(), expires_at],
+                )?;
+                if renewed == 0 {
+                    let kept: Option<i64> = connection
+                        .query_row(
+                            "SELECT 1 FROM processed_results
+                             WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3
+                               AND status='complete' AND lease_owner=?4",
+                            params![organization, session, id, lease.owner().as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if kept.is_none() {
+                        renewal = Renewal::Lost;
+                    }
+                }
+            }
+            Ok(renewal)
+        })
+    }
+
+    pub(crate) fn release_receipts(
+        &self,
+        owner: &LeaseOwner,
+        operations: &[OperationKey],
+        results: &[ProcessedResultKey],
+    ) -> Result<(), ReceiptError> {
+        immediate(&mut self.connection(), |connection| {
+            let now = millis(SystemTime::now());
+            for key in operations {
+                connection.execute(
+                    "UPDATE operations SET lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3
+                       AND status='pending' AND lease_owner=?4",
+                    params![
+                        key.session.organization_id,
+                        key.session.session_id,
+                        key.operation_id,
+                        owner.as_str(),
+                        now
+                    ],
+                )?;
+            }
+            for key in results {
+                connection.execute(
+                    "UPDATE processed_results SET lease_expires_at=?5
+                     WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3
+                       AND status='pending' AND lease_owner=?4",
+                    params![
+                        key.session.organization_id,
+                        key.session.session_id,
+                        key.tool_call_id,
+                        owner.as_str(),
+                        now
                     ],
                 )?;
             }
@@ -1412,27 +1571,28 @@ fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
     Ok(tables == 0)
 }
 
-fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
+/// One operation receipt row, its lease judged against `now` in unix milliseconds.
+fn read_operation(
+    connection: &Connection,
+    key: &OperationKey,
+    now: i64,
+) -> Result<Option<StoredOperation>, ReceiptError> {
     connection
         .query_row(
-            "SELECT organization_id, caller_id, session_id, root, input, status, decision
+            "SELECT organization_id, caller_id, session_id, root, input, status, decision, lease_owner, lease_expires_at
              FROM operations WHERE organization_id=?1 AND session_id=?2 AND operation_id=?3",
             params![key.session.organization_id, key.session.session_id, key.operation_id],
             |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get(5)?,
-                    row.get::<_, Option<String>>(6)?,
+                    (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?),
+                    (row.get::<_, String>(4)?, row.get(5)?, row.get::<_, Option<String>>(6)?),
+                    stored_lease(row, 7, now)?,
                 ))
             },
         )
         .optional()?
         .map(
-            |(organization_id, caller_id, session_id, root, input, status, decision)| {
+            |((organization_id, caller_id, session_id, root), (input, status, decision), lease)| {
                 let input = StoredOperationInput::decode(json(&input)?)?;
                 Ok(StoredOperation {
                     session: SessionScope {
@@ -1444,16 +1604,22 @@ fn read_operation(connection: &Connection, key: &OperationKey) -> Result<Option<
                     semantic: input.semantic,
                     status,
                     decision: decision.as_deref().map(json),
+                    lease,
                 })
             },
         )
         .transpose()
 }
 
-fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Option<StoredResult>, ReceiptError> {
+/// One processed-result receipt row, its lease judged against `now` in unix milliseconds.
+fn read_result(
+    connection: &Connection,
+    key: &ProcessedResultKey,
+    now: i64,
+) -> Result<Option<StoredResult>, ReceiptError> {
     Ok(connection
         .query_row(
-            "SELECT organization_id, session_id, root, status, approved_output, decision
+            "SELECT organization_id, session_id, root, status, approved_output, decision, lease_owner, lease_expires_at
              FROM processed_results WHERE organization_id=?1 AND session_id=?2 AND tool_call_id=?3",
             params![key.session.organization_id, key.session.session_id, key.tool_call_id],
             |row| {
@@ -1466,10 +1632,21 @@ fn read_result(connection: &Connection, key: &ProcessedResultKey) -> Result<Opti
                     status: row.get(3)?,
                     approved_output: row.get(4)?,
                     decision: row.get::<_, Option<String>>(5)?.as_deref().map(json),
+                    lease: stored_lease(row, 6, now)?,
                 })
             },
         )
         .optional()?)
+}
+
+/// A receipt's lease columns, starting at column `from`: owner, then expiry.
+fn stored_lease(row: &rusqlite::Row<'_>, from: usize, now: i64) -> Result<StoredLease, rusqlite::Error> {
+    Ok(StoredLease {
+        owner: row.get(from)?,
+        live: row
+            .get::<_, Option<i64>>(from + 1)?
+            .is_some_and(|expires_at| expires_at > now),
+    })
 }
 
 /// A held row's notice columns: id, digest, label JSON, expiry.
@@ -1515,9 +1692,9 @@ mod tests {
             ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
-            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, PRIMARY KEY (organization_id, session_id, operation_id) )")),
+            ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
-            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
+            ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, completed_at INTEGER, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_archived_roots_1", None),
             ("sqlite_autoindex_held_peer_messages_1", None),
             ("sqlite_autoindex_host_keys_1", None),
@@ -1575,7 +1752,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("the core version reads");
-        assert_eq!(version_before, 7);
+        assert_eq!(version_before, SCHEMA_VERSION);
         {
             let connection = store.lock();
             install_embedded_schema(&connection).expect("the optional schema installs");
@@ -1586,7 +1763,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("the core version still reads");
         assert_eq!(
-            version, 7,
+            version, SCHEMA_VERSION,
             "the embedded side table does not move the frozen core version"
         );
     }

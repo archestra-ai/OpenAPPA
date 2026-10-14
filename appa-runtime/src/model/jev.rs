@@ -1252,6 +1252,32 @@ mod tests {
         assert_eq!(diagnostics.get("error"), None);
     }
 
+    /// A literal `git fetch origin main` does not certify the checkout's git
+    /// configuration. An overstrict judge's complete annotation is returned as
+    /// answered, with and without a hint. This does not promise a live model
+    /// follows the guide.
+    #[tokio::test]
+    async fn an_overstrict_standard_fetch_keeps_the_judges_complete_annotation() {
+        let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
+        let jev = backend(&url, Duration::from_secs(2), FAST);
+        let mut fetch = consult_of(json!({
+            "name": "host/archestra/Bash",
+            "arguments": {"command": "git fetch origin main"},
+        }));
+        let (answered, _) = jev.consult(&fetch).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        if let ConsultBody::Annotation { declaration, .. } = &mut fetch.body {
+            declaration.hint = Some("require public for every network call".to_string());
+        }
+        let (hinted, _) = jev.consult(&fetch).await;
+        assert_eq!(hinted, Ok(jev_annotation()));
+        assert!(
+            stub.requests()
+                .iter()
+                .all(|(_, request)| { request.get("egress").is_none() && request["state"].get("retrieval").is_none() })
+        );
+    }
+
     /// A backend built from a deferred key sends nothing: its configuration never serves,
     /// and a consult that reaches it anyway has no answer.
     #[tokio::test]

@@ -93,6 +93,8 @@ Three rows need attention:
 - **Edit also uses file provenance.** The patch derives from the previous version, so the runtime records that version as a dependency and combines its Label.
 - **Copy and Move keep the payload out of the trajectory.** They return a fixed confirmation, so the source Label does not enter model context. The destination still gets the source's Label, and `requires` is checked against it. A copy of a `self` file into a destination that only accepts `public` data is refused, even though the model never saw the bytes.
 
+`requires` is checked before the call, against what the call sends: the trajectory Label, combined with the tool's `forwards` and the file content the call sends. An Edit sends the previous version, a Copy or Move sends the source, and a Process sends every input. A Read sends no file content, and a Write does not send the version it replaces.
+
 An error message gets the same Label a success would have had, so an error cannot reveal more than a success.
 
 ### One event stream per workspace

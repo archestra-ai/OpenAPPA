@@ -160,7 +160,7 @@ body_contains_any = ["4821", "185,000"]   # Trigger substrings (at least one mat
 | `sanitizer_answer` | No | Hosted sanitizer and the source-line markers it removes before returning a derivation. |
 
 #### Annotator Configuration
-Annotator answers specify the complete per-call contract the fixture produces for one consult. A consult names its annotator (`name`) and carries the exact `args` that annotator's mapped inputs selected under `artifact` — never the tool — so `annotator` plus `args` is the whole fixture key, and `annotation` is served verbatim as the answer. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
+Annotator answers specify the complete per-call contract the fixture produces for one consult. A consult names its annotator (`name`) and carries the exact `args` that annotator's mapped inputs selected under `artifact` — never the tool — so `annotator` plus `args` is the whole fixture key, and `annotation` — `delta`, `requires`, `emits`, and an optional `forwards` — is served verbatim as the answer. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
 
 ```toml
 [[annotator_answer]]

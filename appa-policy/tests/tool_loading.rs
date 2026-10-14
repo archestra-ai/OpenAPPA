@@ -30,7 +30,6 @@ fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
 fn a_declared_tool_with_a_label_requirement_and_no_delta_loads_neutral() {
     let cases = [
         ("trust floor", "requires = { trust = \"trusted\" }"),
-        ("audience cap", "requires = { audience = { within = [\"public\"] } }"),
         (
             "audience includes",
             "requires = { audience = { contains = [\"alice\"] } }",

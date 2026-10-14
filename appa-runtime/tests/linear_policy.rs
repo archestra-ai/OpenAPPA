@@ -15,8 +15,9 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     }
 }
 
-/// A loopback `linear` audience source answering one reader for every collection and
-/// recording each collection it was asked for.
+/// A loopback `linear` audience source recording each collection it was asked for. Every
+/// collection holds one reader, except the full members, who are two: a team is narrower
+/// than `internal`.
 #[derive(Clone, Default)]
 struct Reads(Arc<Mutex<Vec<String>>>);
 
@@ -27,10 +28,13 @@ async fn serve_reads() -> (String, Reads) {
             "/audience",
             post(|State(reads): State<Reads>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
-                if let Some(selector) = request["artifact"]["selector"].as_str() {
-                    reads.0.lock().unwrap().push(selector.to_string());
-                }
-                serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
+                let selector = request["artifact"]["selector"].as_str().unwrap_or_default().to_string();
+                let members = match selector.as_str() {
+                    "full-members" => vec!["alice@corp.example", "bob@corp.example"],
+                    _ => vec!["alice@corp.example"],
+                };
+                reads.0.lock().unwrap().push(selector);
+                serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string()
             }),
         )
         .with_state(reads.clone());
@@ -201,4 +205,42 @@ async fn moving_an_issue_is_bounded_by_the_destination_teams_readers() {
     let asked = reads.0.lock().unwrap().clone();
     assert!(asked.contains(&"team/SEC/readers".to_string()), "{asked:?}");
     assert!(!asked.contains(&"issue/ENG-2/readers".to_string()), "{asked:?}");
+}
+
+/// A private team's issues are read by the team, a narrower audience than `internal`. The
+/// shipped read requires `contains internal` of what the call sends — the session's label —
+/// and its `delta` only labels the result, so the read proceeds once the agent accepts the
+/// narrowing to the team's readers.
+#[tokio::test]
+async fn a_private_team_read_narrows_to_the_team_without_failing_its_requirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, _) = serve_reads().await;
+    let runtime = runtime(&dir, "", Some(&url)).await;
+
+    let read = call("list_issues", serde_json::json!({"team":"SEC"}));
+    let decision = propose(&runtime, read.clone()).await;
+    let HookDecision::DenyCall { review, .. } = &decision else {
+        panic!("the read waits for its narrowing to be accepted: {decision:?}")
+    };
+    assert!(review.is_empty(), "accepting a narrowing consults no human");
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read).await;
+
+    let narrowed: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Narrowed { to, .. } => Some(to.audience),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(narrowed, ["@linear:team/SEC/readers"]);
 }

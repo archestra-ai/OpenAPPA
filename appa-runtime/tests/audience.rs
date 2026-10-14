@@ -32,14 +32,8 @@ effects = ["egress"]
 delta = {}
 
 [[policy.tool]]
-name = "send_capped"
-requires = { audience = { within = ["alice@corp.example", "@team"] } }
-effects = ["egress"]
-delta = {}
-
-[[policy.tool]]
 name = "send_direct"
-requires = { audience = { within = ["@slack:user-group/direct"] } }
+requires = { audience = { contains = ["@slack:user-group/direct"] } }
 effects = ["egress"]
 delta = {}
 
@@ -496,7 +490,7 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
     let revised = || {
         let text = POLICY
             .replace("AUDIENCE_URL", &url)
-            .replace("name = \"send_capped\"", "name = \"send_within\"");
+            .replace("name = \"send_direct\"", "name = \"send_routed\"");
         std::fs::write(&path, text).expect("the revision writes");
         Config::load(&path).expect("the revision validates")
     };
@@ -800,16 +794,8 @@ async fn a_bare_provider_prefix_recipient_is_a_literal_reader() {
     assert!(source.requests().is_empty(), "a bare prefix is never looked up");
 }
 
-fn send_capped() -> ProposedCall {
-    ProposedCall {
-        tool: "send_capped".to_string(),
-        arguments: raw(serde_json::json!({})),
-        cwd: None,
-    }
-}
-
 #[tokio::test]
-async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
+async fn a_group_recipient_is_read_per_act_and_replayed_from_the_pin() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, source) = serve_source().await;
     let runtime = narrowed(&dir, &url).await;
@@ -817,7 +803,7 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
 
     source.members(Some(vec!["bob@corp.example"]));
     assert_eq!(
-        propose(&runtime, send_capped()).await,
+        propose(&runtime, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
     let requests = source.requests();
@@ -826,11 +812,11 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
         requests[0]["artifact"],
         serde_json::json!({ "selector": "user-group/team" })
     );
-    ran(&runtime, send_capped()).await;
+    ran(&runtime, send("@team")).await;
 
     source.members(Some(vec!["carol@corp.example"]));
-    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, send_capped()).await else {
-        panic!("the moved cap blocks");
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, send("@team")).await else {
+        panic!("a team member outside the readers blocks");
     };
     assert!(
         !feedback.contains("carol"),
@@ -841,7 +827,7 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
     let undecided = audit_len(&runtime);
     source.members(None);
     assert!(matches!(
-        propose(&runtime, send_capped()).await,
+        propose(&runtime, send("@team")).await,
         HookDecision::DenyCall { .. }
     ));
     assert_eq!(audit_len(&runtime), undecided);
@@ -857,7 +843,7 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
     let reopened = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment reopens"));
     source.members(Some(vec!["bob@corp.example"]));
     assert_eq!(
-        propose(&reopened, send_capped()).await,
+        propose(&reopened, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
     assert_eq!(source.requests().len(), 4);

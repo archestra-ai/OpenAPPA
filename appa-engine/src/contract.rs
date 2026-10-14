@@ -1,6 +1,6 @@
-//! Tool annotations: what a call commits (`delta`, `emits`) and what it requires (`requires`),
-//! and the declarations that produce them — statically from policy, or per call through a
-//! registered Annotator.
+//! Tool annotations: what a call commits (`delta`, `emits`), what it sends beyond the agent's
+//! arguments (`forwards`), and what it requires (`requires`); and the declarations that
+//! produce them — statically from policy, or per call through a registered Annotator.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -115,7 +115,6 @@ pub enum RecipientSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudienceRequirement {
     Includes(RecipientSpec),
-    Cap(DeclaredAudience),
 }
 
 /// One segment of a selector placeholder: text written as is, or the name of the call argument
@@ -367,6 +366,11 @@ pub struct ToolAnnotation {
     /// so its unwritten dimensions restrict nothing.
     #[serde(default)]
     pub delta: Delta,
+    /// The content the call itself sends out beyond the agent's arguments — a tool that reads
+    /// a file server-side and mails it. Requirements check it; it never narrows the
+    /// trajectory. An omitted `forwards` is [`Delta::NONE`]: the call sends its arguments only.
+    #[serde(default)]
+    pub forwards: Delta,
     pub emits: EffectSet,
     pub requires: Requires,
 }
@@ -399,15 +403,15 @@ impl ToolAnnotation {
     }
 
     /// Every audience-source provider this annotation names: by a `@provider:selector` mention
-    /// in its delta or requirements, or by a selector placeholder.
+    /// in its delta, `forwards` or requirements, or by a selector placeholder.
     pub fn referenced_providers(&self) -> std::collections::BTreeSet<String> {
         let mentioned = self
             .delta
             .symbolic_atoms()
+            .chain(self.forwards.symbolic_atoms())
             .chain(self.requires.audience_requirements().iter().flat_map(|requirement| {
                 let declared = match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Static(declared))
-                    | AudienceRequirement::Cap(declared) => Some(declared),
+                    AudienceRequirement::Includes(RecipientSpec::Static(declared)) => Some(declared),
                     AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => None,
                 };
                 declared.into_iter().flat_map(DeclaredAudience::symbolic_atoms)
@@ -435,8 +439,7 @@ impl ToolAnnotation {
                     .iter()
                     .filter_map(|requirement| match requirement {
                         AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => Some(placeholder),
-                        AudienceRequirement::Includes(RecipientSpec::Static(_) | RecipientSpec::Placeholder(_))
-                        | AudienceRequirement::Cap(_) => None,
+                        AudienceRequirement::Includes(RecipientSpec::Static(_) | RecipientSpec::Placeholder(_)) => None,
                     }),
             )
     }
@@ -451,6 +454,9 @@ pub struct ProducedAnnotation {
     /// dimensions restrict nothing.
     #[serde(default)]
     pub delta: Delta,
+    /// An omitted `forwards` is [`Delta::NONE`]: the call sends only its arguments.
+    #[serde(default, skip_serializing_if = "Delta::is_none")]
+    pub forwards: Delta,
     pub emits: EffectSet,
     pub requires: Requires,
 }
@@ -553,6 +559,7 @@ impl PinnedAnnotation {
             description: declaration.description().map(str::to_string),
             parameters: declaration.parameters().clone(),
             delta: self.0.produced.delta.clone(),
+            forwards: self.0.produced.forwards.clone(),
             emits: self.0.produced.emits.clone(),
             requires: self.0.produced.requires.clone(),
         }
@@ -563,6 +570,8 @@ impl PinnedAnnotation {
 /// `Declared` carries the complete static annotation — the declaration *is* the annotation.
 /// `Annotated` carries the operational metadata and names the Annotator that produces the
 /// semantic fields per call; a declaration never carries both.
+// The registry holds each declaration once and hands out references, so the size gap costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolDeclaration {
     Declared(ToolAnnotation),
@@ -641,6 +650,7 @@ mod tests {
             description: Some("A test tool.".to_string()),
             parameters: crate::params::ToolParameters::open(),
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -773,6 +783,12 @@ mod tests {
                 trust: Some(Trust::new(1)),
                 audience: None,
             },
+            forwards: Delta {
+                trust: Some(Trust::new(0)),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([
+                    crate::label::ReaderId::new("a"),
+                ]))),
+            },
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -790,6 +806,7 @@ mod tests {
         assert_eq!(materialized.tags, declaration.tags());
         assert_eq!(materialized.description.as_deref(), declaration.description());
         assert_eq!(materialized.delta, produced.delta);
+        assert_eq!(materialized.forwards, produced.forwards);
         assert_eq!(materialized.emits, produced.emits);
         assert_eq!(materialized.requires, produced.requires);
     }
@@ -807,6 +824,12 @@ mod tests {
                 delta: Delta {
                     trust: Some(Trust::new(1)),
                     audience: Some(DeltaAudience::Static(DeclaredAudience::Public)),
+                },
+                forwards: Delta {
+                    trust: None,
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([
+                        crate::label::ReaderId::new("a"),
+                    ]))),
                 },
                 emits: EffectSet::default(),
                 requires: Requires::default(),
@@ -829,12 +852,17 @@ mod tests {
         );
         let produced = ProducedAnnotation {
             delta: Delta::NONE,
+            forwards: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
         let bare = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced);
         let bare_wire = serde_json::to_value(&bare).expect("a pinned annotation serializes");
         assert!(bare_wire.get("context").is_none(), "an empty context is not written");
+        assert!(
+            bare_wire["produced"].get("forwards").is_none(),
+            "a pin forwarding nothing is not written a forwards"
+        );
 
         let context = AnnotationContext::new(
             [
