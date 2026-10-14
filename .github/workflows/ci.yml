@@ -346,7 +346,7 @@ jobs:
 
       - name: Exercise the real OpenCode CLI with deterministic inference
         timeout-minutes: 3
-        run: python3 integrations/opencode/smoke/run.py --output "${{ runner.temp }}/appencode-smoke"
+        run: python3 integrations/opencode/smoke/run.py --output "$RUNNER_TEMP/appencode-smoke"
 
       - name: Upload AppenCode smoke evidence
         if: failure()
