@@ -5,7 +5,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from github_token import api_root, api_hostname, TOKEN_VAR
+from github_token import api_root, api_hostname, env_token, TOKEN_VAR
 
 
 def check(environ=None, open_url=urllib.request.urlopen, run=subprocess.run):
@@ -56,6 +56,64 @@ def check(environ=None, open_url=urllib.request.urlopen, run=subprocess.run):
     except (OSError, ValueError):
         return result("unavailable", "provider_unavailable")
     return result("ready", "verified")
+
+
+def throttled(error):
+    """GitHub answers a throttled request with 403 too: the primary limit spent
+    (`x-ratelimit-remaining: 0`), a secondary limit (`retry-after`), or either
+    one named only in the message."""
+    headers = error.headers
+    if headers is not None and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers):
+        return True
+    try:
+        body = json.loads(error.read())
+    except (OSError, ValueError):
+        return False
+    match body:
+        case {"message": str() as message}:
+            return "rate limit" in message.lower()
+        case _:
+            return False
+
+
+def check_installation(environ=None, open_url=urllib.request.urlopen):
+    """A multi-user deployment's check: its token is a GitHub App installation's,
+    read from the deployment alone. One listing of the repositories the
+    installation covers says whether the token is an installation's (a personal
+    token is refused there with 403) and whether it covers any repository."""
+    environ = os.environ if environ is None else environ
+    try:
+        token = env_token(environ)
+    except RuntimeError:
+        return {"status": "needs_configuration", "authentication": "none", "reason": "missing_credential"}
+    def result(status, reason):
+        return {"status": status, "authentication": "token", "reason": reason}
+    request = urllib.request.Request(
+        api_root(environ) + "/installation/repositories?per_page=1",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with open_url(request, timeout=4) as response:
+            body = json.load(response)
+    except urllib.error.HTTPError as error:
+        match error.code:
+            case 401:
+                return result("needs_configuration", "invalid_credential")
+            case 403 if throttled(error):
+                return result("unavailable", "provider_unavailable")
+            case 403:
+                return result("needs_configuration", "not_an_installation")
+            case _:
+                return result("unavailable", "provider_unavailable")
+    except (OSError, ValueError):
+        return result("unavailable", "provider_unavailable")
+    match body:
+        case {"total_count": int() as count} if not isinstance(count, bool) and count > 0:
+            return result("ready", "verified")
+        case {"total_count": 0}:
+            return result("needs_configuration", "no_repositories")
+        case _:
+            return result("unavailable", "check_failed")
 
 
 if __name__ == "__main__":

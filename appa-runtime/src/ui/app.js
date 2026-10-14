@@ -14,6 +14,8 @@ const reasons = {
   missing_executable: 'A program the battery needs is missing. Install it, then check again.',
   invalid_credential: '{name} did not accept the token. The token can be expired, revoked, or copied incompletely. Add a new token.',
   insufficient_access: 'The token works, but it cannot read all that the battery needs. Compare its scopes with the steps in the chat.',
+  not_an_installation: 'This deployment serves many people, so it needs an app installation token, not a personal one. Add the installation token.',
+  no_repositories: 'The app installation covers no repository. Give it access to the repositories, then check again.',
   provider_unavailable: 'APPA cannot connect to {name}. Check your network or VPN, then check again.',
   check_failed: 'The battery check stopped with an error, or gave an answer that APPA cannot read. Check again.',
   check_timed_out: '{name} did not answer in 15 seconds. Check again later.',

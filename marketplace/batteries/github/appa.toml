@@ -1,85 +1,14 @@
-# GitHub battery: the GitHub MCP server's default toolsets.
-#
-# Who may see a repository's content, and who must be allowed to see what
-# a write puts there, is the repository's own visibility: for a tool that
-# names a repository (`owner`, `repo`), the two annotators bound below ask
-# GitHub whether it is private. A public repository's content is `public`,
-# and its writes need trusted data everyone may see. A private or internal
-# repository's content is read by `@github:repo/<owner>/<repo>/collaborators`,
-# the collection the `github` audience source resolves; its writes need
-# trusted data those collaborators may see. A repository the token cannot
-# see gets no answer, and the call is refused.
-#
-# Trust follows who wrote the text. The `github` context provider bound
-# below tells the annotator who wrote a pull request or an issue: every
-# author, commenter, reviewer, editor, and commit author. A pull request or
-# issue keeps the session's trust only when all of them are the
-# repository's owners, members, collaborators, or installed apps (bots)
-# and no list was cut short; otherwise, and whenever the provider has no answer, it enters
-# `suspicious`. A listing of issues or pull requests keeps the session's
-# trust only when the provider repeats it in full and every listed item's
-# author and last editor is one of those people or apps; otherwise it
-# enters `suspicious`.
-# Other content of a public repository enters `suspicious`, since anyone
-# may open the pull requests merged into it, and so does a fork's, which
-# came from its parent. A private or internal repository that is no fork
-# keeps the session's trust for its content.
-# A write's result is labelled only when it returns stored text: the
-# parent issue `sub_issue_write` returns gets the label a read of that
-# issue gets, and is `suspicious` without the provider's answer.
-#
-# Searches and org-level listings name no single repository and reach
-# public repositories as well as every private one the token sees, so
-# their results enter `suspicious` and stay with the viewer (`self`). A
-# root rule can treat a search of public repositories as public by its
-# query. Root rules run first:
-#
-#   [[policy.tool]]
-#   name = "mcp/github/search_code(query:*repo:acme/website*)"
-#   delta = { trust = "suspicious" }
-#
-# The battery also binds `audience-source.py`, the `github` audience
-# source, and declares the selectors it serves. The root config maps
-# `self` and `internal` onto them — the README shows the wiring.
+# GitHub battery, base policy: the GitHub MCP server's default toolsets
+# with no helper and no lookup. A deployment composes a target policy
+# (`single-user.toml` or `multi-user.toml`) over it, whose rules for one
+# repository's reads and writes run first and ask GitHub for the
+# repository's visibility. Composed alone, a read of one repository
+# enters `suspicious` and stays with the viewer (`self`), and a write
+# into one needs trusted data everyone may see. The parent issue
+# `sub_issue_write` returns is labelled as a read of that issue is.
 
 [policy]
 version = 2
-
-# What a read of one repository returns.
-[[policy.annotator]]
-name = "github.repository-visibility"
-ranks = ["suspicious"]
-audiences = ["@github:repo/$owner/$repo/collaborators"]
-marks = []
-
-# What a write into one repository needs, and what its result returns.
-[[policy.annotator]]
-name = "github.repository-readers"
-ranks = ["suspicious", "trusted"]
-audiences = ["@github:repo/$owner/$repo/collaborators"]
-marks = []
-
-[externals.annotators."github.repository-visibility"]
-command = ["python3", "repository-visibility.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
-
-[externals.annotators."github.repository-readers"]
-command = ["python3", "repository-visibility.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
-
-[externals.context.github]
-command = ["python3", "context.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
-
-[externals.audience.github]
-command = ["python3", "audience-source.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
-selectors = [
-  { template = "viewer", feeds = "self" },
-  { template = "org/<org>/members", feeds = "internal" },
-  { template = "org/<org>/team/<team>" },
-  { template = "repo/<owner>/<repo>/collaborators" },
-]
 
 # --- who am I: the viewer's own profile, nothing a stranger wrote ---
 
@@ -101,67 +30,67 @@ delta = { trust = "suspicious", audience = ["self"] }
 name = "mcp/github/search_users"
 delta = { trust = "suspicious", audience = ["self"] }
 
-# --- reads of one repository: its visibility decides who may see the content ---
+# --- reads of one repository: a target policy asks its visibility; alone, they stay with the viewer ---
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_branches"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_commits"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_commit"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_tags"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_tag"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_releases"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_latest_release"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_release_by_tag"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_repository_collaborators"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_issues"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/issue_read"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_label"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/list_pull_requests"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/pull_request_read"
-annotator = "github.repository-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 # --- reads across repositories: content other people wrote, from every repository the token sees ---
 
@@ -197,71 +126,135 @@ delta = { trust = "suspicious", audience = ["self"] }
 name = "mcp/github/search_pull_requests"
 delta = { trust = "suspicious", audience = ["self"] }
 
-# --- writes into one repository: its visibility decides who must be allowed to see the data ---
+# --- writes into one repository: a target policy asks its visibility; alone, only trusted public data ---
 
 [[policy.tool]]
 name = "mcp/github/fork_repository"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/create_branch"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/create_or_update_file"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/push_files"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/delete_file"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/issue_write"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/sub_issue_write"
-annotator = "github.repository-readers"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/add_issue_comment"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/create_pull_request"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request_branch"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/merge_pull_request"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/pull_request_review_write"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/add_comment_to_pending_review"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/add_reply_to_pull_request_comment"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 [[policy.tool]]
 name = "mcp/github/request_copilot_review"
-annotator = "github.repository-readers"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
 
 # --- writes that name no existing repository: only public data may go in ---
 

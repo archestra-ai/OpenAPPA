@@ -282,7 +282,12 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
 /// The runtime over the root config at `config`, its store in `dir`, with the suite's
 /// root session started.
 pub async fn session_runtime(dir: &Path, config: &Path) -> Arc<Runtime> {
-    let runtime = Arc::new(Runtime::open(Config::load(config).unwrap(), dir.join("runtime.db"), None).unwrap());
+    loaded_session_runtime(dir, Config::load(config).unwrap()).await
+}
+
+/// [`session_runtime`] over an already loaded `config`.
+pub async fn loaded_session_runtime(dir: &Path, config: Config) -> Arc<Runtime> {
+    let runtime = Arc::new(Runtime::open(config, dir.join("runtime.db"), None).unwrap());
     assert_eq!(
         hooks::handle(
             &runtime,

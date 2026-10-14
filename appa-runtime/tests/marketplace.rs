@@ -222,7 +222,7 @@ fn every_battery_composes_into_each_host_it_declares() {
             let path = composed.path().join("appa.toml");
             std::fs::write(
                 &path,
-                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.policy),
+                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.base),
             )
             .expect("the composed config is writable");
 
@@ -263,65 +263,70 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
         };
         let installed = tempfile::tempdir().expect("a temp dir is creatable");
         copy_tree(&directory, installed.path());
-        let policy: toml::Value = toml::from_str(
-            &std::fs::read_to_string(installed.path().join(battery.policy.as_str())).expect("the battery policy reads"),
-        )
-        .expect("the battery policy is TOML");
-        for source in appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")
-        {
-            let provider = source.provider.as_str();
-            let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
-                .as_array()
-                .expect("a battery binds its source by a command")
-                .iter()
-                .map(|word| word.as_str().expect("an argv word"))
-                .collect();
-            let served: Vec<String> = source
-                .templates
-                .iter()
-                .map(|t| t.template.as_str().to_owned())
-                .collect();
-            let mut foreign = served.clone();
-            foreign.push("foreign/<x>".to_owned());
-            for (templates, expected) in [(served, 1), (foreign, 2)] {
-                let consult = serde_json::json!({
-                    "version": 1,
-                    "kind": "audience",
-                    "name": provider,
-                    "declaration": { "templates": templates },
-                    "artifact": { "selector": "viewer" },
-                });
-                let mut child = Command::new(on_path(argv[0]))
-                    .args(&argv[1..])
-                    .current_dir(installed.path())
-                    .env_clear()
-                    .env("PATH", no_path.path())
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .expect("the helper spawns");
-                child
-                    .stdin
-                    .take()
-                    .expect("stdin is piped")
-                    .write_all(consult.to_string().as_bytes())
-                    .expect("the consult writes");
-                let output = child.wait_with_output().expect("the helper exits");
-                assert_eq!(
-                    output.status.code(),
-                    Some(expected),
-                    "{provider} of {}: {}",
-                    entry.path,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                assert!(
-                    output.stdout.is_empty(),
-                    "{provider} of {} answered without a credential",
-                    entry.path
-                );
+        let targets = battery.targets.iter().flat_map(|targets| targets.iter());
+        for file in std::iter::once(&battery.base).chain(targets.map(|(_, target)| &target.policy)) {
+            let policy: toml::Value = toml::from_str(
+                &std::fs::read_to_string(installed.path().join(file.as_str())).expect("the battery policy reads"),
+            )
+            .expect("the battery policy is TOML");
+            for source in
+                appa_runtime::config::source_registrations_of(&policy).expect("the battery declares its sources")
+            {
+                let provider = source.provider.as_str();
+                let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
+                    .as_array()
+                    .expect("a battery binds its source by a command")
+                    .iter()
+                    .map(|word| word.as_str().expect("an argv word"))
+                    .collect();
+                let served: Vec<String> = source
+                    .templates
+                    .iter()
+                    .map(|t| t.template.as_str().to_owned())
+                    .collect();
+                let mut foreign = served.clone();
+                foreign.push("foreign/<x>".to_owned());
+                for (templates, expected) in [(served, 1), (foreign, 2)] {
+                    let consult = serde_json::json!({
+                        "version": 1,
+                        "kind": "audience",
+                        "name": provider,
+                        "declaration": { "templates": templates },
+                        "artifact": { "selector": "viewer" },
+                    });
+                    let mut child = Command::new(on_path(argv[0]))
+                        .args(&argv[1..])
+                        .current_dir(installed.path())
+                        .env_clear()
+                        .env("PATH", no_path.path())
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .expect("the helper spawns");
+                    child
+                        .stdin
+                        .take()
+                        .expect("stdin is piped")
+                        .write_all(consult.to_string().as_bytes())
+                        .expect("the consult writes");
+                    let output = child.wait_with_output().expect("the helper exits");
+                    assert_eq!(
+                        output.status.code(),
+                        Some(expected),
+                        "{provider} of {}/{}: {}",
+                        entry.path,
+                        file.as_str(),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(
+                        output.stdout.is_empty(),
+                        "{provider} of {} answered without a credential",
+                        entry.path
+                    );
+                }
+                checked += 1;
             }
-            checked += 1;
         }
     }
     assert!(checked >= 3, "the shipped batteries bind audience sources");
@@ -579,16 +584,242 @@ fn a_battery_that_validates_loads() {
 
 /// Whether a deployment holding this package beside its root config loads.
 fn loads_beside_a_root(package: &Path) -> bool {
+    includes_load(package, &["appa.toml"])
+}
+
+/// A deployment holding this package beside its root config, and including
+/// `policies` of it in that order; the root config's path.
+fn deployment_including(package: &Path, policies: &[&str]) -> (tempfile::TempDir, PathBuf) {
     let deployment = tempfile::tempdir().expect("a temp dir is creatable");
     let installed = deployment.path().join("probe");
     copy_tree(package, &installed);
     let root = deployment.path().join("appa.toml");
+    let includes = policies
+        .iter()
+        .map(|policy| format!("\"probe/{policy}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     std::fs::write(
         &root,
-        "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        format!(
+            "include = [{includes}]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+        ),
     )
     .expect("the root config is writable");
+    (deployment, root)
+}
+
+/// Whether a deployment holding this package beside its root config, and
+/// including `policies` of it in that order, loads.
+fn includes_load(package: &Path, policies: &[&str]) -> bool {
+    let (_deployment, root) = deployment_including(package, policies);
     Config::load(&root).is_ok()
+}
+
+/// An audience source the probe battery's helper serves.
+fn probe_audience(name: &str) -> String {
+    format!(
+        "[externals.audience.{name}]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         selectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+    )
+}
+
+/// The external a targeted probe's base binds: its base runs no helper.
+const PROBE_BASE_EXTERNAL: &str = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+
+/// A targeted battery on disk whose multi-user target policy binds `multi_user_external`.
+/// The base and each target policy carry a rule of their own, so the composed rule
+/// order shows which policies a deployment included and in what order.
+fn targeted_probe(multi_user_external: &str) -> tempfile::TempDir {
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        package.path().join("appa-package.toml"),
+        "schema = 1\nname = \"probe\"\ndescription = \"a targeted battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+    )
+    .expect("the manifest is writable");
+    std::fs::write(
+        package.path().join("appa.toml"),
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n\
+             [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n{PROBE_BASE_EXTERNAL}"
+        ),
+    )
+    .expect("the base is writable");
+    std::fs::write(
+        package.path().join("single-user.toml"),
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/single_user\"\ndelta = {{}}\n\n{}",
+            probe_audience("probe")
+        ),
+    )
+    .expect("the single-user target policy is writable");
+    std::fs::write(
+        package.path().join("multi-user.toml"),
+        format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/multi_user\"\ndelta = {{}}\n\n{multi_user_external}"
+        ),
+    )
+    .expect("the multi-user target policy is writable");
+    std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+    package
+}
+
+/// A deployment includes a targeted battery by its base, and each target's deployment
+/// composes that target's policy before the base. A targeted battery that validates
+/// loads so under every target, and one whose target policy redeclares an external of
+/// its base is refused by both crates.
+#[test]
+fn a_targeted_battery_that_validates_loads_in_its_compose_order() {
+    use appa_package::BatteryTarget;
+
+    for (what, multi_user_external, composes) in [
+        ("a distinct external", probe_audience("probe-org"), true),
+        ("the base's external", PROBE_BASE_EXTERNAL.to_owned(), false),
+    ] {
+        let package = targeted_probe(&multi_user_external);
+        let validated = validate_package(package.path());
+        assert_eq!(validated.is_ok(), composes, "{what}: {validated:?}");
+
+        let (_deployment, root) = deployment_including(package.path(), &["appa.toml"]);
+        for (target, target_rule) in [
+            (BatteryTarget::SingleUser, "mcp/probe/single_user"),
+            (BatteryTarget::MultiUser, "mcp/probe/multi_user"),
+        ] {
+            let loaded = Config::load_for_target(&root, &[], target);
+            match (composes, target) {
+                (true, _) | (false, BatteryTarget::SingleUser) => assert_eq!(
+                    loaded
+                        .unwrap_or_else(|error| panic!("{what}: {target} loads: {error}"))
+                        .tool_names(),
+                    [target_rule, "mcp/probe/read"],
+                    "{what}: {target}"
+                ),
+                (false, BatteryTarget::MultiUser) => {
+                    assert!(loaded.is_err(), "{what}: the package is refused and yet loads")
+                }
+            }
+        }
+    }
+}
+
+/// The deployment target picks a battery's target policy, so a root config that
+/// includes one directly is refused, whichever target it runs.
+#[test]
+fn a_targeted_battery_target_policy_is_not_included_directly() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let package = targeted_probe(&probe_audience("probe-org"));
+    validate_package(package.path()).expect("the targeted package validates");
+    let (_deployment, root) = deployment_including(package.path(), &["multi-user.toml"]);
+    for target in BatteryTarget::ALL {
+        assert!(
+            matches!(
+                Config::load_for_target(&root, &[], target),
+                Err(ConfigError::TargetPolicyIncluded { path }) if path.ends_with("multi-user.toml")
+            ),
+            "{target}"
+        );
+    }
+}
+
+/// An include of a battery's base composes the deployment target's policy with it: each
+/// target binds its own external, a battery without targets loads its base under
+/// either, and a manifest that declares only some targets is refused.
+#[test]
+fn an_included_battery_loads_its_policy_for_the_deployment_target() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let deployment = |manifest_targets: &str, target_policies: &[(&str, &str)]| {
+        let deployment = tempfile::tempdir().expect("a temp dir is creatable");
+        let battery = deployment.path().join("probe");
+        std::fs::create_dir(&battery).expect("the battery dir is creatable");
+        std::fs::write(
+            battery.join("appa-package.toml"),
+            format!(
+                "schema = 1\nname = \"probe\"\ndescription = \"a battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{manifest_targets}"
+            ),
+        )
+        .expect("the manifest is writable");
+        // A targeted base runs no helper, so it binds a stock sanitizer in place of a source.
+        let base_external = match manifest_targets {
+            "" => probe_audience("probe"),
+            _ => "[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
+                  [externals.sanitizers.probe]\nbuiltin = \"redact-secrets\"\n"
+                .to_owned(),
+        };
+        std::fs::write(
+            battery.join("appa.toml"),
+            format!(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {{}}\n\n{base_external}"
+            ),
+        )
+        .expect("the base is writable");
+        for (file, external) in target_policies {
+            std::fs::write(
+                battery.join(file),
+                format!("[policy]\nversion = 2\n\n{}", probe_audience(external)),
+            )
+            .expect("the target policy is writable");
+        }
+        std::fs::write(battery.join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+        std::fs::write(
+            deployment.path().join("appa.toml"),
+            "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("the root config is writable");
+        deployment
+    };
+    let load = |deployment: &tempfile::TempDir, target| {
+        Config::load_for_target(&deployment.path().join("appa.toml"), &[], target)
+    };
+    let externals = |config: Config| {
+        let mut bound: Vec<_> = (config.externals.audience.into_keys())
+            .chain(config.externals.sanitizers.into_keys())
+            .collect();
+        bound.sort();
+        bound
+    };
+
+    const BOTH: &str = "\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
+    let targeted = deployment(
+        BOTH,
+        &[("single-user.toml", "probe-solo"), ("multi-user.toml", "probe-org")],
+    );
+    validate_package(&targeted.path().join("probe")).expect("the targeted package validates");
+    assert_eq!(
+        externals(load(&targeted, BatteryTarget::MultiUser).expect("multi-user loads")),
+        ["probe", "probe-org"]
+    );
+    assert_eq!(
+        externals(load(&targeted, BatteryTarget::SingleUser).expect("single-user loads")),
+        ["probe", "probe-solo"]
+    );
+
+    let plain = deployment("", &[]);
+    for target in BatteryTarget::ALL {
+        assert_eq!(
+            externals(load(&plain, target).expect("the base loads")),
+            ["probe"],
+            "{target}"
+        );
+    }
+
+    let partial = deployment(
+        "\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n",
+        &[("multi-user.toml", "probe-org")],
+    );
+    for target in BatteryTarget::ALL {
+        assert!(
+            matches!(
+                load(&partial, target),
+                Err(ConfigError::UnreadableBatteryManifest { source, .. })
+                    if matches!(*source, appa_package::ManifestError::PartialTargets { missing: BatteryTarget::SingleUser, .. })
+            ),
+            "{target}"
+        );
+    }
 }
 
 /// Every rule the two crates share, not a sample of it.

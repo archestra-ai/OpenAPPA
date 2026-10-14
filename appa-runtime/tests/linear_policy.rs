@@ -48,6 +48,13 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str, source: Option<&str>) -> 
         let origin = repo_root().join("marketplace/batteries").join(battery);
         let target = dir.path().join("marketplace/batteries").join(battery);
         std::fs::create_dir_all(&target).unwrap();
+        // The whole package, so a battery with target policies composes its single-user one.
+        for entry in std::fs::read_dir(&origin).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+            }
+        }
         let mut policy = std::fs::read_to_string(origin.join("appa.toml")).unwrap();
         if let (Some(url), "linear") = (source, battery) {
             let binding =

@@ -19,11 +19,6 @@ import tomllib
 from typing import Any, Iterator, Sequence
 
 
-# The runtime runs a battery's readiness check directly, not through an
-# appa.toml command, so reachability does not apply to it.
-READINESS_CHECK = "check.py"
-
-
 @dataclass(frozen=True)
 class Location:
     path: Path
@@ -352,27 +347,48 @@ def _python_import_diagnostics(
     return missing, unsupported
 
 
-def _read_manifest(root: Path, battery: str) -> tuple[str, list[tuple[str, Location]], list[Diagnostic]]:
+def _read_manifest(
+    root: Path, battery: str
+) -> tuple[str, list[tuple[str, Location]], list[tuple[str, Location]], list[Command], list[Diagnostic]]:
+    """The battery's name, declared helpers, target policies, readiness commands, and findings."""
+
     manifest = root / "appa-package.toml"
     try:
         text = manifest.read_text(encoding="utf-8")
         data = tomllib.loads(text)
     except FileNotFoundError:
-        return battery, [], [_diagnostic(battery, "invalid manifest", "appa-package.toml is missing", Location(manifest))]
+        return battery, [], [], [], [_diagnostic(battery, "invalid manifest", "appa-package.toml is missing", Location(manifest))]
     except tomllib.TOMLDecodeError as error:
-        return battery, [], [
+        return battery, [], [], [], [
             _diagnostic(battery, "invalid manifest", f"appa-package.toml is not valid TOML: {error}", Location(manifest, _toml_line(error)))
         ]
     name = data.get("name") if isinstance(data.get("name"), str) else battery
     table = data.get("battery")
     if not isinstance(table, dict):
-        return name, [], [_diagnostic(name, "invalid manifest", "appa-package.toml has no [battery] table", Location(manifest))]
+        return name, [], [], [], [_diagnostic(name, "invalid manifest", "appa-package.toml has no [battery] table", Location(manifest))]
     helpers = table.get("helpers", [])
     if not isinstance(helpers, list) or not all(isinstance(helper, str) for helper in helpers):
-        return name, [], [_diagnostic(name, "invalid manifest", "[battery].helpers must be an array of strings", Location(manifest))]
+        return name, [], [], [], [_diagnostic(name, "invalid manifest", "[battery].helpers must be an array of strings", Location(manifest))]
+    targets = table.get("targets", {})
+    if not isinstance(targets, dict) or not all(isinstance(target, dict) and isinstance(target.get("policy"), str) for target in targets.values()):
+        return name, [], [], [], [
+            _diagnostic(name, "invalid manifest", "each [battery.targets.<name>] must name its policy as a string", Location(manifest))
+        ]
     found = _line_for_key(text, "helpers")
     location = Location(manifest, found[0] if found else None)
-    return name, [(helper, location) for helper in helpers], []
+    policies = [(target["policy"], Location(manifest)) for target in targets.values()]
+    # The runtime runs a battery's readiness checks directly, not through a
+    # policy command; each is linted and reached like one.
+    readiness = table.get("readiness", {})
+    found = _line_for_key(text, "readiness")
+    readiness_location = Location(manifest, found[0] if found else None)
+    checks = [
+        Command(command, readiness_location)
+        for command in [readiness.get("command") if isinstance(readiness, dict) else None]
+        + [target.get("readiness") for target in targets.values()]
+        if command
+    ]
+    return name, [(helper, location) for helper in helpers], policies, checks, []
 
 
 def lint_battery(root: Path) -> list[Diagnostic]:
@@ -380,19 +396,27 @@ def lint_battery(root: Path) -> list[Diagnostic]:
 
     root = root.resolve()
     default_name = root.name
-    battery, helper_declarations, diagnostics = _read_manifest(root, default_name)
-    appa = root / "appa.toml"
-    try:
-        appa_text = appa.read_text(encoding="utf-8")
-        appa_data = tomllib.loads(appa_text)
-    except FileNotFoundError:
-        return diagnostics + [_diagnostic(battery, "invalid manifest", "appa.toml is missing", Location(appa))]
-    except tomllib.TOMLDecodeError as error:
-        return diagnostics + [
-            _diagnostic(battery, "invalid manifest", f"appa.toml is not valid TOML: {error}", Location(appa, _toml_line(error)))
-        ]
-
-    commands = list(_command_values(appa_data, appa, appa_text)) + list(_plugin_commands_for_battery(root))
+    battery, helper_declarations, target_policies, readiness_checks, diagnostics = _read_manifest(root, default_name)
+    # The base policy and every target policy the manifest declares bind the
+    # battery's helpers; a helper only a target policy runs is still reached.
+    commands: list[Command] = []
+    for raw, location in [("appa.toml", Location(root / "appa-package.toml")), *target_policies]:
+        local = _relative_local_path(root, raw)
+        if local.reason or local.path is None:
+            return diagnostics + [_diagnostic(battery, "invalid manifest", f"policy {raw!r} is invalid: {local.reason}", location)]
+        policy = local.path
+        try:
+            policy_text = policy.read_text(encoding="utf-8")
+            policy_data = tomllib.loads(policy_text)
+        except FileNotFoundError:
+            return diagnostics + [_diagnostic(battery, "invalid manifest", f"{raw} is missing", Location(policy))]
+        except tomllib.TOMLDecodeError as error:
+            return diagnostics + [
+                _diagnostic(battery, "invalid manifest", f"{raw} is not valid TOML: {error}", Location(policy, _toml_line(error)))
+            ]
+        commands.extend(_command_values(policy_data, policy, policy_text))
+    commands.extend(_plugin_commands_for_battery(root))
+    commands.extend(readiness_checks)
     direct_targets: set[Path] = set()
     for command in commands:
         target, found = _parse_command(command, battery, root)
@@ -525,9 +549,8 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                     )
                 )
 
-    readiness_check = root / READINESS_CHECK
     for path, (raw, location) in sorted(helper_paths.items()):
-        if path not in reachable and path != readiness_check:
+        if path not in reachable:
             diagnostics.append(
                 _diagnostic(
                     battery,
@@ -538,7 +561,7 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                 )
             )
     for path in _production_scripts(root):
-        if path not in reachable and path != readiness_check:
+        if path not in reachable:
             diagnostics.append(
                 _diagnostic(
                     battery,

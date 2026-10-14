@@ -33,6 +33,7 @@ async function host(url: string, directory: string, sessionID = 'ses_test', sess
         transform({
           list: () => [...tools.values()],
           remove: (id: string) => tools.delete(id),
+          add: (tool: any) => tools.set(tool.name, { ...tool, id: tool.name }),
           update: (id: string, update: Function) => update(tools.get(id)),
         })
         return { dispose: Effect.void }
@@ -83,15 +84,18 @@ describe('published V2 hook contract', () => {
   test('keeps tools direct and refuses Code Mode, subagents, forks and background calls', async () => {
     const plugin = await fixture()
     expect(plugin.tools.has('subagent')).toBe(false)
+    expect(plugin.tools.has('appa_subagent')).toBe(true)
     expect([...plugin.tools.values()].every(tool => tool.options.codemode === false)).toBe(true)
     const context = await plugin.emit('session.context', { tools: { execute: {}, subagent: {}, read: {} }, system: [] })
     expect(Object.keys(context.tools)).toEqual(['read'])
-    for (const tool of ['execute', 'subagent']) await expect(plugin.before(tool)).rejects.toThrow('not supported')
+    for (const tool of ['execute', 'subagent']) await expect(plugin.before(tool)).rejects.toThrow('refused')
     await expect(plugin.before('shell', { command: 'pwd', background: true })).rejects.toThrow('Background')
     const fork = await host(server!.url.toString(), tmpdir(), 'ses_fork', { fork: { sessionID: 'ses_parent' } })
-    await expect(fork.before('write')).rejects.toThrow('forked')
-    const permission = await plugin.emit('permission.evaluate', { action: 'execute', effect: 'allow' })
-    expect(permission.effect).toBe('deny')
+    await expect(fork.before('write')).rejects.toThrow('Forked')
+    for (const action of ['execute', 'subagent']) {
+      const permission = await plugin.emit('permission.evaluate', { action, effect: 'allow' })
+      expect(permission.effect).toBe('deny')
+    }
   })
 
   test('uses registry namespaces rather than guessing from underscores', async () => {
@@ -215,7 +219,7 @@ describe('real APPA runtime and MCP remedies', () => {
     await writeFile(`${directory}/private/data.txt`, 'private')
     await writeFile(`${directory}/public.txt`, 'public')
     const policy = await readFile(new URL('./appa.toml', import.meta.url), 'utf8')
-    await writeFile(`${directory}/appa.toml`, `${policy}
+    await writeFile(`${directory}/appa.toml`, `${policy.replace('[policy.deployment]', '[policy.deployment]\nconfined_results = ["host/opencode/read_credentials"]')}
 
 [[policy.tool]]
 name = "host/opencode/read_credentials"
@@ -226,9 +230,6 @@ name = "mask-email"
 on = ["tool_output"]
 [policy.sanitizer.permits]
 audience = { from = ["self"], to = ["public"] }
-
-[policy.deployment]
-confined_results = ["host/opencode/read_credentials"]
 
 [externals.sanitizers.mask-email]
 builtin = "redact-email"

@@ -38,10 +38,12 @@ def lint(root: Path) -> list[str]:
         return [f"{root}: no battery directories found"]
 
     errors = []
+    allowed = {battery / name for battery in batteries for name in REQUIRED}
     for battery in batteries:
         for name in sorted(REQUIRED):
             if not (battery / name).is_file():
                 errors.append(f"{battery / name}: required TOML file is missing")
+        policies = [battery / "appa.toml"]
         manifest = battery / "appa-package.toml"
         if manifest.is_file():
             try:
@@ -52,9 +54,24 @@ def lint(root: Path) -> list[str]:
                 battery_config = package.get("battery")
                 if not isinstance(battery_config, dict) or battery_config.get("policy") != "appa.toml":
                     errors.append(f"{manifest}: battery.policy must name appa.toml")
-        errors.extend(unreachable_rules(battery / "appa.toml"))
+                else:
+                    targets = battery_config.get("targets", {})
+                    if not isinstance(targets, dict):
+                        targets = {}
+                        errors.append(f"{manifest}: battery.targets must be a table")
+                    for name, target in targets.items():
+                        declared = target.get("policy") if isinstance(target, dict) else None
+                        if not isinstance(declared, str):
+                            errors.append(f"{manifest}: battery.targets.{name}.policy must be a file name")
+                            continue
+                        policy = battery / declared
+                        if not policy.is_file():
+                            errors.append(f"{policy}: declared target policy is missing")
+                        policies.append(policy)
+        allowed.update(policies)
+        for policy in policies:
+            errors.extend(unreachable_rules(policy))
 
-    allowed = {battery / name for battery in batteries for name in REQUIRED}
     for path in sorted(root.rglob("*")):
         if path.suffix.lower() == ".toml" and path.is_file() and path not in allowed:
             errors.append(f"{path}: unexpected battery TOML file")

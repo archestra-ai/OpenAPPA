@@ -25,11 +25,13 @@ pub use names::{
     RelativePath, RelativePathError,
 };
 pub use package::{
-    Battery, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,
+    Battery, BatteryTarget, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,
+    TargetPolicies, TargetPolicy,
 };
 pub use tree::canonical_tree_digest;
 pub use validate::{
-    BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, INCLUDABLE_POLICY_FIELDS, PackageError, validate_package,
+    BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, DeclarationKind, INCLUDABLE_POLICY_FIELDS, NamedDeclaration,
+    NamedExternal, PackageError, validate_package,
 };
 
 pub use appa_runtime_api::PROTOCOL;

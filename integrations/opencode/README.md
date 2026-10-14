@@ -1,7 +1,8 @@
 # AppenCode v1 — OpenAPPA for OpenCode V2
 
-AppenCode checks direct OpenCode tool calls and results through APPA's runtime.
-It targets `@opencode/cli` and `@opencode/plugin` 2.0.28. It does not support
+AppenCode checks direct OpenCode tool calls, results, and foreground subagent
+returns through APPA's runtime. It targets `@opencode/cli` and
+`@opencode/plugin` 2.0.28. It does not support
 OpenCode V1's `@opencode-ai/plugin` API.
 
 ## Install from this checkout
@@ -83,6 +84,7 @@ Use `opencode run --standalone --auto 'your task'` for a private-server run.
 | OpenCode dispatch name | APPA policy identity |
 | --- | --- |
 | `read`, `shell`, `write`, `edit`, `webfetch` | `host/opencode/<name>` |
+| `appa_subagent` | `host/opencode/appa_subagent` (single child launch) |
 | Namespaced tool, such as `github_create_issue` | `mcp/github/create_issue` |
 | `appa_execute_remedy_plan` from namespace `appa` | `appa/execute_remedy_plan` |
 | Unnamespaced lookalike `appa_execute_remedy_plan` | `host/opencode/appa_execute_remedy_plan` |
@@ -103,15 +105,57 @@ then stop. Sanitizers can replace
 confined results when the deployment registers them. The starting policy
 registers no sanitizer.
 
+## Foreground subagents
+
+The plugin exposes `appa_subagent` for fresh, one-level foreground delegation.
+The starting policy declares `host/opencode/appa_subagent` and enables
+`policy.deployment.context_control`. The agent prepares a return contract by
+executing the offered remedy, then retries the same delegation arguments.
+Each call needs its own declaration, including concurrent calls.
+
+The tool accepts `agent`, `description`, and `prompt`, plus an optional `model`
+override. Select a visible subagent, not a primary agent. A model override
+must identify an available provider, model, and optional variant. Existing
+`sessionID` values and `background: true` are refused.
+
+APPA binds the fresh child to the exact launching call before its initial
+prompt. The child inherits the parent's Label and receives its return
+contract through the context hook. Its direct tools use the same APPA family,
+with a distinct child identity. Only a completed final text answer can return.
+APPA admits that value, or its sanitizer replacement, before the parent sees
+it. The plugin constructs fresh output and text channels from the admitted
+value; it does not forward child attachments, metadata, or raw errors.
+
+Launch binding is serialized within each parent. Bound children can run
+concurrently and finish in any order. Interruption revokes child ownership,
+interrupts the child, and attempts to settle the launch without returning its
+prose. A failed child cannot return earlier prose. Uncertain outcomes remain
+unsettled if the runtime cannot acknowledge cleanup.
+
+An APPA restart with the same database preserves a live child's binding and
+inherited Label. An OpenCode restart loses local ownership: old children
+cannot resume or return. A reloaded plugin cannot adopt existing children.
+Steering, nested delegation, child
+compaction, auxiliary generation, and alternate child launches are refused.
+
+**Delegation uses APPA authorization, not OpenCode's native `subagent`
+permission rule.** The public V2 SDK does not expose the native permission
+assertion to this tool. The native tool stays removed and denied. Native
+foreground Jobs can become background Jobs and deliver delayed synthetic
+messages outside the mutable tool-result hook. The owned executor registers
+neither a Job nor a synthetic completion observer. OpenCode's background
+action therefore cannot convert its foreground return into a delayed message.
+
 ## V1 boundaries
 
 - Direct tool calls fail closed on connection errors, timeouts, invalid replies,
   and runtime refusals. Unchecked results are replaced in every result channel:
   structured output, text, attachments, metadata, and error causes.
 - **Code Mode is refused.** Its built-in `fetch` has no public admission hook.
-  Registered tools are exposed directly instead. Subagents, child sessions,
-  and forked sessions are refused because v1 has no checked child-return or
-  root-fork mapping. Continue the protected root rather than copying its history.
+  Registered tools are exposed directly instead. Native subagents, unowned
+  child sessions, and forked sessions are refused. Use `appa_subagent` for
+  foreground delegation. Continue the protected root rather than copying its
+  history into a fork.
 - **Reads keep OpenCode's native permissions.** The plugin resolves the requested
   path before policy selection. Missing paths are refused instead of allowing
   the native reader to choose an alternate filename. Reads that could load
@@ -155,7 +199,7 @@ separately. Keep the policy and database if protected sessions will resume.
 
 The restrictions above are integration limits, not judgments that these
 OpenCode features are undesirable. The APPA engine already supports child
-trajectories and checked returns; AppenCode does not yet map that lifecycle.
+trajectories and checked returns; AppenCode maps fresh foreground children.
 Keep a feature refused until its additional flows are mediated. An OpenCode
 permission approval alone must not bypass that boundary.
 
@@ -164,13 +208,11 @@ The [plugin](./appencode.ts) owns lifecycle mapping; the
 The [Claude Code mapping](../../appa-adapter-claude-code/src/parse.rs) shows
 how an existing integration reports child starts and checked returns.
 
-1. **Foreground subagents first.** Bind each child to its launching call and
-   inherit the parent's Label before the child works. Prepare its return
-   contract before delegation, check its tool flows, and admit or sanitize its
-   answer before the parent receives it. Map V2's child `session.context`
-   hooks, lineage from `session.get`, and mutable foreground results in
-   `tool.execute.after` to APPA's child lifecycle. Cover concurrent launches,
-   resumed children, cancellation, and restart without confusing identities.
+1. **Child resume and nested delegation.** Preserve the launching call and
+   APPA family identity when reusing a child. Admit additional prompts and
+   their sources before the child works. Map nested parentage explicitly;
+   OpenCode's immediate `parentID` is not the APPA family root. Persist local
+   ownership safely before allowing child recovery after an OpenCode restart.
 2. **Conversation forks.** Map OpenCode's fork lineage to APPA's root-fork
    operation. A conversation copied from a protected parent must inherit its
    security state, not open as a neutral root. Cover resume, revert, and
@@ -214,12 +256,14 @@ cargo build --locked -p appa
 (cd integrations/opencode && bun install --frozen-lockfile && bun run check && bun test)
 ```
 
-The tests use the published V2 SDK and a host-shaped driver with the exported
-plugin. They also run the real APPA daemon and MCP endpoint with disposable
-policies and databases. They check remedies, audience/trust denials, full
-result replacement, sanitizer delivery, parallel outcomes, and restart
-persistence. Mock-hook tests alone do not prove that OpenCode loads the plugin
-or delivers the hooks. No inference-policy enforcement is claimed.
+The tests include a host-shaped driver and a real published OpenCode 2.0.28
+server. Both run the real APPA daemon and MCP endpoint with disposable
+policies and databases. The server tests script only model inference; plugin
+loading, native tools, session lifecycle, and remedy execution are real.
+They check inherited audience/trust, return floors, sanitizer replacement,
+concurrent identities, interruption, restart, and refused alternate launches.
+They also check ordinary root flows and replacement of all tool-result
+channels. No inference-policy enforcement is claimed.
 
 Check the example policy without invoking tools:
 

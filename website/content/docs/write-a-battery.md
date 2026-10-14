@@ -120,7 +120,18 @@ packaged helper, and `required_executables` must then include `python3`. Omit
 `command` to declare executable prerequisites without a provider check. A CLI alternative is optional when its credential is supplied;
 a CLI needed even with a token belongs in `required_executables` too.
 `login_hint` is the one command that signs the person in with every scope
-the helpers need.
+the helpers need. A CLI login is one person's, so a multi-user deployment is
+offered none.
+
+A battery with target policies may give a target its own check, which a
+deployment of that target runs in place of `command`. It follows the same
+rules, and the base's `[battery.readiness]` still declares the requirements:
+
+```toml
+[battery.targets.multi-user]
+policy = "multi-user.toml"
+readiness = ["python3", "check-multi-user.py"]
+```
 
 The readiness helper receives only this battery's declared APPA credential
 variables. It must perform read-only checks, reuse the battery's authentication
@@ -134,7 +145,8 @@ logic, and write one JSON object to stdout:
 `authentication` is `token`, `cli`, or `none`. Reasons are `verified`,
 `missing_configuration`, `missing_credential`, `cli_not_authenticated`,
 `missing_executable`, `invalid_credential`, `insufficient_access`,
-`provider_unavailable`, `check_failed`, or `check_timed_out`.
+`not_an_installation`, `no_repositories`, `provider_unavailable`,
+`check_failed`, or `check_timed_out`.
 Only `ready` may use `verified`, and `ready` must use it.
 
 Do not print credentials, identity information, freeform messages, or provider
@@ -198,7 +210,7 @@ name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]
-command = ["python3", "repository-visibility.py"]
+command = ["python3", "repository_visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 
 [externals.audience.github]

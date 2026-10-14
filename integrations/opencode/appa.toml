@@ -1,7 +1,10 @@
-# Starting policy for AppenCode v1, not a general-purpose coding policy.
-# Undeclared tools are refused. Code Mode and subagents are refused by the plugin.
+# Starting policy for AppenCode, not a general-purpose coding policy.
+# Undeclared tools, Code Mode and native subagents are refused.
 [policy]
 version = 2
+
+[[policy.tool]]
+name = "host/opencode/appa_subagent"
 
 [[policy.tool]]
 name = "host/opencode/read(path:*/private/*)"
@@ -32,6 +35,9 @@ requires = { trust = "trusted" }
 [[policy.tool]]
 name = "host/opencode/shell(command:pwd)"
 requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[policy.deployment]
+context_control = true
 
 [externals]
 timeout_ms = 2000

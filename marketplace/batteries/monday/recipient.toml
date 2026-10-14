@@ -1,0 +1,19 @@
+# monday battery, policy of both targets. A notification names one recipient;
+# the `monday` audience source resolves that user through the monday Users API
+# to a confirmed email, never relative to the token's owner, so the call's input
+# must be sharable with the actual recipient. These rules run before the base
+# policy's.
+
+[policy]
+version = 2
+
+[externals.audience.monday]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_MONDAY_TOKEN"
+selectors = [{ template = "user/<id>" }]
+
+[[policy.tool]]
+name = "mcp/monday/create_notification"
+delta = { audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
+effects = ["monday.sensitive"]

@@ -43,6 +43,17 @@ def gh_token(environ):
     return token if completed.returncode == 0 and token else None
 
 
+def env_token(environ=None):
+    """The deployment's token alone. A multi-user deployment's helpers run
+    under a token with no user behind it; a CLI login found on the host
+    would be some person's, so it is never asked."""
+    environ = os.environ if environ is None else environ
+    token = (environ.get(TOKEN_VAR) or "").strip()
+    if not token:
+        raise RuntimeError(f"{TOKEN_VAR} is not set: set it where the runtime runs and restart it")
+    return token
+
+
 def resolve_token(environ=None):
     environ = os.environ if environ is None else environ
     token = (environ.get(TOKEN_VAR) or "").strip()

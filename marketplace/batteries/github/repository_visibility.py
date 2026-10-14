@@ -55,7 +55,8 @@ spelling; the script refuses a consult whose mandate does not (exit
 status 2) before it reads a token.
 
 Credentials come from APPA_PROVIDER_GITHUB_TOKEN, else the GitHub CLI's
-login (see github_token.py); the API root is GITHUB_API_URL when set (a
+login (see github_token.py); a multi-user deployment runs
+repository-visibility-multi-user.py, which reads the variable alone; the API root is GITHUB_API_URL when set (a
 GitHub Enterprise Server's /api/v3), else api.github.com. A repository
 the token cannot see, or any GitHub error, exits nonzero: the runtime
 treats that as no answer and refuses the operation, so nothing is
@@ -66,41 +67,19 @@ from dataclasses import dataclass
 import json
 import os
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_token import api_root, resolve_token  # noqa: E402
+from github_audience import rest_api  # noqa: E402
+from github_token import resolve_token  # noqa: E402
 
 
-API_ROOT = api_root(os.environ)
 CONTENT = "github.repository-visibility"
 READERS = "github.repository-readers"
-TIMEOUT_SECONDS = 30
 # create_or_update_file and push_files carry the file content inside the consult.
 MAX_INPUT_BYTES = 4 * 1024 * 1024
-
-
-def rest_api(token):
-    def call(path):
-        request = urllib.request.Request(
-            f"{API_ROOT}{path}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(f"GET {path} failed: {error.code}") from error
-
-    return call
 
 
 def repository_of(consult):
@@ -235,6 +214,17 @@ def context_answer(call, owner, repo):
     return answer if isinstance(named, str) and named.lower() == f"{owner}/{repo}".lower() else None
 
 
+def identity_key(answer):
+    """The key the context answer names each person by: a single-user
+    answer names its viewer and every person by `login`; a multi-user one
+    has no viewer and names every person `person`, `github:<id>`."""
+    match answer:
+        case {"viewer": _}:
+            return "login"
+        case _:
+            return "person"
+
+
 def written_by_the_team(call, owner, repo, kind):
     """Whether the context shows that only the repository's own people wrote
     the pull request or issue (`kind`) the call names."""
@@ -245,14 +235,15 @@ def written_by_the_team(call, owner, repo, kind):
     participants = item.get("participants")
     if item.get("number") != call.number or item.get("truncated") is not False or not participants:
         return False
+    key = identity_key(answer)
     team = {
-        participant.get("login")
+        participant.get(key)
         for participant in participants
         if isinstance(participant, dict) and (participant.get("association") in TEAM or participant.get("bot") is True)
     }
     team.discard(None)
-    everyone = [participant.get("login") if isinstance(participant, dict) else None for participant in participants]
-    author = (item.get("author") or {}).get("login")
+    everyone = [participant.get(key) if isinstance(participant, dict) else None for participant in participants]
+    author = (item.get("author") or {}).get(key)
     wrote = [author, *everyone, *item.get("commit_authors", []), *item.get("last_editors", [])]
     return all(login in team for login in wrote)
 
@@ -265,10 +256,11 @@ def listed_by_the_team(call, owner, repo):
     items = listed.get("items") if isinstance(listed, dict) else None
     if not isinstance(items, list) or listed.get("truncated") is not False or not all(isinstance(item, dict) for item in items):
         return False
+    key = identity_key(answer)
     authors = [(item.get("author") if isinstance(item.get("author"), dict) else {}, item.get("bot") is True) for item in items]
-    team = {author.get("login") for author, bot in authors if author.get("association") in TEAM or bot}
+    team = {author.get(key) for author, bot in authors if author.get("association") in TEAM or bot}
     team.discard(None)
-    wrote = [author.get("login") for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
+    wrote = [author.get(key) for author, _ in authors] + [item["last_editor"] for item in items if "last_editor" in item]
     return all(login in team for login in wrote)
 
 
@@ -325,22 +317,23 @@ def annotation(name, call, repository, owner, repo):
             raise ValueError(f"unexpected annotator name {name!r}")
 
 
-def main():
-    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    if len(raw) > MAX_INPUT_BYTES:
-        raise ValueError("the consult is too large")
-    consult = json.loads(raw)
-    name, owner, repo, call = repository_of(consult)
-    check_declaration(consult, owner, repo)
-
-    repository = repository_facts(rest_api(resolve_token()), owner, repo)
-    json.dump({"version": 1, "answer": annotation(name, call, repository, owner, repo)}, sys.stdout)
-    sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
+def main(token):
+    """Answers the consult on stdin with the token `token()` returns."""
     try:
-        main()
+        raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+        if len(raw) > MAX_INPUT_BYTES:
+            raise ValueError("the consult is too large")
+        consult = json.loads(raw)
+        name, owner, repo, call = repository_of(consult)
+        check_declaration(consult, owner, repo)
+
+        repository = repository_facts(rest_api(token()), owner, repo)
+        json.dump({"version": 1, "answer": annotation(name, call, repository, owner, repo)}, sys.stdout)
+        sys.stdout.write("\n")
     except Exception as error:
         print(f"github repository annotator: {error}", file=sys.stderr)
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main(resolve_token)

@@ -1,6 +1,8 @@
 //! The one coarse operation over a package directory: parse its manifest and
 //! refuse everything a marketplace package may not be.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +11,7 @@ use toml::Value;
 
 use crate::manifest::ManifestError;
 use crate::names::{CredentialPrefix, Namespace, PackageName, RelativePath};
-use crate::package::{Battery, MANIFEST_FILE, Package, Role};
+use crate::package::{BatteryTarget, MANIFEST_FILE, Package, Role};
 use crate::tree::{self, EntryKind, TreeDigestError};
 
 /// Why a directory is not a package. Every variant names the file it read.
@@ -85,11 +87,63 @@ pub enum PackageError {
         variable: String,
         prefix: CredentialPrefix,
     },
+    #[error("{policy} uses policy version {found}, but the battery's base uses {base}")]
+    TargetPolicyVersion { policy: PathBuf, base: i64, found: i64 },
+    #[error("{policy} declares `{external}`, which the battery's base already declares")]
+    TargetPolicyDuplicateExternal { policy: PathBuf, external: NamedExternal },
+    #[error("{policy} declares `{declaration}`, which the battery's base already declares")]
+    TargetPolicyDuplicateDeclaration {
+        policy: PathBuf,
+        declaration: NamedDeclaration,
+    },
+    #[error("`{field}` names the battery's base policy, which a deployment of the target already includes")]
+    TargetPolicyIsBase { field: &'static str },
+    #[error("`{field}` is outside the package root, where a battery with targets keeps its policies")]
+    TargetedPolicyOutsidePackageRoot { field: &'static str },
+    #[error("{policy} is a targeted battery's base, which loads alone and so runs no helper, yet binds `{external}`")]
+    BaseRunsHelper { policy: PathBuf, external: NamedExternal },
+    #[error(
+        "{policy} is a targeted battery's base, which loads alone and so names no audience source, yet names `{entry}`"
+    )]
+    BaseMentionsSource { policy: PathBuf, entry: String },
+    #[error(
+        "{policy} is a targeted battery's base, which loads alone, yet a tool names annotator `{annotator}` it does not declare"
+    )]
+    BaseUsesTargetAnnotator { policy: PathBuf, annotator: String },
+    #[error(
+        "{policy} is a targeted battery's base, which loads alone, yet binds no implementation for `{declaration}`"
+    )]
+    BaseDeclarationUnbound {
+        policy: PathBuf,
+        declaration: NamedDeclaration,
+    },
+    #[error("{policy} names `{tool}` without a bare variant, so a call outside its selectors falls through to `*`")]
+    ToolWithoutBareVariant { policy: PathBuf, tool: String },
+    #[error("{policy} is a targeted battery's base, which loads alone, yet binds `{external}` without declaring it")]
+    BaseBindingUndeclared { policy: PathBuf, external: NamedExternal },
+    #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
+    UnreachableVariant {
+        policy: PathBuf,
+        tool: String,
+        variant: String,
+    },
+    #[error("{policy} declares a bare `{tool}`, which shadows the base's variants of it")]
+    TargetShadowsBase { policy: PathBuf, tool: String },
     #[error("{policy} declares `{contract}`, which is outside the namespaces it covers ({namespaces})")]
     PolicyForeignContract {
         policy: PathBuf,
         contract: String,
         namespaces: String,
+    },
+    #[error("{policy}: `audience.{name}` sends its member lookups to itself")]
+    AudienceLookupToItself { policy: PathBuf, name: String },
+    #[error(
+        "{policy}: `audience.{name}` sends its member lookups to `audience.{target}`, which sends its own elsewhere; a lookup takes one hop"
+    )]
+    ChainedAudienceLookup {
+        policy: PathBuf,
+        name: String,
+        target: String,
     },
 }
 
@@ -111,31 +165,105 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let contained = Contained::new(dir, &manifest_path);
     match &mut package.role {
         Role::Battery(battery) => {
-            let policy = contained.resolve(&battery.policy, "battery.policy", EntryKind::File)?;
+            let policy = contained.resolve(&battery.base, "battery.policy", EntryKind::File)?;
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            let bindings = check_policy(&policy, &package.name, battery)?;
-            battery.audiences = bindings.audiences;
-            battery.credentials = bindings.credentials;
+            let base_document = read_document(&policy)?;
+            let base = check_policy(
+                &policy,
+                &package.name,
+                &battery.namespaces,
+                &battery.helpers,
+                &base_document,
+            )?;
+            // The loader finds the manifest beside the included base, and helper
+            // commands run from the including policy's directory.
+            if battery.targets.is_some() && policy.parent() != Some(contained.root.as_path()) {
+                return Err(PackageError::TargetedPolicyOutsidePackageRoot {
+                    field: "battery.policy",
+                });
+            }
+            if battery.targets.is_none() {
+                check_lookup_routes(&policy, &base)?;
+            }
+            if let Some(targets) = &mut battery.targets {
+                check_stands_alone(&policy, &base_document, &base.tools)?;
+                for target in BatteryTarget::ALL {
+                    let target_policy = targets.get_mut(target);
+                    let field = target.policy_field();
+                    let target_path = contained.resolve(&target_policy.policy, field, EntryKind::File)?;
+                    // The loader includes each resolved file once, so a target policy that
+                    // is the base would be refused as a duplicate include.
+                    if target_path == policy {
+                        return Err(PackageError::TargetPolicyIsBase { field });
+                    }
+                    if target_path.parent() != Some(contained.root.as_path()) {
+                        return Err(PackageError::TargetedPolicyOutsidePackageRoot { field });
+                    }
+                    let policy_path = target_path;
+                    let document = read_document(&policy_path)?;
+                    let bindings = check_policy(
+                        &policy_path,
+                        &package.name,
+                        &battery.namespaces,
+                        &battery.helpers,
+                        &document,
+                    )?;
+                    check_composes(&policy_path, &base, &bindings)?;
+                    check_variants(&policy_path, &bindings.tools, &base.tools)?;
+                    check_lookup_routes(&policy_path, &bindings)?;
+                    target_policy.audiences = bindings.audiences;
+                    target_policy.credentials = bindings.credentials;
+                }
+            }
+            battery.audiences = base.audiences;
+            battery.credentials = base.credentials;
+            let runs_a_helper = |command: &[String]| {
+                runs_a_declared_helper(
+                    &command.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &battery.helpers,
+                )
+            };
+            let target_commands: Vec<&[String]> = battery
+                .targets
+                .iter()
+                .flat_map(|targets| {
+                    targets
+                        .iter()
+                        .filter_map(|(_, target_policy)| target_policy.readiness.as_deref())
+                })
+                .filter(|command| !command.is_empty())
+                .collect();
+            let readiness_error = |policy: PathBuf| {
+                PackageError::Readiness { policy, reason: "a check runs python3 on a declared helper and requires python3; a target policy's check needs the base's [battery.readiness]; executables are bare names; alternatives reference owned credentials".into() }
+            };
+            if battery.readiness.is_none() && !target_commands.is_empty() {
+                return Err(readiness_error(policy));
+            }
             if let Some(check) = &battery.readiness {
                 let executable = |name: &str| {
                     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
                 };
-                let valid = (check.command.is_empty()
-                    || (check.command.len() == 2
-                        && check.command[0] == "python3"
-                        && battery.helpers.iter().any(|helper| helper.as_str() == check.command[1])))
-                    && (check.command.is_empty() || check.required_executables.iter().any(|name| name == "python3"))
+                let runs_python = !check.command.is_empty() || !target_commands.is_empty();
+                let valid = (check.command.is_empty() || runs_a_helper(&check.command))
+                    && target_commands.iter().all(|command| runs_a_helper(command))
+                    && (!runs_python || check.required_executables.iter().any(|name| name == "python3"))
                     && check.required_executables.iter().all(|name| executable(name))
                     && check.cli_alternatives.iter().all(|alt| {
                         executable(&alt.executable)
-                            && battery.credentials.contains(&alt.credential)
+                            && battery
+                                .credentials
+                                .iter()
+                                .chain(battery.targets.iter().flat_map(|targets| {
+                                    targets.iter().flat_map(|(_, target_policy)| &target_policy.credentials)
+                                }))
+                                .any(|credential| credential == &alt.credential)
                             && !alt.login_hint.trim().is_empty()
                             && !alt.login_hint.contains(['\n', '\r'])
                     });
                 if !valid {
-                    return Err(PackageError::Readiness { policy, reason: "a check runs python3 on a declared helper and requires python3; executables are bare names; alternatives reference owned credentials".into() });
+                    return Err(readiness_error(policy));
                 }
             }
         }
@@ -214,24 +342,30 @@ pub const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator",
 /// Those of them that are arrays of named declarations.
 const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "sanitizer"];
 
+fn read_document(policy: &Path) -> Result<Value, PackageError> {
+    let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
+        policy: policy.to_path_buf(),
+        source,
+    })?;
+    toml::from_str(&text).map_err(|source| PackageError::PolicySyntax {
+        policy: policy.to_path_buf(),
+        source,
+    })
+}
+
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
 /// declared helpers, and it names only contracts in the namespaces it declares.
 /// Returns what the policy binds that the manifest alone cannot say: the audience
 /// source providers, which a marketplace gives one owner each, and the credential
 /// variables its helpers read, which an install names to the person.
-fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<PolicyBindings, PackageError> {
-    let namespaces = &battery.namespaces;
-    let helpers = &battery.helpers;
-    let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
-        policy: policy.to_path_buf(),
-        source,
-    })?;
-    let document: Value = toml::from_str(&text).map_err(|source| PackageError::PolicySyntax {
-        policy: policy.to_path_buf(),
-        source,
-    })?;
-
+fn check_policy(
+    policy: &Path,
+    name: &PackageName,
+    namespaces: &[Namespace],
+    helpers: &[RelativePath],
+    document: &Value,
+) -> Result<PolicyBindings, PackageError> {
     // Named on its own because it is the mistake a battery author makes: a
     // battery is included, and cannot include in turn.
     if document.get("include").is_some() {
@@ -261,12 +395,12 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             policy: policy.to_path_buf(),
             field: "policy".to_owned(),
         })?;
-    if declared.get("version").and_then(Value::as_integer).is_none() {
+    let Some(version) = declared.get("version").and_then(Value::as_integer) else {
         return Err(PackageError::PolicyField {
             policy: policy.to_path_buf(),
             field: "version".to_owned(),
         });
-    }
+    };
     for (field, value) in declared {
         if field == "deployment" {
             check_confinement(policy, declared, value)?;
@@ -297,6 +431,14 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
         .and_then(Value::as_table)
         .map(|bindings| bindings.keys().cloned().collect())
         .unwrap_or_default();
+    let lookups = document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, binding)| Some((name.clone(), binding.get("lookup")?.as_str()?.to_owned())))
+        .collect();
 
     // A contract may carry an argument filter — `mcp/ns/send(channel:C1)` — so
     // the check is on the family and namespace it opens with, not on the whole
@@ -305,12 +447,13 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
         .iter()
         .flat_map(|namespace| ["mcp", "host", "agent"].map(|family| format!("{family}/{namespace}/")))
         .collect();
-    check_named(policy, &document)?;
-    for contract in declared_contracts(policy, &document)? {
+    check_named(policy, document)?;
+    let tools = declared_contracts(policy, document)?;
+    for contract in &tools {
         if !covered.iter().any(|prefix| contract.starts_with(prefix)) {
             return Err(PackageError::PolicyForeignContract {
                 policy: policy.to_path_buf(),
-                contract,
+                contract: contract.clone(),
                 namespaces: namespaces
                     .iter()
                     .map(Namespace::to_string)
@@ -319,13 +462,344 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             });
         }
     }
-    Ok(PolicyBindings { audiences, credentials })
+    Ok(PolicyBindings {
+        version,
+        audiences,
+        lookups,
+        credentials,
+        externals: externals(document).map(|(external, _)| external).collect(),
+        tools,
+        declarations: named_declarations(document),
+    })
 }
 
-/// What `check_policy` reads out of a battery policy for its manifest.
+/// Every `[externals.<section>.<name>]` entry, and whether it runs a helper `command`.
+fn externals(document: &Value) -> impl Iterator<Item = (NamedExternal, bool)> + '_ {
+    document
+        .get("externals")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
+        .flat_map(|(section, entries)| {
+            entries.iter().map(move |(name, binding)| {
+                let external = NamedExternal {
+                    section: section.clone(),
+                    name: name.clone(),
+                };
+                (external, binding.get("command").is_some())
+            })
+        })
+}
+
+/// Every field that holds an audience list, as `(declaration kind, path within it)`.
+const AUDIENCE_FIELDS: [(&str, &[&str]); 7] = [
+    ("tool", &["delta", "audience"]),
+    ("tool", &["requires", "audience", "contains"]),
+    ("tool", &["requires", "audience", "within"]),
+    ("annotator", &["audiences"]),
+    ("authority", &["permits", "audience_missing"]),
+    ("sanitizer", &["permits", "audience", "from"]),
+    ("sanitizer", &["permits", "audience", "to"]),
+];
+
+/// The `@<provider>:<selector>` entries the fragment's audience lists name; a named
+/// group (`@finance`) carries no provider.
+fn source_mentions(document: &Value) -> impl Iterator<Item = &str> {
+    AUDIENCE_FIELDS
+        .iter()
+        .flat_map(|(kind, path)| {
+            declarations(document, kind).filter_map(|declaration| {
+                path.iter()
+                    .try_fold(declaration, |value, key| value.get(key))
+                    .and_then(Value::as_array)
+            })
+        })
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|entry| entry.starts_with('@') && entry.contains(':'))
+}
+
+/// A targeted battery's base is loaded alone wherever the sandbox is off, so it
+/// runs no helper, every tool and annotator it names resolves within it, and every
+/// declaration the runtime opens only with a binding is bound within it.
+fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(), PackageError> {
+    if let Some((external, _)) = externals(base).find(|(_, runs)| *runs) {
+        return Err(PackageError::BaseRunsHelper {
+            policy: policy.to_path_buf(),
+            external,
+        });
+    }
+    if let Some(entry) = source_mentions(base).next() {
+        return Err(PackageError::BaseMentionsSource {
+            policy: policy.to_path_buf(),
+            entry: entry.to_owned(),
+        });
+    }
+    let bound: BTreeSet<NamedExternal> = externals(base).map(|(external, _)| external).collect();
+    let declared = named_declarations(base);
+    let undeclared = bound.iter().find(|external| {
+        DeclarationKind::ALL
+            .into_iter()
+            .filter(|kind| kind.section() == external.section)
+            .any(|kind| {
+                !declared.contains(&NamedDeclaration {
+                    kind,
+                    name: external.name.clone(),
+                })
+            })
+    });
+    if let Some(external) = undeclared {
+        return Err(PackageError::BaseBindingUndeclared {
+            policy: policy.to_path_buf(),
+            external: external.clone(),
+        });
+    }
+    let unbound = DeclarationKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            declarations(base, kind.field()).filter_map(move |declaration| {
+                let name = declaration.get("name").and_then(Value::as_str)?;
+                kind.binds_at_open(name, declaration).then(|| NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                })
+            })
+        })
+        .find(|declaration| !bound.contains(&declaration.binding()));
+    if let Some(declaration) = unbound {
+        return Err(PackageError::BaseDeclarationUnbound {
+            policy: policy.to_path_buf(),
+            declaration,
+        });
+    }
+    let declared: BTreeSet<&str> = declarations(base, "annotator")
+        .filter_map(|annotator| annotator.get("name").and_then(Value::as_str))
+        .collect();
+    let uses = declarations(base, "tool").filter_map(|tool| tool.get("annotator").and_then(Value::as_str));
+    if let Some(annotator) = uses.into_iter().find(|annotator| !declared.contains(annotator)) {
+        return Err(PackageError::BaseUsesTargetAnnotator {
+            policy: policy.to_path_buf(),
+            annotator: annotator.to_owned(),
+        });
+    }
+    check_variants(policy, tools, &[])
+}
+
+/// The engine picks a tool's first matching variant, the composed order running
+/// `policy` before `base`. No variant follows its tool's bare variant, a bare variant
+/// does not shadow `base`'s patterned ones, and every tool `policy` names has a bare
+/// variant here or in `base`, so no call falls through to `*`.
+fn check_variants(policy: &Path, tools: &[String], base: &[String]) -> Result<(), PackageError> {
+    fn split(variant: &str) -> (&str, bool) {
+        match variant.split_once('(') {
+            Some((tool, _)) => (tool, false),
+            None => (variant, true),
+        }
+    }
+    let patterned: BTreeSet<&str> = base
+        .iter()
+        .map(|other| split(other))
+        .filter_map(|(tool, is_bare)| (!is_bare).then_some(tool))
+        .collect();
+    let mut bare = BTreeSet::new();
+    for variant in tools {
+        let refused = match split(variant) {
+            (tool, _) if bare.contains(tool) => PackageError::UnreachableVariant {
+                policy: policy.to_path_buf(),
+                tool: tool.to_owned(),
+                variant: variant.clone(),
+            },
+            (tool, true) if patterned.contains(tool) => PackageError::TargetShadowsBase {
+                policy: policy.to_path_buf(),
+                tool: tool.to_owned(),
+            },
+            (tool, is_bare) => {
+                bare.extend(is_bare.then_some(tool));
+                continue;
+            }
+        };
+        return Err(refused);
+    }
+    bare.extend(
+        base.iter()
+            .map(|other| split(other))
+            .filter_map(|(tool, is_bare)| is_bare.then_some(tool)),
+    );
+    match tools
+        .iter()
+        .map(|variant| split(variant).0)
+        .find(|tool| !bare.contains(tool))
+    {
+        Some(tool) => Err(PackageError::ToolWithoutBareVariant {
+            policy: policy.to_path_buf(),
+            tool: tool.to_owned(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// What `check_policy` reads out of a battery policy for its manifest, and what
+/// a target policy must not repeat of its base.
 struct PolicyBindings {
+    version: i64,
     audiences: Vec<String>,
+    /// Each audience binding that routes its member lookups, to the entry it names.
+    lookups: BTreeMap<String, String>,
     credentials: Vec<String>,
+    externals: BTreeSet<NamedExternal>,
+    /// The declared tool contracts, canonical and in declaration order.
+    tools: Vec<String>,
+    declarations: BTreeSet<NamedDeclaration>,
+}
+
+/// One `[externals.<section>.<name>]` entry, or one field of the `jev` profile:
+/// the loader composes each into the root's table and refuses it twice.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NamedExternal {
+    pub section: String,
+    pub name: String,
+}
+
+impl fmt::Display for NamedExternal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "externals.{}.{}", self.section, self.name)
+    }
+}
+
+/// The declaration kinds the engine registry admits once per name across every
+/// included file. Tool rules are absent: they are ordered matchers and may repeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeclarationKind {
+    Annotator,
+    Authority,
+    Sanitizer,
+}
+
+impl DeclarationKind {
+    const ALL: [Self; 3] = [Self::Annotator, Self::Authority, Self::Sanitizer];
+
+    fn field(self) -> &'static str {
+        match self {
+            Self::Annotator => "annotator",
+            Self::Authority => "authority",
+            Self::Sanitizer => "sanitizer",
+        }
+    }
+
+    fn section(self) -> &'static str {
+        match self {
+            Self::Annotator => "annotators",
+            Self::Authority => "authorities",
+            Self::Sanitizer => "sanitizers",
+        }
+    }
+
+    /// Whether the runtime refuses to open a policy that declares this without an
+    /// `[externals]` binding: an authority may stay unbound, an annotator naming a
+    /// builtin is complete as written, and the engine applies its reserved sanitizer.
+    fn binds_at_open(self, name: &str, declaration: &Value) -> bool {
+        match self {
+            Self::Authority => false,
+            Self::Annotator => declaration.get("builtin").is_none(),
+            Self::Sanitizer => name != RESERVED_SANITIZER,
+        }
+    }
+}
+
+/// The sanitizer the engine applies itself (`SanitizerName::ATTEST_SCHEMA`).
+const RESERVED_SANITIZER: &str = "attest-schema";
+
+/// One `[[policy.<kind>]]` declaration, by name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NamedDeclaration {
+    pub kind: DeclarationKind,
+    pub name: String,
+}
+
+impl fmt::Display for NamedDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "policy.{} {}", self.kind.field(), self.name)
+    }
+}
+
+impl NamedDeclaration {
+    fn binding(&self) -> NamedExternal {
+        NamedExternal {
+            section: self.kind.section().to_owned(),
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// Every once-per-name declaration in the fragment; `check_named` has already
+/// refused one without a name.
+fn named_declarations(document: &Value) -> BTreeSet<NamedDeclaration> {
+    DeclarationKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            declarations(document, kind.field())
+                .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+                .map(move |name| NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                })
+        })
+        .collect()
+}
+
+/// A deployment of a target includes the target policy beside its base, so the target policy
+/// meets the base under the loader's composition rules: one policy version, no
+/// external the base already binds, and no annotator, authority or sanitizer the
+/// base already names.
+fn check_composes(policy: &Path, base: &PolicyBindings, target_policy: &PolicyBindings) -> Result<(), PackageError> {
+    if target_policy.version != base.version {
+        return Err(PackageError::TargetPolicyVersion {
+            policy: policy.to_path_buf(),
+            base: base.version,
+            found: target_policy.version,
+        });
+    }
+    if let Some(external) = base.externals.intersection(&target_policy.externals).next() {
+        return Err(PackageError::TargetPolicyDuplicateExternal {
+            policy: policy.to_path_buf(),
+            external: external.clone(),
+        });
+    }
+    match base.declarations.intersection(&target_policy.declarations).next() {
+        Some(declaration) => Err(PackageError::TargetPolicyDuplicateDeclaration {
+            policy: policy.to_path_buf(),
+            declaration: declaration.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The loader follows a lookup route one hop: it refuses a route whose destination
+/// routes its own lookups. A targeted base binds no command-bearing audience, so
+/// every route and every destination it may chain to live in one policy; a
+/// destination it does not bind is the root's, which the loader checks against the
+/// composed config.
+fn check_lookup_routes(policy: &Path, bindings: &PolicyBindings) -> Result<(), PackageError> {
+    for (name, target) in &bindings.lookups {
+        match (name == target, bindings.lookups.contains_key(target)) {
+            (true, _) => {
+                return Err(PackageError::AudienceLookupToItself {
+                    policy: policy.to_path_buf(),
+                    name: name.clone(),
+                });
+            }
+            (false, true) => {
+                return Err(PackageError::ChainedAudienceLookup {
+                    policy: policy.to_path_buf(),
+                    name: name.clone(),
+                    target: target.clone(),
+                });
+            }
+            (false, false) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Returns the credential variables the bindings name, each once, in name order.
@@ -433,7 +907,9 @@ fn check_binding(
     let mut credential = None;
     for (key, value) in table {
         match key.as_str() {
-            "command" if runs_a_declared_helper(value, helpers) => transports += 1,
+            "command" if string_argv(value).is_some_and(|argv| runs_a_declared_helper(&argv, helpers)) => {
+                transports += 1;
+            }
             "builtin" if external.starts_with("sanitizers.") && names_a_stock_sanitizer(value) => {
                 transports += 1;
                 stock = true;
@@ -457,6 +933,10 @@ fn check_binding(
             // An audience source declares the selector templates it serves
             // beside its binding; the loader parses the templates themselves.
             "selectors" if external.starts_with("audience.") && declares_selectors(value) => {}
+            // An audience source may send its member lookups to another
+            // audience entry; the loader resolves the name in the composed config.
+            "lookup"
+                if external.starts_with("audience.") && value.as_str().is_some_and(|target| !target.is_empty()) => {}
             _ => return Err(refuse()),
         }
     }
@@ -512,14 +992,15 @@ fn declares_selectors(value: &Value) -> bool {
 
 /// A battery ships the programs it runs, so an argv is exactly `python3` and one
 /// of the helpers this manifest declares.
-fn runs_a_declared_helper(command: &Value, helpers: &[RelativePath]) -> bool {
-    let Some(argv) = command.as_array() else {
-        return false;
-    };
-    match argv.iter().map(Value::as_str).collect::<Option<Vec<_>>>().as_deref() {
-        Some(["python3", helper]) => helpers.iter().any(|declared| declared.as_str() == *helper),
+fn runs_a_declared_helper(argv: &[&str], helpers: &[RelativePath]) -> bool {
+    match argv {
+        ["python3", helper] => helpers.iter().any(|declared| declared.as_str() == *helper),
         _ => false,
     }
+}
+
+fn string_argv(command: &Value) -> Option<Vec<&str>> {
+    command.as_array()?.iter().map(Value::as_str).collect()
 }
 
 /// The one deployment setting a fragment carries: `confined_results` naming
@@ -625,6 +1106,16 @@ mod tests {
 
     const BATTERY_MANIFEST: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
          [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
+
+    const BOTH_TARGETS: &str = "\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n\
+         [battery.targets.multi-user]\npolicy = \"multi-user.toml\"\n";
+
+    const SINGLE_USER_POLICY: &str = "[policy]\nversion = 2\n\n\
+         [externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         selectors = [{ template = \"viewer\", feeds = \"self\" }]\n";
+
+    /// A targeted battery's base: loaded alone wherever the sandbox is off, it runs no helper.
+    const TARGETED_BASE: &str = "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n";
 
     const BATTERY_POLICY: &str = "[policy]\nversion = 2\n\n\
          [[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n\n\
@@ -794,6 +1285,257 @@ mod tests {
         );
     }
 
+    /// Each target policy passes the base's checks, and its audiences and credentials
+    /// are read from its own policy, not merged into the base's.
+    #[test]
+    fn a_battery_target_policy_is_checked_and_its_bindings_read_on_their_own() {
+        let directory = battery(TARGETED_BASE);
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}{BOTH_TARGETS}"),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single-user.toml"), SINGLE_USER_POLICY).unwrap();
+        let target_policy = "[policy]\nversion = 2\n\n\
+             [externals.audience.github-org]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             token_env = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nselectors = [{ template = \"org/<org>\" }]\n";
+        fs::write(directory.path().join("multi-user.toml"), target_policy).unwrap();
+
+        let package = validate_package(directory.path()).unwrap();
+        let validated = package.battery().unwrap();
+        assert!(validated.audiences.is_empty());
+        assert!(validated.credentials.is_empty());
+        let targets = validated.targets.as_ref().unwrap();
+        assert_eq!(targets.get(BatteryTarget::SingleUser).audiences, vec!["github"]);
+        let multi_user = targets.get(BatteryTarget::MultiUser);
+        assert_eq!(multi_user.audiences, vec!["github-org"]);
+        assert_eq!(multi_user.credentials, vec!["APPA_PROVIDER_GITHUB_ORG_TOKEN"]);
+
+        fs::write(
+            directory.path().join("multi-user.toml"),
+            target_policy.replace("APPA_PROVIDER_GITHUB_ORG_TOKEN", "APPA_PROVIDER_SLACK_TOKEN"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::PolicyForeignCredential { .. })
+        ));
+
+        fs::remove_file(directory.path().join("multi-user.toml")).unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::MissingPath {
+                field: "battery.targets.multi-user.policy",
+                ..
+            })
+        ));
+    }
+
+    const MULTI_USER_POLICY: &str = "[policy]\nversion = 2\n\n\
+         [externals.audience.github-org]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         token_env = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nselectors = [{ template = \"org/<org>\" }]\n";
+
+    /// A battery with a multi-user target policy, and `manifest_tail` appended to its manifest.
+    fn targeted_battery(target_policy: &str, manifest_tail: &str) -> tempfile::TempDir {
+        let directory = battery(TARGETED_BASE);
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}{manifest_tail}{BOTH_TARGETS}"),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single-user.toml"), SINGLE_USER_POLICY).unwrap();
+        fs::write(directory.path().join("multi-user.toml"), target_policy).unwrap();
+        directory
+    }
+
+    /// A deployment of the target holds the target policy's credentials beside the
+    /// base's, so a CLI alternative may stand in for either.
+    #[test]
+    fn readiness_alternatives_may_name_a_target_policy_credential() {
+        let readiness = "\n[[battery.readiness.cli_alternatives]]\nexecutable = \"gh\"\n\
+             credential = \"APPA_PROVIDER_GITHUB_ORG_TOKEN\"\nlogin_hint = \"gh auth login\"\n";
+
+        validate_package(targeted_battery(MULTI_USER_POLICY, readiness).path()).unwrap();
+    }
+
+    /// A target policy's check runs python3 on a declared helper, as the base's does,
+    /// under the base's declared requirements.
+    #[test]
+    fn a_target_policy_readiness_command_runs_a_declared_helper() {
+        let base_readiness = "\n[battery.readiness]\nrequired_executables = [\"python3\"]\n";
+        let directory = targeted_battery(MULTI_USER_POLICY, base_readiness);
+        let path = directory.path().join("appa-package.toml");
+        let with = |tail: &str, command: &str| format!("{BATTERY_MANIFEST}{tail}{BOTH_TARGETS}readiness = {command}\n");
+        fs::write(&path, with(base_readiness, "[\"python3\", \"audience-source.py\"]")).unwrap();
+        let package = validate_package(directory.path()).unwrap();
+        let Role::Battery(battery) = package.role else {
+            panic!("a battery")
+        };
+        assert_eq!(
+            battery.readiness_command(BatteryTarget::MultiUser),
+            ["python3", "audience-source.py"]
+        );
+
+        for invalid in [
+            with(base_readiness, "[\"python3\", \"check-multi-user.py\"]"),
+            with(base_readiness, "[\"sh\", \"audience-source.py\"]"),
+            with(base_readiness, "[\"python3\"]"),
+            with("", "[\"python3\", \"audience-source.py\"]"),
+            with(
+                "\n[battery.readiness]\nrequired_executables = [\"gh\"]\n",
+                "[\"python3\", \"audience-source.py\"]",
+            ),
+        ] {
+            fs::write(&path, &invalid).unwrap();
+            assert!(
+                matches!(validate_package(directory.path()), Err(PackageError::Readiness { .. })),
+                "{invalid}"
+            );
+        }
+    }
+
+    /// An empty target policy check is presence-only, as an empty base one is: it runs
+    /// nothing, so it needs neither python3 nor the base's check.
+    #[test]
+    fn an_empty_target_policy_readiness_command_runs_nothing() {
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        let path = directory.path().join("appa-package.toml");
+        let with = |tail: &str| format!("{BATTERY_MANIFEST}{tail}{BOTH_TARGETS}readiness = []\n");
+        let base_check = "\n[battery.readiness]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             required_executables = [\"python3\"]\n";
+        for tail in [
+            "",
+            "\n[battery.readiness]\nrequired_executables = [\"gh\"]\n",
+            base_check,
+        ] {
+            fs::write(&path, with(tail)).unwrap();
+            let package = validate_package(directory.path()).unwrap_or_else(|error| panic!("{tail}: {error}"));
+            let Role::Battery(battery) = package.role else {
+                panic!("a battery")
+            };
+            assert!(battery.readiness_command(BatteryTarget::MultiUser).is_empty(), "{tail}");
+        }
+        let package = validate_package(directory.path()).unwrap();
+        assert_eq!(
+            package.battery().unwrap().readiness_command(BatteryTarget::SingleUser),
+            ["python3", "audience-source.py"]
+        );
+    }
+
+    /// The loader refuses an external two included files both declare, and an
+    /// included file at another policy version, so a target policy that cannot sit
+    /// beside its base is refused here.
+    #[test]
+    fn a_target_policy_that_cannot_compose_with_its_base_is_refused() {
+        let stock = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let directory = targeted_battery(&format!("{MULTI_USER_POLICY}\n{stock}"), "");
+        fs::write(
+            directory.path().join("appa.toml"),
+            format!("{TARGETED_BASE}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n{stock}"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetPolicyDuplicateExternal { external, .. })
+                if external == NamedExternal { section: "sanitizers".into(), name: "mask".into() }
+        ));
+
+        let declaring = |declaration: &str| format!("{MULTI_USER_POLICY}\n{declaration}");
+        for (kind, name) in [
+            (DeclarationKind::Annotator, "classifier"),
+            (DeclarationKind::Authority, "review"),
+        ] {
+            let builtin = if kind == DeclarationKind::Annotator {
+                "builtin = \"llm\"\n"
+            } else {
+                ""
+            };
+            let shared = format!("[[policy.{}]]\nname = \"{name}\"\n{builtin}", kind.field());
+            let directory = targeted_battery(&declaring(&shared), "");
+            fs::write(directory.path().join("appa.toml"), format!("{TARGETED_BASE}\n{shared}")).unwrap();
+            let expected = NamedDeclaration {
+                kind,
+                name: name.to_owned(),
+            };
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::TargetPolicyDuplicateDeclaration { declaration, .. }) if declaration == expected
+                ),
+                "accepted a repeated {expected}"
+            );
+        }
+
+        // Tool rules are ordered matchers, so a target policy may add one for a tool its base covers.
+        let tool = "[[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n";
+        validate_package(targeted_battery(&declaring(tool), "").path()).unwrap();
+
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!(
+                "{BATTERY_MANIFEST}{}",
+                BOTH_TARGETS.replace("multi-user.toml", "appa.toml")
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetPolicyIsBase {
+                field: "battery.targets.multi-user.policy"
+            })
+        ));
+
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        fs::create_dir(directory.path().join("targets")).unwrap();
+        fs::rename(
+            directory.path().join("multi-user.toml"),
+            directory.path().join("targets/multi-user.toml"),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!(
+                "{BATTERY_MANIFEST}{}",
+                BOTH_TARGETS.replace("\"multi-user.toml", "\"targets/multi-user.toml")
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetedPolicyOutsidePackageRoot {
+                field: "battery.targets.multi-user.policy"
+            })
+        ));
+
+        let directory = targeted_battery(MULTI_USER_POLICY, "");
+        fs::create_dir(directory.path().join("policies")).unwrap();
+        for policy in ["appa.toml", "single-user.toml", "multi-user.toml"] {
+            fs::rename(
+                directory.path().join(policy),
+                directory.path().join("policies").join(policy),
+            )
+            .unwrap();
+        }
+        fs::write(
+            directory.path().join("appa-package.toml"),
+            format!("{BATTERY_MANIFEST}{BOTH_TARGETS}").replace("policy = \"", "policy = \"policies/"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::TargetedPolicyOutsidePackageRoot {
+                field: "battery.policy"
+            })
+        ));
+
+        let versioned = MULTI_USER_POLICY.replace("version = 2", "version = 1");
+        assert!(matches!(
+            validate_package(targeted_battery(&versioned, "").path()),
+            Err(PackageError::TargetPolicyVersion { base: 2, found: 1, .. })
+        ));
+    }
+
     #[test]
     fn an_adapter_package_of_each_host_validates() {
         let claude_code = claude_code_adapter();
@@ -903,6 +1645,11 @@ mod tests {
             "[externals.sanitizers.mask]\nbuiltin = \"llm\"\n",
             // A command beside a url is still a url binding on the wire.
             "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
+            // A command is exactly python3 on one of the manifest's helpers.
+            "[externals.audience.github]\ncommand = [\"python3\", \"check-multi-user.py\"]\n",
+            "[externals.audience.github]\ncommand = [\"sh\", \"audience-source.py\"]\n",
+            "[externals.audience.github]\ncommand = [\"python3\"]\n",
+            "[externals.audience.github]\ncommand = [\"python3\", 3]\n",
             // An external kind only a root config binds.
             "[externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-opus-5\"\n",
         ] {
@@ -916,6 +1663,62 @@ mod tests {
                 "accepted {replacement}"
             );
         }
+    }
+
+    /// An audience source may route its member lookups to another audience
+    /// entry by name; no other external, and no other value, carries one.
+    #[test]
+    fn an_audience_binding_may_route_its_lookups() {
+        let binding = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        let routed = BATTERY_POLICY.replace(binding, &format!("{binding}lookup = \"readers\"\n"));
+        assert!(validate_package(battery(&routed).path()).is_ok());
+
+        for refused in [
+            BATTERY_POLICY.replace(binding, &format!("{binding}lookup = \"\"\n")),
+            BATTERY_POLICY.replace(binding, &format!("{binding}lookup = 3\n")),
+            format!(
+                "{BATTERY_POLICY}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n\
+                 [externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\nlookup = \"readers\"\n"
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&refused).path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted {refused}"
+            );
+        }
+    }
+
+    /// A route the loader would refuse at every deployment is refused here: one to
+    /// itself, and one to an entry the package binds that routes its own lookups.
+    /// A destination the package does not bind is the root's to supply.
+    #[test]
+    fn a_lookup_route_takes_one_hop() {
+        let binding = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        let relay = "[externals.audience.relay]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             selectors = [{ template = \"team/<team>\" }]\n";
+        let routed = |to: &str| BATTERY_POLICY.replace(binding, &format!("{binding}lookup = \"{to}\"\n"));
+
+        assert!(matches!(
+            validate_package(battery(&routed("github")).path()),
+            Err(PackageError::AudienceLookupToItself { name, .. }) if name == "github"
+        ));
+        assert!(matches!(
+            validate_package(battery(&format!("{}{relay}lookup = \"host-members\"\n", routed("relay"))).path()),
+            Err(PackageError::ChainedAudienceLookup { name, target, .. }) if name == "github" && target == "relay"
+        ));
+        assert!(validate_package(battery(&format!("{}{relay}", routed("relay"))).path()).is_ok());
+
+        let target_policy = |lookup: &str| format!("{MULTI_USER_POLICY}lookup = \"{lookup}\"\n");
+        let directory = targeted_battery(&target_policy("host-members"), "");
+        assert!(validate_package(directory.path()).is_ok());
+        fs::write(directory.path().join("multi-user.toml"), target_policy("github-org")).unwrap();
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::AudienceLookupToItself { name, .. }) if name == "github-org"
+        ));
     }
 
     #[test]
@@ -1180,5 +1983,194 @@ mod tests {
                 "accepted {what}"
             );
         }
+    }
+
+    /// A targeted battery with `base` as its base and `multi_user` as its multi-user target policy.
+    fn targeted(base: &str, multi_user: &str) -> tempfile::TempDir {
+        let directory = targeted_battery(multi_user, "");
+        fs::write(directory.path().join("appa.toml"), base).unwrap();
+        directory
+    }
+
+    /// Wherever the sandbox is off, a deployment loads a targeted battery's base alone,
+    /// so the base runs no helper and names no audience source a helper would serve.
+    #[test]
+    fn a_targeted_base_runs_no_helper_and_names_no_audience_source() {
+        let annotator = format!(
+            "{TARGETED_BASE}\n[externals.annotators.visibility]\ncommand = [\"python3\", \"audience-source.py\"]\n"
+        );
+        for base in [BATTERY_POLICY.to_owned(), annotator] {
+            assert!(matches!(
+                validate_package(targeted(&base, MULTI_USER_POLICY).path()),
+                Err(PackageError::BaseRunsHelper { .. })
+            ));
+        }
+
+        let declaring = |declaration: &str| format!("{TARGETED_BASE}\n{declaration}");
+        for declaration in [
+            "[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = { audience = [\"@github:viewer\"] }\n",
+            "[[policy.annotator]]\nname = \"classifier\"\naudiences = [\"@github:viewer\"]\n",
+        ] {
+            assert!(matches!(
+                validate_package(targeted(&declaring(declaration), MULTI_USER_POLICY).path()),
+                Err(PackageError::BaseMentionsSource { entry, .. }) if entry == "@github:viewer"
+            ));
+        }
+        let group = "[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = { audience = [\"@finance\"] }\n";
+        validate_package(targeted(&declaring(group), MULTI_USER_POLICY).path()).unwrap();
+    }
+
+    /// Loaded alone, a targeted base resolves its tools' annotators within itself, so
+    /// one declared only by the target policies leaves the base unloadable.
+    #[test]
+    fn a_targeted_base_declares_the_annotators_its_tools_use() {
+        let annotator = "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"llm\"\n";
+        let base =
+            format!("{TARGETED_BASE}\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n");
+        let with_targets = |base: &str, target_tail: &str| {
+            let directory = targeted(base, &format!("{MULTI_USER_POLICY}\n{target_tail}"));
+            fs::write(
+                directory.path().join("single-user.toml"),
+                format!("{SINGLE_USER_POLICY}\n{target_tail}"),
+            )
+            .unwrap();
+            directory
+        };
+
+        assert!(matches!(
+            validate_package(with_targets(&base, annotator).path()),
+            Err(PackageError::BaseUsesTargetAnnotator { annotator, .. }) if annotator == "classifier"
+        ));
+        validate_package(with_targets(&format!("{base}\n{annotator}"), "").path()).unwrap();
+    }
+
+    /// Loaded alone, a targeted base has only its own bindings, so every declaration
+    /// the runtime opens only with a binding is bound by the base itself.
+    #[test]
+    fn a_targeted_base_binds_every_declaration_it_opens_with() {
+        let annotator = format!(
+            "{TARGETED_BASE}\n[[policy.annotator]]\nname = \"classifier\"\n\n[[policy.tool]]\nname = \"mcp/github/list\"\nannotator = \"classifier\"\n"
+        );
+        let sanitizer = format!("{TARGETED_BASE}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n");
+        let stock_mask = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let with_targets = |base: &str, target_tail: &str| {
+            let directory = targeted(base, &format!("{MULTI_USER_POLICY}\n{target_tail}"));
+            fs::write(
+                directory.path().join("single-user.toml"),
+                format!("{SINGLE_USER_POLICY}\n{target_tail}"),
+            )
+            .unwrap();
+            directory
+        };
+
+        for (base, target_binding, kind, name) in [
+            (
+                annotator.as_str(),
+                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n",
+                DeclarationKind::Annotator,
+                "classifier",
+            ),
+            (sanitizer.as_str(), stock_mask, DeclarationKind::Sanitizer, "mask"),
+        ] {
+            let expected = NamedDeclaration {
+                kind,
+                name: name.to_owned(),
+            };
+            assert!(matches!(
+                validate_package(with_targets(base, target_binding).path()),
+                Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
+            ));
+        }
+
+        let builtin_annotator =
+            annotator.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
+        let base_bound_sanitizer = format!("{sanitizer}\n{stock_mask}");
+        let reserved_sanitizer = sanitizer.replace("\"mask\"", &format!("\"{RESERVED_SANITIZER}\""));
+        let unbound_authority =
+            format!("{TARGETED_BASE}\n[[policy.authority]]\nname = \"operator\"\nhint = \"Ask the operator.\"\n");
+        for base in [
+            builtin_annotator,
+            base_bound_sanitizer,
+            reserved_sanitizer,
+            unbound_authority,
+        ] {
+            validate_package(with_targets(&base, "").path()).unwrap();
+        }
+    }
+
+    /// Loaded alone, a targeted base must declare each binding it carries, or the runtime
+    /// refuses it as undeclared. A sanitizer's stock builtin is the one binding a base may
+    /// carry without running a helper, so the check is exercised through it.
+    #[test]
+    fn a_targeted_base_declares_every_binding_it_carries() {
+        let declaration = "[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n";
+        let base = format!("{TARGETED_BASE}\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n");
+        let directory = targeted(&base, &format!("{MULTI_USER_POLICY}\n{declaration}"));
+        fs::write(
+            directory.path().join("single-user.toml"),
+            format!("{SINGLE_USER_POLICY}\n{declaration}"),
+        )
+        .unwrap();
+        let expected = NamedExternal {
+            section: "sanitizers".to_owned(),
+            name: "mask".to_owned(),
+        };
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::BaseBindingUndeclared { external, .. }) if external == expected
+        ));
+    }
+
+    /// The engine picks a tool's first matching variant, target policy before base, and a
+    /// call no variant matches falls through to `*`.
+    #[test]
+    fn every_tool_of_a_targeted_battery_has_a_reachable_bare_variant() {
+        let tools = |names: &[&str]| -> String {
+            names
+                .iter()
+                .map(|name| format!("[[policy.tool]]\nname = \"mcp/github/{name}\"\ndelta = {{}}\n"))
+                .collect()
+        };
+        let validate = |base: &[&str], target: &[&str]| {
+            validate_package(
+                targeted(
+                    &format!("[policy]\nversion = 2\n\n{}", tools(base)),
+                    &format!("{MULTI_USER_POLICY}\n{}", tools(target)),
+                )
+                .path(),
+            )
+        };
+
+        assert!(matches!(
+            validate(&["list(owner:me)"], &[]),
+            Err(PackageError::ToolWithoutBareVariant { tool, .. }) if tool == "mcp/github/list"
+        ));
+        validate(&["list(owner:me)", "list"], &[]).unwrap();
+        for base in [["list", "list(owner:me)"], ["list", "list"]] {
+            assert!(matches!(
+                validate(&base, &[]),
+                Err(PackageError::UnreachableVariant { tool, .. }) if tool == "mcp/github/list"
+            ));
+        }
+        assert!(matches!(
+            validate(&["list(owner:me)", "list"], &["list"]),
+            Err(PackageError::TargetShadowsBase { tool, .. }) if tool == "mcp/github/list"
+        ));
+        validate(&["list"], &["list"]).unwrap();
+        assert!(matches!(
+            validate(&["list"], &["send(to:me)"]),
+            Err(PackageError::ToolWithoutBareVariant { tool, .. }) if tool == "mcp/github/send"
+        ));
+        validate(&["send"], &["send(to:me)"]).unwrap();
+    }
+
+    /// A battery without targets is only ever composed whole, so it keeps its lookups
+    /// and may leave a tool's other calls to `*`.
+    #[test]
+    fn an_untargeted_battery_keeps_its_lookups_and_patterned_tools() {
+        let policy = format!(
+            "{BATTERY_POLICY}\n[[policy.tool]]\nname = \"mcp/github/list(owner:me)\"\ndelta = {{ audience = [\"@github:viewer\"] }}\n"
+        );
+        validate_package(battery(&policy).path()).unwrap();
     }
 }

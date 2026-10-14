@@ -9,6 +9,12 @@ the harness would run it in), one answer out:
                             "pull_request" | "issue": {...},
                             "issues" | "pull_requests": {...}}}
 
+A multi-user deployment runs `context-multi-user.py` under a GitHub App
+installation token, which has no viewer: its answer has no `viewer` and
+no `viewer_permission`, names every person `"person": "github:<id>"`
+where this one names its `"login"`, and reads the token from
+APPA_PROVIDER_GITHUB_TOKEN alone.
+
 Two kinds of call are recognized. A `Bash` call is split into its simple
 commands; each `gh` call and `git push` names its repository by
 `--repo`/`-R`, `GH_REPO`, a `repos/OWNER/NAME` API path, a GitHub URL, a
@@ -36,6 +42,7 @@ the annotator an error entry, and the call itself is never refused here.
 """
 
 from dataclasses import dataclass
+from enum import Enum
 import json
 import os
 import re
@@ -46,7 +53,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_token import api_root, resolve_token  # noqa: E402
+from github_token import api_root, env_token, resolve_token  # noqa: E402
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 TIMEOUT_SECONDS = 10
@@ -661,40 +668,104 @@ def reached(targets):
 
 # ---------------------------------------------------------------- GitHub
 
-ACTOR = "author { login __typename } authorAssociation editor { login } lastEditedAt"
-LISTED = f"pageInfo {{ hasNextPage }} nodes {{ number {ACTOR} }}"
-QUERY = f"""
+def login_of(account):
+    return account.get("login")
+
+
+def github_id_of(account):
+    """`github:<databaseId>` for a user or a bot; `None` for a deleted
+    account, a mannequin, or any other actor the query reads no id for."""
+    match account.get("databaseId"):
+        case int() as number if not isinstance(number, bool) and number > 0:
+            return f"github:{number}"
+        case _:
+            return None
+
+
+class Deployment(Enum):
+    """Whose token the provider holds, which decides how the answer names a
+    person and where the token comes from.
+
+    A single-user deployment's token is a person's: the answer names the
+    viewer, the viewer's permission, and every person by `login`. A
+    multi-user deployment's token is a GitHub App installation's, which
+    has no viewer: every person is `person`, `github:<id>`, and the token
+    comes from the deployment alone."""
+
+    SINGLE_USER = "single-user"
+    MULTI_USER = "multi-user"
+
+    @property
+    def has_viewer(self):
+        return self is Deployment.SINGLE_USER
+
+    @property
+    def key(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return "login"
+            case Deployment.MULTI_USER:
+                return "person"
+
+    def person(self, account):
+        match self:
+            case Deployment.SINGLE_USER:
+                return login_of(account)
+            case Deployment.MULTI_USER:
+                return github_id_of(account)
+
+    def token(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return resolve_token()
+            case Deployment.MULTI_USER:
+                return env_token()
+
+
+ACCOUNT = "__typename ... on User { databaseId } ... on Bot { databaseId }"
+
+
+def query_of(deployment):
+    match deployment:
+        case Deployment.SINGLE_USER:
+            author, editor, user = "login __typename", "login", "login"
+            viewer, viewer_permission = "viewer { login }\n  ", " viewerPermission"
+        case Deployment.MULTI_USER:
+            author, editor, user = ACCOUNT, ACCOUNT, "databaseId"
+            viewer, viewer_permission = "", ""
+    actor = f"author {{ {author} }} authorAssociation editor {{ {editor} }} lastEditedAt"
+    listed = f"pageInfo {{ hasNextPage }} nodes {{ number {actor} }}"
+    return f"""
 query(
   $owner: String!, $name: String!, $number: Int!, $withNumber: Boolean!,
   $withIssues: Boolean!, $withPullRequests: Boolean!, $first: Int!, $after: String,
   $issueStates: [IssueState!], $pullRequestStates: [PullRequestState!], $labels: [String!],
   $orderBy: IssueOrder, $filterBy: IssueFilters, $baseRefName: String, $headRefName: String
 ) {{
-  viewer {{ login }}
-  repository(owner: $owner, name: $name) {{
-    nameWithOwner visibility viewerPermission parent {{ nameWithOwner }}
+  {viewer}repository(owner: $owner, name: $name) {{
+    nameWithOwner visibility{viewer_permission} parent {{ nameWithOwner }}
     issues(
       first: $first, after: $after, states: $issueStates, labels: $labels, orderBy: $orderBy, filterBy: $filterBy
-    ) @include(if: $withIssues) {{ {LISTED} }}
+    ) @include(if: $withIssues) {{ {listed} }}
     pullRequests(
       first: $first, after: $after, states: $pullRequestStates, labels: $labels, orderBy: $orderBy,
       baseRefName: $baseRefName, headRefName: $headRefName
-    ) @include(if: $withPullRequests) {{ {LISTED} }}
+    ) @include(if: $withPullRequests) {{ {listed} }}
     issueOrPullRequest(number: $number) @include(if: $withNumber) {{
       __typename
       ... on Issue {{
-        number locked {ACTOR}
-        comments(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ {ACTOR} }} }}
+        number locked {actor}
+        comments(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ {actor} }} }}
       }}
       ... on PullRequest {{
-        number locked isCrossRepository {ACTOR}
-        comments(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ {ACTOR} }} }}
+        number locked isCrossRepository {actor}
+        comments(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ {actor} }} }}
         reviews(first: 50) {{ pageInfo {{ hasNextPage }} nodes {{
-          {ACTOR}
-          comments(first: 30) {{ pageInfo {{ hasNextPage }} nodes {{ {ACTOR} }} }}
+          {actor}
+          comments(first: 30) {{ pageInfo {{ hasNextPage }} nodes {{ {actor} }} }}
         }} }}
         commits(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ commit {{
-          authors(first: 10) {{ pageInfo {{ hasNextPage }} nodes {{ user {{ login }} }} }}
+          authors(first: 10) {{ pageInfo {{ hasNextPage }} nodes {{ user {{ {user} }} }} }}
         }} }} }}
       }}
     }}
@@ -731,10 +802,10 @@ def graphql_url(root):
     return root.removesuffix("/v3") + "/graphql" if root.endswith("/api/v3") else f"{root}/graphql"
 
 
-def graphql(token, variables):
+def graphql(token, query, variables):
     request = urllib.request.Request(
         graphql_url(api_root(os.environ)),
-        data=json.dumps({"query": QUERY, "variables": variables}).encode(),
+        data=json.dumps({"query": query, "variables": variables}).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -751,7 +822,7 @@ def connection(node, name):
     return found.get("nodes") or [], bool((found.get("pageInfo") or {}).get("hasNextPage"))
 
 
-def item_of(node):
+def item_of(node, deployment):
     """The facts about one pull request or issue from its GraphQL node."""
     written = [node]
     comments, truncated = connection(node, "comments")
@@ -764,24 +835,25 @@ def item_of(node):
         written += review_comments
         truncated |= more
 
+    key, person = deployment.key, deployment.person
     participants, seen, editors = [], set(), []
     for text in written:
         author = text.get("author") or {}
-        login = author.get("login")
-        if login not in seen:
-            seen.add(login)
+        who = person(author)
+        if who not in seen:
+            seen.add(who)
             participants.append(
-                {"login": login, "association": text.get("authorAssociation"), "bot": author.get("__typename") == "Bot"}
+                {key: who, "association": text.get("authorAssociation"), "bot": author.get("__typename") == "Bot"}
             )
         if text.get("lastEditedAt"):
-            editor = (text.get("editor") or {}).get("login")
+            editor = person(text.get("editor") or {})
             if editor not in editors:
                 editors.append(editor)
 
     author = node.get("author") or {}
     item = {
         "number": node.get("number"),
-        "author": {"login": author.get("login"), "association": node.get("authorAssociation")},
+        "author": {key: person(author), "association": node.get("authorAssociation")},
         "locked": bool(node.get("locked")),
     }
     if node.get("__typename") == "PullRequest":
@@ -795,43 +867,43 @@ def item_of(node):
             authors, more = connection(commit.get("commit") or {}, "authors")
             truncated |= more
             for git_author in authors:
-                login = (git_author.get("user") or {}).get("login")
-                if login not in commit_authors:
-                    commit_authors.append(login)
+                who = person(git_author.get("user") or {})
+                if who not in commit_authors:
+                    commit_authors.append(who)
         item["commit_authors"] = commit_authors
     item["last_editors"] = editors
     item["truncated"] = truncated
     return item
 
 
-def listed_item(node):
+def listed_item(node, deployment):
     """The facts about one listed pull request or issue: its author, and its
     last editor when it was edited (`null` for a deleted account)."""
     author = node.get("author") or {}
     item = {
         "number": node.get("number"),
-        "author": {"login": author.get("login"), "association": node.get("authorAssociation")},
+        "author": {deployment.key: deployment.person(author), "association": node.get("authorAssociation")},
         "bot": author.get("__typename") == "Bot",
     }
     if node.get("lastEditedAt"):
-        item["last_editor"] = (node.get("editor") or {}).get("login")
+        item["last_editor"] = deployment.person(node.get("editor") or {})
     return item
 
 
 CONNECTIONS = {"issues": "issues", "pull_requests": "pullRequests"}
 
 
-def listing_of(repository, listed):
+def listing_of(repository, listed, deployment):
     """The listed items, and whether they may miss one the call returns."""
     if listed.scope == UNKNOWN:
         return {"items": [], "truncated": True}
     if not isinstance(repository.get(CONNECTIONS[listed.kind]), dict):
         raise RuntimeError(f"GitHub GraphQL: no {listed.kind} in the response")
     nodes, more = connection(repository, CONNECTIONS[listed.kind])
-    return {"items": [listed_item(node) for node in nodes], "truncated": listed.scope == WHOLE and more}
+    return {"items": [listed_item(node, deployment) for node in nodes], "truncated": listed.scope == WHOLE and more}
 
 
-def answer_of(payload, listed=None):
+def answer_of(payload, listed=None, deployment=Deployment.SINGLE_USER):
     """The provider's answer from one GraphQL response."""
     data = payload.get("data") if isinstance(payload, dict) else None
     repository = data.get("repository") if isinstance(data, dict) else None
@@ -844,27 +916,24 @@ def answer_of(payload, listed=None):
     visibility = str(repository.get("visibility") or "").lower()
     if visibility not in ("public", "private", "internal"):
         raise RuntimeError(f"GitHub reports the unknown repository visibility {visibility!r}")
-    answer = {
-        "viewer": (data.get("viewer") or {}).get("login"),
-        "repository": {
-            "name": repository.get("nameWithOwner"),
-            "visibility": visibility,
-            "viewer_permission": repository.get("viewerPermission"),
-            "fork_of": (repository.get("parent") or {}).get("nameWithOwner"),
-        },
-    }
+    facts = {"name": repository.get("nameWithOwner"), "visibility": visibility}
+    if deployment.has_viewer:
+        facts["viewer_permission"] = repository.get("viewerPermission")
+    facts["fork_of"] = (repository.get("parent") or {}).get("nameWithOwner")
+    answer = {"viewer": (data.get("viewer") or {}).get("login")} if deployment.has_viewer else {}
+    answer["repository"] = facts
     node = repository.get("issueOrPullRequest")
     match (node or {}).get("__typename"):
         case "PullRequest":
-            answer["pull_request"] = item_of(node)
+            answer["pull_request"] = item_of(node, deployment)
         case "Issue":
-            answer["issue"] = item_of(node)
+            answer["issue"] = item_of(node, deployment)
     if listed is not None:
-        answer[listed.kind] = listing_of(repository, listed)
+        answer[listed.kind] = listing_of(repository, listed, deployment)
     return answer
 
 
-def context_of(consult):
+def context_of(consult, deployment=Deployment.SINGLE_USER):
     """The answer for one consult: `None` for a call that reaches nothing on
     GitHub, else the facts one GraphQL query returns."""
     if not isinstance(consult, dict) or consult.get("version") != 1 or consult.get("kind") != "context":
@@ -875,20 +944,21 @@ def context_of(consult):
     place = reached(call_targets(artifact))
     if place is None:
         return None
-    return answer_of(graphql(resolve_token(), variables_of(*place)), place[2])
+    payload = graphql(deployment.token(), query_of(deployment), variables_of(*place))
+    return answer_of(payload, place[2], deployment)
 
 
-def main():
-    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    if len(raw) > MAX_INPUT_BYTES:
-        raise ValueError("the consult is too large")
-    json.dump({"version": 1, "answer": context_of(json.loads(raw))}, sys.stdout)
-    sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
+def main(deployment):
     try:
-        main()
+        raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+        if len(raw) > MAX_INPUT_BYTES:
+            raise ValueError("the consult is too large")
+        json.dump({"version": 1, "answer": context_of(json.loads(raw), deployment)}, sys.stdout)
+        sys.stdout.write("\n")
     except Exception as error:
         print(f"github context: {error}", file=sys.stderr)
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main(Deployment.SINGLE_USER)

@@ -175,10 +175,21 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
 
     // An audience source answers who may read what, so one provider name has
     // one battery answering for it — flat and exact, as a namespace is owned.
-    // The providers a battery binds are read from its validated policy.
+    // The providers a battery binds are read from its validated policies:
+    // its base and every target policy, since any of them may be the one included.
     let mut source_owner: BTreeMap<&str, &PackageName> = BTreeMap::new();
     for (name, battery) in &batteries {
-        for provider in &battery.audiences {
+        let providers: BTreeSet<&String> = battery
+            .audiences
+            .iter()
+            .chain(
+                battery
+                    .targets
+                    .iter()
+                    .flat_map(|targets| targets.iter().flat_map(|(_, target_policy)| &target_policy.audiences)),
+            )
+            .collect();
+        for provider in providers {
             if let Some(first) = source_owner.insert(provider.as_str(), name) {
                 return Err(OwnershipError::SharedAudienceProvider {
                     first: first.clone(),
@@ -227,6 +238,7 @@ struct RawEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::{TargetPolicies, TargetPolicy};
 
     const DIGEST: &str = "sha256:2619322b5feb343f951e2ed55ab86948a93d9460eea0fc70d46a20fdb9f87dec";
 
@@ -392,6 +404,38 @@ mod tests {
         );
         assert!(matches!(
             check_ownership(&[slack, battery_with_audiences("other", &["other"], &["slack"])]),
+            Err(OwnershipError::SharedAudienceProvider { .. })
+        ));
+    }
+
+    /// A target policy's audience sources are owned like the base's; one battery
+    /// binding a provider in its base and in each target policy still owns it alone.
+    #[test]
+    fn a_target_policy_audience_source_is_owned_like_the_base() {
+        let with_target_policies = |name: &str, audiences: &[&str]| {
+            let mut package = battery_with_audiences(name, &[name], audiences);
+            if let Role::Battery(battery) = &mut package.role {
+                let target_policy = TargetPolicy {
+                    policy: crate::RelativePath::parse("target.toml").unwrap(),
+                    audiences: vec!["slack".to_owned()],
+                    credentials: vec![],
+                    readiness: None,
+                    setup: None,
+                };
+                battery.targets = Some(TargetPolicies {
+                    single_user: target_policy.clone(),
+                    multi_user: target_policy,
+                });
+            }
+            package
+        };
+
+        assert!(check_ownership(&[with_target_policies("slack", &["slack"])]).is_ok());
+        assert!(matches!(
+            check_ownership(&[
+                battery_with_audiences("slack", &["slack"], &["slack"]),
+                with_target_policies("other", &[])
+            ]),
             Err(OwnershipError::SharedAudienceProvider { .. })
         ));
     }

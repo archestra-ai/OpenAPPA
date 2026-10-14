@@ -60,6 +60,7 @@ struct Local {
     dirs: Vec<PathBuf>,
     selected: BTreeSet<String>,
     store: CredentialStore,
+    target: appa_package::BatteryTarget,
     runtime_url: String,
     checks: Mutex<BTreeMap<String, readiness::CheckResult>>,
     gate: tokio::sync::Mutex<()>,
@@ -77,6 +78,29 @@ impl BatteryEntry {
             _ => None,
         }
     }
+    /// The variables the battery reads for a deployment of `target`.
+    fn credentials(&self, target: appa_package::BatteryTarget) -> Vec<&str> {
+        self.battery()
+            .expect("catalog contains batteries")
+            .credentials_for(target)
+    }
+    /// The CLI logins that stand in for a variable a deployment of `target` reads. A
+    /// CLI login is one person's, so a multi-user deployment takes none.
+    fn cli_alternatives(&self, target: appa_package::BatteryTarget) -> Vec<&appa_package::CliAlternative> {
+        match target {
+            appa_package::BatteryTarget::MultiUser => Vec::new(),
+            appa_package::BatteryTarget::SingleUser => {
+                let bound = self.credentials(target);
+                self.battery()
+                    .expect("catalog contains batteries")
+                    .readiness
+                    .iter()
+                    .flat_map(|readiness| &readiness.cli_alternatives)
+                    .filter(|alt| bound.contains(&alt.credential.as_str()))
+                    .collect()
+            }
+        }
+    }
 }
 impl Local {
     fn new(args: &Args) -> Result<Self, String> {
@@ -91,11 +115,13 @@ impl Local {
             args.batteries_dir.clone()
         };
         let store = CredentialStore::for_config(&config)?;
+        let target = crate::config::battery_target().map_err(|error| error.to_string())?;
         Ok(Self {
             config,
             dirs,
             selected: args.battery.iter().cloned().collect(),
             store,
+            target,
             runtime_url: args.runtime_url.clone(),
             checks: Mutex::new(BTreeMap::new()),
             gate: tokio::sync::Mutex::new(()),
@@ -177,7 +203,8 @@ impl Local {
         .ok()
         .flatten()?;
         let path = data.get("config")?.as_str()?;
-        if !same_config(Path::new(path), &self.config) {
+        let target = appa_package::BatteryTarget::parse(data.get("target")?.as_str()?)?;
+        if !same_config(Path::new(path), &self.config) || target != self.target {
             return None;
         }
         Some(data)
@@ -200,7 +227,8 @@ impl Local {
             let checks = self.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             entries.iter().map(|entry| {
             let battery = entry.battery().expect("catalog contains batteries");
-            let credentials: Vec<_> = battery.credentials.iter().map(|var| {
+            let bound = entry.credentials(self.target);
+            let credentials: Vec<_> = bound.iter().map(|&var| {
                 let env = std::env::var_os(var);
                 if let Some(status) = runtime_info.as_ref().and_then(|r| r["prerequisites"]["credentials"].get(var)) {
                     let mut status = status.clone(); status["variable"] = json!(var);
@@ -213,11 +241,11 @@ impl Local {
             }).collect();
             let dependencies: Vec<_> = battery.readiness.as_ref().into_iter().flat_map(|r| &r.required_executables)
                 .map(|exe| json!({"executable": exe, "installed": runtime_info.as_ref().and_then(|r| r["prerequisites"]["executables"][exe].as_bool()).unwrap_or_else(|| readiness::executable_available(exe))})).collect();
-            let alternatives: Vec<_> = battery.readiness.as_ref().into_iter().flat_map(|r| &r.cli_alternatives)
+            let alternatives: Vec<_> = entry.cli_alternatives(self.target).into_iter()
                 .map(|alt| json!({"executable": alt.executable, "credential": alt.credential,
                     "login_hint": alt.login_hint, "installed": runtime_info.as_ref().and_then(|r| r["prerequisites"]["executables"][&alt.executable].as_bool()).unwrap_or_else(|| readiness::executable_available(&alt.executable))})).collect();
             json!({"name": entry.name, "description": entry.package.description,
-                "benefit": battery.benefit, "setup": battery.setup,
+                "benefit": battery.benefit, "setup": battery.setup_steps(self.target),
                 "included": active.contains(&entry.name), "configured": configured.contains(&entry.name),
                 "selected": configured.contains(&entry.name) || self.selected.contains(&entry.name),
                 "credentials": credentials, "dependencies": dependencies, "alternatives": alternatives,
@@ -273,7 +301,7 @@ impl Local {
             .await
             .map_err(|_| "Readiness task failed")??
         } else {
-            check_entries(selected.into_iter().cloned().collect(), self.store.clone()).await
+            check_entries(selected.into_iter().cloned().collect(), self.store.clone(), self.target).await
         };
         self.checks
             .lock()
@@ -282,14 +310,18 @@ impl Local {
         Ok(())
     }
 }
-async fn check_entries(entries: Vec<BatteryEntry>, store: CredentialStore) -> BTreeMap<String, readiness::CheckResult> {
+async fn check_entries(
+    entries: Vec<BatteryEntry>,
+    store: CredentialStore,
+    target: appa_package::BatteryTarget,
+) -> BTreeMap<String, readiness::CheckResult> {
     use futures_util::{StreamExt, stream};
     stream::iter(entries)
         .map(move |entry| {
             let store = store.clone();
             async move {
-                let result =
-                    readiness::check(&entry.dir, entry.battery().expect("catalog contains batteries"), &store).await;
+                let battery = entry.battery().expect("catalog contains batteries");
+                let result = readiness::check(&entry.dir, battery, target, &store).await;
                 (entry.name, result)
             }
         })
@@ -309,29 +341,37 @@ fn runtime_local(config: &Path, dirs: &[PathBuf]) -> Result<Local, String> {
 }
 /// Inspect the daemon's actual environment, never the browser launcher's approximation.
 pub(crate) fn runtime_prerequisites(config: &Path, dirs: &[PathBuf]) -> Result<Value, String> {
-    let local = runtime_local(config, dirs)?;
-    let saved = local.store.values()?;
-    let (entries, _) = local.catalog();
-    let mut credentials = BTreeMap::new();
-    let mut executables = BTreeMap::new();
-    for entry in entries {
-        let battery = entry.battery().expect("catalog contains batteries");
-        for var in &battery.credentials {
-            let env = std::env::var_os(var);
-            credentials.insert(var.clone(), json!({"source": if env.is_some() { "environment" } else if saved.contains_key(var) { "database" } else { "missing" },
-                "available": env.as_ref().is_some_and(|v| !v.is_empty()) || (env.is_none() && saved.contains_key(var)), "saved": saved.contains_key(var)}));
-        }
-        if let Some(check) = &battery.readiness {
-            for exe in check
-                .required_executables
+    runtime_local(config, dirs)?.prerequisites()
+}
+impl Local {
+    fn prerequisites(&self) -> Result<Value, String> {
+        let saved = self.store.values()?;
+        let (entries, _) = self.catalog();
+        let mut credentials = BTreeMap::new();
+        let mut executables = BTreeMap::new();
+        for entry in entries {
+            let battery = entry.battery().expect("catalog contains batteries");
+            for var in entry.credentials(self.target) {
+                let env = std::env::var_os(var);
+                credentials.insert(var.to_owned(), json!({"source": if env.is_some() { "environment" } else if saved.contains_key(var) { "database" } else { "missing" },
+                    "available": env.as_ref().is_some_and(|v| !v.is_empty()) || (env.is_none() && saved.contains_key(var)), "saved": saved.contains_key(var)}));
+            }
+            for exe in battery
+                .readiness
                 .iter()
-                .chain(check.cli_alternatives.iter().map(|a| &a.executable))
+                .flat_map(|check| &check.required_executables)
+                .chain(
+                    entry
+                        .cli_alternatives(self.target)
+                        .into_iter()
+                        .map(|alt| &alt.executable),
+                )
             {
                 executables.insert(exe.clone(), readiness::executable_available(exe));
             }
         }
+        Ok(json!({"credentials": credentials, "executables": executables}))
     }
-    Ok(json!({"credentials": credentials, "executables": executables}))
 }
 pub(crate) async fn runtime_check(config: &Path, dirs: &[PathBuf], names: &[String]) -> Result<Value, String> {
     let local = runtime_local(config, dirs)?;
@@ -348,6 +388,7 @@ pub(crate) async fn runtime_check(config: &Path, dirs: &[PathBuf], names: &[Stri
             .filter(|entry| names.contains(&entry.name))
             .collect(),
         local.store,
+        local.target,
     )
     .await;
     serde_json::to_value(results).map_err(|_| "Cannot encode check results".into())
@@ -441,11 +482,9 @@ struct Changes {
 async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) -> ApiResult {
     let _gate = web.local.gate.lock().await;
     let (entries, _) = web.local.catalog();
-    let allowed: BTreeSet<_> = entries
-        .iter()
-        .flat_map(|entry| &entry.battery().expect("battery").credentials)
-        .collect();
-    if changes.credentials.keys().any(|key| !allowed.contains(key))
+    let target = web.local.target;
+    let allowed: BTreeSet<_> = entries.iter().flat_map(|entry| entry.credentials(target)).collect();
+    if changes.credentials.keys().any(|key| !allowed.contains(key.as_str()))
         || changes
             .batteries
             .iter()
@@ -464,10 +503,8 @@ async fn save(State(web): State<Web>, axum::Json(changes): axum::Json<Changes>) 
         .filter(|entry| {
             changes.batteries.contains(&entry.name)
                 || entry
-                    .battery()
-                    .expect("battery")
-                    .credentials
-                    .iter()
+                    .credentials(target)
+                    .into_iter()
                     .any(|variable| changes.credentials.contains_key(variable))
         })
         .map(|entry| entry.name.clone())
@@ -904,7 +941,7 @@ mod tests {
         let mut battery = entry.battery().unwrap().clone();
         battery.credentials.clear();
         battery.readiness.as_mut().unwrap().command.clear();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
         battery
             .readiness
@@ -912,7 +949,7 @@ mod tests {
             .unwrap()
             .required_executables
             .push("appa-missing-fixture-cli".into());
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert_eq!(result.status, readiness::Status::NeedsConfiguration);
     }
 
@@ -925,7 +962,7 @@ mod tests {
         let entry = &entries[0];
         let mut battery = entry.battery().unwrap().clone();
         battery.readiness = None;
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert_eq!(result.status, readiness::Status::NeedsConfiguration);
         assert!(matches!(result.reason, readiness::Reason::MissingCredential));
         local
@@ -935,7 +972,7 @@ mod tests {
                 Some("fixture-only-secret".into()),
             )]))
             .unwrap();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
         assert!(matches!(result.reason, readiness::Reason::Configured));
         battery.credentials.clear();
@@ -943,8 +980,100 @@ mod tests {
             .store
             .update(&BTreeMap::from([("APPA_PROVIDER_DEMO_TOKEN".into(), None)]))
             .unwrap();
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert_eq!(result.status, readiness::Status::Ready);
+    }
+
+    /// A targeted `team` battery: each target policy binds its own variable, each with a
+    /// CLI alternative, and the multi-user target runs its own readiness check.
+    fn team_fixture(dir: &Path) -> Local {
+        let mut args = fixture(dir);
+        let battery = dir.join("batteries/team");
+        std::fs::create_dir_all(&battery).unwrap();
+        std::fs::write(battery.join("appa-package.toml"), "schema = 1\nname = \"team\"\ndescription = \"Team\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"source.py\", \"check.py\", \"check-multi-user.py\"]\n[battery.targets.single-user]\npolicy = \"single-user.toml\"\n[battery.targets.multi-user]\npolicy = \"multi-user.toml\"\nreadiness = [\"python3\", \"check-multi-user.py\"]\n[battery.readiness]\ncommand = [\"python3\", \"check.py\"]\nrequired_executables = [\"python3\"]\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-team-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_TOKEN\"\nlogin_hint = \"appa-team-fixture-cli login\"\n[[battery.readiness.cli_alternatives]]\nexecutable = \"appa-other-fixture-cli\"\ncredential = \"APPA_PROVIDER_TEAM_ORG_TOKEN\"\nlogin_hint = \"appa-other-fixture-cli login\"\n").unwrap();
+        std::fs::write(battery.join("appa.toml"), "[policy]\nversion = 2\n").unwrap();
+        let binding = |variable: &str| {
+            format!(
+                "[policy]\nversion = 2\n[externals.audience.team]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"{variable}\"\nselectors = [{{ template = \"viewer\", feeds = \"self\" }}]\n"
+            )
+        };
+        std::fs::write(battery.join("single-user.toml"), binding("APPA_PROVIDER_TEAM_TOKEN")).unwrap();
+        std::fs::write(battery.join("multi-user.toml"), binding("APPA_PROVIDER_TEAM_ORG_TOKEN")).unwrap();
+        std::fs::write(battery.join("source.py"), "print('{}')\n").unwrap();
+        std::fs::write(
+            battery.join("check.py"),
+            "print('{\"status\":\"ready\",\"authentication\":\"cli\",\"reason\":\"verified\"}')\n",
+        )
+        .unwrap();
+        std::fs::write(battery.join("check-multi-user.py"), "print('{\"status\":\"needs_configuration\",\"authentication\":\"token\",\"reason\":\"not_an_installation\"}')\n").unwrap();
+        args.battery = vec!["team".into()];
+        Local::new(&args).unwrap()
+    }
+
+    /// A CLI login stands in for a variable only where a single-user deployment reads it:
+    /// the page offers it, and the runtime inspects its executable, for that target alone.
+    /// A multi-user deployment takes no one's login.
+    #[tokio::test]
+    async fn cli_alternatives_follow_the_credentials_of_a_single_user_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut local = team_fixture(dir.path());
+
+        for (target, offered) in [
+            (appa_package::BatteryTarget::SingleUser, vec!["appa-team-fixture-cli"]),
+            (appa_package::BatteryTarget::MultiUser, vec![]),
+        ] {
+            local.target = target;
+            let snapshot = local.snapshot().await.unwrap();
+            let team = snapshot["batteries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|battery| battery["name"] == "team")
+                .unwrap()
+                .clone();
+            let alternatives: Vec<&str> = team["alternatives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|alt| alt["executable"].as_str().unwrap())
+                .collect();
+            assert_eq!(alternatives, offered, "{target}");
+            let prerequisites = local.prerequisites().unwrap();
+            for executable in ["appa-team-fixture-cli", "appa-other-fixture-cli"] {
+                assert_eq!(
+                    prerequisites["executables"].get(executable).is_some(),
+                    offered.contains(&executable),
+                    "{target}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deployment_runs_its_targets_readiness_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = team_fixture(dir.path());
+        let (entries, errors) = local.catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        let team = entries.iter().find(|entry| entry.name == "team").unwrap();
+
+        let single = readiness::check(
+            &team.dir,
+            team.battery().unwrap(),
+            appa_package::BatteryTarget::SingleUser,
+            &local.store,
+        )
+        .await;
+        assert!(matches!(single.reason, readiness::Reason::Verified));
+        let multi = readiness::check(
+            &team.dir,
+            team.battery().unwrap(),
+            appa_package::BatteryTarget::MultiUser,
+            &local.store,
+        )
+        .await;
+        assert_eq!(multi.status, readiness::Status::NeedsConfiguration);
+        assert!(matches!(multi.reason, readiness::Reason::NotAnInstallation));
     }
 
     #[tokio::test]
@@ -956,7 +1085,7 @@ mod tests {
         assert!(errors.is_empty());
         let entry = entries.pop().unwrap();
         std::fs::write(entry.dir.join("check.py"), "print('{\"status\":\"ready\",\"authentication\":\"token\",\"reason\":\"verified\",\"message\":\"secret\"}')").unwrap();
-        let result = readiness::check(&entry.dir, entry.battery().unwrap(), &local.store).await;
+        let result = readiness::check(&entry.dir, entry.battery().unwrap(), local.target, &local.store).await;
         assert!(matches!(result.reason, readiness::Reason::CheckFailed));
         let mut battery = entry.battery().unwrap().clone();
         battery
@@ -965,7 +1094,7 @@ mod tests {
             .unwrap()
             .required_executables
             .push("appa-no-such-fixture-executable".into());
-        let result = readiness::check(&entry.dir, &battery, &local.store).await;
+        let result = readiness::check(&entry.dir, &battery, local.target, &local.store).await;
         assert!(matches!(result.reason, readiness::Reason::MissingExecutable));
     }
 }
