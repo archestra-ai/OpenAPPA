@@ -1677,7 +1677,7 @@ mod tests {
     }
 
     async fn ask_the_live_api(spacing: Duration) {
-        const CONSULTS: usize = 20;
+        const CONSULTS: usize = crate::label_guide::EXAMPLES.len();
         let key = std::env::var("APPA_PROVIDER_JEV_API_KEY").expect("APPA_PROVIDER_JEV_API_KEY is set");
         let profile = JevProfile {
             url: JEV_DEFAULT_URL.to_string(),
