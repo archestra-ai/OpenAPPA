@@ -623,14 +623,16 @@ impl ExternalServices {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
-        let credential = match command.token_env.as_deref() {
-            Some(var) => crate::credentials::resolve(self.credential_store.as_ref(), var)
+        let mut credentials = Vec::new();
+        for var in &command.token_env {
+            if let Some(value) = crate::credentials::resolve(self.credential_store.as_ref(), var)
                 .map_err(|_| NoAnswerReason::Unreachable)?
-                .map(|value| (std::ffi::OsString::from(var), value)),
-            None => None,
-        };
+            {
+                credentials.push((std::ffi::OsString::from(var), value));
+            }
+        }
         let CommandRun { output, transcript } =
-            run_command(command, input, deadline, self.max_body_bytes, transcript, credential).await;
+            run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
         drop(permit);
         if let (Some(seen), Some(transcript)) = (seen, transcript) {
             *seen = transcript;
@@ -1202,7 +1204,7 @@ mod tests {
                 "one argument".to_string(),
             ],
             cwd: dir.to_path_buf(),
-            token_env: Some("APPA_PROVIDER_TEST_TOKEN".to_string()),
+            token_env: vec!["APPA_PROVIDER_TEST_TOKEN".to_string()],
         };
         config
             .annotators
@@ -1275,7 +1277,7 @@ mod tests {
         };
         let mut config = command_config(dir.path(), &script("first"), budget_ms(), 1024);
         if let Transport::Command(command) = config.annotators.get_mut("classifier").unwrap() {
-            command.token_env = Some(variable.into());
+            command.token_env = vec![variable.into()];
         }
         let mut services = services_over(config);
         // An embedding host has no attached store and sees no saved credential.
@@ -1289,6 +1291,34 @@ mod tests {
         assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
         store.update(&BTreeMap::from([(variable.into(), None)])).unwrap();
         assert!(matches!(resolve_command(&services).await, ConsultOutcome::NoAnswer(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_listed_credential_reaches_the_helper_and_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::credentials::CredentialStore::for_config(&dir.path().join("appa.toml")).unwrap();
+        store
+            .update(&BTreeMap::from([
+                ("APPA_PROVIDER_LIST_FIXTURE_HOST".to_string(), Some("host".into())),
+                ("APPA_PROVIDER_LIST_FIXTURE_SECRET".to_string(), Some("secret".into())),
+                ("APPA_PROVIDER_LIST_FIXTURE_OTHER".to_string(), Some("other".into())),
+            ]))
+            .unwrap();
+        let script = "test \"$APPA_PROVIDER_LIST_FIXTURE_HOST\" = host || exit 1\n\
+                      test \"$APPA_PROVIDER_LIST_FIXTURE_SECRET\" = secret || exit 1\n\
+                      test -z \"$APPA_PROVIDER_LIST_FIXTURE_OTHER\" || exit 1\n\
+                      printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'";
+        let mut config = command_config(dir.path(), script, budget_ms(), 1024);
+        if let Transport::Command(command) = config.annotators.get_mut("classifier").unwrap() {
+            command.token_env = vec![
+                "APPA_PROVIDER_LIST_FIXTURE_HOST".into(),
+                "APPA_PROVIDER_LIST_FIXTURE_SECRET".into(),
+            ];
+        }
+        let mut services = services_over(config);
+        services.credential_store = Some(store);
+        assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
     }
 
     #[cfg(unix)]
@@ -1433,7 +1463,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             Transport::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
-                token_env: None,
+                token_env: Vec::new(),
             }),
         );
         assert_eq!(

@@ -366,3 +366,8 @@ command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29", "--h
 
 [externals.sanitizers.strip-instructions]
 command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29", "--header", "Content-Type: application/json", "--data-binary", "@-", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
+
+# The shared runtime composes the github battery's multi-user target, whose
+# member lookups this roster answers. Empty, it maps nobody.
+[externals.audience.host-members]
+readers = {}

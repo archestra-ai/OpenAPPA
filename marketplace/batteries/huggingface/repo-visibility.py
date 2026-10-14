@@ -32,9 +32,15 @@ trajectory never carries, so this script admits the copy only when the
 source's readers are inside the target's: a public source, or the
 viewer's own private repository into another of the viewer's own.
 
-Credentials come from APPA_PROVIDER_HUGGINGFACE_TOKEN, else the Hugging
-Face CLI's stored login (see hf_token.py); the Hub root is HF_ENDPOINT
-when set.
+A multi-user deployment runs repo-visibility-multi-user.py under a
+shared token with no viewer: a private repository's content stays with
+the session's own person (`self`) whoever owns it, no resource group is
+asked about, and a write into any repository needs data everyone may
+see, since its owner is nobody the policy can name.
+
+Credentials come from APPA_PROVIDER_HUGGINGFACE_TOKEN, else, for a
+single-user deployment, the Hugging Face CLI's stored login (see
+hf_token.py); the Hub root is HF_ENDPOINT when set.
 """
 
 import concurrent.futures
@@ -49,7 +55,7 @@ from pathlib import Path
 # The sibling module is found beside this file however the file is loaded:
 # run by the runtime from its own directory, or imported by path from another.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hf_token import Forbidden, NotFound, hub_api, resolve_token  # noqa: E402, F401
+from hf_token import Deployment, Forbidden, NotFound, hub_api  # noqa: E402
 
 
 CONTENT = "huggingface.repo-visibility"
@@ -177,8 +183,9 @@ def parse_repo_uri(uri, label):
 class Hub:
     """The Hub as one consult sees it: each repository read once, the viewer once."""
 
-    def __init__(self, call):
+    def __init__(self, call, deployment=Deployment.SINGLE_USER):
         self.call = call
+        self.deployment = deployment
         self._lock = threading.Lock()
         self._viewer = None
         self._facts = {}
@@ -263,12 +270,17 @@ class Hub:
             lookups += [pool.submit(self.collection_private, collection) for collection in collections]
             for lookup in lookups:
                 lookup.result()
-            if not admits_groups(declared):
+            if not self.admits_groups(declared):
                 return
             private = {facts.owner for repo in repos for facts in self.facts_of(repo) if facts.private}
             owners = private - {self.viewer()} if private else private
             for _listing in pool.map(self.resource_groups, owners):
                 pass
+
+    def admits_groups(self, declared):
+        """Whether a private repository may name a resource group: only
+        beside a viewer, whose own repositories stay with the viewer."""
+        return self.deployment.has_viewer and admits_groups(declared)
 
     def collection_private(self, collection):
         with self._lock:
@@ -339,7 +351,7 @@ def read_by(hub, facts, content, declared):
     """The narrowest readers this source can name for what the repository holds."""
     if not facts.private:
         return SELF if facts.gated and content else PUBLIC
-    if not admits_groups(declared) or facts.owner == hub.viewer():
+    if not hub.admits_groups(declared) or facts.owner == hub.viewer():
         return SELF
     group = hub.resource_group(facts)
     if group is None:
@@ -351,8 +363,8 @@ def must_reach(hub, private, owner):
     """Everyone a write into the repository reaches: the viewer for a
     private repository of the viewer's own, everyone otherwise — an
     organization's admins read every private repository, a set no
-    collection lists."""
-    if not private:
+    collection lists, and without a viewer no owner is the session's."""
+    if not private or not hub.deployment.has_viewer:
         return PUBLIC
     return SELF if owner == hub.viewer() else PUBLIC
 
@@ -519,7 +531,7 @@ def annotation(hub, name, tool, arguments, declared):
             raise ValueError(f"unexpected annotator name {name!r}")
 
 
-def main():
+def main(deployment):
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("the consult is too large")
@@ -527,14 +539,18 @@ def main():
     name, tool, arguments = call_of(consult)
     declared = check_declaration(consult)
 
-    hub = Hub(hub_api(resolve_token()))
+    hub = Hub(hub_api(deployment.token()), deployment)
     json.dump({"version": 1, "answer": annotation(hub, name, tool, arguments, declared)}, sys.stdout)
     sys.stdout.write("\n")
 
 
-if __name__ == "__main__":
+def run(deployment):
     try:
-        main()
+        main(deployment)
     except Exception as error:
         print(f"huggingface repository annotator: {error}", file=sys.stderr)
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    run(Deployment.SINGLE_USER)

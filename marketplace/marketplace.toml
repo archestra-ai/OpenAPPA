@@ -16,7 +16,7 @@ digest = "sha256:4352a8f13df935e43d571738007df80912b9f58d50d2ae50ed556888f42d447
 
 [packages.battery.databricks]
 path = "batteries/databricks"
-digest = "sha256:94ee769c2135559da31caf13e19d1cbcaf870be85c3f81ac5163d372467ebe3f"
+digest = "sha256:c04aa3aa7a3559d935b7f0f509573a72aa8e806b2d4d6e4198fcb8cb1e99c2f2"
 
 [packages.battery.github]
 path = "batteries/github"
@@ -32,7 +32,7 @@ digest = "sha256:f31063bdaa32bb92ff6b6c18c0c70f6340be565d991d21ba6de224d28373062
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:7344d3a3ecbbcf92aea634c1ff6546ec8848c79f1658b2429f0df70b90d47c92"
+digest = "sha256:a04d3da6968b93b7ab92f317370d6fde6d25ace91e5aac1616425c6f733d20a3"
 
 [packages.battery.jev]
 path = "batteries/jev"
@@ -44,7 +44,7 @@ digest = "sha256:2004ed3ba8f6689416ecb07fc4a6a09187bde26ef26cf1131c4a308e538e63d
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:c8012c76e1145e84059c805da8c6dedeff242a680a88fd9c27a79b42665ddcdf"
+digest = "sha256:311bb46544f752f21f2758b448aac645f96b99af7591ca91b02e6d6dfcb75eb0"
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"

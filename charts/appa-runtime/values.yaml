@@ -96,7 +96,10 @@ persistence:
   keep: true
 
 # Extra environment for battery audience sources (APPA_PROVIDER_*).
-env: {}
+# APPA_BATTERY_TARGET picks each battery's target policy; this runtime
+# serves many users, so it defaults to multi-user.
+env:
+  APPA_BATTERY_TARGET: multi-user
 envFrom: []
 
 # Optionally install the configuring kagent Agent with this runtime.

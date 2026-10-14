@@ -1,0 +1,18 @@
+# Databricks battery, single-user target: one person's Databricks CLI login
+# or token. It binds the `databricks` audience source, which names the
+# login's own reader under `viewer`. The base policy holds every rule.
+
+[policy]
+version = 2
+
+# --- who reads what: the workspace directory and Genie space permissions ---
+
+[externals.audience.databricks]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_DATABRICKS_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "members", feeds = "internal" },
+  { template = "group/<name>" },
+  { template = "genie-space/<id>/readers" },
+]

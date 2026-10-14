@@ -14,6 +14,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -42,6 +43,7 @@ UniqueKeyLoader.add_constructor(
 RUNTIME_URL = os.environ.get("APPA_GUIDE_RUNTIME_URL", "http://127.0.0.1:8787").rstrip(
     "/"
 )
+APPA = "/usr/local/bin/appa"
 REFRESH = "/usr/local/bin/appa-refresh-batteries"
 IDENTITY_DIR = Path("/var/run/appa/identity")
 POLICY_CONFIGMAP = os.environ.get("APPA_POLICY_CONFIGMAP_NAME")
@@ -224,31 +226,60 @@ def with_battery_include(root: str, battery: str) -> tuple[str, bool]:
     return root[:start] + replacement + root[end:], True
 
 
-def validate_policy(root: str) -> None:
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".toml", encoding="utf-8"
-    ) as candidate:
-        candidate.write(root)
-        candidate.flush()
-        command = [
-            "/usr/local/bin/appa",
-            "describe",
-            "--check",
-            "--config",
-            candidate.name,
-        ]
-        for directory in battery_dirs():
-            command.extend(("--batteries-dir", str(directory)))
-        environment = os.environ.copy()
-        environment.pop("APPA_BATTERIES_DIR", None)
-        checked = subprocess.run(
-            command, capture_output=True, check=False, env=environment, timeout=30
+class Composition(NamedTuple):
+    """What the runtime composes a candidate root with: its binary, battery
+    directories, and deployment target."""
+
+    appa: str
+    battery_dirs: tuple[Path, ...]
+    target: str
+
+    @classmethod
+    def serving(cls) -> Composition:
+        return cls(
+            APPA,
+            tuple(battery_dirs()),
+            os.environ.get("APPA_BATTERY_TARGET", "single-user"),
         )
+
+
+def run_appa(arguments: list[str], composition: Composition) -> None:
+    command = [composition.appa, *arguments]
+    for directory in composition.battery_dirs:
+        command.extend(("--batteries-dir", str(directory)))
+    environment = os.environ.copy()
+    environment.pop("APPA_BATTERIES_DIR", None)
+    environment["APPA_BATTERY_TARGET"] = composition.target
+    checked = subprocess.run(
+        command, capture_output=True, check=False, env=environment, timeout=30
+    )
     if checked.returncode != 0:
         detail = (checked.stderr or checked.stdout).decode("utf-8", errors="replace")[
             -2000:
         ]
         raise RuntimeError(f"candidate policy is invalid: {detail}")
+
+
+def validated_include(candidate: str, composition: Composition) -> str:
+    """The candidate with an empty readers roster for each lookup target the
+    runtime finds no composed source declaring; an empty roster denies until
+    filled."""
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", encoding="utf-8") as root:
+        root.write(candidate)
+        root.flush()
+        run_appa(["add-lookup-rosters", "--config", root.name], composition)
+        rostered = Path(root.name).read_text(encoding="utf-8")
+    validate_policy(rostered, composition)
+    return rostered
+
+
+def validate_policy(root: str, composition: Composition) -> None:
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".toml", encoding="utf-8"
+    ) as candidate:
+        candidate.write(root)
+        candidate.flush()
+        run_appa(["describe", "--check", "--config", candidate.name], composition)
 
 
 def patch_policy_configmap(expected: str, replacement: str) -> None:
@@ -366,7 +397,7 @@ def include_battery(request: dict) -> dict:
     candidate, changed = with_battery_include(current, battery)
     if not changed:
         return {**runtime_state(), "changed": False, "battery": battery}
-    validate_policy(candidate)
+    candidate = validated_include(candidate, Composition.serving())
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": True, "battery": battery, "reload": reloaded}
 
@@ -385,7 +416,7 @@ def update_policy(request: dict) -> dict:
         current_value, candidate_value
     ):
         raise ValueError("candidate does not retain the current root policy structure")
-    validate_policy(candidate)
+    validate_policy(candidate, Composition.serving())
     reloaded = publish_and_reload(current, candidate)
     return {**runtime_state(), "changed": candidate != current, "reload": reloaded}
 
@@ -502,7 +533,9 @@ def annotate_apply(request: dict) -> dict:
         if not isinstance(document, dict):
             raise TypeError("apply manifest must be one mapping")
         if document.get("kind") != "Agent":
-            raise ValueError("appa-guide Kubernetes apply supports only Agent manifests")
+            raise ValueError(
+                "appa-guide Kubernetes apply supports only Agent manifests"
+            )
         if "status" in document:
             raise ValueError("Agent apply must carry complete spec and no status")
         spec = document.get("spec")

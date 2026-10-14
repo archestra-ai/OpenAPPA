@@ -1,11 +1,18 @@
-//! Battery integration: shipped examples, write requirements/effects and cross-provider confidentiality.
+//! Battery integration: shipped examples, write requirements/effects, cross-provider
+//! confidentiality, and the battery's base and target policies composed the way each
+//! deployment does.
 mod common;
 
+use appa_package::BatteryTarget;
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
-use appa_runtime_api::{HookDecision, ProposedCall};
+use appa_runtime::config::{Config, HostDefaults, HostedBattery};
+use appa_runtime::hooks;
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Router, extract::State, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
+use common::{actor, members_source, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
@@ -55,17 +62,20 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str, source: Option<&str>) -> 
                 std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
             }
         }
-        let mut policy = std::fs::read_to_string(origin.join("appa.toml")).unwrap();
         if let (Some(url), "linear") = (source, battery) {
+            let policy = std::fs::read_to_string(origin.join("single-user.toml")).unwrap();
             let binding =
                 "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_LINEAR_TOKEN\"\n";
             assert!(
                 policy.contains(binding),
                 "the linear battery binds its resolver as documented"
             );
-            policy = policy.replace(binding, &format!("url = \"{url}\"\n"));
+            std::fs::write(
+                target.join("single-user.toml"),
+                policy.replace(binding, &format!("url = \"{url}\"\n")),
+            )
+            .unwrap();
         }
-        std::fs::write(target.join("appa.toml"), policy).unwrap();
     }
     // Use the documented configuration; substitute a deterministic review authority.
     let text = std::fs::read_to_string(repo_root().join("examples/live-replays/linear/appa.toml"))
@@ -250,4 +260,201 @@ async fn a_private_team_read_narrows_to_the_team_without_failing_its_requirement
         })
         .collect();
     assert_eq!(narrowed, ["@linear:team/SEC/readers"]);
+}
+
+fn battery_dir() -> std::path::PathBuf {
+    repo_root().join("marketplace/batteries/linear")
+}
+
+fn target_policy(file: &str) -> toml::Value {
+    toml::from_str(&std::fs::read_to_string(battery_dir().join(file)).unwrap()).unwrap()
+}
+
+/// A root that maps `self` and `internal` onto a loopback roster, so no read waits on Linear.
+async fn target_root() -> String {
+    let source = members_source().await;
+    format!(
+        r#"
+[policy]
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[policy.audience]
+self = ["people:viewer"]
+internal = ["people:members"]
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576
+
+[externals.audience.people]
+url = "{source}"
+selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]
+"#
+    )
+}
+
+/// The battery installed beside a root config that includes its base and then reads `root`,
+/// each target policy's `linear` source bound to the loopback `source`.
+fn installed(dir: &Path, root: &str, source: &str) -> std::path::PathBuf {
+    let target = dir.join("linear");
+    std::fs::create_dir_all(&target).unwrap();
+    for entry in std::fs::read_dir(battery_dir()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+    for (file, helper) in [
+        ("single-user.toml", "audience-source.py"),
+        ("multi-user.toml", "audience-source-multi-user.py"),
+    ] {
+        let policy = std::fs::read_to_string(battery_dir().join(file)).unwrap();
+        let binding = format!("command = [\"python3\", \"{helper}\"]\ntoken_env = \"APPA_PROVIDER_LINEAR_TOKEN\"\n");
+        assert!(policy.contains(&binding), "{file} binds {helper}");
+        std::fs::write(
+            target.join(file),
+            policy.replace(&binding, &format!("url = \"{source}\"\n")),
+        )
+        .unwrap();
+    }
+    let path = dir.join("appa.toml");
+    std::fs::write(&path, format!("include = [\"linear/appa.toml\"]\n{root}")).unwrap();
+    path
+}
+
+async fn opened(config: Config) -> Arc<Runtime> {
+    let store =
+        Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+    let runtime = Arc::new(Runtime::open_with_store(config, store, None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    runtime
+}
+
+/// The label the runtime admitted after `read` ran, the narrowing it asks for accepted
+/// first, as the audit records it.
+async fn admitted(runtime: &Arc<Runtime>, read: ProposedCall) -> (String, String) {
+    if let decision @ HookDecision::DenyCall { .. } = propose(runtime, read.clone()).await {
+        let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
+        assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
+    }
+    assert_eq!(
+        propose(runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(runtime, read).await;
+    let labels: Vec<_> = runtime
+        .audit(&actor().root)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some((label.trust, label.audience)),
+            _ => None,
+        })
+        .collect();
+    let [label] = labels.as_slice() else {
+        panic!("one read admits one label: {labels:?}");
+    };
+    label.clone()
+}
+
+/// Each target labels a read of one issue with that issue's readers, and asks the `linear`
+/// source for them once a later call's requirement reads that label.
+#[tokio::test]
+async fn each_target_labels_an_issue_read_with_its_readers() {
+    for target in [BatteryTarget::SingleUser, BatteryTarget::MultiUser] {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, reads) = serve_reads().await;
+        let config = Config::load_for_target(&installed(dir.path(), &target_root().await, &source), &[], target)
+            .expect("the target composition loads");
+        let runtime = opened(config).await;
+        assert_eq!(
+            admitted(&runtime, call("get_issue", serde_json::json!({"id": "ENG-1"}))).await,
+            ("trusted".to_string(), "@linear:issue/ENG-1/readers".to_string()),
+            "{target:?}"
+        );
+        propose(
+            &runtime,
+            call("save_comment", serde_json::json!({"issueId": "ENG-2", "body": "x"})),
+        )
+        .await;
+        assert!(
+            reads.0.lock().unwrap().contains(&"issue/ENG-1/readers".to_string()),
+            "{target:?}"
+        );
+    }
+}
+
+/// The base alone, as a host composes it with no target: it loads without a helper, an
+/// issue read stays with the viewer, and a comment of what it read is refused.
+#[tokio::test]
+async fn the_base_alone_keeps_issue_reads_with_the_viewer_and_refuses_their_writes() {
+    let base = std::fs::read_to_string(battery_dir().join("appa.toml")).unwrap();
+    let config = Config::hosted_composed(
+        &target_root().await,
+        &[HostedBattery {
+            name: "linear",
+            base: &base,
+            target: None,
+            token_env: &[],
+        }],
+        HostDefaults::new(Duration::from_secs(5), 65_536),
+        |_| None,
+    )
+    .expect("the base composes alone");
+    let runtime = opened(config).await;
+    assert_eq!(
+        admitted(&runtime, call("get_issue", serde_json::json!({"id": "ENG-1"}))).await,
+        ("trusted".to_string(), "self".to_string())
+    );
+    let write = call(
+        "save_comment",
+        serde_json::json!({"issueId": "ENG-2", "body": "what ENG-1 says"}),
+    );
+    assert!(matches!(
+        propose(&runtime, write).await,
+        HookDecision::DenyCall { .. } | HookDecision::Refuse { .. }
+    ));
+}
+
+/// The two target policies differ in their helper alone: the same rules and the same
+/// externals bound, the multi-user one serving no token-owner selector.
+#[test]
+fn the_target_policies_declare_the_same_rules() {
+    let single = target_policy("single-user.toml");
+    let multi = target_policy("multi-user.toml");
+    assert_eq!(single["policy"], multi["policy"]);
+    let bound = |document: &toml::Value| -> Vec<(String, Vec<String>)> {
+        document["externals"]
+            .as_table()
+            .unwrap()
+            .iter()
+            .map(|(section, entries)| (section.clone(), entries.as_table().unwrap().keys().cloned().collect()))
+            .collect()
+    };
+    assert_eq!(bound(&single), bound(&multi));
+    let templates = |document: &toml::Value| -> Vec<String> {
+        document["externals"]["audience"]["linear"]["selectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|selector| selector["template"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert!(templates(&single).contains(&"viewer".to_owned()));
+    assert!(!templates(&multi).contains(&"viewer".to_owned()));
 }

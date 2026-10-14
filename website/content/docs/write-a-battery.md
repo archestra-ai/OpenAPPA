@@ -91,7 +91,7 @@ Run `bash scripts/appa-marketplace.sh` to generate the catalog entry and
 content digest, then commit `marketplace/marketplace.toml` with the
 package. CI checks that the generated catalog is current.
 
-`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies the members of the provider's collections: the viewer, the full membership, groups, and per-resource readers such as one channel's members. The battery binds it under `[externals.audience.<provider>]` with `command`, `token_env`, and the `selectors` it serves. Contracts in the battery may then name those collections with selector placeholders, such as `@slack:channel/$channel_id`.
+`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies the members of the provider's collections: the viewer, the full membership, groups, and per-resource readers such as one channel's members. The battery binds it under `[externals.audience.<provider>]` with `command`, `token_env`, and the `selectors` it serves. A helper that needs several credentials, such as a host and a client secret, lists them: `token_env = ["APPA_PROVIDER_<NAME>_HOST", "APPA_PROVIDER_<NAME>_SECRET"]`. The runtime forwards every listed variable to the helper and no other. Contracts in the battery may then name those collections with selector placeholders, such as `@slack:channel/$channel_id`.
 
 The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
 

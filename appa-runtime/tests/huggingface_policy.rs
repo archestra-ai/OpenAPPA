@@ -60,9 +60,17 @@ async fn serve_source() -> String {
 /// The shipped battery with its two helper processes swapped for loopback services, under
 /// a root that maps `self` onto the viewer and permits the review mark.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
+    let origin = repo_root().join("marketplace/batteries/huggingface");
     let target = dir.path().join("marketplace/batteries/huggingface");
     std::fs::create_dir_all(&target).unwrap();
-    let mut policy = std::fs::read_to_string(repo_root().join("marketplace/batteries/huggingface/appa.toml")).unwrap();
+    // The whole package, so the base composes its single-user target policy.
+    for entry in std::fs::read_dir(&origin).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+    let mut policy = std::fs::read_to_string(origin.join("single-user.toml")).unwrap();
     let annotators = serve_annotators().await;
     let source = serve_source().await;
     for (binding, url) in [
@@ -78,7 +86,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
         assert!(policy.contains(binding), "the battery binds its helpers as documented");
         policy = policy.replace(binding, &format!("url = \"{url}\"\n"));
     }
-    std::fs::write(target.join("appa.toml"), policy).unwrap();
+    std::fs::write(target.join("single-user.toml"), policy).unwrap();
     let path = dir.path().join("appa.toml");
     std::fs::write(
         &path,
