@@ -376,25 +376,31 @@ async fn a_child_that_says_nothing_returns_no_value() {
 }
 
 #[tokio::test]
-async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let provider = Provider::default();
-    provider
-        .calls("delegate", serde_json::json!({"task": "Return an empty value."}))
-        .declares_the_return()
-        .calls("delegate", serde_json::json!({"task": "Return an empty value."}))
-        .says("")
-        .says("The empty value crossed.");
-    let host = ToolHost::default();
+async fn an_empty_final_message_returns_nothing() {
+    let mut results = Vec::new();
+    for silent in [true, false] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let provider = Provider::default();
+        let script = provider
+            .calls("delegate", serde_json::json!({"task": "Return nothing."}))
+            .declares_the_return()
+            .calls("delegate", serde_json::json!({"task": "Return nothing."}));
+        match silent {
+            true => script.says_nothing(),
+            false => script.says(""),
+        }
+        .says("Nothing crossed.");
+        let host = ToolHost::default();
 
-    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await);
-    let outcome = agent.run(root(), "Delegate it.", Default::default()).await;
+        let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await);
+        let outcome = agent.run(root(), "Delegate it.", Default::default()).await;
 
-    assert_eq!(outcome, Outcome::Answer("The empty value crossed.".to_string()));
+        assert_eq!(outcome, Outcome::Answer("Nothing crossed.".to_string()));
+        results.push(provider.tool_result(4, "call_2"));
+    }
     assert_eq!(
-        provider.tool_result(4, "call_2"),
-        "",
-        "Some(\"\") remains a value return rather than being rewritten as a void acknowledgement",
+        results[0], results[1],
+        "an empty final message closes the spawn exactly as a silent stop does"
     );
 }
 

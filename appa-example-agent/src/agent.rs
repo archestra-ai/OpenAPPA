@@ -315,7 +315,8 @@ impl Run<'_> {
                             break Outcome::Answer(answer);
                         }
                         Some(mut parent) => {
-                            let crossed = self.return_to_parent(&mut parent, &frame, message.content).await;
+                            let said = message.content.filter(|said| !said.is_empty());
+                            let crossed = self.return_to_parent(&mut parent, &frame, said).await;
                             frame = parent.frame;
                             if let Err(stop) = crossed {
                                 break Outcome::Stopped(stop);

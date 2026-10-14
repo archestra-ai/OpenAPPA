@@ -266,12 +266,15 @@ pub struct PlannedBlock {
 
 /// How a narrowing moves the policy's argument-free tools, judged on the current history:
 /// of `tools` analysed, `sign_off` start needing an authority and `blocked` lose every
-/// authority and input sanitizer that could clear them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// authority and input sanitizer that could clear them. `recipient_checked` names the tools
+/// with a declared variant that checks recipients from its arguments against an audience this
+/// narrowing reduces; they are not judged, since the verdict depends on the recipients.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub tools: usize,
     pub sign_off: usize,
     pub blocked: usize,
+    pub recipient_checked: Vec<ToolName>,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -284,9 +287,12 @@ pub enum ForkAdvice {
     /// trajectory may declare takes the narrowed value and hands back one this trajectory
     /// receives unchanged: it admits the narrowed label, and its derivation holds at the
     /// current label on every dimension.
+    /// `preserving_output` when an output sanitizer this block offers derives a label this
+    /// trajectory receives unchanged, so its plan clears the narrowing without accepting it.
     Narrowing {
         standing: FloorStanding,
         sanitized_return: bool,
+        preserving_output: bool,
     },
 }
 
@@ -382,6 +388,7 @@ pub(crate) fn plan(
                 Some(_) => FloorStanding::Below,
             },
             sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
+            preserving_output: preserving_output_offered(registry, contract, &current, &plans, context),
         }),
     };
     let narrowing_impact = raw.narrowing.as_ref().and_then(|narrowing| {
@@ -489,8 +496,18 @@ fn narrowing_impact(
         tools: 0,
         sign_off: 0,
         blocked: 0,
+        recipient_checked: Vec::new(),
     };
+    let audience_narrows = narrowing.to.audience != narrowing.from.audience;
     for name in registry.tool_names() {
+        if audience_narrows
+            && registry
+                .variants(name)
+                .filter_map(ToolDeclaration::declared)
+                .any(ToolAnnotation::reads_recipients)
+        {
+            impact.recipient_checked.push(name.clone());
+        }
         let Some((before, after)) = registry
             .variants(name)
             .filter_map(ToolDeclaration::declared)
@@ -513,7 +530,7 @@ fn narrowing_impact(
             Standing::Clear => {}
         }
     }
-    (impact.sign_off + impact.blocked > 0).then_some(impact)
+    (impact.sign_off + impact.blocked > 0 || !impact.recipient_checked.is_empty()).then_some(impact)
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
@@ -1227,6 +1244,33 @@ pub(crate) fn return_options(
             .map(|sanitizer| Some(sanitizer.name.clone())),
     );
     options
+}
+
+/// Does an offered output-sanitizer plan derive, from the label its sanitizer binds over, one
+/// `current` receives unchanged? Advice costs the block no directory read: an undecided
+/// derivation counts as no such plan.
+fn preserving_output_offered(
+    registry: &Registry,
+    contract: &ToolAnnotation,
+    current: &Label,
+    plans: &[RemedyPlan],
+    context: &MembershipContext<'_>,
+) -> bool {
+    let unanswered = Expansions::default();
+    let context = MembershipContext::new(context.within, context.providers, &unanswered);
+    let output = contract.output_label();
+    plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .filter_map(|plan| match plan.output_remedy() {
+            Some(OutputRemedy::Sanitize(name)) => registry.sanitizer(&name),
+            Some(OutputRemedy::Withhold) | None => None,
+        })
+        .any(|sanitizer| {
+            sanitizer
+                .derive_output(&output, &contract.tags, &context)
+                .is_ok_and(|derived| derived.is_some_and(|derived| current.combine(&derived) == *current))
+        })
 }
 
 /// Does a return sanitizer this trajectory may declare take the narrowed value and hand back
@@ -3550,6 +3594,11 @@ mod tests {
                     gated.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("approved"))];
                     gated
                 },
+                tool(
+                    "post(scope:any)",
+                    &["mail"],
+                    vec![RecipientSpec::Placeholder("to".to_string())],
+                ),
                 tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
             ]),
             authorities: vec![Authority {
@@ -3588,10 +3637,29 @@ mod tests {
                 tools: 5,
                 sign_off: 1,
                 blocked: 2,
+                recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
              fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
-             not analysed"
+             not analysed; post's argument-named variant and reply check recipients the narrowed audience reduces"
+        );
+        let parts = crate::label::TestContext::default();
+        let trust_only = Narrowing {
+            from: known(TRUSTED, Audience::public()),
+            to: known(SUSPICIOUS, Audience::public()),
+        };
+        assert!(
+            narrowing_impact(
+                &registry,
+                &trust_only,
+                &EffectSet::default(),
+                None,
+                &|_| false,
+                &|_| false,
+                &parts.context(),
+            )
+            .is_none_or(|impact| impact.recipient_checked.is_empty()),
+            "a narrowing that keeps the audience moves no recipient check"
         );
         let narrowed = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("insider")])))];
         assert_eq!(
@@ -3670,6 +3738,7 @@ mod tests {
                 tools: 3,
                 sign_off: 2,
                 blocked: 0,
+                recipient_checked: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
@@ -3679,6 +3748,7 @@ mod tests {
                 tools: 3,
                 sign_off: 1,
                 blocked: 0,
+                recipient_checked: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
         );
@@ -3724,6 +3794,7 @@ mod tests {
             Some(ForkAdvice::Narrowing {
                 standing: FloorStanding::Unbound,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a root with no return sanitizer registered is told a child can take the change, unsanitized"
         );
