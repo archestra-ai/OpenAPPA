@@ -56,8 +56,9 @@ def ping() -> dict[str, Any]:
     return _envelope("ping")
 
 
-def session_start(root_id: str) -> dict[str, Any]:
-    return _event("session_start", root_id, None)
+def session_start(root_id: str, principal: str | None = None) -> dict[str, Any]:
+    """A root session's opening; ``principal`` is the user kagent authenticated, when known."""
+    return _event("session_start", root_id, None, principal=principal)
 
 
 def prompt(root_id: str, text: str, child_id: str | None = None) -> dict[str, Any]:

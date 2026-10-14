@@ -446,6 +446,7 @@ func TestTheLineageHeadersLandInSessionStateOnGetAndCreate(t *testing.T) {
 		"x-kagent-root-context-id":   {"root-1"},
 		"x-kagent-parent-context-id": {"parent-1"},
 		"x-appa-spawn-binding":       {"fork-1"},
+		"x-user-id":                  {"alice@corp.example"},
 		"x-kagent-source":            {"agent"},
 	}))
 	created, err := service.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u1", SessionID: "child-1"})
@@ -456,7 +457,10 @@ func TestTheLineageHeadersLandInSessionStateOnGetAndCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the lineage lands on Create: %v", err)
 	}
-	want := map[string]any{"x-kagent-root-context-id": "root-1", "x-kagent-parent-context-id": "parent-1", "x-appa-spawn-binding": "fork-1"}
+	want := map[string]any{
+		"x-kagent-root-context-id": "root-1", "x-kagent-parent-context-id": "parent-1", "x-appa-spawn-binding": "fork-1",
+		"x-user-id": "alice@corp.example",
+	}
 	if got := headers.(map[string]any); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the python-shaped headers dict: got %v, want %v", got, want)
 	}

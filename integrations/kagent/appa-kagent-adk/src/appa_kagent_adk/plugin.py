@@ -405,7 +405,7 @@ class AppaPluginKagent(BasePlugin):
             return wire.child_start(root_id, child_id, spawn_binding=binding)
         if self._is_fresh(session):
             logger.info("trajectory %s opens as a root", root_id)
-            return wire.session_start(root_id)
+            return wire.session_start(root_id, principal=self._identity.principal(session))
         return None
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
