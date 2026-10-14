@@ -26,6 +26,11 @@
 //! on any other call, or on any other event — no other event reads one —
 //! the envelope asserting one is refused.
 //!
+//! A session's principal crosses by the same rule: only on
+//! `session_start`, only under a host that reviews through its own
+//! channel, and only when the runtime opts in ([`PrincipalSource::Wire`]).
+//! Anywhere else the envelope naming one is refused.
+//!
 //! A decision that stands in for a result says on the wire which of the
 //! two it carries, because a client may rewrite one and may not rewrite
 //! the other. `deliver_value` and `child_return` carry a `value` the
@@ -156,10 +161,11 @@ enum Field {
     Launch,
     Start,
     ForkedFrom,
+    Principal,
 }
 
 impl Field {
-    const ALL: [Field; 20] = [
+    const ALL: [Field; 21] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -180,6 +186,7 @@ impl Field {
         Field::Launch,
         Field::Start,
         Field::ForkedFrom,
+        Field::Principal,
     ];
 
     fn spelling(self) -> &'static str {
@@ -204,6 +211,7 @@ impl Field {
             Field::Launch => "launch",
             Field::Start => "start",
             Field::ForkedFrom => "forked_from",
+            Field::Principal => "principal",
         }
     }
 }
@@ -228,6 +236,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Launch,
             Field::Start,
             Field::ForkedFrom,
+            Field::Principal,
         ],
         EventName::Prompt => &[
             Field::RootId,
@@ -282,6 +291,42 @@ fn checked_ruling(adapter: AdapterName, ruling: Option<Ruling>) -> Result<Option
         (Some(ruling), ReviewChannel::Host) => Ok(Some(ruling)),
         (Some(_), ReviewChannel::Runtime) => Err(malformed(format!(
             "a ruling under adapter {adapter}, whose host reviews through no channel of its own"
+        ))),
+    }
+}
+
+/// Whether this runtime reads a session principal off the wire. `None` refuses every
+/// envelope naming one; `Wire` admits it under a host with its own review channel, the
+/// same hosts a [`Ruling`] crosses under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalSource {
+    None,
+    Wire,
+}
+
+impl PrincipalSource {
+    pub fn parse(spelling: &str) -> Option<Self> {
+        match spelling {
+            "none" => Some(Self::None),
+            "wire" => Some(Self::Wire),
+            _ => None,
+        }
+    }
+}
+
+fn checked_principal(
+    adapter: AdapterName,
+    source: PrincipalSource,
+    principal: Option<String>,
+) -> Result<Option<String>, ParseRefusal> {
+    match (principal, source, adapter.review_channel()) {
+        (None, _, _) => Ok(None),
+        (Some(principal), PrincipalSource::Wire, ReviewChannel::Host) => Ok(Some(principal)),
+        (Some(_), PrincipalSource::None, _) => Err(malformed(
+            "a session principal, which this runtime does not read off the wire",
+        )),
+        (Some(_), PrincipalSource::Wire, ReviewChannel::Runtime) => Err(malformed(format!(
+            "a session principal under adapter {adapter}, whose host reviews through no channel of its own"
         ))),
     }
 }
@@ -490,6 +535,9 @@ pub struct WireEvent {
     /// The host id of the session a fork copied, unprefixed like `root_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+    /// The user the host authenticated for a starting session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -533,6 +581,7 @@ impl WireEvent {
             launch: None,
             start: None,
             forked_from: None,
+            principal: None,
         }
     }
 
@@ -560,6 +609,7 @@ impl WireEvent {
             Field::Launch => self.launch.is_some(),
             Field::Start => self.start.is_some(),
             Field::ForkedFrom => self.forked_from.is_some(),
+            Field::Principal => self.principal.is_some(),
         }
     }
 
@@ -584,12 +634,9 @@ impl WireEvent {
     pub fn from_event(adapter: AdapterName, event: &HookEvent) -> Result<Self, ParseRefusal> {
         let ids = |actor: &Actor| host_ids(adapter, actor);
         let wire = match event {
-            HookEvent::SessionStart { principal: Some(_), .. } => {
-                return Err(malformed("a session principal is named in process, never on the wire"));
-            }
             HookEvent::SessionStart {
                 root,
-                principal: None,
+                principal,
                 address,
                 title,
                 start,
@@ -616,6 +663,7 @@ impl WireEvent {
                     launch: launch.as_ref().map(|launch| launch.launch.clone()),
                     start: *start,
                     forked_from,
+                    principal: checked_principal(adapter, PrincipalSource::Wire, principal.clone())?,
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
@@ -767,7 +815,7 @@ impl WireEvent {
 
     /// The server's reading: the typed event with the configured
     /// adapter's prefixes and tool identification applied, or `None` for a ping.
-    pub fn into_event(self, served: &Adapter) -> Result<Option<Accepted>, ParseRefusal> {
+    pub fn into_event(self, served: &Adapter, source: PrincipalSource) -> Result<Option<Accepted>, ParseRefusal> {
         if self.protocol != PROTOCOL {
             return Err(malformed(format!(
                 "protocol {} is not served; this runtime speaks protocol {PROTOCOL}",
@@ -813,6 +861,7 @@ impl WireEvent {
         // Whether this host can assert a person's ruling at all is
         // settled here, on the envelope, before any event exists.
         let ruling = checked_ruling(served.name, self.ruling)?;
+        let principal = checked_principal(served.name, source, self.principal)?;
         // The envelope's fields, moved out of it now that the rule above
         // has read which of them are there. Arguments and a result's body
         // are the large payloads on this path, and one reader below takes
@@ -895,7 +944,7 @@ impl WireEvent {
             EventName::Ping => Ok(None),
             EventName::SessionStart => accepted(HookEvent::SessionStart {
                 root: root()?,
-                principal: None,
+                principal,
                 address,
                 title,
                 start,
@@ -1423,7 +1472,11 @@ mod tests {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"session_start","root_id":"r1","inventory":{"tools":[{"name":"read","tool":"read"}],"sources":[{"server":"test","status":"partial","dynamic":true}]}}"#;
         let event = WireEvent::read(body).unwrap();
         let encoded = serde_json::to_vec(&event).unwrap();
-        let accepted = WireEvent::read(&encoded).unwrap().into_event(&SERVED).unwrap().unwrap();
+        let accepted = WireEvent::read(&encoded)
+            .unwrap()
+            .into_event(&SERVED, PrincipalSource::None)
+            .unwrap()
+            .unwrap();
         let inventory = accepted.inventory.unwrap();
         assert_eq!(inventory.tools.len(), 1);
         assert!(inventory.sources[0].dynamic);
@@ -1485,7 +1538,7 @@ mod tests {
             assert!(
                 WireEvent::read(&serde_json::to_vec(&body).unwrap())
                     .unwrap()
-                    .into_event(&SERVED)
+                    .into_event(&SERVED, PrincipalSource::None)
                     .is_err()
             );
         }
@@ -1494,7 +1547,11 @@ mod tests {
     #[test]
     fn a_child_start_carries_its_own_inventory() {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"child_start","root_id":"r1","child_id":"c1","inventory":{"tools":[{"name":"read","tool":"read"}]}}"#;
-        let accepted = WireEvent::read(body).unwrap().into_event(&SERVED).unwrap().unwrap();
+        let accepted = WireEvent::read(body)
+            .unwrap()
+            .into_event(&SERVED, PrincipalSource::None)
+            .unwrap()
+            .unwrap();
         assert!(matches!(accepted.event, HookEvent::ChildStart { .. }));
         assert_eq!(accepted.inventory.unwrap().tools[0].name, "read");
     }
@@ -1504,7 +1561,7 @@ mod tests {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1,"a":2}}"#;
         let accepted = WireEvent::read(body)
             .expect("reads")
-            .into_event(&SERVED)
+            .into_event(&SERVED, PrincipalSource::None)
             .expect("parses")
             .expect("is an event");
         match accepted.event {
@@ -1538,7 +1595,7 @@ mod tests {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"read","spawn":true,"arguments":{"path":"tasks/child-1.output"}}"#;
         let accepted = WireEvent::read(body)
             .expect("reads")
-            .into_event(&SERVED)
+            .into_event(&SERVED, PrincipalSource::None)
             .expect("parses")
             .expect("event");
         match accepted.event {
@@ -1563,7 +1620,7 @@ mod tests {
             );
             let accepted = WireEvent::read(body.as_bytes())
                 .expect("reads")
-                .into_event(&NEVER_SCANNED)
+                .into_event(&NEVER_SCANNED, PrincipalSource::None)
                 .expect("parses")
                 .expect("is an event");
             assert!(accepted.names_children.is_empty(), "{event}");
@@ -1576,7 +1633,7 @@ mod tests {
             "root_id":"r1","tool":"spawn","arguments":{"request":"continue"},"spawned_id":"c1"});
         let accepted = WireEvent::read(&serde_json::to_vec(&body).unwrap())
             .unwrap()
-            .into_event(&SERVED)
+            .into_event(&SERVED, PrincipalSource::None)
             .unwrap()
             .unwrap();
         assert!(matches!(accepted.event, HookEvent::SpawnResume { .. }));
@@ -1592,7 +1649,7 @@ mod tests {
             assert!(
                 WireEvent::read(&serde_json::to_vec(&invalid).unwrap())
                     .unwrap()
-                    .into_event(&SERVED)
+                    .into_event(&SERVED, PrincipalSource::None)
                     .is_err(),
                 "{field}"
             );
@@ -1603,15 +1660,15 @@ mod tests {
     fn another_protocol_or_adapter_is_refused_and_a_ping_is_no_event() {
         let refused = WireEvent::read(br#"{"protocol":2,"adapter":"kagent","event":"ping"}"#)
             .expect("reads")
-            .into_event(&SERVED);
+            .into_event(&SERVED, PrincipalSource::None);
         assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })));
         let refused = WireEvent::read(br#"{"protocol":1,"adapter":"claude-code","event":"ping"}"#)
             .expect("reads")
-            .into_event(&SERVED);
+            .into_event(&SERVED, PrincipalSource::None);
         assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })));
         let ping = WireEvent::read(br#"{"protocol":1,"adapter":"kagent","event":"ping"}"#)
             .expect("reads")
-            .into_event(&SERVED)
+            .into_event(&SERVED, PrincipalSource::None)
             .expect("parses");
         assert!(ping.is_none());
         assert!(matches!(
@@ -1653,7 +1710,7 @@ mod tests {
         assert!(!text.contains("spawn\""), "the wire carries no spawn claim: {text}");
         let back = WireEvent::read(&bytes)
             .expect("reads")
-            .into_event(&CLAUDE_CODE)
+            .into_event(&CLAUDE_CODE, PrincipalSource::None)
             .expect("parses")
             .expect("event");
         match back.event {
@@ -1702,7 +1759,7 @@ mod tests {
             let bytes = serde_json::to_vec(&wire).expect("serializes");
             WireEvent::read(&bytes)
                 .expect("reads")
-                .into_event(&CLAUDE_CODE)
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
                 .expect("parses")
                 .expect("event")
                 .event
@@ -1773,9 +1830,19 @@ mod tests {
         }
 
         let both = br#"{"protocol":1,"adapter":"claude-code","event":"child_start","root_id":"s1","child_id":"a1","spawn_binding":"b","prompt_id":"p1"}"#;
-        assert!(WireEvent::read(both).expect("reads").into_event(&CLAUDE_CODE).is_err());
+        assert!(
+            WireEvent::read(both)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                .is_err()
+        );
         let bare = br#"{"protocol":1,"adapter":"claude-code","event":"child_return","root_id":"s1","child_id":"a1"}"#;
-        assert!(WireEvent::read(bare).expect("reads").into_event(&CLAUDE_CODE).is_err());
+        assert!(
+            WireEvent::read(bare)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                .is_err()
+        );
     }
 
     /// A prompt's peer frame and title, and a session start's address, cross the wire and back
@@ -1787,7 +1854,7 @@ mod tests {
             let bytes = serde_json::to_vec(&wire).expect("serializes");
             WireEvent::read(&bytes)
                 .expect("reads")
-                .into_event(&CLAUDE_CODE)
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
                 .expect("parses")
                 .expect("event")
                 .event
@@ -1837,7 +1904,7 @@ mod tests {
             let bytes = serde_json::to_vec(&wire).expect("serializes");
             WireEvent::read(&bytes)
                 .expect("reads")
-                .into_event(&CLAUDE_CODE)
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
                 .expect("parses")
                 .expect("event")
                 .event
@@ -1865,7 +1932,7 @@ mod tests {
         let posted = |fields: &str| {
             let row =
                 format!(r#"{{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1",{fields}}}"#);
-            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE))
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE, PrincipalSource::None))
         };
         let token = r#""launch":"0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10""#;
         for fields in [
@@ -1890,7 +1957,7 @@ mod tests {
     fn invalid_or_misplaced_peer_fields_are_refused() {
         let posted = |event: &str, field: &str| {
             let row = format!(r#"{{"protocol":1,"adapter":"claude-code","event":"{event}","root_id":"s1",{field}}}"#);
-            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE))
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE, PrincipalSource::None))
         };
         let refused = [
             ("session_start", r#""address":"tcp://127.0.0.1:9""#.to_string()),
@@ -1944,7 +2011,7 @@ mod tests {
         let bytes = serde_json::to_vec(&wire).expect("serializes");
         let back = WireEvent::read(&bytes)
             .expect("reads")
-            .into_event(&CLAUDE_CODE)
+            .into_event(&CLAUDE_CODE, PrincipalSource::None)
             .expect("parses")
             .expect("event");
         match back.event {
@@ -1955,7 +2022,7 @@ mod tests {
             br#"{"protocol":1,"adapter":"claude-code","event":"turn_end","root_id":"s1","cwd":"/work"}"#,
         )
         .expect("reads")
-        .into_event(&CLAUDE_CODE);
+        .into_event(&CLAUDE_CODE, PrincipalSource::None);
         assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })));
     }
 
@@ -1997,7 +2064,9 @@ mod tests {
         ];
         for (event, field) in refused {
             let row = carried(event, field);
-            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+            let read = WireEvent::read(row.as_bytes())
+                .expect("reads")
+                .into_event(&SERVED, PrincipalSource::None);
             assert!(
                 matches!(read, Err(ParseRefusal::Malformed { .. })),
                 "{row} must be refused, got {read:?}"
@@ -2009,7 +2078,7 @@ mod tests {
         assert!(
             WireEvent::read(result.as_bytes())
                 .expect("reads")
-                .into_event(&SERVED)
+                .into_event(&SERVED, PrincipalSource::None)
                 .expect("a result event reads a result")
                 .is_some(),
             "{result} is the event those fields belong to"
@@ -2028,7 +2097,11 @@ mod tests {
                 r#"{{"protocol":1,"adapter":"kagent","event":"child_start","root_id":"r1","child_id":"c1"{binding}}}"#
             )
         };
-        let crossed = |row: &str| WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+        let crossed = |row: &str| {
+            WireEvent::read(row.as_bytes())
+                .expect("reads")
+                .into_event(&SERVED, PrincipalSource::None)
+        };
         let spawn_of = |row: String| match crossed(&row) {
             Ok(Some(accepted)) => match accepted.event {
                 HookEvent::ChildStart { spawn, .. } => spawn,
@@ -2127,7 +2200,9 @@ mod tests {
         ];
         for (served, event, tool, asserted, expected) in table {
             let row = posted(served.name.as_str(), event, tool, asserted);
-            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(served);
+            let read = WireEvent::read(row.as_bytes())
+                .expect("reads")
+                .into_event(served, PrincipalSource::None);
             match (&expected, read) {
                 (Expected::Ruled(ruled), Ok(Some(accepted))) => match accepted.event {
                     HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, *ruled, "{row}"),
@@ -2222,7 +2297,7 @@ mod tests {
                 let bytes = serde_json::to_vec(&wire).expect("serializes");
                 let back = WireEvent::read(&bytes)
                     .expect("reads")
-                    .into_event(&SERVED)
+                    .into_event(&SERVED, PrincipalSource::None)
                     .unwrap_or_else(|refusal| panic!("{outcome:?} is admitted: {refusal:?}"))
                     .expect("is an event");
                 let crossed = match &back.event {
@@ -2282,7 +2357,7 @@ mod tests {
                     };
                     let read = WireEvent::read(posted(&outcome).as_bytes())
                         .expect("reads")
-                        .into_event(&SERVED);
+                        .into_event(&SERVED, PrincipalSource::None);
                     match (expected, read) {
                         (Some(expected), Ok(Some(accepted))) => match accepted.event {
                             HookEvent::ToolResult { outcome: crossed, .. } => {
@@ -2398,7 +2473,9 @@ mod tests {
         ];
         for (event, tool, spawn_fields, expected) in table {
             let row = posted(event, tool, spawn_fields);
-            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+            let read = WireEvent::read(row.as_bytes())
+                .expect("reads")
+                .into_event(&SERVED, PrincipalSource::None);
             match (&expected, read) {
                 (Expected::Ordinary, Ok(Some(accepted))) => match accepted.event {
                     HookEvent::ToolResult { call, .. } => assert_eq!(call.tool, format!("host/test/{tool}")),
@@ -2498,5 +2575,58 @@ mod tests {
         assert!(matches!(valueless.into_decision(), Err(ParseRefusal::Malformed { .. })));
         let foreign: WireDecision = serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
         assert!(matches!(foreign.into_decision(), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    /// A principal crosses on `session_start` under a reviewing host when the runtime opts
+    /// in, and is refused everywhere else rather than dropped.
+    #[test]
+    fn a_session_principal_crosses_only_where_admitted() {
+        let start = br#"{"protocol":1,"adapter":"kagent","event":"session_start","root_id":"r1","principal":"alice@corp.example"}"#;
+        let read =
+            |body: &[u8], served: &Adapter, source| WireEvent::read(body).expect("reads").into_event(served, source);
+        match read(start, &SERVED, PrincipalSource::Wire) {
+            Ok(Some(Accepted {
+                event: HookEvent::SessionStart { root, principal, .. },
+                ..
+            })) => {
+                assert_eq!(root.0, "kagent:r1");
+                assert_eq!(principal.as_deref(), Some("alice@corp.example"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            read(start, &SERVED, PrincipalSource::None),
+            Err(ParseRefusal::Malformed { .. })
+        ));
+        let claude = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1","principal":"alice@corp.example"}"#;
+        assert!(matches!(
+            read(claude, &CLAUDE_CODE, PrincipalSource::Wire),
+            Err(ParseRefusal::Malformed { .. })
+        ));
+        let prompt = br#"{"protocol":1,"adapter":"kagent","event":"prompt","root_id":"r1","text":"hi","principal":"alice@corp.example"}"#;
+        assert!(matches!(
+            read(prompt, &SERVED, PrincipalSource::Wire),
+            Err(ParseRefusal::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_session_principal_round_trips_through_the_wire() {
+        let event = HookEvent::SessionStart {
+            root: TrajectoryId("kagent:r1".to_string()),
+            principal: Some("alice@corp.example".to_string()),
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+        };
+        let wire = WireEvent::from_event(AdapterName::Kagent, &event).expect("translates");
+        let bytes = serde_json::to_vec(&wire).expect("serializes");
+        let back = WireEvent::read(&bytes)
+            .expect("reads")
+            .into_event(&SERVED, PrincipalSource::Wire)
+            .expect("parses")
+            .expect("event");
+        assert_eq!(back.event, event);
     }
 }

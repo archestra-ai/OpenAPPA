@@ -4801,7 +4801,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             "protocol": 1, "adapter": "kagent", "event": "session_start", "root_id": "late",
             "inventory": { "tools": [], "sources": [{"server": "demo", "status": "unavailable", "dynamic": true}] }
         });
-        let (status, response) = crate::hooks::answer(&runtime, &adapter, &serde_json::to_vec(&opening).unwrap()).await;
+        let (status, response) = crate::hooks::answer(
+            &runtime,
+            &adapter,
+            appa_runtime_api::PrincipalSource::None,
+            &serde_json::to_vec(&opening).unwrap(),
+        )
+        .await;
         assert_eq!(status, 200, "{response}");
         let call = serde_json::json!({
             "protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "late",
@@ -4811,7 +4817,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 "sources": [{"server": "demo", "status": "complete", "dynamic": true}]
             }
         });
-        let (status, response) = crate::hooks::answer(&runtime, &adapter, &serde_json::to_vec(&call).unwrap()).await;
+        let (status, response) = crate::hooks::answer(
+            &runtime,
+            &adapter,
+            appa_runtime_api::PrincipalSource::None,
+            &serde_json::to_vec(&call).unwrap(),
+        )
+        .await;
         assert_eq!(status, 200, "{response}");
         let decision = serde_json::from_value::<appa_runtime_api::WireDecision>(response)
             .unwrap()
@@ -4819,7 +4831,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .unwrap();
         assert!(matches!(decision, appa_runtime_api::HookDecision::AllowCall { .. }));
         let result = br#"{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"late","tool":"mcp:demo/read_secret","arguments":{},"outcome":{"status":"success","body":{ "literal" : "mcp:demo/read_secret" }}}"#;
-        let (status, response) = crate::hooks::answer(&runtime, &adapter, result).await;
+        let (status, response) =
+            crate::hooks::answer(&runtime, &adapter, appa_runtime_api::PrincipalSource::None, result).await;
         assert_eq!(status, 200, "{response}");
         assert_eq!(response["decision"], "ack", "unchanged output stays with the host");
         let root = TrajectoryId("kagent:late".into());
@@ -4856,6 +4869,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let (status, response) = crate::hooks::answer(
                 runtime,
                 &appa_adapter_kagent::adapter(),
+                appa_runtime_api::PrincipalSource::None,
                 &serde_json::to_vec(&event).unwrap(),
             )
             .await;

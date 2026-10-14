@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, PrincipalSource, ProposedCall, ToolOutcome, TrajectoryId,
+};
 
 /// No audience source at all: `self` has members only when a session names its principal.
 const POLICY: &str = r#"
@@ -199,4 +201,75 @@ async fn a_root_fork_acts_for_its_parents_principal() {
         on_fork(send("bob@corp.example")).await,
         HookDecision::DenyCall { .. }
     ));
+}
+
+/// A kagent `session_start` posted to `/hook` with the runtime opted into the wire principal.
+async fn wire_start(runtime: &Arc<Runtime>, principal: &str) -> u16 {
+    let body = serde_json::json!({
+        "protocol": 1,
+        "adapter": "kagent",
+        "event": "session_start",
+        "root_id": "s1",
+        "principal": principal,
+    });
+    let body = serde_json::to_vec(&body).expect("the event serializes");
+    hooks::answer(runtime, &appa_adapter_kagent::adapter(), PrincipalSource::Wire, &body)
+        .await
+        .0
+}
+
+#[tokio::test]
+async fn a_wire_principal_is_the_self_audience() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(wire_start(&runtime, ALICE).await, 200);
+
+    let actor = Actor {
+        root: TrajectoryId("kagent:s1".to_string()),
+        child: None,
+    };
+    let call = |call: ProposedCall| {
+        hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call,
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+    };
+    let HookDecision::DenyCall { feedback, .. } = call(read_secret()).await else {
+        panic!("the narrowing read is offered for acceptance");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor, last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(call(read_secret()).await, HookDecision::AllowCall { spawn: None });
+    let result = HookEvent::ToolResult {
+        actor: actor.clone(),
+        call: read_secret(),
+        call_id: None,
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Available("done".to_string()),
+        },
+    };
+    assert_eq!(hooks::handle(&runtime, result).await, HookDecision::Ack);
+
+    assert_eq!(call(send(ALICE)).await, HookDecision::AllowCall { spawn: None });
+    assert!(matches!(
+        call(send("bob@corp.example")).await,
+        HookDecision::DenyCall { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_wire_principal_that_is_not_an_address_refuses_the_start() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(wire_start(&runtime, "alice").await, 409);
+    assert_eq!(wire_start(&runtime, ALICE).await, 200);
 }
