@@ -546,11 +546,11 @@ pub(crate) const EXAMPLES: [Example; 22] = [
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "pnpm install --frozen-lockfile", "description": "Install the workspace dependencies"}}"#,
-        delta_audience: ResultAudience::Public,
+        delta_audience: ResultAudience::Internal,
         delta_trust: ResultTrust::Trusted,
         requires_audience: RequiredAudience::None,
         requires_trusted: true,
-        why: "the lockfile names what to download and nothing of the trajectory's is sent; installing still requires trust",
+        why: "the lockfile names what to download and nothing of the trajectory's is sent; the workspace's own install scripts run over the local checkout; installing still requires trust",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm publish --access public", "description": "Release the package"}}"#,
