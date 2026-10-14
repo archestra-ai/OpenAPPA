@@ -8,7 +8,7 @@ digest = "sha256:e70521fb8bcebe9bc44c2eb76bece85ad3209927a2cc12c5d0c9928a45bf627
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:90221dc7bcca7d5eb33d31d22efce9bb922d58719cd3ae6c08e072d1f87a29ad"
+digest = "sha256:b352564763dc215a4bfbccb65aa0c53cb9262850d726f60077fbb67d807eaa3b"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
