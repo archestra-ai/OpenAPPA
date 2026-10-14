@@ -5,6 +5,16 @@ use serde_json::{Value, json};
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 
+/// The tests' own client to the page, on the crypto provider the binary installs.
+fn http_client() -> reqwest::Client {
+    appa_runtime::tls::install_crypto_provider();
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap()
+}
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -17,7 +27,6 @@ impl Drop for Process {
 /// own; a token saved there lets the next start succeed, and a running runtime reloads.
 #[tokio::test(flavor = "multi_thread")]
 async fn setup_runs_without_a_runtime_and_reloads_a_running_one() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();
     let battery = dir.path().join("batteries/demo");
     std::fs::create_dir_all(&battery).unwrap();
@@ -100,11 +109,7 @@ selectors = [{ template = "viewer", feeds = "self" }]
         clean(&mut command);
         Process(command.spawn().unwrap())
     };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap();
+    let client = http_client();
     let save = |page: String| {
         let client = client.clone();
         async move {
@@ -292,11 +297,7 @@ async fn setup_asks_for_the_credentials_of_the_deployment_target() {
             .unwrap();
         (process, line.trim().to_owned())
     };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap();
+    let client = http_client();
     let post = |origin: String, path: &'static str, body: Value| {
         let client = client.clone();
         async move {
@@ -346,7 +347,6 @@ async fn setup_asks_for_the_credentials_of_the_deployment_target() {
 /// a multi-user runtime is not the single-user page's runtime.
 #[tokio::test(flavor = "multi_thread")]
 async fn setup_refuses_a_runtime_of_another_deployment_target() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();
     let battery = dir.path().join("batteries/team");
     std::fs::create_dir_all(&battery).unwrap();
@@ -420,11 +420,7 @@ async fn setup_refuses_a_runtime_of_another_deployment_target() {
         }
         Process(command.spawn().unwrap())
     };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap();
+    let client = http_client();
     let state = |link: String| {
         let client = client.clone();
         async move {
