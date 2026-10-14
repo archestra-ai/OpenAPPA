@@ -213,6 +213,14 @@ This runtime serves many users, so `env.APPA_BATTERY_TARGET` defaults to
 policy. Set it to `single-user` only for a runtime that acts for one
 person.
 
+`env.APPA_SESSION_PRINCIPAL` defaults to `none`. Set it to `wire` to make
+the user that kagent names in its `x-user-id` header each session's
+principal, the member of its `self` audience. The principal must be an
+email address, or the session start is refused. `/hook` does not
+authenticate its caller, so set `wire` only when kagent authenticates
+its users (for example behind oauth2-proxy) and the NetworkPolicy keeps
+other clients off `/hook`.
+
 A multi-user target may route member lookups to a roster in the root
 policy. The GitHub battery names people `github:<numeric id>` and asks
 `[externals.audience.host-members]`. When `appa_include_battery` adds
