@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
@@ -115,7 +115,7 @@ impl CorpSystems {
 
     fn do_search(&self, system: System, args: SearchArgs) -> CallToolResult {
         match systems::search(&self.corpus_root, system, &args.query) {
-            Ok(hits) if hits.is_empty() => CallToolResult::success(vec![Content::text(format!(
+            Ok(hits) if hits.is_empty() => CallToolResult::success(vec![ContentBlock::text(format!(
                 "no matches for {:?} in the {system} system",
                 args.query
             ))]),
@@ -124,7 +124,7 @@ impl CorpSystems {
                 for hit in hits {
                     out.push_str(&format!("- {} — {}\n", hit.file, hit.snippet));
                 }
-                CallToolResult::success(vec![Content::text(out)])
+                CallToolResult::success(vec![ContentBlock::text(out)])
             }
             Err(e) => error_result(format!("search failed: {e}")),
         }
@@ -132,14 +132,14 @@ impl CorpSystems {
 
     fn do_read(&self, system: System, args: ReadArgs) -> CallToolResult {
         match systems::read(&self.corpus_root, system, &args.file) {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
             Err(e) => error_result(e.to_string()),
         }
     }
 
     fn do_create(&self, system: System, args: CreateArgs) -> CallToolResult {
         match systems::create(&self.corpus_root, system, &args.file, &args.content) {
-            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "created {} in the {system} system",
                 args.file
             ))]),
@@ -151,7 +151,7 @@ impl CorpSystems {
 /// A model-visible error result: delivered as text (so the model can read and
 /// recover from it) but flagged `is_error` so the transport reports it faithfully.
 fn error_result(message: String) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message)])
+    CallToolResult::error(vec![ContentBlock::text(message)])
 }
 
 #[tool_router]
@@ -226,7 +226,7 @@ impl CorpSystems {
     #[tool(description = "Send an outbound email. Delivers the message to the given recipient.")]
     fn send_email(&self, Parameters(a): Parameters<SendEmailArgs>) -> CallToolResult {
         match systems::send_email(&self.sink_root, &a.to, &a.subject, &a.body) {
-            Ok(file) => CallToolResult::success(vec![Content::text(format!(
+            Ok(file) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "email sent to {} (subject: {:?}); archived as {file}",
                 a.to, a.subject
             ))]),
@@ -239,7 +239,7 @@ impl CorpSystems {
     )]
     fn execute_wire(&self, Parameters(a): Parameters<ExecuteWireArgs>) -> CallToolResult {
         match systems::execute_wire(&self.sink_root, &a.request_file, a.amount_usd, &a.beneficiary_account) {
-            Ok(file) => CallToolResult::success(vec![Content::text(format!(
+            Ok(file) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "wire executed; receipt archived as wire/{file}"
             ))]),
             Err(e) => error_result(format!("execute_wire failed: {e}")),
@@ -252,8 +252,8 @@ impl CorpSystems {
     fn share_legal_packet(&self, Parameters(a): Parameters<ShareLegalPacketArgs>) -> CallToolResult {
         match systems::share_legal_packet(&self.corpus_root, &self.sink_root, &a.file, &a.to) {
             Ok(shared) => CallToolResult::success(vec![
-                Content::text(format!("{}\n\n", shared.receipt)),
-                Content::text(shared.packet_contents),
+                ContentBlock::text(format!("{}\n\n", shared.receipt)),
+                ContentBlock::text(shared.packet_contents),
             ]),
             Err(e) => error_result(e.to_string()),
         }
@@ -264,8 +264,8 @@ impl CorpSystems {
 // macro default of rebuilding it via `Self::tool_router()` on every call.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CorpSystems {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Mock corporate systems: hr, finance, task_tracker, public_forum, and vendor, each with \
              search/read/create tools, plus outbound email, atomic wire execution, and legal-packet sharing. Files are plain markdown documents.",
         )
