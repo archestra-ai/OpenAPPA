@@ -350,7 +350,7 @@ jobs:
 
       - name: Upload AppenCode smoke evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: appencode-smoke
           path: |
@@ -989,7 +989,7 @@ jobs:
 
       - name: Upload the trajectory database and the process logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kagent-integration-logs
           path: ${{ runner.temp }}/appa-integration
@@ -1142,7 +1142,7 @@ jobs:
 
       - name: Upload the cluster diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kagent-a2a-e2e-diagnostics
           path: ${{ runner.temp }}/kagent-e2e-diagnostics
@@ -1225,7 +1225,7 @@ jobs:
         run: python3 integrations/kagent/e2e/marketplace/run.py "$ACCEPTANCE_LOGS"
       - name: Upload acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: marketplace-kagent-acceptance
           path: |
