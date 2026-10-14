@@ -88,10 +88,10 @@ export async function configuration(config: string, binary: string) {
   }
 }
 
-export async function install(project: string, config: string, runtimeURL: string, binary = join(checkout, 'target/debug/appa')) {
-  const path = join(project, 'opencode.json')
+export async function install(settingsDirectory: string, config: string, runtimeURL: string, binary = join(checkout, 'target/debug/appa')) {
+  const path = join(settingsDirectory, 'opencode.json')
   // JSONC is not JSON. Never shadow a configuration we cannot safely merge.
-  if (await Bun.file(join(project, 'opencode.jsonc')).exists()) throw new Error('Merge AppenCode into opencode.jsonc manually before setup; do not shadow it with opencode.json.')
+  if (await Bun.file(join(settingsDirectory, 'opencode.jsonc')).exists()) throw new Error('Merge AppenCode into global opencode.jsonc manually before setup; do not shadow it with opencode.json.')
   const settings = await Bun.file(path).exists() ? await Bun.file(path).json() : {}
   const plugins = settings.plugins ?? []
   const plugin = plugins.find((plugin: any) => (typeof plugin === 'string' ? plugin : plugin.package) === import.meta.dir)
@@ -101,7 +101,7 @@ export async function install(project: string, config: string, runtimeURL: strin
   if (plugin) plugins[plugins.indexOf(plugin)] = entry
   else plugins.push(entry)
   if (settings.mcp?.servers?.appa && settings.mcp.servers.appa.url !== `${runtimeURL}/mcp`) throw new Error('Existing appa MCP connection names a different runtime; reconcile it before setup.')
-  const command = `AppenCode policy setup runs in a separate operator session. Ask the operator to run: bun run ${shellQuote(join(import.meta.dir, 'setup.ts'))} --project ${shellQuote(project)} --config ${shellQuote(config)} --binary ${shellQuote(binary)} --runtime-url ${shellQuote(runtimeURL)}. Do not edit APPA policy from this coding session.`
+  const command = `AppenCode policy setup runs in a separate operator session. From the project to inspect, ask the operator to run: bun run ${shellQuote(join(import.meta.dir, 'setup.ts'))} --config ${shellQuote(config)} --binary ${shellQuote(binary)} --runtime-url ${shellQuote(runtimeURL)}. Do not edit APPA policy from this coding session.`
   settings.plugins = plugins
   settings.mcp = { ...settings.mcp, servers: { ...settings.mcp?.servers, appa: { ...settings.mcp?.servers?.appa, type: 'remote', url: `${runtimeURL}/mcp`, oauth: false } } }
   if (settings.commands?.['appa-guide'] && settings.commands['appa-guide'].template !== command) throw new Error('Existing /appa-guide command is not owned by this setup; preserve it and resolve the conflict.')
@@ -116,13 +116,16 @@ export async function install(project: string, config: string, runtimeURL: strin
   const initial = 'include = ["batteries/opencode/appa.toml"]\n\n[policy]\nversion = 2\n\n[policy.deployment]\ncontext_control = true\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n'
   try { await writeFile(config, initial, { flag: 'wx', mode: 0o600 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+  await mkdir(settingsDirectory, { recursive: true })
   await writeFile(path, `${JSON.stringify(settings, null, 2)}\n`)
 }
 
 if (import.meta.main) {
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
+  const settingsDirectory = resolve(process.env.OPENCODE_CONFIG_DIR || join(configHome, 'opencode'))
   const { values } = parseArgs({ options: {
     project: { type: 'string', default: process.cwd() },
-    config: { type: 'string', default: join(homedir(), '.config/appa/opencode/appa.toml') },
+    config: { type: 'string', default: join(configHome, 'appa/opencode/appa.toml') },
     binary: { type: 'string', default: join(checkout, 'target/debug/appa') },
     'runtime-url': { type: 'string', default: 'http://127.0.0.1:8789' },
     'install-only': { type: 'boolean', default: false },
@@ -131,7 +134,7 @@ if (import.meta.main) {
   const url = new URL(values['runtime-url']!)
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/') throw new Error('Runtime URL must be an unauthenticated loopback HTTP origin.')
   const runtimeURL = url.origin
-  await install(project, config, runtimeURL, binary)
+  await install(settingsDirectory, config, runtimeURL, binary)
   if (!values['install-only']) {
     const temporary = await mkdtemp(join(tmpdir(), 'appa-opencode-setup-'))
     const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
@@ -148,15 +151,16 @@ if (import.meta.main) {
         await Bun.sleep(50)
       }
       if (!ready) throw new Error(`Setup runtime failed: ${await readFile(join(temporary, 'runtime.log'), 'utf8')}`)
-      const settings = await Bun.file(join(project, 'opencode.json')).json()
-      await writeFile(join(temporary, 'opencode.json'), JSON.stringify({ ...settings,
+      // Keep normal global and project discovery. Inline overrides take precedence
+      // without copying project settings or pinning the global guide to one project.
+      const setupSettings = JSON.stringify({
         commands: { 'appa-guide': { template: await guide() } },
-        mcp: { ...settings.mcp, servers: { ...settings.mcp?.servers, appa: { type: 'remote', url: `http://127.0.0.1:${port}/mcp`, oauth: false } } } }))
+        mcp: { servers: { appa: { type: 'remote', url: `http://127.0.0.1:${port}/mcp`, oauth: false } } } })
       console.log('Operator setup session: configuration access only. Review the proposal before approving. Close it before protected coding.')
       const session = Bun.spawn([join(import.meta.dir, 'node_modules/.bin/opencode'), '--standalone', project,
         '--prompt', 'Run /appa-guide init. Inspect and propose; wait for my approval before publishing.'],
       { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', env: { ...process.env,
-        OPENCODE_CONFIG: join(temporary, 'opencode.json'), OPENCODE_CONFIG_PROJECT_DISABLE: '1', OPENCODE_CONFIG_CONTENT: '',
+        OPENCODE_CONFIG_PROJECT_DISABLE: '', OPENCODE_CONFIG_CONTENT: setupSettings,
         APPA_OPENCODE_SETUP_CONFIG: config, APPA_OPENCODE_SETUP_BINARY: binary, APPA_OPENCODE_RUNTIME_URL: `http://127.0.0.1:${port}` } })
       const stop = () => { session.kill() }
       process.once('SIGINT', stop)

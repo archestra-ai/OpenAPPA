@@ -9,6 +9,11 @@ The shared policy-writing rules above apply. An initial setup request permits
 inspection and a proposal, not publication. Wait for a later user message
 approving the complete proposal before calling `publish`.
 
+Registration and policy are user-global by default. The selected project
+supplies the inspected tools; it does not limit the policy's scope. Explain
+that approved changes affect every project using this deployment. Preserve
+contracts for other projects even when their tools are absent from this registry.
+
 ## Operations
 
 | Operation | Tool call |

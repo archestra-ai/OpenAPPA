@@ -16,16 +16,27 @@ cargo build --locked -p appa
 
 ### Guided setup
 
-Run the setup launcher from this checkout:
+Run the setup launcher from the project whose tools you want to inspect:
 
 ```sh
-bun run integrations/opencode/setup.ts --project /absolute/path/to/your-project
+bun run /absolute/path/to/OpenAPPA/integrations/opencode/setup.ts
 ```
 
-It preserves existing JSON settings, registers AppenCode and its MCP connection,
-adds `/appa-guide`, and creates a policy that includes the OpenCode battery.
-Existing policies remain unchanged. The default deployment is
-`~/.config/appa/opencode/appa.toml`; use `--config` for another path.
+Registration and policy are user-global. Setup preserves existing global JSON
+settings, registers AppenCode and its MCP connection, adds `/appa-guide`, and
+creates a policy that includes the OpenCode battery. It does not write project
+settings. Existing policies remain unchanged.
+
+The default paths are `~/.config/opencode/opencode.json` for OpenCode settings
+and `~/.config/appa/opencode/appa.toml` for policy. Both respect `XDG_CONFIG_HOME`;
+`OPENCODE_CONFIG_DIR` overrides the OpenCode directory. Use `--config` for a
+different policy path. Projects using this deployment share its policy and
+runtime, so approved changes affect all of them.
+
+Setup uses the current project by default. `--project /path/to/project` selects
+another project's tool inventory; it does not select an installation scope.
+OpenCode loads project-local settings alongside the global settings. The setup
+session retains those project-local providers and MCP servers.
 Keep this checkout and the deployment outside the agent's writable project.
 The installed configuration references this checkout's battery files.
 
@@ -52,8 +63,9 @@ for protected work.
 Run `/appa-guide` in a normal session to get the operator setup command for
 later changes. Use `--install-only` to write configuration without opening
 OpenCode. `--binary` selects an APPA binary; `--runtime-url` selects the protected
-runtime's loopback HTTP origin. Existing conflicting MCP or command entries
-are refused rather than overwritten. JSONC configurations require manual setup.
+runtime's loopback HTTP origin. Existing conflicting global MCP or command
+entries are refused rather than overwritten. Global JSONC settings require
+manual setup; project JSONC files remain untouched and load normally.
 
 The OpenCode battery starts conservatively: private reads narrow audience,
 web results lower trust, edits require trust, and the shell permits only `pwd`.
@@ -96,9 +108,11 @@ amp orb service start appencode-runtime --command "\"$(pwd)/target/debug/appa\" 
 Do not expose the runtime through a portal. `/hook` trusts its local client
 and does not authenticate callers. Keep the database across restarts.
 
-Merge the following entries into the target project's `opencode.json`,
-preserving other settings. Replace the absolute plugin directory with this
-checkout's `integrations/opencode` directory. V2 uses `plugins`, not `plugin`:
+Merge the following entries into the user's global OpenCode settings,
+normally `~/.config/opencode/opencode.json`, preserving other settings. Respect
+`XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR` when set. Replace the absolute plugin
+directory with this checkout's `integrations/opencode` directory.
+V2 uses `plugins`, not `plugin`:
 
 ```json
 {

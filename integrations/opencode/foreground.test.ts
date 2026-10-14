@@ -194,13 +194,17 @@ builtin = "redact-email"
     }
     return completion(null, [{ name: 'appa_subagent', input }])
   } })
+  await mkdir(`${directory}/config/opencode`, { recursive: true })
+  await writeFile(`${directory}/config/opencode/opencode.json`, JSON.stringify({
+    plugins: [resolve(import.meta.dir)],
+    mcp: { servers: { appa: { type: 'remote', url: `${proxy.url}mcp`, oauth: false } } },
+  }))
   await writeFile(`${directory}/opencode.json`, JSON.stringify({
-    plugins: [resolve(import.meta.dir)], snapshots: false, share: 'disabled', update: 'disable', model: 'appa-test/fixture',
+    snapshots: false, share: 'disabled', update: 'disable', model: 'appa-test/fixture',
     permissions: [{ action: '*', resource: '*', effect: 'allow' }],
     providers: { 'appa-test': { package: '@opencode/ai/providers/openai-compatible',
       settings: { baseURL: `${provider.url}v1`, apiKey: 'local-test-fixture' },
       models: { fixture: { capabilities: { tools: true }, limit: { context: 128000, output: 4096 } } } } },
-    mcp: { servers: { appa: { type: 'remote', url: `${proxy.url}mcp`, oauth: false } } },
     commands: { alternate: { template: 'child:alternate-command', agent: 'general', subagent: true } },
   }))
   serverPort = port()
@@ -393,7 +397,9 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   await client.session.wait({ sessionID: before.id })
   expect(JSON.stringify(await client.session.context({ sessionID: before.id }))).toContain('arguments match no registered contract')
   const target = `${directory}/deployment/appa.toml`
-  await install(directory, target, proxy.url.toString().replace(/\/$/, ''))
+  const projectSettings = await readFile(`${directory}/opencode.json`, 'utf8')
+  await install(`${directory}/config/opencode`, target, proxy.url.toString().replace(/\/$/, ''))
+  expect(await readFile(`${directory}/opencode.json`, 'utf8')).toBe(projectSettings)
   const original = await readFile(target, 'utf8')
   setupPolicy = original.replace('opencode/appa.toml"]', 'opencode/appa.toml", "batteries/microsoft-learn/appa.toml"]')
     .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/shell(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
@@ -440,6 +446,14 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   expect(hooks.some(hook => hook.event.root_id === normal.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
   const normalRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'probe-shell:setup'))
   expect(normalRequest.tools.some((tool: any) => tool.function.name === 'appa_setup')).toBe(false)
+  const other = `${directory}/other-project`
+  await mkdir(other)
+  await writeFile(`${other}/opencode.json`, projectSettings)
+  const second = await client.session.create({ location: { directory: other } })
+  await client.session.prompt({ sessionID: second.id, text: 'probe-shell:setup' })
+  await client.session.wait({ sessionID: second.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: second.id }))).toContain('setup-proof')
+  expect(hooks.some(hook => hook.event.root_id === second.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
   const refusal = await fetch(`${proxy.url}hook`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ protocol: 1, adapter: 'opencode', event: 'tool_call', root_id: normal.id,
       call_id: 'not-an-operator', tool: 'appa_setup', arguments: { operation: 'inspect' } }) })
