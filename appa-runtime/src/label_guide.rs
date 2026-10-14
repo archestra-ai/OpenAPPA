@@ -554,11 +554,11 @@ pub(crate) const EXAMPLES: [Example; 22] = [
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm publish --access public", "description": "Release the package"}}"#,
-        delta_audience: ResultAudience::Public,
+        delta_audience: ResultAudience::Internal,
         delta_trust: ResultTrust::Trusted,
         requires_audience: RequiredAudience::Public,
         requires_trusted: true,
-        why: "the package's files reach a public registry; the registry's own status comes back",
+        why: "the package's files reach a public registry; the package's own publish scripts run over the local checkout and print beside the registry's status",
     },
     Example {
         call: r#"{"tool": "WebSearch", "arguments": {"query": "rust E0502 cannot borrow `self.cache` as mutable because it is also borrowed as immutable"}}"#,
