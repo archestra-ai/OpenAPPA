@@ -264,11 +264,24 @@ fn observed(
         HookEvent::ToolCall { actor, .. } => actor.clone(),
         _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
     };
+    // A start's principal is held to its shape and to the root it continues before the
+    // inventory lands, so a refused start leaves no root behind and changes no stored one.
+    let principal = match event {
+        HookEvent::SessionStart { principal, .. } => {
+            session_principal(principal.as_deref()).map_err(|error| refused_hook(runtime, root, event, error))?
+        }
+        _ => None,
+    };
+    let continued = |session: Session| {
+        continues_for(&session, principal.as_ref())?;
+        runtime.observe_inventory(&actor, *adapter, inventory)
+    };
     let observed = match runtime.session(root, root) {
-        Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
+        Ok(session) => continued(session),
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
-                Ok(_) | Err(EventError::TrajectoryExists) => runtime.observe_inventory(&actor, *adapter, inventory),
+            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal.clone()) {
+                Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
+                Err(EventError::TrajectoryExists) => runtime.session(root, root).and_then(continued),
                 Err(error) => Err(error),
             }
         }
