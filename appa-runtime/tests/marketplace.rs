@@ -191,8 +191,10 @@ fn every_package_directory_is_named_by_the_marketplace() {
 fn every_battery_composes_into_each_host_it_declares() {
     let root = marketplace_root();
     let manifest = manifest();
-    let default_policy = |host: Host| {
-        manifest
+    let default_policy = |host: Host| match host {
+        // AppenCode is source-distributed, without a marketplace plugin package.
+        Host::OpenCode => repository().join("integrations/opencode/appa.toml"),
+        _ => manifest
             .packages
             .iter()
             .find_map(
@@ -203,7 +205,7 @@ fn every_battery_composes_into_each_host_it_declares() {
                     _ => None,
                 },
             )
-            .unwrap_or_else(|| panic!("the marketplace ships no adapter for {host}"))
+            .unwrap_or_else(|| panic!("the marketplace ships no adapter for {host}")),
     };
 
     for entry in &manifest.packages {

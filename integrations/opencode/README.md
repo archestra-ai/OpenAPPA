@@ -14,6 +14,55 @@ cargo build --locked -p appa
 (cd integrations/opencode && bun install --frozen-lockfile)
 ```
 
+### Guided setup
+
+Run the setup launcher from this checkout:
+
+```sh
+bun run integrations/opencode/setup.ts --project /absolute/path/to/your-project
+```
+
+It preserves existing JSON settings, registers AppenCode and its MCP connection,
+adds `/appa-guide`, and creates a policy that includes the OpenCode battery.
+Existing policies remain unchanged. The default deployment is
+`~/.config/appa/opencode/appa.toml`; use `--config` for another path.
+Keep this checkout and the deployment outside the agent's writable project.
+The installed configuration references this checkout's battery files.
+
+The launcher opens a fresh, private OpenCode server for operator setup. The
+agent inspects the actual tool registry, reads the policy and relevant batteries,
+then proposes changes. Review the proposal and approve it in a later message.
+The agent validates the complete configuration before saving it. Validation
+errors and stale proposals leave the existing policy unchanged.
+
+Only `appa_setup` is exposed to the setup model. A separate APPA runtime gates
+that tool; ordinary shell, file, MCP, and delegation calls are not authorized.
+The tool can inspect the fixed deployment, read catalog batteries, and publish
+its root policy. It cannot choose another target or run arbitrary commands.
+Approval is an agent instruction, not a separately authenticated human decision.
+Treat setup as an administrative session and close it before coding. Never set
+`APPA_OPENCODE_SETUP_CONFIG` or `APPA_OPENCODE_SETUP_BINARY` on ordinary servers.
+
+After setup, start or restart the protected runtime using the command printed
+by the launcher, then start a fresh OpenCode session in the project. Setup saves
+the policy; it does not reload an existing protected runtime. In an Amp orb,
+use the supervised runtime command below. Do not reuse the setup conversation
+for protected work.
+
+Run `/appa-guide` in a normal session to get the operator setup command for
+later changes. Use `--install-only` to write configuration without opening
+OpenCode. `--binary` selects an APPA binary; `--runtime-url` selects the protected
+runtime's loopback HTTP origin. Existing conflicting MCP or command entries
+are refused rather than overwritten. JSONC configurations require manual setup.
+
+The OpenCode battery starts conservatively: private reads narrow audience,
+web results lower trust, edits require trust, and the shell permits only `pwd`.
+The guide proposes additional root contracts for the tools you need. It includes
+only batteries that declare OpenCode support; Microsoft Learn is also supported.
+Other catalog batteries are not automatically treated as OpenCode-compatible.
+
+### Manual setup
+
 Keep the deployment policy and database outside the agent's writable project.
 Copy the starting policy without replacing existing configuration:
 

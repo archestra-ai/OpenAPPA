@@ -7,6 +7,7 @@ import { Tool } from '@opencode/schema/tool'
 import { Cause, Effect, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { configuration, guide } from './setup'
 
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
@@ -27,7 +28,10 @@ function failure(error: unknown): Tool.Error {
 export default Plugin.define({
   id: 'appa.appencode',
   effect: Effect.fn(function* (ctx) {
-    const base = process.env.APPA_OPENCODE_RUNTIME_URL || 'http://127.0.0.1:8789'
+    const base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || 'http://127.0.0.1:8789'
+    const setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG
+    const setup = setupConfig ? yield* Effect.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || '')).pipe(Effect.orDie) : undefined
+    const setupGuide = setup ? yield* Effect.tryPromise(guide).pipe(Effect.orDie) : undefined
     const pending = new Map<string, { proposal: Proposal; actor: Actor }>()
     const children = new Map<string, {
       root: Tool.Context['sessionID']; promptID: SessionMessage.ID; prompt: string; context: string
@@ -122,6 +126,27 @@ export default Plugin.define({
 
     yield* ctx.tool.transform(editor => {
       editor.remove('subagent')
+      if (setup) editor.add({
+        name: 'appa_setup',
+        options: { codemode: false },
+        description: 'Inspect AppenCode policy and live tools, read a catalog battery, or publish a complete approved policy. Publish only after a later operator message approves your proposal. Configuration access only; no coding or shell execution.',
+        input: Schema.Struct({
+          operation: Schema.Literals(['inspect', 'battery', 'publish']),
+          battery: Schema.optionalKey(Schema.String),
+          policy: Schema.optionalKey(Schema.String),
+          expected_digest: Schema.optionalKey(Schema.String),
+        }),
+        output: Schema.String,
+        execute: (input, call) => Effect.tryPromise({ try: async () => {
+          const session = await Effect.runPromise(ctx.session.get({ sessionID: call.sessionID }))
+          if (session.parentID || session.fork) throw new Error('Setup requires a fresh root operator session.')
+          const tools = await Effect.runPromise(ctx.tool.list())
+          const output = await setup(input, tools.map(tool => ({ name: tool.id, description: tool.description,
+            canonical: tool.options?.namespace === 'appa' && tool.name === 'execute_remedy_plan' ? 'appa/execute_remedy_plan'
+              : tool.options?.namespace ? `mcp/${tool.options.namespace}/${tool.name}` : `host/opencode/${tool.name}` })))
+          return { output, content: output }
+        }, catch: error => new Tool.Error({ message: error instanceof Error ? error.message : 'AppenCode setup failed.' }) }),
+      })
       editor.add({
         name: 'appa_subagent',
         options: { codemode: false },
@@ -282,7 +307,10 @@ export default Plugin.define({
         delete event.tools.execute
         delete event.tools.subagent
         if (children.has(event.sessionID)) delete event.tools.appa_subagent
-        event.system.push({ type: 'text', text: context ||
+        if (setup) {
+          for (const name of Object.keys(event.tools)) if (name !== 'appa_setup') delete event.tools[name]
+        }
+        event.system.push({ type: 'text', text: setupGuide || context ||
           'AppenCode checks direct tool flows through APPA. Use the offered remedy tool, then retry. Do not bypass refused flows.' })
       },
       catch: failure,
