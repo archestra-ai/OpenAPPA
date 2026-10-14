@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.33.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.32.0...v0.33.0) (2026-10-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** check requirements against what a call forwards ([#640](https://github.com/archestra-ai/OpenAPPA/issues/640))
+
+### Features
+
+* **engine:** check requirements against what a call forwards ([#640](https://github.com/archestra-ai/OpenAPPA/issues/640)) ([ea7f8d2](https://github.com/archestra-ai/OpenAPPA/commit/ea7f8d24835a819a684ca9da1beb002f1ee05adb))
+* **engine:** show what accepting a narrowing restricts ([#636](https://github.com/archestra-ai/OpenAPPA/issues/636)) ([f63b4ff](https://github.com/archestra-ai/OpenAPPA/commit/f63b4ff9f44607660a5dc4d824a764fa2d7da7b1))
+* **eventlog:** replace advisory locks with row locks, receipt leases and incremental views ([#637](https://github.com/archestra-ai/OpenAPPA/issues/637)) ([d349053](https://github.com/archestra-ai/OpenAPPA/commit/d3490532c492d955340e525d7df4ac1ec0288117))
+* **opencode:** add AppenCode v1 for OpenCode V2 ([#628](https://github.com/archestra-ai/OpenAPPA/issues/628)) ([6d29f14](https://github.com/archestra-ai/OpenAPPA/commit/6d29f14eb2f5033c3bad595d85d6883f310d43d6))
+* **opencode:** add checked foreground subagents ([#635](https://github.com/archestra-ai/OpenAPPA/issues/635)) ([82f3011](https://github.com/archestra-ai/OpenAPPA/commit/82f3011a88f4db28cce8593a13d1ce6bed225919))
+
+
+### Bug Fixes
+
+* **battery:** let archestra yell run in any session ([#624](https://github.com/archestra-ai/OpenAPPA/issues/624)) ([c0f3a66](https://github.com/archestra-ai/OpenAPPA/commit/c0f3a668845375cefe6c884212c2b2197fc373ed))
+* **runtime:** distinguish a named fetch from outgoing data ([#638](https://github.com/archestra-ai/OpenAPPA/issues/638)) ([aac8c2b](https://github.com/archestra-ai/OpenAPPA/commit/aac8c2b3c34c9bad7f08793e2d226d4791724a43))
+* **runtime:** name the blocked tool and the accepted change in remedy feedback ([#623](https://github.com/archestra-ai/OpenAPPA/issues/623)) ([c3607f0](https://github.com/archestra-ai/OpenAPPA/commit/c3607f083200d318ed497343ba9fc08fabcdcca8))
+
 ## [0.32.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.31.1...v0.32.0) (2026-10-13)
 
 
