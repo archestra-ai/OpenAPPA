@@ -1,15 +1,22 @@
-import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).parent))
+import linear_audience as AUDIENCE_SOURCE  # noqa: E402
 
 SCRIPT = Path(__file__).with_name("audience-source.py")
-SPEC = importlib.util.spec_from_file_location("audience_source", SCRIPT)
-AUDIENCE_SOURCE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(AUDIENCE_SOURCE)
+TEMPLATES = [
+    "viewer",
+    "full-members",
+    "team/<key>/members",
+    "team/<key>/readers",
+    "issue/<id>/readers",
+    "project/<id>/readers",
+    "document/<id>/readers",
+]
 
 
 def no_api(*_args, **_kwargs):
@@ -97,7 +104,7 @@ class EnvelopeTests(unittest.TestCase):
             "version": 1,
             "kind": "audience",
             "name": "linear",
-            "declaration": {"templates": list(AUDIENCE_SOURCE.SERVED_TEMPLATES)},
+            "declaration": {"templates": TEMPLATES},
             "artifact": {"selector": "viewer"},
             **overrides,
         }

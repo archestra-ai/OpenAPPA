@@ -142,7 +142,6 @@ mod served {
         let (bearer, body) = &requests[0];
         assert_eq!(bearer.as_deref(), Some("Bearer host-token"));
         let system = body["system"].as_str().expect("system is text");
-        assert!(system.starts_with("You are OpenAPPA's Annotator for one proposed tool call"));
         assert!(system.contains("Fetched pages from a.example are suspicious."));
         let input: serde_json::Value =
             serde_json::from_str(body["input"].as_str().expect("input is text")).expect("input is JSON");

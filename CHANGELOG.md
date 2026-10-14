@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.34.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.33.0...v0.34.0) (2026-10-14)
+
+
+### Features
+
+* **databricks:** split the battery into a base and target policies ([#633](https://github.com/archestra-ai/OpenAPPA/issues/633)) ([e0bb190](https://github.com/archestra-ai/OpenAPPA/commit/e0bb190f8f0e89b6ce9649a79035fbd2df7f13fc))
+* **github:** readiness and setup per deployment target ([#630](https://github.com/archestra-ai/OpenAPPA/issues/630)) ([47c01d9](https://github.com/archestra-ai/OpenAPPA/commit/47c01d99b799069846357ec9b1c0f4aebb0842fc))
+* **github:** split the battery into a base and target policies ([#629](https://github.com/archestra-ai/OpenAPPA/issues/629)) ([21146af](https://github.com/archestra-ai/OpenAPPA/commit/21146afff102b61bc3417ec56e948fa8bc272a95))
+* **huggingface:** split the battery into a base and target policies ([#632](https://github.com/archestra-ai/OpenAPPA/issues/632)) ([877d982](https://github.com/archestra-ai/OpenAPPA/commit/877d9828a6758b12873e5edff3d8fae10c21bb7b))
+* **linear:** split the battery into a base and target policies ([#634](https://github.com/archestra-ai/OpenAPPA/issues/634)) ([47be8e8](https://github.com/archestra-ai/OpenAPPA/commit/47be8e80f07887e96d5a71322e9b7e762cbe4eec))
+* **monday:** split the battery into a base and target policies ([#631](https://github.com/archestra-ai/OpenAPPA/issues/631)) ([b8d005e](https://github.com/archestra-ai/OpenAPPA/commit/b8d005efe3b5468ae9212e469a279033ad118569))
+* **package:** battery base and per-target add-ons ([#619](https://github.com/archestra-ai/OpenAPPA/issues/619)) ([fec1bcd](https://github.com/archestra-ai/OpenAPPA/commit/fec1bcd29d1906655c638d6eb8efa9512ce697a1))
+* **package:** check a targeted battery's base stands alone ([#627](https://github.com/archestra-ai/OpenAPPA/issues/627)) ([614af74](https://github.com/archestra-ai/OpenAPPA/commit/614af744e4474021ac96779cce53c4d6b3a1e01c))
+* **runtime:** load each battery's policy for the deployment target ([#622](https://github.com/archestra-ai/OpenAPPA/issues/622)) ([b4e3915](https://github.com/archestra-ai/OpenAPPA/commit/b4e3915539ac2fbcc4cd49a9eadb4c50dd2a0a13))
+* **runtime:** run batteries' multi-user target on the kagent shared runtime ([#639](https://github.com/archestra-ai/OpenAPPA/issues/639)) ([b3b9896](https://github.com/archestra-ai/OpenAPPA/commit/b3b9896786aaa12c9c811f2bd30a0b6f509a1a1b))
+
+
+### Documentation
+
+* **opencode:** align MCP guidance with direct tools ([#643](https://github.com/archestra-ai/OpenAPPA/issues/643)) ([b830891](https://github.com/archestra-ai/OpenAPPA/commit/b8308911ac4dd8e645258936652d01eb0c57fcba))
+* **opencode:** configure direct MCP tool guidance ([b830891](https://github.com/archestra-ai/OpenAPPA/commit/b8308911ac4dd8e645258936652d01eb0c57fcba))
+
 ## [0.33.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.32.0...v0.33.0) (2026-10-14)
 
 

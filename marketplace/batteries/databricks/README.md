@@ -29,9 +29,34 @@ tool one server does not expose is simply never called there. The
 per-space Genie Agent servers (`/api/2.0/mcp/genie/{space_id}`) expose
 one dynamically named tool each and are not covered; see Limits.
 
+## Targets
+
+`appa.toml` is the base policy and holds every rule; no rule names a
+lookup, so the rules decide the same in every composition. A deployment
+composes one target policy over it, which binds the audience source the
+root's mappings read.
+
+- **single-user** (`single-user.toml`) — one person's CLI login or
+  token, as this README describes: `audience-source.py` serves `viewer`
+  beside the workspace's directory.
+- **multi-user** (`multi-user.toml`) — a service principal's OAuth
+  login, with no viewer. `audience-source-multi-user.py` serves the same
+  selectors and member lookup without `viewer`, people still named by
+  the address they sign in with, and runs the CLI from the
+  `APPA_PROVIDER_DATABRICKS_HOST`, `_CLIENT_ID`, and `_CLIENT_SECRET`
+  credentials its binding forwards, handed to the CLI as
+  `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, and
+  `DATABRICKS_CLIENT_SECRET`, alone: it drops every other `DATABRICKS_*`
+  variable, pins the CLI's auth type to `oauth-m2m`, and empties its
+  config file, so neither a profile in `~/.databrickscfg` nor a cached
+  `databricks auth login` stands in for the principal.
+  `check-multi-user.py` checks the same login.
+- **base alone** — no audience source: the rules below run as written,
+  and a root mapping onto a `databricks:` selector has nothing to read.
+
 ## Files
 
-**`appa.toml`** — three groups.
+**`appa.toml`** — two groups.
 
 *Genie One reads* — `genie_ask`, `view_ask`, `genie_poll_response`,
 `genie_get_query_result`. Genie answers a question with SQL it
@@ -61,14 +86,16 @@ root config points at another command or model under
 replaces the annotator outright; the comment at the top of `appa.toml`
 shows one that sends every statement to a person.
 
-*Audience source* — `[externals.audience.databricks]`, below.
+**`single-user.toml`**, **`multi-user.toml`** — the
+`[externals.audience.databricks]` binding of each target, below.
 
-**`audience-source.py`** — the `databricks` audience source, Python
-standard library over the Databricks CLI: every read is one
-`databricks <group> <command> -o json` process. It answers these
-selectors:
+**`audience-source.py`**, **`databricks_audience.py`** — the
+`databricks` audience source, Python standard library over the
+Databricks CLI: every read is one `databricks <group> <command> -o json`
+process. It answers these selectors:
 
-- `databricks:viewer` — the login's own reader. Feeds `self`.
+- `databricks:viewer` — the login's own reader. Feeds `self`. Single-user
+  only.
 - `databricks:members` — every active user of the workspace. Feeds
   `internal`.
 - `databricks:group/<name>` — one workspace group's active users,
@@ -129,7 +156,9 @@ while a login or network failure refuses the consult.
 outputs for every selector and the member lookup, the bounds and
 refusals, the envelope and declaration checks, and a fake `databricks`
 on PATH for the process boundary: the arguments, the token variable,
-and every failure shape.
+and every failure shape. **`test_multi_user.py`** — the multi-user
+source and check against a fake `databricks` on PATH: the login
+variables the CLI sees, the refused `viewer`, and a missing login.
 
 ## Root config
 

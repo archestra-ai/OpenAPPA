@@ -99,7 +99,7 @@ pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
 
 /// The namespace a `command` external's own credential lives in — a battery's provider
 /// token, which the runtime never reads and never sends. A child inherits nothing of the
-/// runtime's namespace by default; the one variable its binding names is put back, and only
+/// runtime's namespace by default; the variables its binding names are put back, and only
 /// from this namespace, so a credential reaches the one command that reads it and no other.
 /// A `url` binding's `token_env` may not name a variable here, so the passthrough cannot
 /// become a way to hand a subprocess a secret this runtime holds.
@@ -641,14 +641,14 @@ pub enum AudienceImplementation {
     Readers(BTreeMap<ReaderId, ReaderId>),
 }
 
-/// A command binding's argv, the directory of the config that declared it, and the one
-/// `APPA_PROVIDER_*` variable its child inherits. The name is carried, never the value: the
-/// runtime forwards the variable at spawn and never reads the credential itself.
+/// A command binding's argv, the directory of the config that declared it, and the
+/// `APPA_PROVIDER_*` variables its child inherits. Names are carried, never values: the
+/// runtime forwards the variables at spawn and never reads the credentials itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverCommand {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
-    pub token_env: Option<String>,
+    pub token_env: Vec<String>,
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
@@ -824,6 +824,8 @@ pub enum ConfigError {
         var: String,
         prefix: &'static str,
     },
+    #[error("the {section} entry {name:?} lists token_env, and only a command takes a non-empty list")]
+    TokenEnvList { section: &'static str, name: String },
     #[error("the {section} endpoint {name:?} names {var}, which is not set")]
     MissingSecret {
         section: &'static str,
@@ -1117,11 +1119,19 @@ struct RawJev {
     max_concurrent: Option<u32>,
 }
 
+/// A binding's `token_env`: one variable, or, beside a `command`, several.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTokenEnv {
+    One(String),
+    Many(Vec<String>),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBinding {
     url: Option<String>,
-    token_env: Option<String>,
+    token_env: Option<RawTokenEnv>,
     builtin: Option<String>,
     command: Option<Vec<String>>,
 }
@@ -1130,7 +1140,7 @@ struct RawBinding {
 #[serde(deny_unknown_fields)]
 struct RawAudienceBinding {
     url: Option<String>,
-    token_env: Option<String>,
+    token_env: Option<RawTokenEnv>,
     command: Option<Vec<String>>,
     readers: Option<BTreeMap<String, String>>,
     lookup: Option<String>,
@@ -1917,9 +1927,12 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Va
         let bindings = entries
             .iter()
             .filter_map(|(name, entry)| Some((name, entry.get("token_env")?)));
-        for (name, var) in profile.into_iter().chain(bindings) {
-            if let Some(var) = var.as_str()
-                && !battery.token_env.contains(&var)
+        for (name, named) in profile.into_iter().chain(bindings) {
+            let vars = named.as_array().map_or(std::slice::from_ref(named), Vec::as_slice);
+            if let Some(var) = vars
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .find(|var| !battery.token_env.contains(var))
             {
                 return Err(ConfigError::UngrantedBatteryCredential {
                     battery: battery.name.to_string(),
@@ -2359,15 +2372,15 @@ fn resolve_readers(name: &str, readers: BTreeMap<String, String>) -> Result<BTre
 }
 
 /// A command's `token_env` is the opposite of a URL's: the runtime sends nothing, it
-/// forwards one variable to the child that reads it, and only from the passthrough
-/// namespace. Presence is deliberately not checked here — the runtime never reads the
+/// forwards each variable named, one or a list, to the child that reads it, and only from
+/// the passthrough namespace. Presence is deliberately not checked here — the runtime never reads the
 /// value, so a policy stays loadable and describable on a machine that holds no provider
 /// credential, and a missing one surfaces as the child's own refusal to answer.
 fn resolve_command(
     section: Section,
     name: &str,
     argv: Vec<String>,
-    token_env: Option<String>,
+    token_env: Option<RawTokenEnv>,
     origins: &BTreeMap<String, PathBuf>,
 ) -> Result<ResolverCommand, ConfigError> {
     if argv.is_empty() || argv.iter().any(String::is_empty) {
@@ -2376,9 +2389,20 @@ fn resolve_command(
             name: name.to_string(),
         });
     }
+    let token_env = match token_env {
+        None => Vec::new(),
+        Some(RawTokenEnv::One(var)) => vec![var],
+        Some(RawTokenEnv::Many(vars)) if !vars.is_empty() => vars,
+        Some(RawTokenEnv::Many(_)) => {
+            return Err(ConfigError::TokenEnvList {
+                section: section.name(),
+                name: name.to_string(),
+            });
+        }
+    };
     if let Some(var) = token_env
-        .as_ref()
-        .filter(|var| !var.starts_with(PROVIDER_CREDENTIAL_PREFIX))
+        .iter()
+        .find(|var| !var.starts_with(PROVIDER_CREDENTIAL_PREFIX))
     {
         return Err(ConfigError::CommandCredentialVariable {
             section: section.name(),
@@ -2510,11 +2534,19 @@ fn validated_url(section: &'static str, name: &str, url: String) -> Result<Strin
 fn resolve_token(
     section: &'static str,
     name: &str,
-    token_env: Option<String>,
+    token_env: Option<RawTokenEnv>,
     keys: KeySource<'_>,
 ) -> Result<Option<EndpointToken>, ConfigError> {
-    let Some(var) = token_env else {
-        return Ok(None);
+    // The runtime sends one bearer token, so a URL names one variable.
+    let var = match token_env {
+        None => return Ok(None),
+        Some(RawTokenEnv::One(var)) => var,
+        Some(RawTokenEnv::Many(_)) => {
+            return Err(ConfigError::TokenEnvList {
+                section,
+                name: name.to_string(),
+            });
+        }
     };
     let var = endpoint_token_variable(section, name, var)?;
     let KeySource::Lookup(lookup) = keys else {
@@ -2859,11 +2891,54 @@ mod tests {
         else {
             panic!("the slack audience source is a command")
         };
-        assert_eq!(command.token_env.as_deref(), Some("APPA_PROVIDER_SLACK_TOKEN"));
+        assert_eq!(command.token_env, ["APPA_PROVIDER_SLACK_TOKEN"]);
         assert!(
             !format!("{command:?}").contains("xoxb-fixture"),
             "the binding carries the variable name, never the credential"
         );
+    }
+
+    /// A command may list the several credentials its helper reads, each from the
+    /// passthrough namespace; a URL sends one bearer token, so it names one variable.
+    #[test]
+    fn a_command_may_list_credentials_and_a_url_names_one() {
+        let command = |token_env: &str| {
+            format!(
+                "{MINIMAL}\n[externals.audience.slack]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = {token_env}\n"
+            )
+        };
+        let config = parse(&command(
+            "[\"APPA_PROVIDER_SLACK_HOST\", \"APPA_PROVIDER_SLACK_SECRET\"]",
+        ))
+        .expect("a list of passthrough variables validates");
+        let Some(AudienceImplementation::Transport(Transport::Command(bound))) = config
+            .externals
+            .audience
+            .get("slack")
+            .map(|binding| &binding.implementation)
+        else {
+            panic!("the slack audience source is a command")
+        };
+        assert_eq!(
+            bound.token_env,
+            ["APPA_PROVIDER_SLACK_HOST", "APPA_PROVIDER_SLACK_SECRET"]
+        );
+
+        assert!(matches!(
+            parse(&command("[\"APPA_PROVIDER_SLACK_HOST\", \"APPA_SLACK_SECRET\"]")),
+            Err(ConfigError::CommandCredentialVariable { var, .. }) if var == "APPA_SLACK_SECRET"
+        ));
+        assert!(matches!(parse(&command("[]")), Err(ConfigError::TokenEnvList { .. })));
+        let set = |_: &str| Some("fixture".to_string());
+        assert!(matches!(
+            parse_with(
+                &format!(
+                    "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = [\"APPA_AUTHORITY_TOKEN\"]\n"
+                ),
+                set
+            ),
+            Err(ConfigError::TokenEnvList { .. })
+        ));
     }
 
     #[test]
@@ -3865,6 +3940,40 @@ mod tests {
             ),
             "{ungranted:?}"
         );
+    }
+
+    /// A command that lists several credentials needs the host's grant for each.
+    #[test]
+    fn a_battery_command_reads_every_listed_variable_only_when_each_is_granted() {
+        let base = GITHUB_BATTERY
+            .replace(
+                "url = \"http://127.0.0.1:9000/api/openappa/helpers/install-1/github.visibility\"",
+                "command = [\"python3\", \"visibility.py\"]",
+            )
+            .replace(
+                "token_env = \"APPA_HOSTED_TEST_BRIDGE_TOKEN\"",
+                "token_env = [\"APPA_PROVIDER_GITHUB_HOST\", \"APPA_PROVIDER_GITHUB_SECRET\"]",
+            );
+        let granted = |token_env| {
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "github",
+                    base: &base,
+                    target: None,
+                    token_env,
+                }],
+            )
+        };
+        assert!(matches!(
+            granted(&["APPA_PROVIDER_GITHUB_HOST"]),
+            Err(ConfigError::UngrantedBatteryCredential { var, .. }) if var == "APPA_PROVIDER_GITHUB_SECRET"
+        ));
+        // Granted in full, the battery passes the grant and meets the hosted refusal of commands.
+        assert!(matches!(
+            granted(&["APPA_PROVIDER_GITHUB_HOST", "APPA_PROVIDER_GITHUB_SECRET"]),
+            Err(ConfigError::HostedCommand { .. })
+        ));
     }
 
     /// The host's grant covers a battery's target policy as it covers its base.

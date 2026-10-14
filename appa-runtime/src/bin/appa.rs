@@ -55,6 +55,16 @@ enum Command {
     },
     /// Export a locked deployment and its artifacts for offline installation.
     Bundle(appa_runtime::installation::cli::Bundle),
+    /// Internal: rewrite a candidate root in place with an empty readers roster for
+    /// each lookup target its composition is missing, then exit once it loads.
+    #[command(hide = true)]
+    AddLookupRosters {
+        #[arg(long)]
+        config: PathBuf,
+
+        #[arg(long = "batteries-dir", action = clap::ArgAction::Append)]
+        batteries_dir: Vec<PathBuf>,
+    },
     /// Describe the configuration facts available to a human or configuring agent.
     Describe {
         #[arg(long, env = "APPA_CONFIG")]
@@ -425,6 +435,15 @@ fn main() -> ExitCode {
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             appa_runtime::replay::main(&config, modules_dir, verbose, &paths)
+        }
+        Command::AddLookupRosters { config, batteries_dir } => {
+            match appa_runtime::config::edit::add_missing_rosters(&config, &batteries_dir) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("appa add-lookup-rosters: {error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Describe {
             config,

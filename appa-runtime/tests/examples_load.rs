@@ -4,6 +4,8 @@ use common::repo_root;
 use common::{actor, last_offer, offer_of, propose, ran, raw, root};
 
 use std::path::Path;
+
+use appa_package::BatteryTarget;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -36,9 +38,9 @@ fn policy_files(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn opens(path: &Path) {
+fn opens(path: &Path, target: BatteryTarget) {
     let battery_dirs = [repo_root().join("marketplace/batteries")];
-    let config = Config::load_from(path, &battery_dirs)
+    let config = Config::load_for_target(path, &battery_dirs, target)
         .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     Runtime::open(config, dir.path().join("appa.db"), None)
@@ -54,21 +56,33 @@ fn every_shipped_example_opens() {
         "the shipped examples were found and checked, not {examples:?}"
     );
     for path in &examples {
-        opens(path);
+        opens(path, BatteryTarget::SingleUser);
     }
 }
 
 #[test]
 fn the_kagent_policies_open() {
-    opens(&repo_root().join("marketplace/plugins/kagent/default.appa.toml"));
-    opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
+    opens(
+        &repo_root().join("marketplace/plugins/kagent/default.appa.toml"),
+        BatteryTarget::MultiUser,
+    );
+    opens(
+        &repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"),
+        BatteryTarget::MultiUser,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn the_live_replay_roots_open() {
-    opens(&repo_root().join("examples/live-replays/github/appa.toml"));
-    opens(&repo_root().join("examples/live-replays/linear/appa.toml"));
+    opens(
+        &repo_root().join("examples/live-replays/github/appa.toml"),
+        BatteryTarget::SingleUser,
+    );
+    opens(
+        &repo_root().join("examples/live-replays/linear/appa.toml"),
+        BatteryTarget::SingleUser,
+    );
 }
 
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes

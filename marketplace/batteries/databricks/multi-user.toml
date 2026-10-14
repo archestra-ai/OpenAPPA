@@ -1,0 +1,23 @@
+# Databricks battery, multi-user target: a service principal's OAuth login,
+# with no viewer behind it. The single-user target's audience source
+# without `viewer`; it logs the CLI in from the three credentials its
+# binding forwards alone, never from a CLI profile or a cached personal
+# login. The base policy holds every rule.
+
+[policy]
+version = 2
+
+# --- who reads what: the workspace directory and Genie space permissions ---
+
+[externals.audience.databricks]
+command = ["python3", "audience-source-multi-user.py"]
+token_env = [
+  "APPA_PROVIDER_DATABRICKS_HOST",
+  "APPA_PROVIDER_DATABRICKS_CLIENT_ID",
+  "APPA_PROVIDER_DATABRICKS_CLIENT_SECRET",
+]
+selectors = [
+  { template = "members", feeds = "internal" },
+  { template = "group/<name>" },
+  { template = "genie-space/<id>/readers" },
+]
