@@ -57,6 +57,12 @@ pub enum Record {
     ReturnBlocked {
         reason: String,
     },
+    /// What the parent's spawn call delivered: the child's admitted return,
+    /// or the acknowledgement that it returned no value.
+    Returned {
+        call: CallId,
+        body: String,
+    },
     ProviderRetried {
         attempts: u32,
     },
@@ -100,6 +106,7 @@ impl std::fmt::Display for Record {
             Record::OfferRefused { feedback } => write!(f, "offer refused: {feedback}"),
             Record::Forked { depth, errand } => write!(f, "forked at depth {depth} to: {errand}"),
             Record::ReturnBlocked { reason } => write!(f, "the child's return was blocked: {reason}"),
+            Record::Returned { body, .. } => write!(f, "the child's return crossed as: {body}"),
             Record::ProviderRetried { attempts } => {
                 write!(f, "inference completed after {attempts} provider attempts")
             }
