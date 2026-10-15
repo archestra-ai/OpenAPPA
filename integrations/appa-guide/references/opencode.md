@@ -42,7 +42,7 @@ bindings. Do not copy or edit battery files. The installer supplies the version'
 battery files. Use `publish` to change the approved root policy in this session.
 
 Bind a battery's namespace to the actual MCP server names from `inspect`, using
-the root `server_aliases` table. For example, `cloudflare = ["cf-docs", "cf-logs"]`
+the root `aliases.mcp` table. For example, `cloudflare = ["cf-docs", "cf-logs"]`
 binds both connections. Inclusion adds policy, not an MCP connection. Ask the
 operator to connect missing servers through OpenCode before checking coverage.
 

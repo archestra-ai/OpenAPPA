@@ -632,7 +632,7 @@ test('catalog batteries enforce MCP flows, GitHub helper audiences, and explicit
     const inspected = JSON.parse((await setup({ operation: 'inspect' }, []))!)
     expect(inspected.batteries.map((battery: any) => battery.name)).toEqual(['cloudflare', 'github', 'microsoft-learn', 'notion', 'opencode'])
     const policy = `include = ["batteries/opencode/appa.toml", "batteries/cloudflare/appa.toml", "batteries/notion/appa.toml", "batteries/github/appa.toml"]
-[server_aliases]
+[aliases.mcp]
 cloudflare = ["docs", "logs"]
 notion = ["notes"]
 github = ["codehub"]

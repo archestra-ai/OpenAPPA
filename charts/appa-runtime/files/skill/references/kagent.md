@@ -306,7 +306,7 @@ Always use this order:
 
 When the operator approves a battery include and the ten demo cluster
 tools are already in serving policy and the battery's namespace already
-maps to the returned `server` in `server_aliases`, call `appa_include_battery`
+maps to the returned `server` in `aliases.mcp`, call `appa_include_battery`
 with that exact battery name and the policy key from the proposal's
 `appa_get_runtime_state`. A battery that binds an Annotator or an audience
 source reads `APPA_PROVIDER_<PROVIDER>_TOKEN` from the runtime pod: the
@@ -316,7 +316,7 @@ battery README shows. The tool preserves the complete root policy,
 updates only the runtime-owned ConfigMap, waits for kubelet sync, reloads,
 and rolls back on failure. Never synthesize a ConfigMap or invoke a separate
 reload. If the binding is absent, propose the include and
-`server_aliases.<battery-namespace> = ["<returned server>"]` together in one
+`aliases.mcp.<battery-namespace> = ["<returned server>"]` together in one
 complete `appa_update_policy`. Never overwrite a binding to a different
 server without explicit approval for that change. A blocked delegation
 under **Exceptions** is not part of a battery
@@ -422,7 +422,7 @@ because persistence is disabled.
 
 - MCP rules can use native names. Add `server` to restrict a rule to one
   configured connection. Batteries use canonical names such as
-  `mcp/github/get_file_contents`; deployment `server_aliases` binds their
+  `mcp/github/get_file_contents`; deployment `aliases.mcp` binds their
   namespace to the connection identity returned by the matcher.
 - Delegation rules use `agent/<namespace>/<name>`. A wildcard never covers
   a delegation; the agent requires an explicit contract.

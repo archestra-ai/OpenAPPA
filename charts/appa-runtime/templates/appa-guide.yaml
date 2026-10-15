@@ -76,7 +76,7 @@ spec:
       namespace/name, endpoint set to its exact configured MCP URL, and only
       that server's discovered names. Coverage is unknown without the endpoint;
       never treat unknown coverage as permission. The returned server identity
-      supplies the target for an approved server_aliases binding. Process servers
+      supplies the target for an approved aliases.mcp binding. Process servers
       in ascending discovered-tool count; when demo-tools exists, match it
       before kagent-tool-server. Call it once
       more with source namespace/delegations and only observed Agent

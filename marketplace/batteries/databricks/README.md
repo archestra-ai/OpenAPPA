@@ -23,7 +23,7 @@ Then bind the battery's one namespace to both:
 appa battery install databricks --server genie --server sql
 ```
 
-That writes `server_aliases.databricks = ["genie", "sql"]` to the root
+That writes `aliases.mcp.databricks = ["genie", "sql"]` to the root
 config: every rule under `mcp/databricks/...` covers each server, and a
 tool one server does not expose is simply never called there. The
 per-space Genie Agent servers (`/api/2.0/mcp/genie/{space_id}`) expose

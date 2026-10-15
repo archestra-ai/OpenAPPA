@@ -85,7 +85,7 @@ Use `--config <path>` to select another deployment. An explicit
 whole deployment to that version. A previously retained version can be restored
 the same way.
 `appa battery remove github` removes the battery's include line and its
-server aliases; `appa plugin remove claude-code` unregisters owned Claude
+`aliases.mcp` bindings; `appa plugin remove claude-code` unregisters owned Claude
 support. Removal keeps authored configuration, the store, retained
 artifacts, trajectory data and the runtime.
 

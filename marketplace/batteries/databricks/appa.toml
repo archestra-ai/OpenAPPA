@@ -7,7 +7,7 @@
 #
 # The two endpoints are two MCP servers in the host, so the deployment
 # binds this one namespace to both: `appa battery install databricks
-# --server <genie> --server <sql>`, or `server_aliases.databricks =
+# --server <genie> --server <sql>`, or `aliases.mcp.databricks =
 # ["<genie>", "<sql>"]` in the root config. Every rule below then covers
 # each of them; a tool one server does not expose is never called there.
 #

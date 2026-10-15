@@ -158,7 +158,7 @@ Other catalog batteries are not automatically treated as OpenCode-compatible.
 
 Connect the service's MCP server in OpenCode first. Battery inclusion supplies
 policy, not a connection or its authentication. The setup guide uses the live
-registry to propose `server_aliases` bindings when connection names differ from
+registry to propose `aliases.mcp` bindings when connection names differ from
 battery namespaces. Cloudflare can bind both documentation and observability
 connections to its one namespace.
 
