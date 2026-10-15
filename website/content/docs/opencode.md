@@ -58,7 +58,7 @@ Only `appa_setup` is exposed to the setup model. A separate temporary APPA runti
 
 Approval is an instruction to the agent, **not an authenticated human authorization check**. Before saving, publication validates the configuration and checks that the root policy digest still matches the inspected version. Validation failures and stale proposals leave the existing root unchanged; successful publication replaces it atomically.
 
-For a new deployment, installation includes the OpenCode battery. Microsoft Learn also declares OpenCode support. Other batteries are not implicitly compatible; the guide includes only batteries that declare support for this harness. Batteries are retained with the deployment; no source checkout needs to stay available.
+For a new deployment, installation includes the OpenCode battery. Supported service batteries are **Microsoft Learn, Cloudflare, Notion, and GitHub**. Other batteries are not implicitly compatible; the guide includes only batteries that declare OpenCode support. Batteries are retained with the deployment; no source checkout needs to stay available. See [Connect service batteries](#connect-service-batteries) for connection, audience, and credential requirements.
 
 ### 3. Reload the runtime and start coding
 
@@ -72,6 +72,24 @@ Setup saves policy; it does not reload a running protected runtime. Existing tra
 After a reboot, rerun `appa plugin install opencode` to start the runtime. Installation does not create an automatic reboot service.
 
 Keep the runtime on loopback. Its `/hook` endpoint trusts its local client and does not authenticate callers. Do not expose it publicly. Preserve the database across restarts: it holds the trajectory's restrictions and event log. Never set `APPA_OPENCODE_SETUP_CONFIG` or `APPA_OPENCODE_SETUP_BINARY` on ordinary coding servers.
+
+## Connect service batteries
+
+Connect and authenticate each service's MCP server in OpenCode before running setup. **Including a battery adds policy, not an MCP connection or its authentication.** Setup inspects live tools and proposes `server_aliases` when connection names differ from battery namespaces. Cloudflare can bind both documentation and observability connections to its namespace.
+
+Map `internal` to the people who may read everything a Cloudflare observability or Notion connection reaches. Notion's structural and agent-session changes also require an Authority permitting `notion-review`; ordinary trusted workspace writes do not. The guide proposes this Authority for those reviewed operations, not a wildcard approval rule.
+
+For GitHub, setup shows the selected `single-user` or `multi-user` target policy. Use the same `APPA_BATTERY_TARGET` in setup and the protected runtime; the default is `single-user`. Include only the battery's base `appa.toml`: the runtime composes the selected target automatically.
+
+GitHub's Python helpers authenticate separately from the MCP connection. For `single-user`, supply `APPA_PROVIDER_GITHUB_TOKEN` in the protected runtime's environment or use an existing `gh` login. For `multi-user`, supply a GitHub App installation token. Run the target's readiness command from the installed GitHub battery directory, with the runtime's environment: `python3 check.py` for single-user or `python3 check-multi-user.py` for multi-user. **Saving policy validates its structure, not GitHub credentials or repository permissions.**
+
+## Respond to human-review forms
+
+Runtime remedy review authorizes an **exact tool call**. It is separate from the conversational approval that publishes setup policy. OpenCode **2.0.28 displays MCP review forms only in its terminal UI**, not its web or desktop session interface.
+
+Inspect the tool and arguments before answering. **Yes is initially highlighted; Enter submits approval.** Select No to deny, or Escape to cancel without a ruling. APPA requires an explicit boolean approval; a missing answer or cancellation grants nothing. Forms use the project's global queue, so a form may concern a different session from the one displayed.
+
+In testing, some pending forms appeared only after the terminal reconnected. If a remedy waits without displaying a form, reconnect a server-attached terminal to the same project while keeping the OpenCode server running. Do not restart the server to surface the review. This is an observed workaround, not a guarantee that every pending form will appear.
 
 ## Adjust policy later
 
