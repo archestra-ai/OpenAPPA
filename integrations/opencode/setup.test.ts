@@ -27,6 +27,11 @@ test('setup reads the installer catalog, filters host compatibility, and keeps d
     expect(battery.files['README.md']).toBe('Catalog documentation')
     expect(battery.contracts).toContain('contract')
     await expect(setup({ operation: 'battery', battery: 'incompatible' }, [])).rejects.toThrow('catalog')
+    for (const status of ['pending', 'failed', 'needs_auth'] as const) {
+      await expect(setup({ operation: 'publish', policy: '[policy]\nversion = 2\n', expected_digest: 'unused' }, [],
+        [{ name: 'project-only', status }])).rejects.toThrow(`project-only (${status})`)
+      expect(await readFile(config, 'utf8')).toBe('[policy]\nversion = 2\n')
+    }
     expect(await guide()).toContain('OpenCode')
   } finally {
     if (previous === undefined) delete process.env.APPA_OPENCODE_BATTERIES
