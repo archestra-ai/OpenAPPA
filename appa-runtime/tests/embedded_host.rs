@@ -17,8 +17,8 @@ use appa_runtime_api::{
 };
 
 const ROOT: &str = r#"
-[server_aliases]
-github = ["github_prod"]
+[aliases]
+mcp = { github = ["github_prod"] }
 
 [policy]
 version = 2

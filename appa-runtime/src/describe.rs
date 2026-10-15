@@ -444,12 +444,8 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
     let mut served_policy = None;
     let served = served(adapter);
     if let Some(loaded) = &loaded {
-        let resolved = crate::tool_validation::resolve(
-            loaded.policy_file().value(),
-            served,
-            &loaded.inventory,
-            &loaded.server_aliases,
-        );
+        let resolved =
+            crate::tool_validation::resolve(loaded.policy_file().value(), served, &loaded.inventory, &loaded.aliases);
         let authored_tools = policy.tools.clone();
         served_policy = describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
         policy.tools = authored_tools;

@@ -311,11 +311,7 @@ async fn the_namespace_covers_each_bound_server_under_the_host() {
     install_battery(&dir).await;
     let (command, classifier) = Classifier::install(dir.path());
     reads(&classifier);
-    let config = root_config(
-        &dir,
-        &command,
-        "\n[server_aliases]\ndatabricks = [\"genie\", \"sql\"]\n",
-    );
+    let config = root_config(&dir, &command, "\n[aliases.mcp]\ndatabricks = [\"genie\", \"sql\"]\n");
     let served = serve_runtime(&config, &dir.path().join("served.db"));
 
     for (server, tool) in [("genie", "genie_ask"), ("sql", "execute_sql"), ("genie", "execute_sql")] {

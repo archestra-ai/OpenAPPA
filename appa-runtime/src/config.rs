@@ -2,6 +2,7 @@
 //! external bindings. The harness adapter is a CLI flag on the
 //! binary, not configuration.
 
+pub mod aliases;
 pub mod edit;
 
 use std::collections::BTreeMap;
@@ -16,8 +17,7 @@ use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::PrincipalSource;
 use serde::Deserialize;
 
-/// Each policy namespace bound to the connection identities the host reports for it.
-pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
+pub use aliases::{AliasFamily, Aliases};
 
 /// Each child-credential variable a battery's helpers read, bound to the key the host's
 /// own store holds its value under. The runtime never looks a key up; see
@@ -53,8 +53,7 @@ pub struct Config {
     pub(crate) credential_store: Option<crate::credentials::CredentialStore>,
     keys: Keys,
     policy: PolicyFile,
-    /// Each policy namespace bound to the connection identities the host reports for it.
-    pub(crate) server_aliases: ServerBindings,
+    pub(crate) aliases: Aliases,
     credentials: CredentialBindings,
     pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
@@ -781,6 +780,10 @@ pub enum ConfigError {
         reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
     )]
     UnresolvedInclude { path: String, reason: Option<String> },
+    #[error("the document declares both [aliases] and [server_aliases]; bind mcp namespaces under aliases.mcp only")]
+    MixedAliasSpellings,
+    #[error("[aliases] tool is not supported yet; alias namespaces under aliases.mcp or aliases.host")]
+    UnsupportedToolAliases,
     #[error("included config {path} has unsupported top-level field {field:?}")]
     IncludedTopLevel { path: String, field: String },
     #[error("included config {path} cannot set policy field {field:?}")]
@@ -1007,8 +1010,8 @@ struct RawConfig {
     /// Offline packaging inputs, not part of the policy identity.
     #[serde(default)]
     bundle: RawBundle,
-    #[serde(default)]
-    server_aliases: ServerBindings,
+    aliases: Option<aliases::RawAliases>,
+    server_aliases: Option<aliases::NamespaceBindings>,
     /// Hosted documents only: the host's credential declaration, carried and never
     /// resolved. See [`Config::credentials`].
     #[serde(default)]
@@ -1340,11 +1343,11 @@ impl Config {
 
     /// The configuration of a host that holds its document in memory rather than reading
     /// `appa.toml`: a `[policy]` table, an optional `[externals]` table and the optional
-    /// `[server_aliases]` and `[credentials]` tables, plus the two settings the host fills
+    /// `[aliases]` and `[credentials]` tables, plus the two settings the host fills
     /// in where the document states neither. The document comes from an author who may run
     /// nothing on this machine and read none of its files, so every other top-level key and
-    /// every `command` binding is refused. `server_aliases` stays admitted because it is the
-    /// host's own declaration of which connections a namespace names, and a document that
+    /// every `command` binding is refused. `aliases` stays admitted because it is the
+    /// host's own declaration of which identities a namespace names, and a document that
     /// carries it is one snapshot: reopened or replayed under the same bytes, a trajectory
     /// resolves its rules the way it did when it opened. `[credentials]` is admitted on the
     /// same terms and carried, never resolved: it names, for each child-credential variable
@@ -1657,7 +1660,7 @@ impl Config {
             credential_store: None,
             keys: keys.keys(),
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
-            server_aliases: raw.server_aliases,
+            aliases: aliases::admit(raw.aliases, raw.server_aliases)?,
             credentials: raw.credentials,
             inventory: raw.appa_inventory,
             reporting,
@@ -1694,7 +1697,7 @@ fn hosted_root(text: &str, include: IncludeAdmission) -> Result<toml::Value, Con
     let document: toml::Value = toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
     let table = document.as_table().expect("a TOML document parses as a table");
     if let Some(key) = table.keys().find(|key| match key.as_str() {
-        "policy" | "externals" | "server_aliases" | "credentials" => false,
+        "policy" | "externals" | "aliases" | "server_aliases" | "credentials" => false,
         "include" => include == IncludeAdmission::Refused,
         _ => true,
     }) {
@@ -3641,17 +3644,29 @@ mod tests {
     /// The host's own binding of policy namespaces to connections rides inside the
     /// document, so the bytes a trajectory opens under resolve the same way on reload.
     #[test]
-    fn a_hosted_document_may_bind_server_aliases() {
-        let config = hosted("[server_aliases]\ngithub = [\"github_prod\", \"github_dev\"]\n[policy]\nversion = 2\n")
-            .expect("server aliases are the host's to declare");
-        assert_eq!(
-            config.server_aliases,
-            BTreeMap::from([(
+    fn a_hosted_document_may_bind_aliases() {
+        let config = hosted(
+            "[aliases]\nmcp = { github = [\"github_prod\", \"github_dev\"] }\nhost = { claude-code = [\"archestra\"] }\n[policy]\nversion = 2\n",
+        )
+        .expect("aliases are the host's to declare");
+        let expected = Aliases {
+            mcp: BTreeMap::from([(
                 "github".to_string(),
-                vec!["github_prod".to_string(), "github_dev".to_string()]
-            )])
-        );
-        assert!(String::from_utf8_lossy(config.policy_file().bytes()).contains("server_aliases"));
+                vec!["github_prod".to_string(), "github_dev".to_string()],
+            )]),
+            host: BTreeMap::from([("claude-code".to_string(), vec!["archestra".to_string()])]),
+        };
+        assert_eq!(config.aliases, expected);
+        let stored: toml::Value = toml::from_str(std::str::from_utf8(config.policy_file().bytes()).unwrap()).unwrap();
+        assert_eq!(aliases::of_document(&stored).unwrap(), expected);
+
+        let legacy = hosted("[server_aliases]\ngithub = [\"github_prod\"]\n[policy]\nversion = 2\n")
+            .expect("a top-level server_aliases table still binds mcp namespaces");
+        assert_eq!(legacy.aliases.mcp["github"], vec!["github_prod"]);
+        assert!(matches!(
+            hosted("[server_aliases]\n[aliases]\n[policy]\nversion = 2\n"),
+            Err(ConfigError::MixedAliasSpellings)
+        ));
     }
 
     #[test]
@@ -4089,6 +4104,10 @@ mod tests {
         assert!(matches!(
             hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[server_aliases]\nx = [\"y\"]\n")]),
             Err(ConfigError::IncludedTopLevel { field, .. }) if field == "server_aliases"
+        ));
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[aliases]\nhost = { x = [\"y\"] }\n")]),
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases"
         ));
         assert!(matches!(
             hosted_composed(

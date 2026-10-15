@@ -9,6 +9,8 @@ use appa_runtime_api::inventory::{InventorySource, InventoryStatus, ToolInventor
 use appa_runtime_api::{Adapter, AdapterName, CanonicalTool};
 use serde::{Deserialize, Serialize};
 
+use crate::config::AliasFamily;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum ToolStatus {
@@ -179,15 +181,17 @@ fn spells_server(adapter: Adapter, name: &str) -> bool {
     name.contains('/') || (adapter.spells_server)(name)
 }
 
-/// `server_aliases` belongs to deployment configuration, never to a battery. Its values
-/// are configured connection identities, not DNS/provider guesses. A namespace bound to
+/// `aliases` belongs to deployment configuration, never to a battery. Its values are
+/// identities the deployment reports, not DNS/provider guesses. A namespace bound to
 /// several identities resolves each rule under it to one canonical id per identity: the
-/// rule covers every server the deployment bound it to.
+/// rule covers every server or host the deployment bound it to. Each family's aliases
+/// rebind only ids of that family, after composition, so root and battery rules alike
+/// resolve and the root's still match first.
 pub fn resolve(
     policy: &toml::Value,
     adapter: Adapter,
     inventory: &ToolInventory,
-    server_aliases: &crate::config::ServerBindings,
+    aliases: &crate::config::Aliases,
 ) -> ResolvedPolicy {
     let mut policy = policy.clone();
     let mut report = ValidationReport {
@@ -208,33 +212,36 @@ pub fn resolve(
             return ResolvedPolicy { policy, report };
         }
     };
-    for (alias, targets) in server_aliases {
-        if CanonicalTool::of("mcp", alias, "tool").is_err() {
-            report
-                .errors
-                .push(format!("server alias {alias:?} is not a valid connection identity"));
-        }
-        if targets.is_empty() {
-            report.errors.push(format!("server alias {alias:?} binds no server"));
-        }
-        let mut seen = BTreeSet::new();
-        for target in targets {
-            if CanonicalTool::of("mcp", target, "tool").is_err() {
-                report.errors.push(format!(
-                    "server alias {alias:?} target {target:?} is not a valid connection identity"
-                ));
-            }
-            if !seen.insert(target) {
+    for family in AliasFamily::ALL {
+        let kind = family.kind();
+        for (alias, targets) in aliases.of(family) {
+            if CanonicalTool::of(kind, alias, "tool").is_err() {
                 report
                     .errors
-                    .push(format!("server alias {alias:?} binds {target:?} twice"));
+                    .push(format!("{kind} alias {alias:?} is not a valid {kind} namespace"));
+            }
+            if targets.is_empty() {
+                report.errors.push(format!("{kind} alias {alias:?} binds nothing"));
+            }
+            let mut seen = BTreeSet::new();
+            for target in targets {
+                if CanonicalTool::of(kind, target, "tool").is_err() {
+                    report.errors.push(format!(
+                        "{kind} alias {alias:?} target {target:?} is not a valid {kind} identity"
+                    ));
+                }
+                if !seen.insert(target) {
+                    report
+                        .errors
+                        .push(format!("{kind} alias {alias:?} binds {target:?} twice"));
+                }
             }
         }
     }
-    // The servers a rule spelled `mcp/<namespace>/…` or `server = "<namespace>"` names: the
-    // namespace's bound identities, else the namespace itself.
-    let targets_of = |namespace: &str| -> Vec<String> {
-        match server_aliases.get(namespace) {
+    // The identities a rule spelled `<family>/<namespace>/…` (or, for MCP,
+    // `server = "<namespace>"`) names: the namespace's bound identities, else the namespace.
+    let targets_of = |family: AliasFamily, namespace: &str| -> Vec<String> {
+        match aliases.of(family).get(namespace) {
             Some(targets) if !targets.is_empty() => targets.clone(),
             _ => vec![namespace.to_owned()],
         }
@@ -255,7 +262,7 @@ pub fn resolve(
                     "tool {name:?} conflicts with server selector {server:?}; use a short tool name with server"
                 ));
             }
-            return targets_of(server)
+            return targets_of(AliasFamily::Mcp, server)
                 .iter()
                 .map(|target| {
                     CanonicalTool::of("mcp", target, name)
@@ -268,11 +275,14 @@ pub fn resolve(
         let qualified = precise_name(name, adapter).map(|id| {
             let parts: Vec<_> = id.as_str().split('/').collect();
             match parts.as_slice() {
-                ["mcp", namespace, tool] if server_aliases.contains_key(*namespace) => targets_of(namespace)
-                    .iter()
-                    .filter_map(|target| CanonicalTool::of("mcp", target, tool).ok())
-                    .map(|id| format!("{id}{selector}"))
-                    .collect(),
+                [kind, namespace, tool] => match AliasFamily::of_kind(kind) {
+                    Some(family) if aliases.of(family).contains_key(*namespace) => targets_of(family, namespace)
+                        .iter()
+                        .filter_map(|target| CanonicalTool::of(kind, target, tool).ok())
+                        .map(|id| format!("{id}{selector}"))
+                        .collect(),
+                    _ => vec![format!("{id}{selector}")],
+                },
                 _ => vec![format!("{id}{selector}")],
             }
         });
@@ -409,6 +419,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Aliases;
 
     #[test]
     fn kagent_literal_mcp_prefix_is_not_claude_wire_syntax() {
@@ -421,7 +432,12 @@ mod tests {
             }],
             ..ToolInventory::default()
         };
-        let resolved = resolve(&policy, appa_adapter_kagent::adapter(), &inventory, &BTreeMap::new());
+        let resolved = resolve(
+            &policy,
+            appa_adapter_kagent::adapter(),
+            &inventory,
+            &crate::config::Aliases::default(),
+        );
         assert!(resolved.report.is_valid(), "{:?}", resolved.report);
         assert!(matches!(resolved.report.tools[0].status, ToolStatus::Valid));
         assert_eq!(
@@ -460,7 +476,7 @@ mod tests {
             &original,
             appa_adapter_claude_code::adapter(),
             &inventory(&[("Bash", "Bash")]),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(result.report.is_valid());
         assert_eq!(original["tool"][0]["name"].as_str(), Some("Bash(command:cargo test*)"));
@@ -488,7 +504,7 @@ mod tests {
             &authored,
             appa_adapter_kagent::adapter(),
             &inventory(&[]),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(
             result
@@ -507,12 +523,12 @@ mod tests {
         let adapter = appa_adapter_kagent::adapter();
         let mut unavailable = inventory(&[]);
         unavailable.sources[0].status = InventoryStatus::Unavailable;
-        let before = resolve(&authored, adapter, &unavailable, &BTreeMap::new());
+        let before = resolve(&authored, adapter, &unavailable, &crate::config::Aliases::default());
         let after = resolve(
             &authored,
             adapter,
             &inventory(&[("read_secret", "mcp:demo/read_secret")]),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(before.report.is_valid());
         assert!(after.report.is_valid());
@@ -529,7 +545,7 @@ mod tests {
             &original,
             appa_adapter_kagent::adapter(),
             &ToolInventory::default(),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(unknown.report.is_valid());
         assert!(!unknown.report.inventory_complete);
@@ -538,7 +554,7 @@ mod tests {
             &original,
             appa_adapter_kagent::adapter(),
             &inventory(&[("read_secret", "mcp:demo/read_secret")]),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(known.report.is_valid());
         assert_eq!(known.policy["tool"][0]["name"].as_str(), Some("mcp/*/read_secret"));
@@ -552,7 +568,7 @@ mod tests {
             &policy("read"),
             appa_adapter_kagent::adapter(),
             &facts,
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(!bad.report.is_valid());
         facts.tools.clear();
@@ -561,7 +577,7 @@ mod tests {
             &policy("read"),
             appa_adapter_kagent::adapter(),
             &facts,
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert!(partial.report.is_valid());
         assert!(!partial.report.inventory_complete);
@@ -572,21 +588,36 @@ mod tests {
         let wildcard: toml::Value = toml::from_str("[[tool]]\nname = '*'\nannotator = 'classify'").unwrap();
         let facts = inventory(&[("read", "mcp:demo/read")]);
         assert!(
-            resolve(&wildcard, appa_adapter_kagent::adapter(), &facts, &BTreeMap::new())
-                .report
-                .is_valid()
+            resolve(
+                &wildcard,
+                appa_adapter_kagent::adapter(),
+                &facts,
+                &crate::config::Aliases::default()
+            )
+            .report
+            .is_valid()
         );
         let facts = inventory(&[("read", "mcp:demo/read"), ("read", "mcp:other/read")]);
         assert!(
-            !resolve(&wildcard, appa_adapter_kagent::adapter(), &facts, &BTreeMap::new())
-                .report
-                .is_valid()
+            !resolve(
+                &wildcard,
+                appa_adapter_kagent::adapter(),
+                &facts,
+                &crate::config::Aliases::default()
+            )
+            .report
+            .is_valid()
         );
         let facts = inventory(&[("child", "agent:demo/child")]);
         assert!(
-            !resolve(&wildcard, appa_adapter_kagent::adapter(), &facts, &BTreeMap::new())
-                .report
-                .is_valid()
+            !resolve(
+                &wildcard,
+                appa_adapter_kagent::adapter(),
+                &facts,
+                &crate::config::Aliases::default()
+            )
+            .report
+            .is_valid()
         );
     }
 
@@ -595,23 +626,38 @@ mod tests {
         let facts = inventory(&[("read", "mcp:demo/read")]);
         let mut authored = policy("read");
         assert!(
-            resolve(&authored, appa_adapter_kagent::adapter(), &facts, &BTreeMap::new())
-                .report
-                .is_valid()
+            resolve(
+                &authored,
+                appa_adapter_kagent::adapter(),
+                &facts,
+                &crate::config::Aliases::default()
+            )
+            .report
+            .is_valid()
         );
         authored["tool"][0]
             .as_table_mut()
             .unwrap()
             .insert("server".into(), toml::Value::String("demo".into()));
-        let resolved = resolve(&authored, appa_adapter_kagent::adapter(), &facts, &BTreeMap::new());
+        let resolved = resolve(
+            &authored,
+            appa_adapter_kagent::adapter(),
+            &facts,
+            &crate::config::Aliases::default(),
+        );
         assert_eq!(resolved.policy["tool"][0]["name"].as_str(), Some("mcp/demo/read"));
         assert!(resolved.report.is_valid());
         assert!(resolved.policy["tool"][0].get("server").is_none());
         let other = inventory(&[("read", "mcp:other/read")]);
         assert!(
-            !resolve(&authored, appa_adapter_kagent::adapter(), &other, &BTreeMap::new())
-                .report
-                .is_valid()
+            !resolve(
+                &authored,
+                appa_adapter_kagent::adapter(),
+                &other,
+                &crate::config::Aliases::default()
+            )
+            .report
+            .is_valid()
         );
     }
 
@@ -620,7 +666,7 @@ mod tests {
     /// once any of them is observed, and a deployment reference to it names them all.
     #[test]
     fn a_namespace_bound_to_several_servers_covers_each_of_them() {
-        let aliases = BTreeMap::from([("databricks".to_owned(), vec!["genie".to_owned(), "sql".to_owned()])]);
+        let aliases = mcp_aliases("databricks", &["genie", "sql"]);
         let authored: toml::Value = toml::from_str(
             "version = 2\n[[tool]]\nname = 'mcp/databricks/genie_ask'\ndelta = {}\n[[tool]]\nname = 'execute_sql'\nserver = 'databricks'\ndelta = {}\n[deployment]\nconfined_results = ['mcp/databricks/genie_ask']\n",
         )
@@ -668,12 +714,98 @@ mod tests {
         );
 
         for broken in [
-            BTreeMap::from([("databricks".to_owned(), vec![])]),
-            BTreeMap::from([("databricks".to_owned(), vec!["genie".to_owned(), "genie".to_owned()])]),
-            BTreeMap::from([("databricks".to_owned(), vec!["not a server".to_owned()])]),
+            mcp_aliases("databricks", &[]),
+            mcp_aliases("databricks", &["genie", "genie"]),
+            mcp_aliases("databricks", &["not a server"]),
         ] {
             assert!(
                 !resolve(&authored, appa_adapter_kagent::adapter(), &facts, &broken)
+                    .report
+                    .is_valid(),
+                "{broken:?}"
+            );
+        }
+    }
+
+    fn mcp_aliases(namespace: &str, targets: &[&str]) -> Aliases {
+        Aliases {
+            mcp: BTreeMap::from([(namespace.to_owned(), targets.iter().map(|t| (*t).to_owned()).collect())]),
+            host: BTreeMap::new(),
+        }
+    }
+
+    fn host_aliases(namespace: &str, targets: &[&str]) -> Aliases {
+        Aliases {
+            mcp: BTreeMap::new(),
+            host: BTreeMap::from([(namespace.to_owned(), targets.iter().map(|t| (*t).to_owned()).collect())]),
+        }
+    }
+
+    fn resolved_names(resolved: &ResolvedPolicy) -> Vec<&str> {
+        resolved.policy["tool"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect()
+    }
+
+    /// A host alias rebinds a battery's `host/<namespace>/…` rules, selectors and
+    /// deployment references included, and leaves MCP ids alone; an MCP alias of the same
+    /// namespace leaves host ids alone.
+    #[test]
+    fn each_alias_family_rebinds_only_its_own_ids() {
+        let authored: toml::Value = toml::from_str(
+            "version = 2\n[[tool]]\nname = 'host/claude-code/Read(file_path:.env*)'\ndelta = { audience = ['self'] }\n[[tool]]\nname = 'host/claude-code/Read'\ndelta = {}\n[[tool]]\nname = 'mcp/claude-code/Read'\ndelta = {}\n[[tool]]\nname = 'Read'\nserver = 'claude-code'\ndelta = {}\n[deployment]\nconfined_results = ['host/claude-code/Read']\n",
+        )
+        .unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let host = resolve(
+            &authored,
+            adapter,
+            &ToolInventory::default(),
+            &host_aliases("claude-code", &["archestra"]),
+        );
+        assert!(host.report.errors.is_empty(), "{:?}", host.report);
+        assert_eq!(
+            resolved_names(&host),
+            vec![
+                "host/archestra/Read(file_path:.env*)",
+                "host/archestra/Read",
+                "mcp/claude-code/Read",
+                "mcp/claude-code/Read",
+            ]
+        );
+        assert_eq!(
+            host.policy["deployment"]["confined_results"],
+            toml::Value::Array(vec![toml::Value::String("host/archestra/Read".into())])
+        );
+
+        let mcp = resolve(
+            &authored,
+            adapter,
+            &ToolInventory::default(),
+            &mcp_aliases("claude-code", &["cc"]),
+        );
+        assert!(mcp.report.errors.is_empty(), "{:?}", mcp.report);
+        assert_eq!(
+            resolved_names(&mcp),
+            vec![
+                "host/claude-code/Read(file_path:.env*)",
+                "host/claude-code/Read",
+                "mcp/cc/Read",
+                "mcp/cc/Read",
+            ]
+        );
+
+        for broken in [
+            host_aliases("claude-code", &[]),
+            host_aliases("claude-code", &["archestra", "archestra"]),
+            host_aliases("claude-code", &["not a host"]),
+            host_aliases("not a host", &["archestra"]),
+        ] {
+            assert!(
+                !resolve(&authored, adapter, &ToolInventory::default(), &broken)
                     .report
                     .is_valid(),
                 "{broken:?}"
@@ -688,7 +820,7 @@ mod tests {
             &authored,
             appa_adapter_claude_code::adapter(),
             &ToolInventory::default(),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert_eq!(
             resolved.policy["tool"][0]["name"].as_str(),
@@ -711,7 +843,7 @@ mod tests {
             &authored,
             appa_adapter_kagent::adapter(),
             &ToolInventory::default(),
-            &BTreeMap::new(),
+            &crate::config::Aliases::default(),
         );
         assert_eq!(
             resolved.policy["deployment"]["confined_results"],

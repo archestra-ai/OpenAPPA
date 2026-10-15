@@ -1084,7 +1084,7 @@ impl Runtime {
 
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
     /// own, under [`AdapterName::Embedded`]: the policy is resolved the way a served
-    /// deployment resolves it, so canonical rules, `server_aliases` and the adapter's
+    /// deployment resolves it, so canonical rules, `aliases` and the adapter's
     /// spelling of a tool to the model all apply. The host identifies every call through the
     /// same adapter before it hands the event over.
     pub fn open_with_store_as(
@@ -1194,7 +1194,7 @@ impl Runtime {
             config.policy_file().value(),
             adapter,
             &config.inventory,
-            &config.server_aliases,
+            &config.aliases,
         )
         .report;
         Prepared::new(config, None, ToolNaming::Canonical { adapter })?;
@@ -1953,7 +1953,7 @@ impl Runtime {
                     serving.config.policy_file().value(),
                     adapter,
                     inventory,
-                    &serving.config.server_aliases,
+                    &serving.config.aliases,
                 )
                 .report)
             }
@@ -1978,17 +1978,13 @@ impl Runtime {
         inventory: &appa_runtime_api::inventory::ToolInventory,
     ) -> Result<crate::tool_validation::ValidationReport, EventError> {
         self.inner.resolve_policy(&self.inner.deployment(), log)?;
-        #[derive(serde::Deserialize)]
-        struct Rules {
-            policy: toml::Value,
-            #[serde(default)]
-            server_aliases: crate::config::ServerBindings,
-        }
+        let undecodable = || EventError::PolicyUnavailable("stored validation rules do not decode".into());
         let source = std::str::from_utf8(log.policy_file())
             .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
-        let rules: Rules = toml::from_str(source)
-            .map_err(|_| EventError::PolicyUnavailable("stored validation rules do not decode".into()))?;
-        Ok(crate::tool_validation::resolve(&rules.policy, adapter, inventory, &rules.server_aliases).report)
+        let document: toml::Value = toml::from_str(source).map_err(|_| undecodable())?;
+        let policy = document.get("policy").ok_or_else(undecodable)?;
+        let aliases = crate::config::aliases::of_document(&document).map_err(|_| undecodable())?;
+        Ok(crate::tool_validation::resolve(policy, adapter, inventory, &aliases).report)
     }
 
     /// Open `new_root` as an independent conversation-root fork of `parent`, a trajectory in the
@@ -3418,13 +3414,8 @@ fn bare_tool_name(authored: &str) -> &str {
 }
 
 fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Config, OpenError> {
-    let policy = resolve_served_policy(
-        config.policy_file().value(),
-        naming,
-        &config.inventory,
-        &config.server_aliases,
-    )
-    .map_err(OpenError::UnsupportedPolicy)?;
+    let policy = resolve_served_policy(config.policy_file().value(), naming, &config.inventory, &config.aliases)
+        .map_err(OpenError::UnsupportedPolicy)?;
     let text = toml::to_string(&policy)
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     appa_policy::Config::from_toml_str_routed(
@@ -3458,7 +3449,7 @@ fn resolve_served_policy(
     policy: &toml::Value,
     naming: ToolNaming,
     inventory: &appa_runtime_api::inventory::ToolInventory,
-    aliases: &crate::config::ServerBindings,
+    aliases: &crate::config::Aliases,
 ) -> Result<toml::Value, String> {
     match naming {
         ToolNaming::AsAuthored => Ok(policy.clone()),
@@ -3491,13 +3482,8 @@ fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_poli
         .transpose()
         .map_err(|error| format!("invalid stored inventory: {error}"))?
         .unwrap_or_default();
-    let aliases = value
-        .get("server_aliases")
-        .cloned()
-        .map(toml::Value::try_into)
-        .transpose()
-        .map_err(|error| format!("invalid stored aliases: {error}"))?
-        .unwrap_or_default();
+    let aliases =
+        crate::config::aliases::of_document(&value).map_err(|error| format!("invalid stored aliases: {error}"))?;
     let policy = resolve_served_policy(policy, naming, &inventory, &aliases)?;
     let text =
         toml::to_string(&policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;

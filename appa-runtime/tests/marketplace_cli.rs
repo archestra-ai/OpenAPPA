@@ -1025,7 +1025,7 @@ fn a_battery_binds_to_several_servers_with_repeated_server_flags() {
     );
     let bound = |config: &Path| -> toml::Value {
         assert!(appa_runtime::config::Config::load(config).is_ok());
-        toml::from_str::<toml::Value>(&std::fs::read_to_string(config).unwrap()).unwrap()["server_aliases"]["github"]
+        toml::from_str::<toml::Value>(&std::fs::read_to_string(config).unwrap()).unwrap()["aliases"]["mcp"]["github"]
             .clone()
     };
     assert_eq!(bound(&config), toml::Value::Array(vec!["work".into(), "lab".into()]));
@@ -1038,7 +1038,12 @@ fn a_battery_binds_to_several_servers_with_repeated_server_flags() {
     let removed = run(root.path(), &["battery", "remove", "github", "--json"]);
     assert!(removed.status.success());
     assert!(std::fs::read_to_string(&config).unwrap().contains(&original));
-    assert!(!std::fs::read_to_string(&config).unwrap().contains("server_aliases"));
+    assert!(
+        toml::from_str::<toml::Value>(&std::fs::read_to_string(&config).unwrap())
+            .unwrap()
+            .get("aliases")
+            .is_none()
+    );
 }
 
 #[test]

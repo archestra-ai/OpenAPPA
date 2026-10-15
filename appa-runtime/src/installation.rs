@@ -1343,7 +1343,7 @@ mod tests {
             .unwrap();
         assert!(store.join("github/appa.toml").is_file(), "the commit fills the store");
         let effective = crate::config::Config::load(install.config_path()).unwrap();
-        assert_eq!(effective.server_aliases["github"], vec!["work-github"]);
+        assert_eq!(effective.aliases.mcp["github"], vec!["work-github"]);
         assert_eq!(
             effective.policy_file().value()["tool"][0]["name"].as_str(),
             Some("mcp/github/read")

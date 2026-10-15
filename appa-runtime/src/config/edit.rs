@@ -1,10 +1,12 @@
 //! The edits a root document takes from a program rather than a person: the
-//! include list, the `server_aliases` bindings and the `[credentials]`
+//! include list, the `aliases.mcp` bindings and the `[credentials]`
 //! declaration. The editor owns nothing in the document — a line it wrote and a
 //! line the person wrote read the same, comments and unrelated entries stay as
 //! authored, and a document that already says what the edit asks for comes back
-//! byte for byte. The CLI installer edits the file this way; a host that keeps
-//! its document in a store edits it the same way.
+//! byte for byte. An edit that changes a document still spelling its MCP bindings
+//! as a top-level `server_aliases` table moves that table to `aliases.mcp`, so the
+//! result never mixes the two spellings. The CLI installer edits the file this
+//! way; a host that keeps its document in a store edits it the same way.
 
 use std::path::Path;
 
@@ -76,28 +78,72 @@ pub fn remove_include(text: &str, include: &str) -> Result<String, ConfigError> 
     Ok(document.to_string())
 }
 
-/// The text with `server_aliases.<namespace>` naming exactly `servers`, in
+const LEGACY_MCP_ALIASES: &str = "server_aliases";
+
+fn uneditable(reason: &str) -> ConfigError {
+    ConfigError::UneditableDocument {
+        reason: reason.to_string(),
+    }
+}
+
+/// The MCP bindings the document declares, under either spelling; a document with
+/// both is refused, as the loader refuses it.
+pub(crate) fn mcp_bindings(document: &DocumentMut) -> Result<Option<&dyn toml_edit::TableLike>, ConfigError> {
+    match (document.get("aliases"), document.get(LEGACY_MCP_ALIASES)) {
+        (Some(_), Some(_)) => Err(uneditable("the document declares both aliases and server_aliases")),
+        (Some(aliases), None) => aliases
+            .as_table_like()
+            .ok_or_else(|| uneditable("aliases must be a table"))?
+            .get("mcp")
+            .map(|mcp| {
+                mcp.as_table_like()
+                    .ok_or_else(|| uneditable("aliases.mcp must be a table"))
+            })
+            .transpose(),
+        (None, Some(legacy)) => legacy
+            .as_table_like()
+            .map(Some)
+            .ok_or_else(|| uneditable("server_aliases must be a table")),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The `aliases.mcp` table to write into, created when absent. A top-level
+/// `server_aliases` table moves there first with its entries and comments.
+fn mcp_bindings_mut(document: &mut DocumentMut) -> Result<&mut dyn toml_edit::TableLike, ConfigError> {
+    mcp_bindings(document)?;
+    let legacy = document.remove(LEGACY_MCP_ALIASES);
+    let aliases = document.as_table_mut().entry("aliases").or_insert_with(|| {
+        let mut aliases = toml_edit::Table::new();
+        aliases.set_implicit(true);
+        Item::Table(aliases)
+    });
+    let inline = aliases.is_inline_table();
+    let aliases = aliases
+        .as_table_like_mut()
+        .ok_or_else(|| uneditable("aliases must be a table"))?;
+    if let Some(legacy) = legacy {
+        aliases.insert("mcp", legacy);
+    }
+    child_table(aliases, inline, "mcp").map(|(mcp, _)| mcp)
+}
+
+fn namespace(spelled: &str) -> Result<Namespace, ConfigError> {
+    Namespace::parse(spelled).map_err(|error| uneditable(&error.to_string()))
+}
+
+/// The text with `aliases.mcp.<namespace>` naming exactly `servers`, in
 /// their order; a binding already spelled so is left as written.
 pub fn bind_servers(text: &str, namespace: &str, servers: &[String]) -> Result<String, ConfigError> {
-    let namespace = Namespace::parse(namespace).map_err(|error| ConfigError::UneditableDocument {
-        reason: error.to_string(),
-    })?;
+    let namespace = self::namespace(namespace)?;
     let mut document = document(text)?;
-    if document.get("server_aliases").is_none() {
-        document["server_aliases"] = toml_edit::table();
-    }
-    let aliases = document["server_aliases"]
-        .as_table_like_mut()
-        .ok_or_else(|| ConfigError::UneditableDocument {
-            reason: "server_aliases must be a table".to_string(),
-        })?;
-    if aliases
-        .get(namespace.as_str())
+    if mcp_bindings(&document)?
+        .and_then(|bindings| bindings.get(namespace.as_str()))
         .is_some_and(|bound| bound_servers(bound).as_deref() == Some(servers))
     {
         return Ok(text.to_owned());
     }
-    aliases.insert(
+    mcp_bindings_mut(&mut document)?.insert(
         namespace.as_str(),
         toml_edit::value(servers.iter().map(String::as_str).collect::<toml_edit::Array>()),
     );
@@ -109,25 +155,30 @@ pub fn bind_servers(text: &str, namespace: &str, servers: &[String]) -> Result<S
 pub fn unbind_servers(text: &str, namespaces: &[&str]) -> Result<String, ConfigError> {
     let namespaces = namespaces
         .iter()
-        .map(|namespace| {
-            Namespace::parse(namespace).map_err(|error| ConfigError::UneditableDocument {
-                reason: error.to_string(),
-            })
-        })
+        .map(|spelled| namespace(spelled))
         .collect::<Result<Vec<_>, _>>()?;
     let mut document = document(text)?;
-    let Some(aliases) = document.get_mut("server_aliases").and_then(Item::as_table_like_mut) else {
+    let Some(bindings) = mcp_bindings(&document)? else {
         return Ok(text.to_owned());
     };
-    let mut changed = false;
-    for namespace in &namespaces {
-        changed |= aliases.remove(namespace.as_str()).is_some();
-    }
-    if !changed {
+    if !namespaces
+        .iter()
+        .any(|namespace| bindings.contains_key(namespace.as_str()))
+    {
         return Ok(text.to_owned());
     }
-    if aliases.is_empty() {
-        document.remove("server_aliases");
+    let bindings = mcp_bindings_mut(&mut document)?;
+    for namespace in &namespaces {
+        bindings.remove(namespace.as_str());
+    }
+    if bindings.is_empty() {
+        let aliases = document["aliases"]
+            .as_table_like_mut()
+            .expect("mcp_bindings_mut left aliases a table");
+        aliases.remove("mcp");
+        if aliases.is_empty() {
+            document.remove("aliases");
+        }
     }
     Ok(document.to_string())
 }
@@ -233,6 +284,7 @@ pub fn set_credential(text: &str, var: &str, key: Option<&str>) -> Result<String
 mod tests {
     use super::*;
     use crate::config::{Config, HostDefaults};
+    use std::collections::BTreeMap;
 
     const AUTHORED: &str = "# my policy\n[policy]\nversion = 2\n# keep this order\n[[policy.tool]]\nname = 'Read'\n";
 
@@ -290,6 +342,87 @@ mod tests {
             bind_servers(AUTHORED, "not a namespace", &servers(&["github"])),
             Err(ConfigError::UneditableDocument { .. })
         ));
+    }
+
+    const LEGACY: &str = "# my policy\n[policy]\nversion = 2\n\n# connections at work\n[server_aliases]\ngithub = ['work-github']\n# the team workspace\nslack = ['team-slack']\n";
+
+    fn mcp_of(text: &str) -> crate::config::aliases::NamespaceBindings {
+        Config::hosted(text, HOST_DEFAULTS, |_| None)
+            .expect("the edited document loads")
+            .aliases
+            .mcp
+    }
+
+    /// An edit that changes a document spelling its bindings as `server_aliases`
+    /// moves the table to `aliases.mcp`, entries and comments with it; an edit that
+    /// changes nothing returns the document byte for byte.
+    #[test]
+    fn an_edit_of_a_legacy_document_moves_its_bindings_to_aliases_mcp() {
+        let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            bind_servers(LEGACY, "github", &servers(&["work-github"])).unwrap(),
+            LEGACY
+        );
+        assert_eq!(unbind_servers(LEGACY, &["linear"]).unwrap(), LEGACY);
+
+        let rebound = bind_servers(LEGACY, "github", &servers(&["home-github"])).unwrap();
+        assert_eq!(
+            rebound,
+            "# my policy\n[policy]\nversion = 2\n\n# connections at work\n[aliases.mcp]\ngithub = [\"home-github\"]\n# the team workspace\nslack = ['team-slack']\n"
+        );
+        assert_eq!(
+            mcp_of(&rebound),
+            BTreeMap::from([
+                ("github".to_owned(), servers(&["home-github"])),
+                ("slack".to_owned(), servers(&["team-slack"])),
+            ])
+        );
+        assert_eq!(
+            unbind_servers(LEGACY, &["github"]).unwrap(),
+            "# my policy\n[policy]\nversion = 2\n\n# connections at work\n[aliases.mcp]\n# the team workspace\nslack = ['team-slack']\n"
+        );
+        assert_eq!(
+            unbind_servers(LEGACY, &["github", "slack"]).unwrap(),
+            "# my policy\n[policy]\nversion = 2\n"
+        );
+    }
+
+    #[test]
+    fn a_new_document_binds_under_aliases_mcp_beside_its_host_aliases() {
+        let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let bound = bind_servers(AUTHORED, "github", &servers(&["work-github"])).unwrap();
+        assert_eq!(
+            bound,
+            format!("{AUTHORED}\n[aliases.mcp]\ngithub = [\"work-github\"]\n")
+        );
+        assert_eq!(mcp_of(&bound)["github"], servers(&["work-github"]));
+
+        let hosts = format!("{AUTHORED}\n[aliases]\nhost = {{ claude-code = [\"archestra\"] }}\n");
+        let both = bind_servers(&hosts, "github", &servers(&["work-github"])).unwrap();
+        assert_eq!(bind_servers(&both, "github", &servers(&["work-github"])).unwrap(), both);
+        let config = Config::hosted(&both, HOST_DEFAULTS, |_| None).unwrap();
+        assert_eq!(config.aliases.mcp["github"], servers(&["work-github"]));
+        assert_eq!(config.aliases.host["claude-code"], servers(&["archestra"]));
+        assert_eq!(unbind_servers(&both, &["github"]).unwrap(), hosts);
+    }
+
+    /// A document with both spellings is the loader's refusal; the editor refuses it too,
+    /// empty tables included, rather than pick one.
+    #[test]
+    fn a_document_with_both_spellings_is_not_edited() {
+        for both in [
+            format!("{AUTHORED}[aliases]\n[server_aliases]\n"),
+            format!("{AUTHORED}[aliases.mcp]\ngithub = ['a']\n[server_aliases]\ngithub = ['a']\n"),
+        ] {
+            assert!(matches!(
+                bind_servers(&both, "github", &["a".to_owned()]),
+                Err(ConfigError::UneditableDocument { .. })
+            ));
+            assert!(matches!(
+                unbind_servers(&both, &["github"]),
+                Err(ConfigError::UneditableDocument { .. })
+            ));
+        }
     }
 
     #[test]

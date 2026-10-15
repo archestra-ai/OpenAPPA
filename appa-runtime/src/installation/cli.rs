@@ -286,7 +286,10 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         if !args.server.is_empty() {
             let battery = &batteries[0];
             if battery.namespaces.len() != 1 {
-                return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
+                return Err(InstallError::Invalid(
+                    "this battery has multiple namespaces; configure aliases.mcp explicitly in the deployment config"
+                        .into(),
+                ));
             }
             text = edit::bind_servers(&text, battery.namespaces[0].as_str(), &args.server)?;
         }
@@ -826,7 +829,7 @@ fn coverage_result(
     servers: &std::collections::BTreeSet<Namespace>,
     available: &[(PackageName, Battery)],
     included: &std::collections::BTreeSet<String>,
-    bindings: &crate::config::ServerBindings,
+    bindings: &crate::config::aliases::NamespaceBindings,
     config: Option<&Path>,
     target: BatteryTarget,
 ) -> serde_json::Value {

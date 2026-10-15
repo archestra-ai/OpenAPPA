@@ -1023,7 +1023,7 @@ mod tests {
             &path,
             format!(
                 r#"
-            [server_aliases]
+            [aliases.mcp]
             github = ["{server}"]
             [externals]
             timeout_ms = 1000

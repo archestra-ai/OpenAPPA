@@ -1,4 +1,4 @@
-//! The root config's `include` list and `server_aliases` table, as the
+//! The root config's `include` list and MCP alias bindings, as the
 //! installer reads them. One spelling names a battery,
 //! `batteries/<name>/appa.toml`, and it resolves beside the config, where the
 //! install keeps the store. The edits themselves are [`crate::config::edit`]'s;
@@ -11,7 +11,7 @@ use appa_package::PackageName;
 use toml_edit::{DocumentMut, Item};
 
 use super::InstallError;
-use crate::config::edit::{bound_servers, document};
+use crate::config::edit::{bound_servers, document, mcp_bindings};
 
 pub(crate) fn battery_include(name: &PackageName) -> String {
     format!("batteries/{name}/appa.toml")
@@ -23,19 +23,20 @@ pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
     Ok(included_in(&document(text)?))
 }
 
-/// The batteries the config includes, and its `server_aliases` table. A
-/// binding that is not an array of strings is refused, as the loader refuses it.
-pub(crate) fn batteries(text: &str) -> Result<(BTreeSet<String>, crate::config::ServerBindings), InstallError> {
+/// The batteries the config includes, and its MCP alias bindings under either
+/// spelling. A binding that is not an array of strings is refused, as the loader
+/// refuses it.
+pub(crate) fn batteries(
+    text: &str,
+) -> Result<(BTreeSet<String>, crate::config::aliases::NamespaceBindings), InstallError> {
     let document = document(text)?;
-    let bindings = document
-        .get("server_aliases")
-        .and_then(Item::as_table_like)
+    let bindings = mcp_bindings(&document)?
         .into_iter()
         .flat_map(|aliases| aliases.iter())
         .map(|(namespace, bound)| {
             bound_servers(bound)
                 .map(|servers| (namespace.to_owned(), servers))
-                .ok_or_else(|| InstallError::Invalid(format!("server_aliases.{namespace} must be an array of strings")))
+                .ok_or_else(|| InstallError::Invalid(format!("aliases.mcp.{namespace} must be an array of strings")))
         })
         .collect::<Result<_, _>>()?;
     Ok((included_in(&document), bindings))
@@ -79,6 +80,12 @@ mod tests {
         let servers = ["home-github".to_owned(), "lab-github".to_owned()];
         let bound = bind_servers(AUTHORED, "github", &servers).unwrap();
         assert_eq!(batteries(&bound).unwrap().1["github"], servers);
+        assert_eq!(
+            batteries("[server_aliases]\ngithub = ['work-github']\n").unwrap().1["github"],
+            ["work-github"]
+        );
         assert!(batteries("[server_aliases]\ngithub = 'work-github'\n").is_err());
+        assert!(batteries("[aliases.mcp]\ngithub = 'work-github'\n").is_err());
+        assert!(batteries("[aliases]\n[server_aliases]\n").is_err());
     }
 }
