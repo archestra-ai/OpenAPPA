@@ -177,7 +177,11 @@ fn including_session_tool_rules(dir: &Path, root: &str) -> String {
     std::fs::create_dir_all(&battery).expect("the battery directory is created");
     std::fs::write(
         battery.join("appa.toml"),
-        toml::to_string(&toml::Table::from_iter([("policy".to_string(), toml::Value::Table(policy))])).unwrap(),
+        toml::to_string(&toml::Table::from_iter([(
+            "policy".to_string(),
+            toml::Value::Table(policy),
+        )]))
+        .unwrap(),
     )
     .expect("the battery writes");
     format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{root}")

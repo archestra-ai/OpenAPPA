@@ -165,9 +165,8 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
 fn session_tool(rule: &toml::Value) -> bool {
     let name = rule["name"].as_str().expect("every rule is named");
     let tool = name.split('(').next().expect("split yields a first part");
-    tool.strip_prefix("host/claude-code/").is_some_and(|tool| {
-        !["Bash", "Monitor", "PowerShell", "Read", "Grep", "Write", "Edit"].contains(&tool)
-    })
+    tool.strip_prefix("host/claude-code/")
+        .is_some_and(|tool| !["Bash", "Monitor", "PowerShell", "Read", "Grep", "Write", "Edit"].contains(&tool))
 }
 
 #[cfg(unix)]
@@ -228,14 +227,20 @@ fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
         let (tool, selector) = name.split_once('(').unwrap_or((name, ""));
         probes.push((tool.to_owned(), serde_json::json!({})));
         if let Some((key, pattern)) = selector.trim_end_matches(')').split_once(':') {
-            probes.push((tool.to_owned(), serde_json::json!({ key: pattern.replace('*', "probe") })));
+            probes.push((
+                tool.to_owned(),
+                serde_json::json!({ key: pattern.replace('*', "probe") }),
+            ));
             probes.push((tool.to_owned(), serde_json::json!({ key: "elsewhere" })));
         }
     }
     let route = |policy: &appa_policy::Config, tool: &str, arguments: &serde_json::Value| {
         let engine = policy.engine();
         engine
-            .resolve_call(appa_engine::value::ToolName::new(tool), arguments.to_string().as_bytes())
+            .resolve_call(
+                appa_engine::value::ToolName::new(tool),
+                arguments.to_string().as_bytes(),
+            )
             .map(|call| engine.registry().declaration(&call).cloned())
             .map_err(|error| error.to_string())
     };
