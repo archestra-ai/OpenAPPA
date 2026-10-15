@@ -74,6 +74,8 @@ use appa_runtime_api::{
 
 pub mod embedded;
 mod encoding;
+#[cfg(feature = "postgres")]
+pub mod encryption;
 pub mod files;
 mod held;
 #[cfg(feature = "postgres")]
@@ -639,6 +641,31 @@ impl Step<'_> {
 }
 
 impl LogStore {
+    /// A PostgreSQL view whose retained content uses this request's cipher.
+    /// It owns a separate projection cache, so a view without the key cannot
+    /// read a previously decrypted projection from another request.
+    #[cfg(feature = "postgres")]
+    pub fn encrypted_view(&self, cipher: encryption::StorageCipher) -> Result<LogStore, postgres::LeaseError> {
+        match &self.store {
+            Store::Sqlite(_) => Err(postgres::LeaseError::NotPostgres),
+            Store::Postgres(pg) => Ok(LogStore {
+                store: Store::Postgres(pg.encrypted_view(cipher)),
+                #[cfg(feature = "fault-injection")]
+                faults: std::sync::Arc::clone(&self.faults),
+            }),
+        }
+    }
+
+    /// The cipher of this view, for content an embedded host retains beside
+    /// the event log. Its key is never returned or serialized.
+    #[cfg(feature = "postgres")]
+    pub fn cipher(&self) -> &encryption::StorageCipher {
+        match &self.store {
+            Store::Sqlite(_) => &encryption::StorageCipher::Plain,
+            Store::Postgres(pg) => &pg.cipher,
+        }
+    }
+
     /// The connection a leased PostgreSQL store runs on, for host SQL beside its event batches
     /// and receipts. `None` for a SQLite store and for a store that is not leased.
     #[cfg(feature = "postgres")]
