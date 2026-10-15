@@ -53,7 +53,7 @@ HUB = {
 }
 
 
-def fixture_hub(answers=HUB, **extra):
+def fixture_hub(answers=HUB, deployment=ANNOTATOR.Deployment.SINGLE_USER, **extra):
     """A Hub answering from recorded payloads; a path it lacks is a 404."""
     table = {**answers, **extra}
     seen = []
@@ -68,7 +68,7 @@ def fixture_hub(answers=HUB, **extra):
             case payload:
                 return payload
 
-    hub = ANNOTATOR.Hub(call)
+    hub = ANNOTATOR.Hub(call, deployment)
     hub.seen = seen
     return hub
 
@@ -422,6 +422,72 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(hub.seen, [])
+
+
+# A multi-user deployment's Hub: it answers no viewer and no resource group,
+# so a lookup of either fails the test.
+SHARED_HUB = {path: payload for path, payload in HUB.items() if path != "/api/whoami-v2" and not path.endswith("/resource-groups")}
+MULTI_USER_SCRIPT = Path(__file__).with_name("repo-visibility-multi-user.py")
+
+
+def shared_hub():
+    return fixture_hub(SHARED_HUB, ANNOTATOR.Deployment.MULTI_USER)
+
+
+class MultiUserTests(unittest.TestCase):
+    def test_a_private_repository_stays_with_the_session_whoever_owns_it(self):
+        for repo_id in ["arsenyinfo/notes", "acme/weights", "acme/other"]:
+            hub = shared_hub()
+            answer = read(hub, details(repo_id, repo_type="model"))
+            self.assertEqual(answer["delta"], {"trust": "suspicious", "audience": ["self"]}, repo_id)
+            self.assertEqual(hub.seen, [f"/api/models/{repo_id}"])
+
+    def test_public_and_gated_repositories_read_as_in_a_single_user_deployment(self):
+        self.assertEqual(read(shared_hub(), details("openai-community/gpt2", repo_type="model"))["delta"]["audience"], "public")
+        gated = fs(("cat", "hf://models/meta-llama/Llama-3.1-8B/config.json"))
+        self.assertEqual(read(shared_hub(), gated, tool="hf_fs")["delta"]["audience"], ["self"])
+
+    def test_every_write_needs_data_everyone_may_see(self):
+        for tool, arguments in [
+            ("hf_fs_write", {"cmd": "put", "args": ["hf://models/arsenyinfo/notes/README.md"], "content": "x"}),
+            ("hf_fs_write", {"cmd": "put", "args": ["hf://models/openai-community/gpt2/README.md"], "content": "x"}),
+            ("create_repo", {"uri": "hf://models/arsenyinfo/new", "private": True}),
+            ("create_repo", {"uri": "hf://models/arsenyinfo/fork", "source_uri": "hf://models/openai-community/gpt2", "private": True}),
+        ]:
+            answer = write(shared_hub(), tool, arguments)
+            self.assertEqual(answer["requires"]["audience"], {"contains": "public"}, repr(arguments))
+
+    def test_a_copy_of_a_private_or_gated_repository_is_refused(self):
+        for source in ["hf://models/arsenyinfo/notes", "hf://models/acme/weights", "hf://models/meta-llama/Llama-3.1-8B"]:
+            with self.assertRaises(RuntimeError, msg=source):
+                write(shared_hub(), "create_repo", {"uri": "hf://models/arsenyinfo/copy", "source_uri": source, "private": True})
+
+    def test_the_script_reads_the_variable_and_never_a_stored_login(self):
+        with tempfile.TemporaryDirectory() as home:
+            stored = Path(home) / ".cache" / "huggingface" / "token"
+            stored.parent.mkdir(parents=True)
+            stored.write_text("hf_stored")
+            with Loopback(SHARED_HUB) as hub:
+                unset = {key: value for key, value in hub.env().items() if key != "APPA_PROVIDER_HUGGINGFACE_TOKEN"}
+                missing = subprocess.run(
+                    [sys.executable, str(MULTI_USER_SCRIPT)],
+                    input=json.dumps(consult()),
+                    capture_output=True,
+                    text=True,
+                    env={**unset, "HOME": home},
+                )
+                answered = subprocess.run(
+                    [sys.executable, str(MULTI_USER_SCRIPT)],
+                    input=json.dumps(consult(arguments=details("acme/weights", repo_type="model"))),
+                    capture_output=True,
+                    text=True,
+                    env=hub.env(),
+                )
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertEqual(missing.stdout, "")
+        self.assertEqual(answered.returncode, 0, answered.stderr)
+        self.assertEqual(hub.seen, [("/api/models/acme/weights", "Bearer hf-fixture")])
+        self.assertEqual(json.loads(answered.stdout)["answer"]["delta"], {"trust": "suspicious", "audience": ["self"]})
 
 
 if __name__ == "__main__":

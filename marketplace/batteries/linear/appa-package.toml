@@ -6,7 +6,7 @@ description = "Policy for 65 Linear MCP tools: per-issue, per-team, per-project 
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["linear"]
-helpers = ["audience-source.py"]
+helpers = ["audience-source.py", "audience-source-multi-user.py", "linear_audience.py"]
 benefit = "APPA asks Linear who can see each team, issue, project, and document. With this, APPA lets Linear data flow only to people who can already read it in Linear."
 setup = [
   "In Linear, open Settings, then Security & access: https://linear.app/settings/account/security",
@@ -15,3 +15,14 @@ setup = [
 
 [battery.readiness]
 required_executables = ["python3"]
+
+[battery.targets.single-user]
+policy = "single-user.toml"
+
+[battery.targets.multi-user]
+policy = "multi-user.toml"
+setup = [
+  "In Linear, open Settings, then API, and create an OAuth application: https://linear.app/settings/api/applications/new",
+  "Authorize it for the workspace with `actor=app` and the `read` scope, and grant it every team the agents use.",
+  "Set `APPA_PROVIDER_LINEAR_TOKEN` to that app's access token, and replace it before it expires. A personal API key is refused.",
+]

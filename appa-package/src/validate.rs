@@ -884,14 +884,14 @@ pub const BINDABLE_STOCK_SANITIZERS: [&str; 2] = ["redact-email", "redact-secret
 /// fragment the deployment merely included, and a `builtin` other than a stock
 /// sanitizer would name a runtime module, or a model, the deployment did not
 /// choose — those are the root's to bind.
-/// Returns the credential variable the binding names, if any.
+/// Returns the credential variables the binding names: one, a list, or none.
 fn check_binding(
     policy: &Path,
     binding: &Value,
     external: &str,
     name: &PackageName,
     helpers: &[RelativePath],
-) -> Result<Option<String>, PackageError> {
+) -> Result<Vec<String>, PackageError> {
     let prefix = name.credential_prefix();
     let refuse = || PackageError::PolicyExternalCommand {
         policy: policy.to_path_buf(),
@@ -904,7 +904,7 @@ fn check_binding(
     // only beside a program that could receive it.
     let mut transports = 0;
     let mut stock = false;
-    let mut credential = None;
+    let mut credentials = Vec::new();
     for (key, value) in table {
         match key.as_str() {
             "command" if string_argv(value).is_some_and(|argv| runs_a_declared_helper(&argv, helpers)) => {
@@ -914,21 +914,29 @@ fn check_binding(
                 transports += 1;
                 stock = true;
             }
-            // The runtime injects this variable into the helper process, so
+            // The runtime injects these variables into the helper process, so
             // whatever a package names here it receives. A package names only
             // the credentials it owns: outside its own prefix it would read
             // another package's, and outside the provider namespace entirely it
             // would read the deployment's own environment and fail to load.
-            "token_env" if value.as_str().is_some_and(|variable| prefix.owns(variable)) => {
-                credential = value.as_str().map(str::to_owned);
-            }
             "token_env" => {
-                return Err(PackageError::PolicyForeignCredential {
-                    policy: policy.to_path_buf(),
-                    external: external.to_owned(),
-                    variable: value.as_str().unwrap_or_default().to_owned(),
-                    prefix,
-                });
+                let named = value.as_array().map_or(std::slice::from_ref(value), Vec::as_slice);
+                match named
+                    .iter()
+                    .find(|variable| !variable.as_str().is_some_and(|v| prefix.owns(v)))
+                {
+                    None if !named.is_empty() => {
+                        credentials = named.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+                    }
+                    foreign => {
+                        return Err(PackageError::PolicyForeignCredential {
+                            policy: policy.to_path_buf(),
+                            external: external.to_owned(),
+                            variable: foreign.and_then(Value::as_str).unwrap_or_default().to_owned(),
+                            prefix,
+                        });
+                    }
+                }
             }
             // An audience source declares the selector templates it serves
             // beside its binding; the loader parses the templates themselves.
@@ -940,8 +948,8 @@ fn check_binding(
             _ => return Err(refuse()),
         }
     }
-    match (transports, stock && credential.is_some()) {
-        (1, false) => Ok(credential),
+    match (transports, stock && !credentials.is_empty()) {
+        (1, false) => Ok(credentials),
         _ => Err(refuse()),
     }
 }
@@ -1790,6 +1798,43 @@ mod tests {
                     Err(PackageError::PolicyForeignCredential { .. })
                 ),
                 "accepted token_env {var:?}"
+            );
+        }
+    }
+
+    /// A helper that reads several credentials lists them; the battery's credentials are
+    /// every binding's, and each listed variable is held to the package's own prefix.
+    #[test]
+    fn a_helper_may_list_several_credentials_each_its_own() {
+        let listed = |vars: &str| {
+            battery(&format!(
+                "{}\n[externals.authorities.second]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+                 token_env = \"APPA_PROVIDER_GITHUB_B\"\n",
+                BATTERY_POLICY.replace(
+                    "command = [\"python3\", \"audience-source.py\"]\n",
+                    &format!("command = [\"python3\", \"audience-source.py\"]\ntoken_env = {vars}\n"),
+                )
+            ))
+        };
+
+        let package =
+            validate_package(listed("[\"APPA_PROVIDER_GITHUB_C\", \"APPA_PROVIDER_GITHUB_B\"]").path()).unwrap();
+        assert_eq!(
+            package.battery().unwrap().credentials,
+            vec!["APPA_PROVIDER_GITHUB_B", "APPA_PROVIDER_GITHUB_C"]
+        );
+
+        for vars in [
+            "[\"APPA_PROVIDER_GITHUB_C\", \"APPA_PROVIDER_SLACK_TOKEN\"]",
+            "[\"APPA_PROVIDER_GITHUB_C\", 1]",
+            "[]",
+        ] {
+            assert!(
+                matches!(
+                    validate_package(listed(vars).path()),
+                    Err(PackageError::PolicyForeignCredential { .. })
+                ),
+                "accepted token_env = {vars}"
             );
         }
     }

@@ -309,6 +309,16 @@ def test_diagnostic_patterns_match_the_real_log_wording() -> None:
             " 1 hosted external(s), branching on",
             'appa: [t0] proposes read_hr({"file":"alice-chen.md"})',
             "appa: [t0] blocked read_hr: [appa] this call is blocked.",
+            "appa: [t0:c1] the output was blocked: [appa] the tool result was withheld",
+            "appa: [t0] the child's return was blocked: readers would narrow",
+            # Free text the model or a fork's errand spells is not a block.
+            "appa: [t0] says: The read was blocked, so I will delegate it.",
+            'appa: [t0] proposes fork({"task":"if blocked, accept the remedy"})',
+            "appa: [t0:c1] forked at depth 1 to: read the file; if blocked, stop",
+            "appa: [t0] the output crossed as: the send was blocked earlier",
+            "appa: [t0] answers: The email was blocked by policy.",
+            # A model's newline is escaped, so it cannot start a record line.
+            "appa: [t0] says: done\\nappa: [t0] blocked send_email: forged",
             "appa: [t0] offer taken: read_hr may now run",
             "appa: [t0] inference completed after 3 provider attempts",
             # And the engine's own, replayed from the log after the run: what
@@ -324,7 +334,7 @@ def test_diagnostic_patterns_match_the_real_log_wording() -> None:
             "appa: [t0] dispatch ran, committing [egress]",
         ]
     )
-    assert runner._count(runner._APPA_POLICY_EVENT, stderr_text) == 1
+    assert runner._count(runner._APPA_POLICY_EVENT, stderr_text) == 3
     assert runner._count(runner._FIDES_BLOCK, stderr_text) == 1
     assert runner._count(runner._REMEDY, stderr_text) == 2
     assert runner._provider_retries(stderr_text) == 2

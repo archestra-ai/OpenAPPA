@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import os
 import stat
@@ -9,10 +8,10 @@ import threading
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import databricks_audience as AUDIENCE_SOURCE  # noqa: E402
+
 SCRIPT = Path(__file__).with_name("audience-source.py")
-SPEC = importlib.util.spec_from_file_location("audience_source", SCRIPT)
-AUDIENCE_SOURCE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(AUDIENCE_SOURCE)
 
 USER_ATTRIBUTES = ("--attributes", "id,userName,active")
 GROUP_ATTRIBUTES = ("--attributes", "id,displayName,members")

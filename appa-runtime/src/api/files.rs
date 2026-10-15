@@ -777,6 +777,7 @@ max_body_bytes = 65536
         let (status, answer) = crate::hooks::answer(
             runtime,
             &appa_adapter_claude_code::adapter(),
+            appa_runtime_api::PrincipalSource::None,
             &serde_json::to_vec(&wire).unwrap(),
         )
         .await;

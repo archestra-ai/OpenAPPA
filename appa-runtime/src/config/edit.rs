@@ -132,6 +132,58 @@ pub fn unbind_servers(text: &str, namespaces: &[&str]) -> Result<String, ConfigE
     Ok(document.to_string())
 }
 
+/// The table under `key`, created in its parent's style when absent: inside an
+/// inline table inline, else a standard table. Whether it is inline comes along.
+fn child_table<'a>(
+    parent: &'a mut dyn toml_edit::TableLike,
+    inline: bool,
+    key: &str,
+) -> Result<(&'a mut dyn toml_edit::TableLike, bool), ConfigError> {
+    let child = parent.entry(key).or_insert_with(|| match inline {
+        true => toml_edit::value(toml_edit::InlineTable::new()),
+        false => toml_edit::table(),
+    });
+    let inline = child.is_inline_table();
+    let table = child
+        .as_table_like_mut()
+        .ok_or_else(|| ConfigError::UneditableDocument {
+            reason: format!("{key} must be a table"),
+        })?;
+    Ok((table, inline))
+}
+
+/// The text with an empty `externals.audience.<name>` readers roster, written
+/// in the style of the tables that hold it.
+pub fn add_empty_roster(text: &str, name: &str) -> Result<String, ConfigError> {
+    let mut document = document(text)?;
+    let (externals, inline) = child_table(document.as_table_mut(), false, "externals")?;
+    let (audience, inline) = child_table(externals, inline, "audience")?;
+    let (roster, _) = child_table(audience, inline, name)?;
+    roster.insert("readers", toml_edit::value(toml_edit::InlineTable::new()));
+    Ok(document.to_string())
+}
+
+/// Rewrite the root at `path` with an empty roster for each lookup target its
+/// composition is missing, until it loads; the names added, in order. Any other
+/// refusal, or a target an added roster does not satisfy, is returned.
+pub fn add_missing_rosters(path: &Path, battery_dirs: &[std::path::PathBuf]) -> Result<Vec<String>, ConfigError> {
+    let rewrite = |error: std::io::Error| ConfigError::UneditableDocument {
+        reason: format!("{}: {error}", path.display()),
+    };
+    let mut added = Vec::new();
+    loop {
+        match super::Config::load_from(path, battery_dirs) {
+            Ok(_) => return Ok(added),
+            Err(ConfigError::UnknownLookupTarget { target, .. }) if !added.contains(&target) => {
+                let text = std::fs::read_to_string(path).map_err(rewrite)?;
+                std::fs::write(path, add_empty_roster(&text, &target)?).map_err(rewrite)?;
+                added.push(target);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// The servers one binding names: an array of strings, else nothing.
 pub(crate) fn bound_servers(item: &Item) -> Option<Vec<String>> {
     item.as_array()?

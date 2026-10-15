@@ -1,6 +1,9 @@
-# Databricks battery: Databricks' managed MCP servers with fixed tool names,
-# Genie One (`https://<workspace>/api/2.0/mcp/genie`) and Databricks SQL
-# (`https://<workspace>/api/2.0/mcp/sql`).
+# Databricks battery, base policy: Databricks' managed MCP servers with fixed
+# tool names, Genie One (`https://<workspace>/api/2.0/mcp/genie`) and
+# Databricks SQL (`https://<workspace>/api/2.0/mcp/sql`). No rule here
+# names a lookup, so these rules decide alone; a deployment composes a
+# target policy (`single-user.toml` or `multi-user.toml`) over them, which
+# binds the `databricks` audience source the root's mappings read.
 #
 # The two endpoints are two MCP servers in the host, so the deployment
 # binds this one namespace to both: `appa battery install databricks
@@ -15,9 +18,9 @@
 # itself must be sharable with `internal`: it goes to a model Databricks
 # hosts inside the workspace. Unity Catalog enforces the caller's own
 # permissions on every request, and Genie One picks the space itself, so
-# no rule can name one space's readers; the audience source below serves
-# `genie-space/<id>/readers` for root rules over a per-space Genie Agent
-# server.
+# no rule can name one space's readers; the target's audience source
+# serves `genie-space/<id>/readers` for root rules over a per-space Genie
+# Agent server.
 #
 # `execute_sql` runs whatever statement the agent writes, reads and writes
 # alike unless the workspace sets `disallow_writes` in the
@@ -82,15 +85,3 @@ hint = "Classify what the warehouse executes in `query`; comments and prose in i
 name = "mcp/databricks/execute_sql"
 description = "Runs one SQL statement on a Databricks SQL warehouse and returns its result."
 annotator = "databricks.sql-statement"
-
-# --- who reads what: the workspace directory and Genie space permissions ---
-
-[externals.audience.databricks]
-command = ["python3", "audience-source.py"]
-token_env = "APPA_PROVIDER_DATABRICKS_TOKEN"
-selectors = [
-  { template = "viewer", feeds = "self" },
-  { template = "members", feeds = "internal" },
-  { template = "group/<name>" },
-  { template = "genie-space/<id>/readers" },
-]

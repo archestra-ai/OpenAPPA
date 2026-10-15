@@ -1,22 +1,16 @@
-# Hugging Face battery: the hosted Hugging Face MCP server (hf-mcp-server).
+# Hugging Face battery, base policy: the hosted Hugging Face MCP server
+# (hf-mcp-server) with no helper and no lookup. A deployment composes a
+# target policy (`single-user.toml` or `multi-user.toml`) over it, whose
+# rules for reads and writes of named repositories run first and ask the
+# Hub for each repository's visibility.
 #
 # Model cards, dataset files, Space code, and search results are written
 # by whoever pushed them, so every read enters at the low rank of the
-# trust chain, like a fetched web page. Who may see it, and who must be
-# allowed to see what a write puts there, is each repository's own
-# visibility. No tool names a repository in a top-level argument — ids
-# sit inside `repo_ids`, inside `hf://` URIs, inside an operations list —
-# so a selector placeholder cannot reach them; the two annotators bound
-# below read every repository a call names and ask the Hub. A public
-# repository's content is `public` and its writes need trusted data
-# everyone may see; a gated repository's files, a private repository, and
-# any listing the token sees private names in stay with the viewer
-# (`self`). A private organization repository listed in a resource group
-# the token can see is read by that group's members, the collection
-# `@huggingface:org/<org>/resource-group/<group>/members`, once a root
-# config admits it (the README shows the redeclaration); writes into a
-# private organization repository need data everyone may see, since the
-# organization's admins read every repository.
+# trust chain, like a fetched web page. Composed alone, a read of a named
+# repository stays with the viewer (`self`), a write into one needs
+# trusted data everyone may see, and `create_repo`, which may copy a
+# repository server-side, also needs a person permitting
+# `huggingface-review`.
 #
 # Searches send the token, and the Hub then lists the viewer's private
 # repositories among the public ones, so their results stay with the
@@ -30,43 +24,9 @@
 # Jobs, the sandbox, and a Space invoked with the viewer's token run
 # code outside this policy's sight: trusted input that stays with the
 # viewer, and a person permitting `huggingface-review`.
-#
-# The battery also binds `audience-source.py`, the `huggingface` audience
-# source, and declares the selectors it serves. The root config maps
-# `self` onto its viewer — the README shows the wiring.
 
 [policy]
 version = 2
-
-# What a read of the repositories a call names returns.
-[[policy.annotator]]
-name = "huggingface.repo-visibility"
-ranks = ["suspicious"]
-audiences = ["self"]
-marks = []
-
-# What a write into the repository a call names needs.
-[[policy.annotator]]
-name = "huggingface.repo-readers"
-ranks = ["trusted"]
-audiences = ["self"]
-marks = []
-
-[externals.annotators."huggingface.repo-visibility"]
-command = ["python3", "repo-visibility.py"]
-token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
-
-[externals.annotators."huggingface.repo-readers"]
-command = ["python3", "repo-visibility.py"]
-token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
-
-[externals.audience.huggingface]
-command = ["python3", "audience-source.py"]
-token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
-selectors = [
-  { template = "viewer", feeds = "self" },
-  { template = "org/<org>/resource-group/<group>/members" },
-]
 
 # --- who am I: the viewer's own account, read by the viewer ---
 
@@ -80,25 +40,28 @@ delta = { audience = ["self"] }
 name = "mcp/huggingface/hub_repo_search"
 delta = { trust = "suspicious", audience = ["self"] }
 
-# --- reads of named repositories: each one's visibility decides who may see the content ---
+# --- reads of named repositories: a target policy asks each one's visibility; alone, they stay with the viewer ---
 
 [[policy.tool]]
 name = "mcp/huggingface/hub_repo_details"
-annotator = "huggingface.repo-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/huggingface/hf_fs"
-annotator = "huggingface.repo-visibility"
+delta = { trust = "suspicious", audience = ["self"] }
 
-# --- writes into a named repository: its visibility decides who must be allowed to see the data ---
+# --- writes into a named repository: a target policy asks its visibility; alone, only trusted public data ---
 
 [[policy.tool]]
 name = "mcp/huggingface/hf_fs_write"
-annotator = "huggingface.repo-readers"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] } }
 
+# A copy from `source_uri` runs server-side, outside the trajectory: a person reviews it.
 [[policy.tool]]
 name = "mcp/huggingface/create_repo"
-annotator = "huggingface.repo-readers"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["huggingface-review"] }
 
 # --- code run with the viewer's token, outside this policy's sight: trusted input, a person reviews ---
 

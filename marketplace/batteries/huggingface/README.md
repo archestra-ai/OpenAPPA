@@ -19,9 +19,32 @@ from the server's source at that version. The capture returned
 when the account enables them. Every rule names its tool by the
 canonical tool id `mcp/huggingface/<tool>`.
 
+## Targets
+
+`appa.toml` is the base policy; a deployment composes one target policy
+over it, whose rules for reads and writes of named repositories run
+first.
+
+- **single-user** (`single-user.toml`) — one person's token, as this
+  README describes: the two annotators and the audience source.
+- **multi-user** (`multi-user.toml`) — a shared token, with no viewer.
+  The same rules over `repo-visibility-multi-user.py`, which reads the
+  token from `APPA_PROVIDER_HUGGINGFACE_TOKEN` alone and compares no
+  repository owner with the token's: a private repository's content
+  stays with the session's own person (`self`), no resource group is
+  asked about, and a write into any repository, a private one or a new
+  private one included, needs trusted data everyone may see. A copy by
+  `source_uri` is admitted only from a public source. No audience source
+  is bound; `check-multi-user.py` checks the variable alone.
+- **base alone** — no helper: a read of a named repository enters
+  `suspicious` and stays with the viewer (`self`), a write into one needs
+  trusted data everyone may see, and `create_repo`, whose `source_uri`
+  copy the base cannot see, also needs a person permitting
+  `huggingface-review`.
+
 ## Files
 
-**`appa.toml`** — the rules, in six groups.
+**`appa.toml`**, **`single-user.toml`** — the rules, in six groups.
 
 *Who am I* — `hf_whoami` returns the viewer's own account. Read by the
 viewer (`self`).
@@ -136,7 +159,7 @@ in a group and the viewer read as `self` are one reader, and answers
 `null` for a name the Hub does not know.
 
 The battery binds the source itself, under
-`[externals.audience.huggingface]` in `appa.toml`, and declares the two
+`[externals.audience.huggingface]` in `single-user.toml`, and declares the two
 templates above as its `selectors`. Audience mappings are root-only, so
 the root config maps `self` onto the viewer:
 
@@ -175,7 +198,8 @@ stored at `hf auth login` (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else
 `$XDG_CACHE_HOME/huggingface/token`, `~/.cache` when unset). The install names the variable and this
 fallback after it includes the battery. A read token covers every read
 and the audience source; `hf_fs_write` and `create_repo` need a write
-token. Neither present, the script stops and names both fixes. The
+token. Neither present, the script stops and names both fixes. A
+multi-user deployment's scripts read the variable alone. The
 scripts call `https://huggingface.co` unless `HF_ENDPOINT` names another
 Hub. A command inherits none of the runtime's `APPA_*` namespace — only
 the one `APPA_PROVIDER_*` variable its own binding names, with the rest
@@ -183,7 +207,7 @@ of the environment. Any Hub error or missing answer stops the operation
 without recording a decision; nothing is guessed.
 
 **`test_repo_visibility.py`**, **`test_audience_source.py`**,
-**`test_hf_token.py`** — tests without network: recorded Hub payloads
+**`test_hf_token.py`**, **`test_check_multi_user.py`** — tests without network: recorded Hub payloads
 for the public, gated, and missing cases, payloads following the Hub's
 OpenAPI schema for the private and resource-group cases this token
 cannot produce, every refusal, the envelope and declaration checks, and

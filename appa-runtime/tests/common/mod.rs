@@ -13,8 +13,8 @@ use appa_runtime::api::{OfferId, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
-    WireDecision, WireEvent,
+    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, ProposedCall, ToolOutcome,
+    TrajectoryId, WireDecision, WireEvent,
 };
 
 /// The Claude Code hook JSON a suite is written in, as the served runtime
@@ -27,7 +27,7 @@ pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
     let event = (appa_adapter_claude_code::codec().parse)(&body).expect("the Claude Code event parses")?;
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
     let accepted = wire
-        .into_event(&appa_adapter_claude_code::adapter())
+        .into_event(&appa_adapter_claude_code::adapter(), PrincipalSource::None)
         .expect("the wire event maps")
         .expect("a translated event is no ping");
     Some(accepted.event)
@@ -48,7 +48,13 @@ pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u
     };
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
     let wire = serde_json::to_vec(&wire).expect("the wire event serializes");
-    let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await;
+    let (status, answer) = hooks::answer(
+        runtime,
+        &appa_adapter_claude_code::adapter(),
+        PrincipalSource::None,
+        &wire,
+    )
+    .await;
     match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
         Ok(Ok(decision)) => (status, (codec.render)(&body, &event, &decision)),
         _ => (status, answer),
@@ -282,7 +288,12 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
 /// The runtime over the root config at `config`, its store in `dir`, with the suite's
 /// root session started.
 pub async fn session_runtime(dir: &Path, config: &Path) -> Arc<Runtime> {
-    let runtime = Arc::new(Runtime::open(Config::load(config).unwrap(), dir.join("runtime.db"), None).unwrap());
+    loaded_session_runtime(dir, Config::load(config).unwrap()).await
+}
+
+/// [`session_runtime`] over an already loaded `config`.
+pub async fn loaded_session_runtime(dir: &Path, config: Config) -> Arc<Runtime> {
+    let runtime = Arc::new(Runtime::open(config, dir.join("runtime.db"), None).unwrap());
     assert_eq!(
         hooks::handle(
             &runtime,

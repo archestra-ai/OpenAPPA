@@ -5,7 +5,7 @@ use appa_engine::authority::{Attends, DeclaredTransition, Hint};
 use appa_engine::contract::{AudienceRequirement, DeltaAudience, RecipientSpec, SelectorPlaceholder, ToolDeclaration};
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, GroupName, SanitizerName, TagName};
-use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
+use appa_engine::profile::{BindingMode, ExecutorClass, PolicyIdentity, neutral_starting_label};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
@@ -968,6 +968,122 @@ fn hints_and_limits_never_move_the_policy_identity() {
     assert_eq!(identity(&capped), base);
     let weakened = DECLARATIONS.replace("dispatch = \"enforced\"", "dispatch = \"assumed\"");
     assert_ne!(identity(&weakened), base);
+}
+
+/// A policy that exercises every field the identity document covers, in the TOML both identity
+/// algorithms read.
+const IDENTITY_FIXTURE: &str = r#"
+version = 2
+
+[audience]
+internal = ["slack:full-members"]
+
+[audience.group.team]
+within = "internal"
+from = ["slack:user-group/team"]
+
+[audience.group.board]
+from = ["slack:user-group/board"]
+
+[[annotator]]
+name = "crm-acl"
+inputs = { customer_id = "$tool_call.arguments.customer_id" }
+audiences = ["internal", "@team"]
+
+[[tool]]
+name = "lookup"
+parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
+annotator = "crm-acl"
+
+[[tool]]
+name = "read"
+tags = ["crm"]
+delta = { trust = "suspicious", audience = ["alice", "@team"] }
+
+[[tool]]
+name = "review"
+description = "Records a review."
+delta = {}
+effects = ["reviewed"]
+
+[[tool]]
+name = "post"
+tags = ["outbound"]
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { trust = "trusted", audience = { contains = ["@board"] }, effects = { contains = ["reviewed"], excludes = ["revoked"] }, attention = ["legal-review"] }
+delta = {}
+
+[[authority]]
+name = "officer"
+tags = ["crm"]
+[authority.permits]
+trust_below = "trusted"
+attention = ["legal-review"]
+
+[[sanitizer]]
+name = "redact"
+on = ["tool_output"]
+tags = ["crm"]
+[sanitizer.permits]
+audience = { from = ["alice"], to = ["internal"] }
+
+[deployment]
+dispatch = "enforced"
+confined_results = ["read"]
+"#;
+
+/// Every durable opening records the identity its engine's algorithm gave the policy, so a
+/// trajectory reopens only while the engine still recognizes that digest. These are the digests
+/// the v1 engine (OpenAPPA 0.32) and the current engine recorded for the same policies. A change
+/// to the identity document moves the current digest and fails this test: keep the replaced
+/// algorithm in `PolicyIdentity::earlier_of_registry` and pin its digests here, or every open
+/// trajectory stops reopening.
+#[test]
+fn the_engine_recognizes_the_identity_every_algorithm_recorded() {
+    let digest = |hex: &str| -> PolicyIdentity { serde_json::from_value(serde_json::json!(hex)).expect("a digest") };
+    let hex =
+        |identity: PolicyIdentity| -> String { identity.bytes().iter().map(|byte| format!("{byte:02x}")).collect() };
+    for (name, source, v1, v2) in [
+        (
+            "the identity fixture",
+            IDENTITY_FIXTURE,
+            "1a4c7e2d6745d281152d6a5c8318d2354ae1b4b13973cedaae1452757df77c56",
+            "ebef4dcf80cd5461661f8b74483147686279a42d20ead293660cedc21dfc4782",
+        ),
+        (
+            "the declarations fixture",
+            DECLARATIONS,
+            "41172107625b0b6f59033f3f7c62e30d682d39e4c3a816e825e8bc4fe65b2b2c",
+            "d4c2074e9a86e79e6f38c42661abab6ff7732b9bce61f497f53c03b169db98e6",
+        ),
+    ] {
+        let engine = load(source).expect("the fixture loads").engine().clone();
+        assert_eq!(hex(engine.identity()), v2, "{name}: the current algorithm moved");
+        assert!(engine.recognizes(&digest(v2)), "{name}: the current identity");
+        assert!(
+            engine.recognizes(&digest(v1)),
+            "{name}: the identity the v1 engine recorded"
+        );
+    }
+    let other = load(DECLARATIONS).expect("the fixture loads").engine().clone();
+    assert!(
+        !other.recognizes(&digest(
+            "1a4c7e2d6745d281152d6a5c8318d2354ae1b4b13973cedaae1452757df77c56"
+        )),
+        "another policy's v1 identity names another policy"
+    );
+    let forwarding = IDENTITY_FIXTURE.replace(
+        "name = \"review\"\n",
+        "name = \"review\"\nforwards = { trust = \"suspicious\" }\n",
+    );
+    let forwarding = load(&forwarding)
+        .expect("the forwarding fixture loads")
+        .engine()
+        .clone();
+    assert!(
+        forwarding.earlier_identities().is_empty(),
+        "no v1 policy declares forwards"
+    );
 }
 
 #[test]

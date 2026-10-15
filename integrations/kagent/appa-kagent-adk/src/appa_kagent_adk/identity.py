@@ -26,6 +26,8 @@ _PARENT_HEADER = "x-kagent-parent-context-id"
 # The spawn binding of the parent's released spawn. The child binds to
 # that spawn only, so a delegated entry without it opens no child.
 SPAWN_BINDING_HEADER = "x-appa-spawn-binding"
+# The caller kagent authenticated, sent as the session's principal.
+_USER_HEADER = "x-user-id"
 
 TrajectoryIds = tuple[str, str | None]
 
@@ -62,6 +64,12 @@ class SessionIdentity:
         headers = (getattr(session, "state", None) or {}).get(_HEADERS_STATE_KEY)
         binding = headers.get(SPAWN_BINDING_HEADER) if isinstance(headers, dict) else None
         return binding if isinstance(binding, str) and binding else None
+
+    def principal(self, session: Any) -> str | None:
+        """The user id the request carried, or None."""
+        headers = (getattr(session, "state", None) or {}).get(_HEADERS_STATE_KEY)
+        user = headers.get(_USER_HEADER) if isinstance(headers, dict) else None
+        return user if isinstance(user, str) and user else None
 
     def open_invocation(self, invocation_context: Any) -> TrajectoryIds:
         """Pin the run's pair from its session state. The first open of a run wins.

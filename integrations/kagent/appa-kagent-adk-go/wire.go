@@ -55,8 +55,13 @@ func pingEvent() map[string]any {
 	return envelope("ping")
 }
 
-func sessionStartEvent(rootID string) map[string]any {
-	return event("session_start", rootID, "")
+// sessionStartEvent opens a root session; an empty principal stays off the wire.
+func sessionStartEvent(rootID, principal string) map[string]any {
+	wire := event("session_start", rootID, "")
+	if principal != "" {
+		wire["principal"] = principal
+	}
+	return wire
 }
 
 func promptEvent(rootID, text, childID string) map[string]any {

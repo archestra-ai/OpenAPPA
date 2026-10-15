@@ -6,7 +6,7 @@ description = "Rules for the hosted Hugging Face MCP server: account, search, re
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["huggingface"]
-helpers = ["check.py", "audience-source.py", "repo-visibility.py", "hf_token.py"]
+helpers = ["check.py", "check-multi-user.py", "audience-source.py", "repo-visibility.py", "repo-visibility-multi-user.py", "hf_token.py"]
 benefit = "APPA asks the Hugging Face Hub if each repository a call names is public, private, or gated. With this, APPA keeps private and gated content with you, and writes to a public repository only data that anyone may see."
 setup = [
   "Create a token of type Read at https://huggingface.co/settings/tokens. It starts with `hf_`.",
@@ -22,3 +22,15 @@ required_executables = ["python3"]
 executable = "hf"
 credential = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
 login_hint = "hf auth login"
+
+[battery.targets.single-user]
+policy = "single-user.toml"
+
+[battery.targets.multi-user]
+policy = "multi-user.toml"
+readiness = ["python3", "check-multi-user.py"]
+setup = [
+  "Set `APPA_PROVIDER_HUGGINGFACE_TOKEN` to a token of type Read of the account the deployment shares. It starts with `hf_`; a login stored by the Hugging Face CLI is never read.",
+  "The MCP server connection has its own token: it needs Write only for `hf_fs_write` and `create_repo`.",
+  "For a private Hub endpoint, set `HF_ENDPOINT` to its root URL.",
+]

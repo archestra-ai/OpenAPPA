@@ -692,7 +692,7 @@ pub enum DispatchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub policy_file_key: String,
-    pub policy_identity: String,
+    pub policy_digest: appa_engine::profile::PolicyIdentity,
 }
 
 /// Where a trajectory stands in its family's log, as [`RuntimeEngine::liveness`]
@@ -734,9 +734,15 @@ impl PolicyEngine<'_> {
     }
 
     /// The policy identity of the deciding engine, lowercase hex — what
-    /// a root's opening record must name.
+    /// a root's opening record names when this engine opens it.
     pub fn identity_hex(&self) -> String {
         hex(self.engine().engine.identity().bytes())
+    }
+
+    /// Whether an opening record's digest names the deciding engine's policy, under the
+    /// current identity algorithm or an earlier one ([`appa_engine::engine::Engine::recognizes`]).
+    pub fn recognizes(&self, digest: &appa_engine::profile::PolicyIdentity) -> bool {
+        self.engine().engine.recognizes(digest)
     }
 }
 
@@ -753,7 +759,7 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
             ..
         })) => Some(Opened {
             policy_file_key: policy_file_key.as_str().to_string(),
-            policy_identity: hex(policy_digest.bytes()),
+            policy_digest: *policy_digest,
         }),
         _ => None,
     }
@@ -3859,7 +3865,9 @@ fn return_instruction(
              tool again with the same arguments. The subagent starts at this session's label, now {floor}. Its floor \
              must cover every narrowing its task needs. Set `trust` to the lowest rank it may read and `audience` to \
              the narrowest audience its data may be confined to. Remove either field from the call when that dimension \
-             should keep its current value. Returning no final value does not relax this floor.\n    {call}, with \
+             should keep its current value. A returned value combines its label with this session's and can narrow \
+             this session: under this floor it carries the subagent's label. Returning no final value adds nothing to \
+             this session's label, and it does not relax this floor.\n    {call}, with \
              <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, \
              or reader ID from the policy; add audience entries as needed"
             )
@@ -3897,8 +3905,9 @@ fn return_instruction(
                 "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
              floor. The floor must cover every narrowing its task needs on dimensions the sanitizer does not raise, even \
              when the subagent returns no final value. Set every bound dimension low enough for the data the subagent \
-             must read.\n    {call}, with <rank> one of {ranks} (lowest first), and each \
-             <audience-entry> a built-in audience, configured group, or reader ID from the policy; add audience entries \
+             must read. A returned value combines its sanitized label with this session's and can narrow this session \
+             on the dimensions the sanitizer does not raise; returning no final value adds nothing.\n    {call}, with \
+             <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, or reader ID from the policy; add audience entries \
              as needed",
                 terminal_safe(name.as_str()),
             )
@@ -4160,14 +4169,28 @@ fn block_feedback(
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
     }
-    if let Some(impact) = planned.narrowing_impact {
-        reasons.push(format!(
-            "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
-            impact.sign_off + impact.blocked,
-            impact.tools,
-            impact.sign_off,
-            impact.blocked
-        ));
+    if let Some(impact) = &planned.narrowing_impact {
+        if impact.sign_off + impact.blocked > 0 {
+            reasons.push(format!(
+                "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
+                impact.sign_off + impact.blocked,
+                impact.tools,
+                impact.sign_off,
+                impact.blocked
+            ));
+        }
+        if !impact.recipient_checked.is_empty() {
+            let tools = impact
+                .recipient_checked
+                .iter()
+                .map(|tool| format!("`{}`", terminal_safe(&naming.model_spelling(tool.as_str()))))
+                .collect::<Vec<_>>()
+                .join(", ");
+            reasons.push(format!(
+                "{tools} can check recipients against the readers of what they send. After accepting, a recipient \
+                 outside this session's readers fails that check unless a remedy covers it."
+            ));
+        }
     }
     if planned.plans.iter().any(|plan| match plan {
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
@@ -4252,6 +4275,7 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,
         sanitized_return,
+        preserving_output,
     } = advice
     else {
         return "If a child-session or subagent tool is available, handle the work there if isolation is \
@@ -4267,7 +4291,16 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
                          route permits every narrowing the delegated work needs. A sanitizer unbinds only the dimension \
                          it raises. Returning nothing controls what crosses back; it does not relax what the child may \
                          read or accept under that route.";
-    match (standing, sanitized_return) {
+    let preferred = match (standing, preserving_output) {
+        (FloorStanding::Unbound | FloorStanding::Within, true) => {
+            "An output sanitizer offered under Continue can admit this result without changing this session's \
+             label, if its required steps succeed. Prefer that offer to the routes below.\n"
+        }
+        (FloorStanding::Below, _) | (_, false) => "",
+    };
+    let returned = "A final message the parent admits crosses to it and can narrow its label. When the task needs \
+                    no return, end with an empty final message to leave the parent's label unchanged.";
+    let route = match (standing, sanitized_return) {
         (FloorStanding::Unbound, true) => format!(
             "If a child-session or subagent tool is available, delegate {delegated} there.\n{declare_floor}\nFinish \
              there by returning nothing, or choose a registered return sanitizer whose declared permit covers the \
@@ -4281,13 +4314,14 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
         (FloorStanding::Within, true) => format!(
             "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
              keep this session unchanged instead, delegate {delegated} to a further subagent declared with a \
-             return sanitizer; one declared with the bare floor would apply the same change here on its return."
+             return sanitizer; one declared with the bare floor would apply the same change here on its return.\n\
+             {returned}"
         ),
-        (FloorStanding::Within, false) => {
+        (FloorStanding::Within, false) => format!(
             "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nA \
-             further subagent's return would apply the same change to this session, so delegating gains nothing."
-                .to_string()
-        }
+             further subagent's return would apply the same change to this session, so delegating gains nothing.\n\
+             {returned}"
+        ),
         (FloorStanding::Below, true) => format!(
             "The parent does not allow this session to admit the raw result. This restriction does not forbid \
              an output sanitizer offered under Continue: execute that offer and retry the call.\nWithout an \
@@ -4304,7 +4338,8 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
              a child declared with a lower floor or a return sanitizer."
                 .to_string()
         }
-    }
+    };
+    format!("{preferred}{route}")
 }
 
 #[cfg(test)]
@@ -4362,6 +4397,7 @@ mod tests {
             let advice = super::ForkAdvice::Narrowing {
                 standing: super::FloorStanding::Below,
                 sanitized_return,
+                preserving_output: false,
             };
             assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
             let text = super::fork_advice_text(advice, false);
@@ -4369,6 +4405,31 @@ mod tests {
             assert!(text.contains("does not forbid an output sanitizer offered under Continue"));
             assert!(text.contains("execute that offer and retry the call"));
             assert!(!text.contains("Finish without this call"));
+        }
+    }
+
+    #[test]
+    fn a_label_preserving_output_offer_adds_advice_only_where_the_raw_change_is_allowed() {
+        use super::FloorStanding::{Below, Unbound, Within};
+        for (standing, extends) in [(Unbound, true), (Within, true), (Below, false)] {
+            for sanitized_return in [false, true] {
+                let text = |preserving_output| {
+                    super::fork_advice_text(
+                        super::ForkAdvice::Narrowing {
+                            standing,
+                            sanitized_return,
+                            preserving_output,
+                        },
+                        false,
+                    )
+                };
+                let (plain, preferred) = (text(false), text(true));
+                assert_eq!(
+                    preferred != plain && preferred.ends_with(&plain),
+                    extends,
+                    "{standing:?}, sanitized return {sanitized_return}"
+                );
+            }
         }
     }
 
@@ -5166,7 +5227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrowing_impact_adds_one_reason() {
+    fn a_narrowing_impact_adds_a_reason_per_part() {
         use appa_engine::check::Narrowing;
         use appa_engine::label::{Audience, Label};
         use appa_engine::plan::NarrowingImpact;
@@ -5207,13 +5268,26 @@ mod tests {
             .reasons
         };
         let without = reasons(None);
-        let with = reasons(Some(NarrowingImpact {
-            tools: 4,
-            sign_off: 1,
-            blocked: 2,
-        }));
-        assert_eq!(with.len(), without.len() + 1);
-        assert!(with.starts_with(&without));
+        let impact = |restricted: usize, recipient_checked: &[&str]| {
+            Some(NarrowingImpact {
+                tools: 4,
+                sign_off: restricted,
+                blocked: 0,
+                recipient_checked: recipient_checked
+                    .iter()
+                    .map(|tool| appa_engine::value::ToolName::new(*tool))
+                    .collect(),
+            })
+        };
+        for (impact, added) in [
+            (impact(1, &[]), 1),
+            (impact(0, &["send_mail", "reply"]), 1),
+            (impact(1, &["send_mail"]), 2),
+        ] {
+            let with = reasons(impact.clone());
+            assert_eq!(with.len(), without.len() + added, "{impact:?}");
+            assert!(with.starts_with(&without));
+        }
     }
 
     #[test]

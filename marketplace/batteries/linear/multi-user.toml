@@ -1,0 +1,92 @@
+# Linear battery, multi-user target: an OAuth app's access token issued
+# with `actor=app`, with no person behind it. The same rules as the
+# single-user target; the source serves no `viewer`, and people stay the
+# account emails Linear reports. These rules run before the base
+# policy's.
+
+[policy]
+version = 2
+
+[externals.audience.linear]
+command = ["python3", "audience-source-multi-user.py"]
+token_env = "APPA_PROVIDER_LINEAR_TOKEN"
+selectors = [
+  { template = "full-members", feeds = "internal" },
+  { template = "team/<key>/members" },
+  { template = "team/<key>/readers" },
+  { template = "issue/<id>/readers" },
+  { template = "project/<id>/readers" },
+  { template = "document/<id>/readers" },
+]
+
+# Reads of one resource: read by that resource's readers.
+
+[[policy.tool]]
+name = "mcp/linear/get_document"
+delta = { audience = ["@linear:document/$id/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_issue"
+delta = { audience = ["@linear:issue/$id/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_comments(issueId:*)"
+delta = { audience = ["@linear:issue/$issueId/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_cycles"
+delta = { audience = ["@linear:team/$teamId/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_documents(teamId:*)"
+delta = { audience = ["@linear:team/$teamId/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_issues(team:*)"
+delta = { audience = ["@linear:team/$team/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Writes into one resource: its readers must be allowed to see the data.
+
+[[policy.tool]]
+name = "mcp/linear/save_comment(issueId:*)"
+delta = { audience = ["@linear:issue/$issueId/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issueId/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+# Moving an issue: the team it lands in decides who reads it from then on.
+[[policy.tool]]
+name = "mcp/linear/save_issue(id:*,team:*)"
+delta = { audience = ["@linear:team/$team/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_issue(id:*)"
+delta = { audience = ["@linear:issue/$id/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$id/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+# Creating an issue: the team it lands in decides who reads it.
+[[policy.tool]]
+name = "mcp/linear/save_issue"
+delta = { audience = ["@linear:team/$team/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/create_attachment"
+delta = { audience = ["@linear:issue/$issue/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/create_attachment_from_upload"
+delta = { audience = ["@linear:issue/$issue/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]

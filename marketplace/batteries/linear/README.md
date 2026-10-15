@@ -4,9 +4,27 @@ Rules for 65 Linear MCP tools and the `linear` audience source that
 reads who may see each issue, team, project, and document from Linear
 itself. The manifest registers the battery with the marketplace.
 
+## Targets
+
+`appa.toml` is the base policy; a deployment composes one target policy
+over it, whose rules run first.
+
+- **single-user** (`single-user.toml`) — one person's personal API key,
+  as this README describes: the twelve rules that name an issue, team,
+  or document by id, and the `linear` audience source.
+- **multi-user** (`multi-user.toml`) — an OAuth app's access token
+  issued with `actor=app`, with no person behind it. The same rules over
+  `audience-source-multi-user.py`, which serves every template but
+  `linear:viewer`, sends the token as a bearer token, and refuses a
+  personal API key. People stay the account emails Linear reports, so
+  map `internal` as below and `self` from another source.
+- **base alone** — no helper and no lookup: a read that names a resource
+  stays with the viewer (`self`), and a write into one needs trusted data
+  everyone may see.
+
 ## Files
 
-**`appa.toml`** — the rules. Trust follows who can write the text.
+**`appa.toml`**, **`single-user.toml`** — the rules. Trust follows who can write the text.
 Workspace members write issues, comments, documents, and projects, so
 reads and mutation responses keep the session's trust. Text an installed
 integration posts counts as trusted too, because a member installed it.
@@ -23,7 +41,8 @@ authorized for everything this connection can list. Image extraction can
 fetch external URLs, so its input must be public and reviewed.
 
 **`audience-source.py`** — the `linear` audience source, over the
-GraphQL API. It answers these selectors:
+GraphQL API; its reads live in `linear_audience.py`, which both
+entrypoints import. It answers these selectors:
 
 - `linear:viewer` — the token's own reader. Feeds `self`.
 - `linear:full-members` — every active member of the workspace, guests
@@ -59,7 +78,7 @@ lookup resolves a `linear:<id>` member the same way and answers `null`
 for an id Linear does not know.
 
 The battery binds the source itself, under `[externals.audience.linear]`
-in `appa.toml`, and declares the seven templates above as its
+in `single-user.toml`, and declares the seven templates above as its
 `selectors`. Audience mappings are root-only, so the root config maps
 the chain onto them:
 
@@ -85,9 +104,14 @@ command inherits none of the runtime's `APPA_*` namespace — only the one
 missing answer stops the operation without recording a decision; nothing
 is guessed.
 
-**`test_audience_source.py`** — tests without network: member and
-person shaping, selector and member refusals, and the envelope and
-declaration checks. Run with `python3 test_audience_source.py`.
+**`audience-source-multi-user.py`** — the same source for a
+multi-user deployment: no `viewer` template, an OAuth app token sent as
+a bearer token, a personal API key refused.
+
+**`test_audience_source.py`**, **`test_audience_source_multi_user.py`**
+— tests without network: member and person shaping, selector and member
+refusals, the token, and the envelope and declaration checks. Run with
+`python3 -m unittest discover -s marketplace/batteries/linear -p 'test_*.py'`.
 
 ## Configure the deployment
 
@@ -117,5 +141,5 @@ not grant permission.
 ```sh
 cargo test --locked -p appa --test linear_policy --test marketplace
 bash scripts/appa-marketplace.sh --check
-python3 marketplace/batteries/linear/test_audience_source.py
+python3 -m unittest discover -s marketplace/batteries/linear -p 'test_*.py'
 ```

@@ -6,11 +6,13 @@ HF_TOKEN_PATH when set, else `$HF_HOME/token`, else
 `$XDG_CACHE_HOME/huggingface/token` (`~/.cache` when unset). Neither present, the helper stops with the
 two ways to fix it; nothing is guessed. The Hub root is HF_ENDPOINT when
 set, else https://huggingface.co; `hub_api` reads one JSON path of it
-with the token, telling a 404 and a 401/403 apart for the caller.
+with the token, telling a 404 and a 401/403 apart for the caller. A
+multi-user deployment's helpers read the variable alone (`env_token`).
 """
 
 import json
 import os
+from enum import Enum
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -73,6 +75,17 @@ def stored_token(environ):
     return token or None
 
 
+def env_token(environ=None):
+    """The deployment's token alone. A multi-user deployment's token is
+    shared, so a CLI login stored on the host, some one person's, is never
+    read."""
+    environ = os.environ if environ is None else environ
+    token = (environ.get(TOKEN_VAR) or "").strip()
+    if not token:
+        raise RuntimeError(f"{TOKEN_VAR} is not set: set it where the runtime runs and restart it")
+    return token
+
+
 def resolve_token(environ=None):
     environ = os.environ if environ is None else environ
     token = (environ.get(TOKEN_VAR) or "").strip()
@@ -85,3 +98,24 @@ def resolve_token(environ=None):
         f"{TOKEN_VAR} is not set and {token_path(environ)} holds no token: "
         f"run `hf auth login`, or export {TOKEN_VAR} where the runtime runs and restart it"
     )
+
+
+class Deployment(Enum):
+    """Whose token the helpers hold. A single-user deployment's is one
+    person's, the viewer, from the variable or the CLI login. A multi-user
+    deployment's is shared: it has no viewer an answer may compare an
+    owner with, and it comes from the variable alone."""
+
+    SINGLE_USER = "single-user"
+    MULTI_USER = "multi-user"
+
+    @property
+    def has_viewer(self):
+        return self is Deployment.SINGLE_USER
+
+    def token(self, environ=None):
+        match self:
+            case Deployment.SINGLE_USER:
+                return resolve_token(environ)
+            case Deployment.MULTI_USER:
+                return env_token(environ)

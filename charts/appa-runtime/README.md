@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.33.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.34.0`. # x-release-please-version
 
 ## Install
 
@@ -207,3 +207,39 @@ replace the NetworkPolicy.
 include. An `include = ["batteries/<name>/appa.toml"]` line in the
 root policy resolves against those directories. Root rules still run
 first.
+
+This runtime serves many users, so `env.APPA_BATTERY_TARGET` defaults to
+`multi-user`: each included battery composes its multi-user target
+policy. Set it to `single-user` only for a runtime that acts for one
+person.
+
+`env.APPA_SESSION_PRINCIPAL` defaults to `none`. Set it to `wire` to make
+the user that kagent names in its `x-user-id` header each session's
+principal, the member of its `self` audience. The principal must be an
+email address, or the session start is refused. `/hook` does not
+authenticate its caller, so set `wire` only when kagent authenticates
+its users (for example behind oauth2-proxy) and the NetworkPolicy keeps
+other clients off `/hook`.
+
+A multi-user target may route member lookups to a roster in the root
+policy. The GitHub battery names people `github:<numeric id>` and asks
+`[externals.audience.host-members]`. When `appa_include_battery` adds
+such a battery, it appends the missing roster empty:
+
+```toml
+[externals.audience.host-members]
+readers = {}
+```
+
+An empty roster maps nobody, so every lookup through it denies until you
+map each member to an address, through `appa_update_policy` or your own
+ConfigMap:
+
+```toml
+[externals.audience.host-members]
+readers = { "github:583231" = "ana@corp.example" }
+```
+
+`gh api users/<login> --jq .id` prints a GitHub account's numeric id. A
+root you write yourself (`config.contents`, `config.existingConfigMap`)
+must declare the roster too, or the runtime refuses it.

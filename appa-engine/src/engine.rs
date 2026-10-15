@@ -14,7 +14,7 @@ use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom}
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
-use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV2};
+use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentity};
 use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry, ToolKind};
@@ -61,7 +61,10 @@ pub enum ForkStatus {
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
-    identity: PolicyIdentityV2,
+    identity: PolicyIdentity,
+    /// What earlier identity algorithms give this policy: the digest an opening an earlier engine
+    /// recorded names it by.
+    earlier_identities: Vec<PolicyIdentity>,
     dialect: PolicyDialectVersion,
 }
 
@@ -90,10 +93,12 @@ impl Engine {
         let profile = DeploymentProfile::declare(declaration.clone())?;
         let registry = Registry::build(config, planner_cap, profile)?;
         profile::validate_coverage(&registry, &declaration)?;
-        let identity = PolicyIdentityV2::of_registry(&registry);
+        let identity = PolicyIdentity::of_registry(&registry);
+        let earlier_identities = PolicyIdentity::earlier_of_registry(&registry);
         Ok(Engine {
             registry,
             identity,
+            earlier_identities,
             dialect,
         })
     }
@@ -106,8 +111,21 @@ impl Engine {
         self.registry.profile()
     }
 
-    pub fn identity(&self) -> PolicyIdentityV2 {
+    pub fn identity(&self) -> PolicyIdentity {
         self.identity
+    }
+
+    /// Whether a durable opening's `policy_digest` names this engine's policy: its identity, or
+    /// the identity an earlier identity algorithm gives the same policy. Every opening this engine
+    /// records carries [`Engine::identity`].
+    pub fn recognizes(&self, digest: &PolicyIdentity) -> bool {
+        *digest == self.identity || self.earlier_identities.contains(digest)
+    }
+
+    /// What earlier identity algorithms give this policy, newest first. Empty for a policy no
+    /// earlier algorithm could express.
+    pub fn earlier_identities(&self) -> &[PolicyIdentity] {
+        &self.earlier_identities
     }
 
     /// The open vectors derived from the validated declaration and the registered tool set —
@@ -10503,6 +10521,32 @@ mod tests {
             }),
             Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
         );
+        // An opening an earlier engine recorded carries the identity its algorithm gave this
+        // policy, and names this policy as surely as the current identity does.
+        let earlier = *e
+            .earlier_identities()
+            .first()
+            .expect("a policy that forwards nothing has a v1 identity");
+        assert_ne!(earlier, e.identity(), "the algorithms differ in their domain tag");
+        assert!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    *policy_digest = earlier;
+                }
+            })
+            .is_ok(),
+            "the v1 identity of this policy reopens its trajectory"
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    let other = engine(vec![plain_tool("send")]);
+                    *policy_digest = other.earlier_identities()[0];
+                }
+            }),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch)),
+            "the v1 identity of another policy does not"
+        );
         assert_eq!(
             mutated(&|fact| {
                 if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { profile, .. }) = fact {
@@ -13325,6 +13369,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: true,
+                preserving_output: true,
             }),
             "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
              return sanitizer can"
@@ -13361,8 +13406,10 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Within,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a drop the floor permits is to be accepted here, not delegated again"
+            "a drop the floor permits is to be accepted here, not delegated again, unless the offered output \
+             sanitizer keeps this trajectory's label"
         );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
@@ -13387,6 +13434,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
         );
@@ -13413,6 +13461,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "with no return sanitizer registered, no grandchild can take the drop either"
         );
@@ -13444,6 +13493,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a sanitizer whose `from` the suspicious value fails would refuse the child's return"
         );
@@ -13464,8 +13514,46 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route, \
+             and offered on the read's output it keeps this trajectory's label"
+        );
+    }
+
+    #[test]
+    fn an_output_sanitizer_that_leaves_a_narrowing_does_not_preserve_the_label() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let log = vec![opened(&e)];
+        let read = call("read_suspicious_internal", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .any(|plan| plan.sanitizer().is_some()),
+            "the trust-lifting sanitizer is offered on the read's output"
+        );
+        assert!(
+            matches!(
+                block.block.fork_advice,
+                Some(crate::plan::ForkAdvice::Narrowing {
+                    preserving_output: false,
+                    ..
+                })
+            ),
+            "the offer still narrows the audience, so it keeps no label: {:?}",
+            block.block.fork_advice
         );
     }
 

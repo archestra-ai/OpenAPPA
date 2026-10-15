@@ -75,7 +75,13 @@ async fn start(runtime: &Runtime, session: &str, address: &str, principal: Optio
         None => {
             let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
             let body = serde_json::to_vec(&wire).expect("the wire event serializes");
-            let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
+            let (status, answer) = hooks::answer(
+                runtime,
+                &appa_adapter_claude_code::adapter(),
+                appa_runtime_api::PrincipalSource::None,
+                &body,
+            )
+            .await;
             assert_eq!(status, 200, "{answer}");
         }
     }

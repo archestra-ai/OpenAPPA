@@ -1,20 +1,25 @@
-"""Validate an explicit token or the login cached by hf auth login."""
+"""Validate an explicit token or, for a single-user deployment, the login cached by hf auth login."""
 import json
 import os
 import urllib.error
 import urllib.request
-from hf_token import TOKEN_VAR, resolve_token, hub_root
+from hf_token import TOKEN_VAR, Deployment, env_token, resolve_token, hub_root
 
 
-def check(environ=None, open_url=urllib.request.urlopen):
+def check(environ=None, open_url=urllib.request.urlopen, deployment=Deployment.SINGLE_USER):
     environ = os.environ if environ is None else environ
-    authentication = "token" if environ.get(TOKEN_VAR, "").strip() else "cli"
+    match deployment:
+        case Deployment.SINGLE_USER:
+            authentication = "token" if environ.get(TOKEN_VAR, "").strip() else "cli"
+            token_of, missing = resolve_token, "cli_not_authenticated"
+        case Deployment.MULTI_USER:
+            authentication, token_of, missing = "token", env_token, "missing_credential"
     def result(status, reason):
         return {"status": status, "authentication": authentication, "reason": reason}
     try:
-        token = resolve_token(environ)
+        token = token_of(environ)
     except RuntimeError:
-        return result("needs_configuration", "cli_not_authenticated")
+        return result("needs_configuration", missing)
     try:
         request = urllib.request.Request(hub_root(environ) + "/api/whoami-v2", headers={"Authorization": f"Bearer {token}"})
         with open_url(request, timeout=8) as response:

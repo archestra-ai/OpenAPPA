@@ -1,0 +1,55 @@
+# Hugging Face battery, multi-user target: a shared token with no viewer
+# behind it. The same rules as the single-user target over
+# `repo-visibility-multi-user.py`, which reads the token from the
+# deployment alone and compares no owner with the token's: a public
+# repository's content is `public`; a gated repository's files, a
+# private repository, and any listing the token sees private names in
+# stay with the session's own person (`self`); a write into any
+# repository, private ones included, needs trusted data everyone may
+# see. No audience source is bound. These rules run before the base
+# policy's.
+
+[policy]
+version = 2
+
+# What a read of the repositories a call names returns.
+[[policy.annotator]]
+name = "huggingface.repo-visibility"
+ranks = ["suspicious"]
+audiences = ["self"]
+marks = []
+
+# What a write into the repository a call names needs.
+[[policy.annotator]]
+name = "huggingface.repo-readers"
+ranks = ["trusted"]
+audiences = ["self"]
+marks = []
+
+[externals.annotators."huggingface.repo-visibility"]
+command = ["python3", "repo-visibility-multi-user.py"]
+token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
+
+[externals.annotators."huggingface.repo-readers"]
+command = ["python3", "repo-visibility-multi-user.py"]
+token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
+
+# --- reads of named repositories: each one's visibility decides who may see the content ---
+
+[[policy.tool]]
+name = "mcp/huggingface/hub_repo_details"
+annotator = "huggingface.repo-visibility"
+
+[[policy.tool]]
+name = "mcp/huggingface/hf_fs"
+annotator = "huggingface.repo-visibility"
+
+# --- writes into a named repository: its visibility decides who must be allowed to see the data ---
+
+[[policy.tool]]
+name = "mcp/huggingface/hf_fs_write"
+annotator = "huggingface.repo-readers"
+
+[[policy.tool]]
+name = "mcp/huggingface/create_repo"
+annotator = "huggingface.repo-readers"

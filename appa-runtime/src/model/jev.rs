@@ -32,7 +32,7 @@ use super::MAX_ATTEMPTS;
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
-use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
+use crate::label_guide::{Call, Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_policy::AnnotatorBuiltin;
 use questions::Questions;
@@ -191,7 +191,7 @@ impl JevBackend {
                 &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
             )
         });
-        let state = State::of(&args, context.as_ref()).ok_or(unsupported)?;
+        let state = Call::of(&args, context.as_ref()).ok_or(unsupported)?;
         let key = self
             .key
             .as_ref()
@@ -472,33 +472,9 @@ struct JevDiagnostics<'a> {
 
 #[derive(Serialize)]
 struct JevRequest<'a> {
-    state: State<'a>,
+    state: Call<'a>,
     model: &'static str,
     questions: Questions,
-}
-
-/// The call as Jev reads it: its name, its redacted arguments, its description when the
-/// policy declares one, and what the deployment's context providers answered about it.
-#[derive(Serialize)]
-struct State<'a> {
-    tool: &'a str,
-    arguments: &'a serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<&'a serde_json::Value>,
-}
-
-impl<'a> State<'a> {
-    /// The complete call an annotation consult carries, or nothing for any other artifact.
-    fn of(args: &'a serde_json::Value, context: Option<&'a serde_json::Value>) -> Option<State<'a>> {
-        Some(State {
-            tool: args.get("name")?.as_str()?,
-            arguments: args.get("arguments").filter(|arguments| arguments.is_object())?,
-            description: args.get("description").and_then(serde_json::Value::as_str),
-            context,
-        })
-    }
 }
 
 fn consult_size(consult: &Consult) -> Result<usize, (JevFailure, NoAnswerReason)> {
@@ -1701,7 +1677,7 @@ mod tests {
     }
 
     async fn ask_the_live_api(spacing: Duration) {
-        const CONSULTS: usize = 20;
+        const CONSULTS: usize = crate::label_guide::EXAMPLES.len();
         let key = std::env::var("APPA_PROVIDER_JEV_API_KEY").expect("APPA_PROVIDER_JEV_API_KEY is set");
         let profile = JevProfile {
             url: JEV_DEFAULT_URL.to_string(),

@@ -107,6 +107,10 @@ must_contain 'name: APPA_GUIDE_RUNTIME_URL'
 must_contain 'value: "http://127.0.0.1:18787"'
 must_contain 'name: APPA_PERSISTENCE_ENABLED'
 must_contain 'value: "false"'
+must_contain 'name: APPA_BATTERY_TARGET'
+must_contain 'value: "multi-user"'
+must_contain 'name: APPA_SESSION_PRINCIPAL'
+must_contain 'value: "none"'
 must_contain 'mountPath: /var/run/appa/identity'
 must_contain 'path: pod-name'
 must_contain 'fieldPath: metadata.namespace'
@@ -279,6 +283,12 @@ must_refuse 'exceeds the 750 KiB encoded budget' -f "$work/large.yaml"
 printf '%s\n' 'include = ["batteries/slack/appa.toml"]' >"$work/policy.toml"
 must_render --set-file config.contents="$work/policy.toml"
 must_contain 'include = ["batteries/slack/appa.toml"]'
+
+must_render --set env.APPA_BATTERY_TARGET=single-user --set env.APPA_PROVIDER_GITHUB_TOKEN=x
+expect 1 'name: APPA_BATTERY_TARGET'
+must_contain 'value: "single-user"'
+must_not_contain 'value: "multi-user"'
+must_contain 'name: APPA_PROVIDER_GITHUB_TOKEN'
 
 must_contain 'busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
 

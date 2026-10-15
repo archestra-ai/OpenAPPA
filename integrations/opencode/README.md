@@ -119,11 +119,15 @@ V2 uses `plugins`, not `plugin`:
   "plugins": ["/absolute/path/to/OpenAPPA/integrations/opencode"],
   "mcp": {
     "servers": {
-      "appa": { "type": "remote", "url": "http://127.0.0.1:8789/mcp", "oauth": false }
+      "appa": { "type": "remote", "url": "http://127.0.0.1:8789/mcp", "oauth": false, "codemode": false }
     }
   }
 }
 ```
+
+Set `codemode` to `false` so OpenCode does not instruct the model to use
+the disabled `execute` tool. AppenCode exposes MCP tools directly. Use the
+same setting for other MCP servers connected to this protected deployment.
 
 Keep the exact MCP server name `appa`. Connect it before protected work;
 the agent needs its `appa_execute_remedy_plan` tool to execute remedy plans.
@@ -327,6 +331,39 @@ They check inherited audience/trust, return floors, sanitizer replacement,
 concurrent identities, interruption, restart, and refused alternate launches.
 They also check ordinary root flows and replacement of all tool-result
 channels. No inference-policy enforcement is claimed.
+
+### Published CLI smoke check
+
+The CLI smoke check runs separately from `bun test`. Its CLI installation does
+not add dependencies or execution time to the SDK test lane. Build APPA and
+install the plugin dependencies as above, then run:
+
+```sh
+(cd integrations/opencode/smoke && bun install --frozen-lockfile)
+python3 integrations/opencode/smoke/run.py
+```
+
+The check uses the published CLI and plugin SDK at the same pinned version.
+A local OpenAI-compatible SSE fixture scripts tool proposals. No model provider
+credentials, external inference, or paid tokens are used. Native OpenCode tools,
+APPA decisions, and MCP remedy execution are real.
+
+One root attempts a private read, executes its offered remedy, retries the read,
+and attempts a public web request. The check requires ordered native CLI tool
+results and zero requests at a local receiver. Receiver controls run before and
+after the journey. Assistant prose cannot satisfy these assertions.
+
+The runner owns an isolated OpenCode server. It waits for APPA health, MCP
+connection, and the remedy tool's actual advertisement before starting the
+journey. This checks CLI/host integration, not standalone cold-start behavior.
+Each run uses fresh HOME/XDG state, synthetic data, and an APPA policy/database
+outside the project. The runner copies the starting policy above unchanged.
+
+`--output /path/to/new-directory` selects where to retain diagnostic evidence;
+otherwise the runner creates a temporary directory and prints its path. Use
+`APPA_TEST_BINARY` to select a different APPA build. CI runs the check in
+`Runtime Binary Checks` and uploads failure evidence for seven days. Keep CLI
+and SDK pins aligned when upgrading. Video rendering is not part of this check.
 
 Check the example policy without invoking tools:
 

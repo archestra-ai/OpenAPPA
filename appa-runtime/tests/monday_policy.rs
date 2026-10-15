@@ -1,10 +1,12 @@
 //! monday battery: internal reads and reviewed writes, like Linear and PostHog.
 mod common;
 
+use appa_package::{BatteryTarget, MANIFEST_FILE, Package, Role};
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_runtime::config::Config;
 use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
+use common::{actor, loaded_session_runtime, offer_of, propose, ran, raw, repo_root, root, serve};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -15,14 +17,30 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     }
 }
 
-async fn runtime(dir: &tempfile::TempDir, expand_audience: bool) -> Arc<Runtime> {
-    runtime_with_monday_source(dir, expand_audience, None).await
+/// How the root composes the battery: its base policy alone, or under one target policy.
+#[derive(Clone, Copy)]
+enum Composition {
+    BaseAlone,
+    Target(BatteryTarget),
 }
 
-async fn runtime_with_monday_source(
+async fn runtime(dir: &tempfile::TempDir, expand_audience: bool) -> Arc<Runtime> {
+    composed_runtime(
+        dir,
+        expand_audience,
+        None,
+        Composition::Target(BatteryTarget::SingleUser),
+    )
+    .await
+}
+
+/// The battery composed as `composition` asks, its target's `monday` source served at
+/// `monday_source` when given.
+async fn composed_runtime(
     dir: &tempfile::TempDir,
     expand_audience: bool,
     monday_source: Option<&str>,
+    composition: Composition,
 ) -> Arc<Runtime> {
     let router = Router::new().route(
         "/audience",
@@ -37,19 +55,39 @@ async fn runtime_with_monday_source(
         }),
     );
     let source = serve(router).await;
+    let package = "marketplace/batteries/monday";
     let battery = "marketplace/batteries/monday/appa.toml";
-    let target = dir.path().join(battery);
-    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    let policy = std::fs::read_to_string(repo_root().join(battery)).unwrap();
-    let policy = if let Some(url) = monday_source {
-        policy.replace(
-            "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_MONDAY_TOKEN\"",
-            &format!("url = \"{url}\""),
-        )
-    } else {
-        policy
+    let target = dir.path().join(package);
+    std::fs::create_dir_all(&target).unwrap();
+    let battery_target = match composition {
+        // Without its manifest, the base composes alone.
+        Composition::BaseAlone => {
+            std::fs::copy(repo_root().join(battery), dir.path().join(battery)).unwrap();
+            BatteryTarget::SingleUser
+        }
+        Composition::Target(battery_target) => {
+            for entry in std::fs::read_dir(repo_root().join(package)).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+                }
+            }
+            if let Some(url) = monday_source {
+                let package = Package::read(&target.join(MANIFEST_FILE)).unwrap();
+                let Role::Battery(battery) = package.role else {
+                    panic!("monday is a battery");
+                };
+                let targets = battery.targets.expect("monday declares its targets");
+                let policy_path = target.join(targets.get(battery_target).policy.as_str());
+                let policy = std::fs::read_to_string(&policy_path).unwrap().replace(
+                    "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_MONDAY_TOKEN\"",
+                    &format!("url = \"{url}\""),
+                );
+                std::fs::write(policy_path, policy).unwrap();
+            }
+            battery_target
+        }
     };
-    std::fs::write(target, policy).unwrap();
     let expansion = if expand_audience {
         "audience_missing = [\"public\"]"
     } else {
@@ -90,7 +128,8 @@ selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members",
         ),
     )
     .unwrap();
-    session_runtime(dir.path(), &path).await
+    let config = Config::load_for_target(&path, &[], battery_target).expect("the composition loads");
+    loaded_session_runtime(dir.path(), config).await
 }
 
 async fn accept_read(runtime: &Arc<Runtime>, read: ProposedCall) {
@@ -217,8 +256,49 @@ async fn reviewed_writes_keep_trust_and_record_their_effects() {
     );
 }
 
+fn notification(user_id: &str) -> ProposedCall {
+    call(
+        "create_notification",
+        serde_json::json!({
+            "user_id": user_id,
+            "target_id": "1",
+            "target_type": "Project",
+            "text": "Internal plan",
+        }),
+    )
+}
+
 #[tokio::test]
 async fn notification_requires_its_recipient_to_read_the_input() {
+    notification_checks_its_recipient(BatteryTarget::SingleUser).await;
+}
+
+#[tokio::test]
+async fn multi_user_notification_requires_its_recipient_to_read_the_input() {
+    notification_checks_its_recipient(BatteryTarget::MultiUser).await;
+}
+
+/// The base alone looks up no recipient: a notification carries only public input, so it
+/// is refused unless an authority may expand the audience to the public.
+#[tokio::test]
+async fn the_base_alone_notifies_only_with_public_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let without_expansion = composed_runtime(&dir, false, None, Composition::BaseAlone).await;
+    accept_read(
+        &without_expansion,
+        call("get_board_info", serde_json::json!({ "boardId": 1 })),
+    )
+    .await;
+    assert!(matches!(
+        propose(&without_expansion, notification("1")).await,
+        HookDecision::DenyCall { offers, .. } if offers.is_empty()
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let with_expansion = composed_runtime(&dir, true, None, Composition::BaseAlone).await;
+    review_write(&with_expansion, notification("1")).await;
+}
+
+async fn notification_checks_its_recipient(battery_target: BatteryTarget) {
     let router = Router::new().route(
         "/",
         post(|body: String| async move {
@@ -234,20 +314,9 @@ async fn notification_requires_its_recipient_to_read_the_input() {
     );
     let source = serve(router).await;
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime_with_monday_source(&dir, false, Some(&source)).await;
+    let runtime = composed_runtime(&dir, false, Some(&source), Composition::Target(battery_target)).await;
     accept_read(&runtime, call("get_board_info", serde_json::json!({ "boardId": 1 }))).await;
 
-    let notification = |user_id| {
-        call(
-            "create_notification",
-            serde_json::json!({
-                "user_id": user_id,
-                "target_id": "1",
-                "target_type": "Project",
-                "text": "Internal plan",
-            }),
-        )
-    };
     assert!(matches!(
         propose(&runtime, notification("2")).await,
         HookDecision::DenyCall { offers, .. } if offers.is_empty()
