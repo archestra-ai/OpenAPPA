@@ -4,6 +4,7 @@ import { tmpdir, homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { existsSync } from 'node:fs'
+import type { Mcp } from '@opencode/schema/mcp'
 
 const checkout = resolve(import.meta.dir, '../..')
 const batteries = join(checkout, 'marketplace/batteries')
@@ -54,13 +55,18 @@ export async function configuration(config: string, binary: string) {
     for (const include of includes) await documents(resolve(dirname(path), include), found)
     return found
   }
-  return async (input: SetupInput, tools: { name: string; description: string; canonical: string }[]) => {
+  return async (input: SetupInput, tools: { name: string; description: string; canonical: string }[],
+    servers: { name: string; status: Mcp.Status['status'] }[] = []) => {
+    // The public host API has no acknowledgement binding MCP discovery to the
+    // registry. Even connected servers do not prove this is a complete catalog.
+    const inventory = { scope: 'observed', servers,
+      note: 'Tools are a live registry observation, not proof of complete MCP discovery or policy coverage. Connected servers can still have registry updates pending. Disabled servers are excluded; resolve pending, failed, or needs_auth servers and inspect again before proposing policy.' }
     switch (input.operation) {
       case 'inspect': {
         const policy = await readFile(config, 'utf8')
         return JSON.stringify({ config, policy, digest: digest(policy), deployment_target: target,
           description: await describe(config, tools.map(tool => tool.canonical)),
-          documents: Object.fromEntries(await documents(config)), tools, batteries: catalog })
+          documents: Object.fromEntries(await documents(config)), tools, inventory, batteries: catalog })
       }
       case 'battery': {
         const battery = catalog.find(item => item.name === input.battery)
@@ -72,6 +78,8 @@ export async function configuration(config: string, binary: string) {
       }
       case 'publish': {
         if (!input.policy || !input.expected_digest) throw new Error('Publish requires the approved complete policy and inspected digest.')
+        const unavailable = servers.filter(server => server.status !== 'connected' && server.status !== 'disabled')
+        if (unavailable.length) throw new Error(`MCP discovery is unresolved: ${unavailable.map(server => `${server.name} (${server.status})`).join(', ')}. Resolve these connections and inspect again before publishing.`)
         if (publishing) throw new Error('Another publish is in progress; inspect again.')
         publishing = true
         const candidate = join(dirname(config), `.appa-setup-${crypto.randomUUID()}.toml`)
@@ -83,7 +91,7 @@ export async function configuration(config: string, binary: string) {
           const description = await describe(candidate, tools.map(tool => tool.canonical))
           if (digest(await readFile(config, 'utf8')) !== input.expected_digest) throw new Error('Policy changed during validation; inspect and propose again.')
           await rename(candidate, config)
-          return JSON.stringify({ state: 'saved', description,
+          return JSON.stringify({ state: 'saved', description, inventory,
             next: 'Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions retain their opening policy.' })
         } finally {
           publishing = false

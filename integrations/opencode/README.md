@@ -117,6 +117,15 @@ then proposes changes. Review the proposal and approve it in a later message.
 The agent validates the complete configuration before saving it. Validation
 errors and stale proposals leave the existing policy unchanged.
 
+Inspection and publication wait up to 10 seconds for pending MCP discovery
+across global and project servers. Inspection reports server statuses alongside
+the observed tools. Publication refuses pending, failed, or authentication-required
+connections; disabled servers are excluded. Connected status does not prove
+registry completeness in OpenCode 2.0.28. Inspection and publication therefore
+report observed inventory, not complete tool coverage. Inspect again if a newly
+connected server's tools have not appeared. Configuration validation does not
+prove that every configured tool was discovered.
+
 Only `appa_setup` is exposed to the setup model. A separate APPA runtime gates
 that tool; ordinary shell, file, MCP, and delegation calls are not authorized.
 The tool can inspect the fixed deployment, read catalog batteries, and publish
@@ -236,11 +245,16 @@ Set `codemode` to `false` so OpenCode does not instruct the model to use
 the disabled `execute` tool. AppenCode exposes MCP tools directly. Use the
 same setting for other MCP servers connected to this protected deployment.
 
-Keep the exact MCP server name `appa`. Connect it before protected work;
-the agent needs its `appa_execute_remedy_plan` tool to execute remedy plans.
-MCP discovery can finish after the first model request. If the tool is not yet
-available, wait for connection and retry; a remedy has not executed until its
-tool call succeeds.
+Keep the exact MCP server name `appa`. Before admitting a protected prompt,
+AppenCode waits up to 10 seconds for its real `appa_execute_remedy_plan` executor
+to appear in the direct-tool registry. Unavailable connections or timeout reject
+the prompt before inference. Check the connection and retry the prompt; AppenCode
+does not reconnect or enable servers automatically. Unrelated MCP servers do not
+delay this check. This covers submitted prompts, not every automatic continuation
+or later disconnection. Discovery does not execute a remedy; its tool call must
+execute successfully before retrying the refused flow.
+OpenCode 2.0.28 returns HTTP 500 for prompt-hook failures without the diagnostic
+body. Check its logs and `opencode mcp list` in the same project and server.
 Install the plugin in a host-controlled directory. A plugin inside the
 agent's writable project is not protected against modification.
 

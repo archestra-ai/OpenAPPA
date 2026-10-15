@@ -11,6 +11,7 @@ import appencode from './appencode'
 async function host(url: string, directory: string, sessionID = 'ses_test', session: object = {}) {
   process.env.APPA_OPENCODE_RUNTIME_URL = url
   const hooks = new Map<string, Function>()
+  const servers: any[] = [{ name: 'appa', status: { status: 'connected' } }]
   const tools = new Map<string, any>([
     ...['read', 'write', 'edit', 'webfetch', 'websearch', 'shell', 'subagent', 'read_credentials', 'unknown'].map(name =>
       [name, { id: name, name, options: { codemode: true, pinned: true } }] as [string, any]),
@@ -40,11 +41,13 @@ async function host(url: string, directory: string, sessionID = 'ses_test', sess
       }),
       hook: hook('tool'),
     },
+    mcp: { list: () => Effect.succeed({ data: servers }) },
     session: { get: () => Effect.succeed({ id: sessionID, ...session }), hook: hook('session') },
     permission: { hook: hook('permission') },
   } as unknown as Context)))
   return {
     tools,
+    servers,
     async emit(name: string, fields: Record<string, unknown>) {
       const event = { sessionID, agent: 'build', messageID: 'msg_test', ...fields }
       await Effect.runPromise(hooks.get(name)!(event))
@@ -81,6 +84,20 @@ async function fixture(reply: (event: any) => unknown = event => ({
 }
 
 describe('published V2 hook contract', () => {
+  test('prompt admission rejects unavailable MCP without mistaking a lookalike for the remedy', async () => {
+    const plugin = await fixture()
+    plugin.tools.set('appa_execute_remedy_plan', {
+      id: 'appa_execute_remedy_plan', name: 'execute_remedy_plan', options: { codemode: false },
+    })
+    for (const status of ['disabled', 'failed', 'needs_auth']) {
+      plugin.servers[0].status = { status, error: 'credential-bearing transport detail' }
+      await expect(plugin.emit('session.prompt', { prompt: { text: 'Read private data' } })).rejects.toThrow(`APPA MCP is ${status}`)
+    }
+    plugin.servers.length = 0
+    await expect(plugin.emit('session.prompt', { prompt: { text: 'Read private data' } })).rejects.toThrow('not configured')
+    expect(plugin.events).toHaveLength(0)
+  })
+
   test('keeps tools direct and refuses Code Mode, subagents, forks and background calls', async () => {
     const plugin = await fixture()
     expect(plugin.tools.has('subagent')).toBe(false)

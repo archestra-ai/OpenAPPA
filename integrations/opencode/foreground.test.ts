@@ -23,6 +23,9 @@ const slow = new Map<string, { promise: Promise<void>; resolve: () => void }>()
 let corruptDecision: string | undefined
 let setupInspection: any
 let setupPolicy: string
+let appaCatalogGate: Promise<void> | undefined
+let appaCatalogSeen = false
+let projectMcp: ReturnType<typeof Bun.serve> | undefined
 
 function port() {
   const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
@@ -95,8 +98,15 @@ builtin = "redact-email"
 `)
   runtimePort = port()
   await startRuntime()
-  proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+  proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 30, async fetch(request) {
     const path = new URL(request.url).pathname
+    if (path === '/mcp' && request.method === 'POST') {
+      const rpc = await request.clone().json()
+      if (rpc.method === 'tools/list' && appaCatalogGate) {
+        appaCatalogSeen = true
+        await appaCatalogGate
+      }
+    }
     const event = path === '/hook' ? await request.clone().json() : undefined
     const response = await fetch(new Request(`http://127.0.0.1:${runtimePort}${path}`, request))
     if (event) {
@@ -229,16 +239,12 @@ afterAll(async () => {
   if (server) await server.exited
   runtime?.kill()
   if (runtime) await runtime.exited
-  provider?.stop(true); proxy?.stop(true)
+  provider?.stop(true); proxy?.stop(true); projectMcp?.stop(true)
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
 async function begin(task: string) {
   const session = await client.session.create({ location: { directory } })
-  await ready(async () => {
-    const mcp = await client.mcp.list({ location: { directory } })
-    if (!mcp.data.some(item => item.name === 'appa' && item.status.status === 'connected')) throw new Error('MCP discovery pending')
-  }, server, `${directory}/opencode-error.log`)
   await client.session.prompt({ sessionID: session.id, text: `delegate:${task}` })
   return session
 }
@@ -248,6 +254,52 @@ async function delegate(task: string) {
   await client.session.wait({ sessionID: session.id })
   return { session, history: await client.session.context({ sessionID: session.id }) }
 }
+
+test('cold prompts wait for the real remedy executor; unavailable discovery has a deadline', async () => {
+  for (const expire of [false, true]) {
+    server.kill(); await server.exited
+    let release!: () => void
+    appaCatalogGate = new Promise<void>(resolve => { release = resolve })
+    appaCatalogSeen = false
+    try {
+      await startServer()
+      const session = await client.session.create({ location: { directory } })
+      const prior = requests.length
+      const submitted = client.session.prompt({ sessionID: session.id, text: 'delegate:private cold-start' })
+      // Observe rejection immediately too: otherwise a failing baseline leaves an
+      // unhandled rejection while this test is waiting for the catalog request.
+      const outcome = submitted.then(() => 'admitted', error => String(error))
+      await ready(async () => { if (!appaCatalogSeen) throw new Error('Catalog not requested') }, server, `${directory}/opencode-error.log`)
+      expect(await Promise.race([outcome, Bun.sleep(150).then(() => 'waiting')])).toBe('waiting')
+      expect(requests.length).toBe(prior)
+      if (expire) {
+        const started = performance.now()
+        // This host reports prompt-hook failures as HTTP 500, without the message.
+        expect(await outcome).not.toBe('admitted')
+        const elapsed = performance.now() - started
+        expect(elapsed).toBeGreaterThan(9_000)
+        expect(elapsed).toBeLessThan(12_000)
+        expect(requests.length).toBe(prior)
+        release()
+        await client.session.prompt({ sessionID: session.id, text: 'delegate:after-timeout' })
+        await client.session.wait({ sessionID: session.id })
+        expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Parent received: child:after-timeout')
+      } else {
+        release()
+        expect(await outcome).toBe('admitted')
+        await client.session.wait({ sessionID: session.id })
+        const first = requests.slice(prior).find(request => request.tools?.length)
+        expect(first.tools.some((tool: any) => tool.function.name === 'appa_execute_remedy_plan')).toBe(true)
+        expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('alice@corp.example')
+        expect(hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'mcp__appa__execute_remedy_plan' &&
+          hook.reply.decision === 'pass_control')).toBe(true)
+      }
+    } finally {
+      release()
+      appaCatalogGate = undefined
+    }
+  }
+}, 45_000)
 
 test('published CLI runs a checked foreground child and refuses later child prompting', async () => {
   const { session, history } = await delegate('hello')
@@ -419,6 +471,29 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   settings.plugins = [payload]
   await writeFile(settingsPath, JSON.stringify(settings))
   expect(await readFile(`${directory}/opencode.json`, 'utf8')).toBe(projectSettings)
+  let releaseProject!: () => void
+  let projectCatalogSeen = false
+  const projectCatalog = new Promise<void>(resolve => { releaseProject = resolve })
+  projectMcp = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 30, async fetch(request) {
+    if (request.method !== 'POST') return new Response(null, { status: 405 })
+    const rpc = await request.json()
+    if (rpc.id === undefined) return new Response(null, { status: 202 })
+    if (rpc.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: rpc.id, result: {
+      protocolVersion: rpc.params.protocolVersion, serverInfo: { name: 'project-fixture', version: '1' }, capabilities: { tools: {} },
+    } })
+    if (rpc.method === 'tools/list') {
+      projectCatalogSeen = true
+      await projectCatalog
+      return Response.json({ jsonrpc: '2.0', id: rpc.id, result: { tools: [
+        { name: 'project_marker', description: 'Project-only inventory marker; never execute', inputSchema: { type: 'object', properties: {} } },
+      ] } })
+    }
+    return Response.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Marker must not execute' } })
+  } })
+  await writeFile(`${directory}/opencode.json`, JSON.stringify({ ...JSON.parse(projectSettings), mcp: { servers: {
+    'project-only': { type: 'remote', url: `${projectMcp.url}mcp`, oauth: false },
+    disabled: { type: 'remote', url: 'http://127.0.0.1:1/mcp', disabled: true, oauth: false },
+  } } }))
   const original = await readFile(target, 'utf8')
   setupPolicy = original.replace('opencode/appa.toml"]', 'opencode/appa.toml", "batteries/microsoft-learn/appa.toml"]')
     .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/shell(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
@@ -428,8 +503,37 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   await startRuntime()
   await startServer(target)
   const session = await client.session.create({ location: { directory } })
+  await ready(async () => {
+    const mcp = await client.mcp.list({ location: { directory } })
+    if (!projectCatalogSeen || !mcp.data.some(server => server.name === 'appa' && server.status.status === 'connected')) throw new Error('APPA not connected')
+  }, server, `${directory}/opencode-error.log`)
+  setupInspection = undefined
   await client.session.prompt({ sessionID: session.id, text: 'setup:init' })
-  await client.session.wait({ sessionID: session.id })
+  await ready(async () => {
+    if (!hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'appa_setup')) throw new Error('Inspection not started')
+  }, server, `${directory}/opencode-error.log`)
+  try {
+    await Bun.sleep(150)
+    expect(setupInspection).toBeUndefined()
+    const started = performance.now()
+    await client.session.wait({ sessionID: session.id })
+    expect(performance.now() - started).toBeLessThan(12_000)
+    expect(setupInspection.inventory).toMatchObject({ scope: 'observed', servers: expect.arrayContaining([
+      { name: 'appa', status: 'connected' }, { name: 'project-only', status: 'pending' }, { name: 'disabled', status: 'disabled' },
+    ]) })
+    expect(setupInspection.inventory.note).toContain('not proof of complete MCP discovery')
+    await client.session.prompt({ sessionID: session.id, text: 'setup:approve' })
+    await client.session.wait({ sessionID: session.id })
+    expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('project-only (pending)')
+    expect(await readFile(target, 'utf8')).toBe(original)
+  } finally { releaseProject() }
+  // Connected is not a registry barrier. Reinspection observes later registry updates.
+  await ready(async () => {
+    await client.session.prompt({ sessionID: session.id, text: 'setup:init' })
+    await client.session.wait({ sessionID: session.id })
+    if (!setupInspection.tools.some((tool: any) => tool.canonical === 'mcp/project-only/project_marker')) throw new Error('Registry update pending')
+  }, server, `${directory}/opencode-error.log`)
+  expect(setupInspection.inventory.servers).toContainEqual({ name: 'project-only', status: 'connected' })
   expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Approve, or tell me what to change.')
   expect(await readFile(target, 'utf8')).toBe(original)
   expect(setupInspection.tools.some((tool: any) => tool.canonical === 'host/opencode/shell')).toBe(true)
@@ -560,7 +664,7 @@ selectors = [{ template = "members", feeds = "internal" }]
     await startServer()
     await ready(async () => {
       const connected = (await client.mcp.list({ location: { directory } })).data.filter(item => item.status.status === 'connected')
-      if (connected.length !== 5) throw new Error('MCP discovery pending')
+      if (!['appa', ...Object.keys(tools)].every(name => connected.some(server => server.name === name))) throw new Error('MCP discovery pending')
     }, server, `${directory}/opencode-error.log`)
     async function call(sessionID: string, name: string, input: unknown, remedy = true) {
       await client.session.prompt({ sessionID, text: `battery:${JSON.stringify({ name, input, remedy })}` })

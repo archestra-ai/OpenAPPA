@@ -29,6 +29,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::encryption::{StorageCipher, field_context};
 use ::postgres::{Client, GenericClient};
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
@@ -323,6 +324,7 @@ pub(crate) struct PostgresStore {
     lease: Option<LeasedPostgres>,
     /// Shared with every lease of this store.
     logs: Arc<LogCache>,
+    pub(crate) cipher: StorageCipher,
 }
 
 /// How many facts the cached logs of one store hold at most, together. A log read past the
@@ -469,7 +471,17 @@ impl PostgresStore {
             pool,
             lease: None,
             logs: Arc::default(),
+            cipher: StorageCipher::Plain,
         })
+    }
+
+    pub(crate) fn encrypted_view(&self, cipher: StorageCipher) -> Self {
+        Self {
+            pool: Arc::clone(&self.pool),
+            lease: None,
+            logs: Arc::default(),
+            cipher,
+        }
     }
 
     /// A store pinned to one pooled connection; an unleased store takes a connection per
@@ -485,6 +497,7 @@ impl PostgresStore {
                 lease: self.pool.checkout()?,
             }),
             logs: Arc::clone(&self.logs),
+            cipher: self.cipher.clone(),
         })
     }
 
@@ -564,8 +577,11 @@ impl PostgresStore {
     ) -> Result<OperationClaim, ReceiptError> {
         let input = serde_json::to_value(StoredOperationInput::from_request(&request))
             .map_err(|error| ReceiptError::storage(error.to_string()))?;
+        let cipher = self.cipher.clone();
+        let input = cipher.seal_json(&operation_field(&request.key, "input"), &input)?;
         self.transaction(move |client| {
             let key = &request.key;
+            check_root_cipher(client, request.root.as_str(), &cipher)?;
             for _ in 0..CLAIM_ATTEMPTS {
                 let inserted = client.execute(
                     "INSERT INTO openappa_operations \
@@ -587,7 +603,7 @@ impl PostgresStore {
                     return Ok(OperationClaim::Claimed);
                 }
                 // Gone again when the host deleted it after the insert met it.
-                let Some(stored) = read_operation(client, key)? else {
+                let Some(stored) = read_operation(client, key, &cipher)? else {
                     continue;
                 };
                 let claim = resolve_operation_claim(stored, &request, lease.owner())?;
@@ -619,9 +635,11 @@ impl PostgresStore {
         decision: Value,
         owner: LeaseOwner,
     ) -> Result<(), ReceiptError> {
+        let cipher = self.cipher.clone();
         self.transaction(move |client| {
-            let existing = read_operation(client, &key)?;
+            let existing = read_operation(client, &key, &cipher)?;
             if let Completion::Write = resolve_operation_completion(existing, &key, &decision, &owner)? {
+                let decision = cipher.seal_json(&operation_field(&key, "decision"), &decision)?;
                 client.execute(
                     "UPDATE openappa_operations SET status='complete', decision=$4 \
                      WHERE organization_id=$1 AND session_id=$2 AND operation_id=$3",
@@ -644,8 +662,10 @@ impl PostgresStore {
         request: ProcessedResultRequest,
         lease: ReceiptLease,
     ) -> Result<ProcessedResultClaim, ReceiptError> {
+        let cipher = self.cipher.clone();
         self.transaction(move |client| {
             let key = &request.key;
+            check_root_cipher(client, request.root.as_str(), &cipher)?;
             for _ in 0..CLAIM_ATTEMPTS {
                 let inserted = client.execute(
                     "INSERT INTO openappa_processed_results \
@@ -665,7 +685,7 @@ impl PostgresStore {
                 if inserted == 1 {
                     return Ok(ProcessedResultClaim::Claimed);
                 }
-                let Some(stored) = read_result(client, key)? else {
+                let Some(stored) = read_result(client, key, &cipher)? else {
                     continue;
                 };
                 let claim = resolve_result_claim(stored, &request, lease.owner())?;
@@ -698,9 +718,12 @@ impl PostgresStore {
         decision: Value,
         owner: LeaseOwner,
     ) -> Result<(), ReceiptError> {
+        let cipher = self.cipher.clone();
         self.transaction(move |client| {
-            let existing = read_result(client, &key)?;
+            let existing = read_result(client, &key, &cipher)?;
             if let Completion::Write = resolve_result_completion(existing, &key, &approved_output, &decision, &owner)? {
+                let approved_output = cipher.seal_text(&result_field(&key, "approved_output"), &approved_output)?;
+                let decision = cipher.seal_json(&result_field(&key, "decision"), &decision)?;
                 client.execute(
                     "UPDATE openappa_processed_results \
                      SET status='complete', approved_output=$4, decision=$5, completed_at=clock_timestamp() \
@@ -840,6 +863,11 @@ impl PostgresStore {
         now: SystemTime,
         quota: usize,
     ) -> Result<(), HeldError> {
+        if self.cipher.is_encrypted() {
+            return Err(HeldError::Storage(
+                "peer sharing is unavailable for an encrypted storage view".into(),
+            ));
+        }
         let receiver = receiver.as_str().to_owned();
         let (id, digest, label, body) = (
             held.id.as_str().to_owned(),
@@ -950,6 +978,11 @@ impl PostgresStore {
     }
 
     pub(crate) fn claim_embedded_peer(&self, fresh: &NewEmbedded) -> Result<EmbeddedClaim, EmbeddedError> {
+        if self.cipher.is_encrypted() {
+            return Err(EmbeddedError::Storage(
+                "peer sharing is unavailable for an encrypted storage view".into(),
+            ));
+        }
         let fresh = fresh.clone();
         self.transaction(move |client| {
             lock_root(client, &fresh.root)?;
@@ -1058,6 +1091,11 @@ impl PostgresStore {
         call_id: &str,
         arguments: &str,
     ) -> Result<ReadTake, EmbeddedError> {
+        if self.cipher.is_encrypted() {
+            return Err(EmbeddedError::Storage(
+                "peer sharing is unavailable for an encrypted storage view".into(),
+            ));
+        }
         let (root, id, recipient, call_id, arguments) = (
             root.to_owned(),
             id.to_owned(),
@@ -1092,6 +1130,11 @@ impl PostgresStore {
         generation: i64,
         decision: &str,
     ) -> Result<bool, EmbeddedError> {
+        if self.cipher.is_encrypted() {
+            return Err(EmbeddedError::Storage(
+                "peer sharing is unavailable for an encrypted storage view".into(),
+            ));
+        }
         let (root, id, call_id) = (root.to_owned(), id.to_owned(), call_id.to_owned());
         let decision = serde_json::from_str::<serde_json::Value>(decision)
             .map_err(|error| EmbeddedError::Storage(format!("invalid read receipt JSON: {error}")))?;
@@ -1146,6 +1189,10 @@ impl PostgresStore {
         bytes: Vec<u8>,
     ) -> Result<TrajectoryId, CreateError> {
         let id = root.as_str().to_owned();
+        let bytes = self
+            .cipher
+            .seal_bytes(&event_field(&id, 0), &bytes)
+            .map_err(PostgresError::from)?;
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
         let created = self.query(move |client| {
@@ -1232,6 +1279,15 @@ impl PostgresStore {
                 Ok((prefix as u64, rows))
             }
         })?;
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(offset, bytes)| {
+                self.cipher
+                    .open_bytes(&event_field(&id, from + offset as u64), &bytes)
+                    .map_err(PostgresError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let (log, last_batch) = match cached {
             Some(CachedLog { mut log, last_batch }) if prefix == from && rows.first() == Some(&last_batch) => {
                 let batches = rows.into_iter().skip(1).collect::<Vec<_>>();
@@ -1289,13 +1345,26 @@ impl PostgresStore {
 
     pub(super) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
         let workspace = workspace.to_owned();
+        let cipher = self.cipher.clone();
         self.query(move |client| {
             let rows = client.query(
                 "SELECT seq,payload FROM openappa_file_events WHERE workspace=$1 ORDER BY seq",
                 &[&workspace],
             )?;
-            contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
-                .map_err(|error| PostgresError(error.to_string()))
+            let batches = contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+                .map_err(|error| PostgresError(error.to_string()))?;
+            batches
+                .into_iter()
+                .enumerate()
+                .map(|(seq, bytes)| {
+                    cipher
+                        .open_bytes(
+                            &field_context(&["openappa_file_events", &workspace, &seq.to_string()]),
+                            &bytes,
+                        )
+                        .map_err(Into::into)
+                })
+                .collect()
         })
         .map_err(Into::into)
     }
@@ -1306,6 +1375,13 @@ impl PostgresStore {
         payload: Vec<u8>,
     ) -> Result<(), crate::files::FileStoreError> {
         let workspace = workspace.to_owned();
+        let payload = self
+            .cipher
+            .seal_bytes(
+                &field_context(&["openappa_file_events", &workspace, &0.to_string()]),
+                &payload,
+            )
+            .map_err(PostgresError::from)?;
         self.query(move |client| {
             client.execute(
                 "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,0,$2) ON CONFLICT DO NOTHING",
@@ -1327,6 +1403,13 @@ impl PostgresStore {
         root: Option<TrajectoryId>,
     ) -> Result<(), crate::files::FileStoreError> {
         let workspace = workspace.to_owned();
+        let payload = self
+            .cipher
+            .seal_bytes(
+                &field_context(&["openappa_file_events", &workspace, &basis.to_string()]),
+                &payload,
+            )
+            .map_err(PostgresError::from)?;
         self.transaction(move |client| {
             let position = stored_position(basis)?;
             let appended = client.execute(
@@ -1407,10 +1490,15 @@ impl PostgresStore {
         bytes: Vec<u8>,
         key: Option<&str>,
     ) -> Result<(), AppendError> {
+        let bytes = self
+            .cipher
+            .seal_bytes(&event_field(root.as_str(), basis), &bytes)
+            .map_err(PostgresError::from)?;
         let batch = Batch::new(root, basis, bytes, key, None);
+        let cipher = self.cipher.clone();
         self.query(move |client| {
             let mut transaction = client.transaction()?;
-            let written = batch.write(&mut transaction)?;
+            let written = batch.write(&mut transaction, &cipher)?;
             if written == Written::Done {
                 transaction.commit()?;
             }
@@ -1427,10 +1515,15 @@ impl PostgresStore {
         key: Option<&str>,
         hold: &crate::embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
+        let bytes = self
+            .cipher
+            .seal_bytes(&event_field(root.as_str(), basis), &bytes)
+            .map_err(PostgresError::from)?;
         let batch = Batch::new(root, basis, bytes, key, Some(HeldRead::new(hold)));
+        let cipher = self.cipher.clone();
         self.query(move |client| {
             let mut transaction = client.transaction()?;
-            let written = batch.write(&mut transaction)?;
+            let written = batch.write(&mut transaction, &cipher)?;
             if written == Written::Done {
                 transaction.commit()?;
             }
@@ -1462,9 +1555,15 @@ impl PostgresStep<'_> {
         key: Option<&str>,
         hold: Option<&crate::embedded::EmbeddedAppendHold<'_>>,
     ) -> Result<(), AppendError> {
+        let bytes = self
+            .store
+            .cipher
+            .seal_bytes(&event_field(self.root.as_str(), basis), &bytes)
+            .map_err(PostgresError::from)?;
         let batch = Batch::new(&self.root, basis, bytes, key, hold.map(HeldRead::new));
+        let cipher = self.store.cipher.clone();
         let written = self.worker().run(move |state| {
-            let written = batch.write(&mut state.client)?;
+            let written = batch.write(&mut state.client, &cipher)?;
             if written == Written::Done {
                 state.client.batch_execute("COMMIT")?;
             }
@@ -1566,7 +1665,8 @@ impl Batch {
 
     /// Write this batch inside the caller's transaction. The `(root, seq)` key is the
     /// compare-and-swap: a position another writer took inserts nothing.
-    fn write(&self, client: &mut impl GenericClient) -> Result<Written, PostgresError> {
+    fn write(&self, client: &mut impl GenericClient, cipher: &StorageCipher) -> Result<Written, PostgresError> {
+        check_root_cipher(client, &self.root, cipher)?;
         let current: i64 = client
             .query_one(
                 "SELECT COALESCE(MAX(seq) + 1, 0) FROM openappa_events WHERE root = $1",
@@ -1632,7 +1732,11 @@ impl From<::postgres::Error> for ReceiptError {
 
 /// Lock one operation receipt row for the rest of the transaction and read it, its lease
 /// judged by the database clock.
-fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<StoredOperation>, ReceiptError> {
+fn read_operation(
+    client: &mut Client,
+    key: &OperationKey,
+    cipher: &StorageCipher,
+) -> Result<Option<StoredOperation>, ReceiptError> {
     client
         .query_opt(
             "SELECT organization_id, caller_id, session_id, root, input, status, decision, \
@@ -1641,7 +1745,7 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
             &[&key.session.organization_id, &key.session.session_id, &key.operation_id],
         )?
         .map(|row| {
-            let input = StoredOperationInput::decode(row.get(4))?;
+            let input = StoredOperationInput::decode(cipher.open_json(&operation_field(key, "input"), row.get(4))?)?;
             Ok(StoredOperation {
                 session: SessionScope {
                     organization_id: row.get(0),
@@ -1651,7 +1755,11 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
                 root: row.get(3),
                 semantic: input.semantic,
                 status: row.get(5),
-                decision: row.get::<_, Option<Value>>(6).map(Ok),
+                decision: row.get::<_, Option<Value>>(6).map(|value| {
+                    cipher
+                        .open_json(&operation_field(key, "decision"), value)
+                        .map_err(ReceiptError::from)
+                }),
                 lease: StoredLease {
                     owner: row.get(7),
                     live: row.get(8),
@@ -1662,28 +1770,76 @@ fn read_operation(client: &mut Client, key: &OperationKey) -> Result<Option<Stor
 }
 
 /// Lock one processed-result receipt row and read it, as [`read_operation`] does.
-fn read_result(client: &mut Client, key: &ProcessedResultKey) -> Result<Option<StoredResult>, ReceiptError> {
-    Ok(client
+fn read_result(
+    client: &mut Client,
+    key: &ProcessedResultKey,
+    cipher: &StorageCipher,
+) -> Result<Option<StoredResult>, ReceiptError> {
+    client
         .query_opt(
             "SELECT organization_id, session_id, root, status, approved_output, decision, \
                     lease_owner, COALESCE(lease_expires_at > now(), false) \
              FROM openappa_processed_results WHERE organization_id=$1 AND session_id=$2 AND tool_call_id=$3 FOR UPDATE",
             &[&key.session.organization_id, &key.session.session_id, &key.tool_call_id],
         )?
-        .map(|row| StoredResult {
-            session: SessionScope {
-                organization_id: row.get(0),
-                session_id: row.get(1),
-            },
-            root: row.get(2),
-            status: row.get(3),
-            approved_output: row.get(4),
-            decision: row.get::<_, Option<Value>>(5).map(Ok),
-            lease: StoredLease {
-                owner: row.get(6),
-                live: row.get(7),
-            },
-        }))
+        .map(|row| {
+            let root: String = row.get(2);
+            check_root_cipher(client, &root, cipher)?;
+            Ok(StoredResult {
+                session: SessionScope {
+                    organization_id: row.get(0),
+                    session_id: row.get(1),
+                },
+                root,
+                status: row.get(3),
+                approved_output: row
+                    .get::<_, Option<String>>(4)
+                    .map(|value| cipher.open_text(&result_field(key, "approved_output"), value))
+                    .transpose()?,
+                decision: row.get::<_, Option<Value>>(5).map(|value| {
+                    cipher
+                        .open_json(&result_field(key, "decision"), value)
+                        .map_err(ReceiptError::from)
+                }),
+                lease: StoredLease {
+                    owner: row.get(6),
+                    live: row.get(7),
+                },
+            })
+        })
+        .transpose()
+}
+
+fn check_root_cipher(client: &mut impl GenericClient, root: &str, cipher: &StorageCipher) -> Result<(), PostgresError> {
+    if let Some(row) = client.query_opt("SELECT payload FROM openappa_events WHERE root=$1 AND seq=0", &[&root])? {
+        let bytes: Vec<u8> = row.get(0);
+        cipher.open_bytes(&event_field(root, 0), &bytes)?;
+    }
+    Ok(())
+}
+
+fn operation_field(key: &OperationKey, field: &str) -> String {
+    field_context(&[
+        "openappa_operations",
+        &key.session.organization_id,
+        &key.session.session_id,
+        &key.operation_id,
+        field,
+    ])
+}
+
+fn result_field(key: &ProcessedResultKey, field: &str) -> String {
+    field_context(&[
+        "openappa_processed_results",
+        &key.session.organization_id,
+        &key.session.session_id,
+        &key.tool_call_id,
+        field,
+    ])
+}
+
+fn event_field(root: &str, seq: u64) -> String {
+    field_context(&["openappa_events", root, &seq.to_string(), "payload"])
 }
 
 /// The primary key each receipt table must carry, column for column. A host on another key

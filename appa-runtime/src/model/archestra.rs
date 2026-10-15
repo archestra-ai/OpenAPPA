@@ -11,6 +11,17 @@ use crate::consult::ModelPrompt;
 use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, error_line, read_body};
 use appa_policy::AnnotatorBuiltin;
 
+// Scoped around the exact consult future, including retries and hedges; no
+// spawned task or process-wide endpoint configuration carries another request's context.
+tokio::task_local! { static HOST_CONTEXT: String; }
+
+pub(crate) async fn with_context<T>(context: Option<&str>, future: impl Future<Output = T>) -> T {
+    match context {
+        Some(context) => HOST_CONTEXT.scope(context.to_owned(), future).await,
+        None => future.await,
+    }
+}
+
 /// One client for the host's endpoint, shared by every `builtin = "archestra"` Annotator of
 /// the deployment. Its permit pool is the runtime's `archestra` gate.
 #[derive(Clone)]
@@ -73,6 +84,11 @@ impl ArchestraBackend {
             Some(EndpointToken::Set(token)) => request = request.bearer_auth(token.reveal()),
             Some(EndpointToken::Deferred) => return Err(NoAnswerReason::Unregistered),
             None => {}
+        }
+        if let Ok(context) = HOST_CONTEXT.try_with(Clone::clone) {
+            let mut value = reqwest::header::HeaderValue::from_str(&context).map_err(|_| NoAnswerReason::Malformed)?;
+            value.set_sensitive(true);
+            request = request.header("x-archestra-openappa-context", value);
         }
         let mut response = request.send().await.map_err(|error| {
             tracing::debug!(%error, "the archestra consult failed");
