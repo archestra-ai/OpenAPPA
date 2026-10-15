@@ -24,14 +24,29 @@ After adding or editing a package, run:
 bash scripts/appa-marketplace.sh
 ```
 
-Commit the resulting catalog with the package changes. The script includes
-current tracked and non-ignored files, including new packages, and excludes
-ignored test artifacts. It validates packages and ownership before replacing
-the catalog. It uses the same digest implementation as the package library.
+The script validates packages and ownership before replacing the catalog.
+It includes current tracked and non-ignored files, including new packages,
+and excludes ignored test artifacts.
 
-CI runs `bash scripts/appa-marketplace.sh --check` and fails when the catalog
-needs regeneration. Regeneration is a developer operation; it does not update
-installed deployments or contact a remote marketplace.
+Before committing, verify the working files:
+
+```sh
+bash scripts/appa-marketplace.sh --check
+cargo test -p appa --locked --test marketplace
+```
+
+`--check` runs the same validation and generation, but compares the result with
+the working-tree catalog without modifying it. Use it to verify uncommitted digests.
+
+The Rust tests check working-tree package validation and runtime compatibility.
+The digest test, `every_recorded_digest_is_the_digest_of_its_committed_package`,
+checks the catalog and packages together from `git archive HEAD`.
+Deployments fetch committed content, not working files or ignored test artifacts.
+Passing that test does not verify uncommitted digests.
+
+Commit the catalog and package changes together, then rerun both commands to
+verify the new commit. CI runs both checks. Regeneration does not update installed
+deployments or contact a remote marketplace.
 
 ## Install and manage a deployment
 

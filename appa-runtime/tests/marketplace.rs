@@ -89,14 +89,18 @@ fn every_package_the_marketplace_names_validates() {
 /// rather than off the working tree, because a working tree also holds what the
 /// tests left behind — a `__pycache__` beside a battery's helper is not part of
 /// the package, and never reaches the archive a deployment resolves. When this
-/// fails, regenerate the catalog with `bash scripts/appa-marketplace.sh`.
+/// fails, regenerate and commit the catalog with the package changes. Read the
+/// catalog from the same archive: uncommitted catalog changes describe working
+/// files, not HEAD. Check those with `bash scripts/appa-marketplace.sh --check`.
 #[test]
 fn every_recorded_digest_is_the_digest_of_its_committed_package() {
     let exported = tempfile::tempdir().expect("a temp dir is creatable");
     export_committed(exported.path());
     let root = exported.path().join("marketplace");
+    let committed =
+        Marketplace::read(&root.join("marketplace.toml")).expect("the committed marketplace manifest reads");
 
-    let drifted: Vec<String> = manifest()
+    let drifted: Vec<String> = committed
         .packages
         .iter()
         .filter_map(|entry| {
@@ -110,7 +114,9 @@ fn every_recorded_digest_is_the_digest_of_its_committed_package() {
 
     assert!(
         drifted.is_empty(),
-        "Regenerate with `bash scripts/appa-marketplace.sh`: package digests changed:\n  {}",
+        "HEAD's catalog does not match HEAD's packages.\n\
+         Run `bash scripts/appa-marketplace.sh`, verify with `bash scripts/appa-marketplace.sh --check`, \
+         and commit the catalog with the package changes before rerunning this test:\n  {}",
         drifted.join("\n  ")
     );
 }
