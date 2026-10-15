@@ -41,6 +41,33 @@ existing includes, rules, comments, Authorities, audience mappings, and external
 bindings. Do not copy or edit battery files. The installer supplies the version's
 battery files. Use `publish` to change the approved root policy in this session.
 
+Bind a battery's namespace to the actual MCP server names from `inspect`, using
+the root `server_aliases` table. For example, `cloudflare = ["cf-docs", "cf-logs"]`
+binds both connections. Inclusion adds policy, not an MCP connection. Ask the
+operator to connect missing servers through OpenCode before checking coverage.
+
+The supported service batteries are Microsoft Learn, Cloudflare, Notion, and
+GitHub. Cloudflare logs and Notion workspace data require an `internal` audience
+mapping that covers the connection's readers. Preserve narrower existing mappings.
+Notion's reviewed operations need an Authority permitting `notion-review`.
+Propose that Authority only for those operations, not a wildcard approval rule.
+Human review requires OpenCode's terminal UI in the pinned version; its web and
+desktop interfaces do not display MCP review forms. Without a reviewer, keep
+reviewed calls blocked. Yes is initially selected; Enter submits approval.
+If a review is pending but invisible, tell the operator to reconnect a
+server-attached terminal to the same project, keeping the OpenCode server running.
+Never answer a review through shell or HTTP on the user's behalf.
+
+`battery` returns the selected target policy when one exists. Include only the
+base `appa.toml`; the runtime composes the target automatically. Setup and the
+protected runtime must use the same `APPA_BATTERY_TARGET` (default `single-user`).
+Read GitHub's target policy and manifest before proposing it. Its Python helpers
+need a GitHub login or deployment credential independently of the MCP connection.
+Have the operator run the manifest's target-specific readiness command from the
+GitHub battery directory, with the runtime's environment. Explain that validation
+checks policy structure, not provider credentials or repository access. Do not
+claim readiness from successful publication alone.
+
 The initial OpenCode battery covers selected file, web, shell, and delegation
 tools. It permits only `pwd` through the shell. Explain that limitation and
 propose narrowly scoped root contracts for needed commands. Do not add a

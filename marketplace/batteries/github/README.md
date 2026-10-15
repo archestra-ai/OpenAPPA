@@ -2,9 +2,9 @@
 
 Rules for the GitHub MCP server (`https://api.githubcopilot.com/mcp/`)
 with its default tool sets: your profile, repositories, issues, pull
-requests, and user search. Shared by the Claude Code and kagent plugins.
+requests, and user search. Shared by the Claude Code, kagent, and OpenCode plugins.
 Installing the battery adds its policy include; it does not create the
-MCP connection or enable tools in either host.
+MCP connection or enable tools in the host.
 
 ## Targets
 

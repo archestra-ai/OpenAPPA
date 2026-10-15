@@ -4,7 +4,7 @@ description = "Rules for Cloudflare's documentation and Workers Observability MC
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "opencode"]
 namespaces = ["cloudflare"]
 helpers = []
 benefit = "Rules for Cloudflare's documentation and Workers Observability servers: APPA keeps Worker logs, telemetry, and code internal and treats their text as suspicious. It covers no write tool."

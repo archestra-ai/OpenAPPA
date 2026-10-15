@@ -34,6 +34,36 @@ test('setup reads the installer catalog, filters host compatibility, and keeps d
   }
 })
 
+test('service batteries expose the policy selected for the deployment, not just the base', async () => {
+  const config = join(directory, 'catalog-policy.toml')
+  await writeFile(config, '[policy]\nversion = 2\n')
+  const previous = { store: process.env.APPA_OPENCODE_BATTERIES, target: process.env.APPA_BATTERY_TARGET }
+  process.env.APPA_OPENCODE_BATTERIES = resolve(import.meta.dir, '../../marketplace/batteries')
+  try {
+    for (const target of ['single-user', 'multi-user']) {
+      process.env.APPA_BATTERY_TARGET = target
+      const setup = await configuration(config, '/unused/appa')
+      for (const name of ['cloudflare', 'notion', 'github']) {
+        const battery = JSON.parse((await setup({ operation: 'battery', battery: name }, []))!)
+        expect(battery.deployment_target).toBe(target)
+        expect(battery.path).toBe(`batteries/${name}/appa.toml`)
+        if (name === 'github') {
+          expect(battery.target_policy).toBe(`${target}.toml`)
+          expect(battery.files[`${target}.toml`]).toContain('github.repository-visibility')
+          expect(battery.files[`${target}.toml`]).toContain(target === 'multi-user'
+            ? 'repository-visibility-multi-user.py' : 'repository_visibility.py')
+        }
+      }
+      await expect(setup({ operation: 'battery', battery: 'posthog' }, [])).rejects.toThrow('catalog')
+    }
+  } finally {
+    if (previous.store === undefined) delete process.env.APPA_OPENCODE_BATTERIES
+    else process.env.APPA_OPENCODE_BATTERIES = previous.store
+    if (previous.target === undefined) delete process.env.APPA_BATTERY_TARGET
+    else process.env.APPA_BATTERY_TARGET = previous.target
+  }
+})
+
 test('source setup is user-global across projects, preserves settings and policy, and refuses conflicting ownership', async () => {
   const project = join(directory, "project with spaces' $(touch APPA_SETUP_INJECTION)")
   const other = join(directory, 'another project')

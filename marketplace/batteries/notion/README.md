@@ -43,6 +43,10 @@ permits = { trust_below = "trusted", attention = ["notion-review"] }
 builtin = "hitl"
 ```
 
+OpenCode does not install a wildcard human Authority. Add the scoped Authority
+above when enabling reviewed changes. Use its terminal UI for review; version
+2.0.28 does not display MCP forms in the web or desktop session interface.
+
 ## Limits
 
 Notion exposes no page permissions to a policy: no tool reports who can

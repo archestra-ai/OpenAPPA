@@ -141,8 +141,44 @@ manual setup; project JSONC files remain untouched and load normally.
 The OpenCode battery starts conservatively: private reads narrow audience,
 web results lower trust, edits require trust, and the shell permits only `pwd`.
 The guide proposes additional root contracts for the tools you need. It includes
-only batteries that declare OpenCode support; Microsoft Learn is also supported.
+only batteries that declare OpenCode support: Microsoft Learn, Cloudflare,
+Notion, and GitHub, in addition to the OpenCode baseline.
 Other catalog batteries are not automatically treated as OpenCode-compatible.
+
+### Service batteries
+
+Connect the service's MCP server in OpenCode first. Battery inclusion supplies
+policy, not a connection or its authentication. The setup guide uses the live
+registry to propose `server_aliases` bindings when connection names differ from
+battery namespaces. Cloudflare can bind both documentation and observability
+connections to its one namespace.
+
+Map `internal` to the people who may read everything a Cloudflare observability
+or Notion connection reaches. Notion's structural and agent-session changes
+also require an Authority permitting `notion-review`; ordinary trusted workspace
+writes do not. The guide proposes this support with the battery, subject to
+operator approval. It does not add a wildcard Authority.
+
+Use OpenCode's terminal UI for human review. Version 2.0.28 exposes MCP review
+forms there, but not in its web/desktop session interface. Review shows the exact
+call. **Yes is initially highlighted; Enter submits approval.** Select No to
+refuse, or Escape to dismiss without a ruling. A missing answer grants nothing.
+Forms belong to the project's global queue, so inspect the call rather than
+assuming it belongs to the currently displayed session. In testing, newly queued
+forms sometimes did not appear until the terminal reconnected. If a remedy waits
+without showing a form, reconnect a server-attached terminal to the same project,
+leaving the OpenCode server running. Do not restart the server to surface a review.
+
+GitHub's Python helpers need their own credentials in the protected runtime's
+environment. For `single-user`, use `APPA_PROVIDER_GITHUB_TOKEN` or a `gh` login;
+run `python3 check.py` from the installed GitHub battery directory to check access.
+For `multi-user`, use a GitHub App installation token and `python3 check-multi-user.py`.
+The MCP connection's authentication does not provision these helpers. Use the same
+`APPA_BATTERY_TARGET` for setup and the protected runtime; it defaults to
+`single-user`. Setup shows the selected target policy and validates its composition
+with the base policy. Include only `appa.toml`; the runtime adds the selected target
+automatically. **Successful publication does not establish credential readiness
+or repository access.**
 
 ### Manual setup
 

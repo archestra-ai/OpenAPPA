@@ -29,11 +29,14 @@ export async function guide() {
 export async function configuration(config: string, binary: string) {
   if (!isAbsolute(config) || !isAbsolute(binary)) throw new Error('Setup requires absolute config and appa paths.')
   if (!(await lstat(config)).isFile()) throw new Error('Setup config must be a regular file, not a symlink.')
+  const target = process.env.APPA_BATTERY_TARGET ?? 'single-user'
+  if (!['single-user', 'multi-user'].includes(target)) throw new Error('APPA_BATTERY_TARGET must be single-user or multi-user.')
   const store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), 'batteries')
   const catalog = await Promise.all((await readdir(store)).sort().filter(name => !name.includes('.')).map(async name => {
     const manifest = Bun.TOML.parse(await readFile(join(store, name, 'appa-package.toml'), 'utf8')) as any
     return { name, description: manifest.description, hosts: manifest.battery.hosts,
-      namespaces: manifest.battery.namespaces ?? [], path: `batteries/${name}/appa.toml` }
+      namespaces: manifest.battery.namespaces ?? [], path: `batteries/${name}/appa.toml`,
+      target_policy: manifest.battery.targets?.[target]?.policy }
   })).then(items => items.filter(item => item.hosts.includes('opencode')))
   let publishing = false
   async function describe(path: string, tools: string[] = []) {
@@ -55,15 +58,16 @@ export async function configuration(config: string, binary: string) {
     switch (input.operation) {
       case 'inspect': {
         const policy = await readFile(config, 'utf8')
-        return JSON.stringify({ config, policy, digest: digest(policy),
+        return JSON.stringify({ config, policy, digest: digest(policy), deployment_target: target,
           description: await describe(config, tools.map(tool => tool.canonical)),
           documents: Object.fromEntries(await documents(config)), tools, batteries: catalog })
       }
       case 'battery': {
         const battery = catalog.find(item => item.name === input.battery)
         if (!battery) throw new Error('Choose a battery from the inspected catalog.')
-        return JSON.stringify({ ...battery, files: Object.fromEntries(await Promise.all(
-          ['appa-package.toml', 'appa.toml', 'README.md'].map(async name => [name, await readFile(join(store, battery.name, name), 'utf8')]))),
+        return JSON.stringify({ ...battery, deployment_target: target, files: Object.fromEntries(await Promise.all(
+          ['appa-package.toml', 'appa.toml', 'README.md', ...(battery.target_policy ? [battery.target_policy] : [])]
+            .map(async name => [name, await readFile(join(store, battery.name, name), 'utf8')]))),
           contracts: await readFile(assets ? join(assets, 'contracts.md') : join(checkout, 'website/content/docs/contracts.md'), 'utf8') })
       }
       case 'publish': {

@@ -3,7 +3,7 @@ import { OpenCode } from '@opencode/client'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { install } from './setup'
+import { configuration, install } from './setup'
 
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
@@ -40,10 +40,10 @@ async function ready(check: () => Promise<unknown>, process: ReturnType<typeof B
   throw new Error(`Process did not start: ${await readFile(log, 'utf8')}`)
 }
 
-async function startRuntime(config = `${directory}/appa.toml`) {
+async function startRuntime(config = `${directory}/appa.toml`, env: Record<string, string> = {}) {
   runtime = Bun.spawn([resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa'), 'runtime', '--adapter', 'opencode',
     '--listen', `127.0.0.1:${runtimePort}`, '--config', config, '--db', `${directory}/appa.db`],
-  { stdout: 'ignore', stderr: Bun.file(`${directory}/appa.log`) })
+  { env: { ...process.env, ...env }, stdout: 'ignore', stderr: Bun.file(`${directory}/appa.log`) })
   await ready(async () => { if (!(await fetch(`http://127.0.0.1:${runtimePort}/health`)).ok) throw new Error() }, runtime, `${directory}/appa.log`)
 }
 
@@ -113,7 +113,7 @@ builtin = "redact-email"
     const body = await request.json()
     requests.push(body)
     const prompt = [...body.messages].reverse().find((message: any) => message.role === 'user' &&
-      typeof message.content === 'string' && /^(child|delegate|probe-public|probe-shell|setup):/.test(message.content))
+      typeof message.content === 'string' && /^(child|delegate|probe-public|probe-shell|setup|battery):/.test(message.content))
     const user = prompt?.content ?? ''
     const conversation = body.messages.slice(body.messages.indexOf(prompt) + 1)
     const last = [...conversation].reverse().find((message: any) => message.role === 'tool' || message.role === 'assistant')
@@ -121,6 +121,18 @@ builtin = "redact-email"
       try { const parsed = JSON.parse(last.content); return parsed.error?.message ?? last.content } catch { return last.content }
     })() : ''
     const previous = [...conversation].reverse().find((message: any) => message.tool_calls)?.tool_calls?.[0]?.function.name
+    if (user.startsWith('battery:')) {
+      const call = JSON.parse(user.slice('battery:'.length))
+      if (output.includes('offer_id:') && previous !== 'appa_execute_remedy_plan' && call.remedy !== false) {
+        return completion(null, [{ name: 'appa_execute_remedy_plan', input: {
+          offer_id: output.match(/offer_id: "([a-f0-9]+)"/)[1],
+        } }])
+      }
+      if (last?.role === 'tool' && !(previous === 'appa_execute_remedy_plan' && output.includes('Authorized'))) {
+        return completion(`Battery result: ${output}`)
+      }
+      return completion(null, [{ name: call.name, input: call.input }])
+    }
     if (user.startsWith('setup:')) {
       if (last?.role === 'tool') {
         if (user === 'setup:init') {
@@ -466,3 +478,144 @@ test('operator setup proposes without writing, rejects invalid and stale policie
       call_id: 'not-an-operator', tool: 'appa_setup', arguments: { operation: 'inspect' } }) })
   expect((await refusal.json()).decision).not.toBe('allow_call')
 }, 60_000)
+
+test('catalog batteries enforce MCP flows, GitHub helper audiences, and explicit Notion review through OpenCode', async () => {
+  // External services and inference are fixtures; OpenCode, MCP transport, the
+  // packaged plugin, runtime, battery policies and Python helpers are real.
+  const calls: { server: string; name: string; arguments: any }[] = []
+  const apiReads: string[] = []
+  const tools: Record<string, string[]> = {
+    docs: ['search_cloudflare_documentation'],
+    logs: ['query_worker_observability'],
+    notes: ['notion-fetch', 'notion-update-page', 'notion-move-pages'],
+    codehub: ['get_file_contents', 'create_or_update_file'],
+  }
+  const fixture = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+    const path = new URL(request.url).pathname
+    if (path === '/audience') return Response.json({ version: 1, answer: { members: ['alice@corp.example'] } })
+    if (request.method === 'GET' && !tools[path.slice(1)]) {
+      apiReads.push(path)
+      if (request.headers.get('authorization') !== 'Bearer ghp_fixture') return new Response(null, { status: 401 })
+      if (path === '/user') return Response.json({ login: 'alice' })
+      if (path === '/user/emails') return Response.json([{ email: 'alice@corp.example', primary: true, verified: true }])
+      if (path === '/users/alice') return Response.json({ email: 'alice@corp.example' })
+      if (/^\/repos\/acme\/(private|public)\/collaborators$/.test(path)) return Response.json([{ login: 'alice', type: 'User' }])
+      if (/^\/repos\/acme\/(private|public)$/.test(path)) return Response.json({ visibility: path.endsWith('/private') ? 'private' : 'public', fork: false })
+      return new Response(null, { status: 404 })
+    }
+    if (request.method !== 'POST') return new Response(null, { status: 405 })
+    const body = await request.json()
+    if (body.id === undefined) return new Response(null, { status: 202 })
+    const server = path.slice(1)
+    let result: unknown
+    switch (body.method) {
+      case 'initialize': result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: server, version: '1' } }; break
+      case 'tools/list': result = { tools: (tools[server] ?? []).map(name => ({ name, description: name,
+        inputSchema: { type: 'object', properties: {}, additionalProperties: true } })) }; break
+      case 'tools/call':
+        calls.push({ server, ...body.params })
+        result = { content: [{ type: 'text', text: `${server}/${body.params.name} result` }] }; break
+      default: return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: -32601, message: 'Unknown method' } })
+    }
+    return Response.json({ jsonrpc: '2.0', id: body.id, result })
+  } })
+  try {
+    server.kill(); await server.exited
+    runtime.kill(); await runtime.exited
+    const target = `${directory}/batteries-deployment/appa.toml`
+    await install(`${directory}/battery-settings`, target, proxy.url.toString().replace(/\/$/, ''))
+    const setup = await configuration(target, resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa'))
+    const inspected = JSON.parse((await setup({ operation: 'inspect' }, []))!)
+    expect(inspected.batteries.map((battery: any) => battery.name)).toEqual(['cloudflare', 'github', 'microsoft-learn', 'notion', 'opencode'])
+    const policy = `include = ["batteries/opencode/appa.toml", "batteries/cloudflare/appa.toml", "batteries/notion/appa.toml", "batteries/github/appa.toml"]
+[server_aliases]
+cloudflare = ["docs", "logs"]
+notion = ["notes"]
+github = ["codehub"]
+[policy]
+version = 2
+[policy.deployment]
+context_control = true
+[policy.audience]
+internal = ["people:members"]
+[[policy.authority]]
+name = "notion-operator"
+permits = { attention = ["notion-review"] }
+[externals]
+timeout_ms = 10000
+review_timeout_ms = 30000
+max_body_bytes = 1048576
+[externals.authorities.notion-operator]
+builtin = "hitl"
+[externals.audience.people]
+url = "${fixture.url}audience"
+selectors = [{ template = "members", feeds = "internal" }]
+`
+    expect(JSON.parse((await setup({ operation: 'publish', policy, expected_digest: inspected.digest }, []))!).state).toBe('saved')
+    const settingsPath = `${directory}/config/opencode/opencode.json`
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
+    for (const name of Object.keys(tools)) settings.mcp.servers[name] = { type: 'remote', url: `${fixture.url}${name}`, oauth: false }
+    await writeFile(settingsPath, JSON.stringify(settings))
+    await startRuntime(target, { GITHUB_API_URL: fixture.url.toString().replace(/\/$/, ''), APPA_PROVIDER_GITHUB_TOKEN: 'ghp_fixture', APPA_BATTERY_TARGET: 'single-user' })
+    await startServer()
+    await ready(async () => {
+      const connected = (await client.mcp.list({ location: { directory } })).data.filter(item => item.status.status === 'connected')
+      if (connected.length !== 5) throw new Error('MCP discovery pending')
+    }, server, `${directory}/opencode-error.log`)
+    async function call(sessionID: string, name: string, input: unknown, remedy = true) {
+      await client.session.prompt({ sessionID, text: `battery:${JSON.stringify({ name, input, remedy })}` })
+      await client.session.wait({ sessionID })
+      return JSON.stringify(await client.session.context({ sessionID }))
+    }
+    const create = () => client.session.create({ location: { directory } })
+    const cloudflare = await create()
+    expect(await call(cloudflare.id, 'docs_search_cloudflare_documentation', { query: 'alarms' })).toContain('docs/search_cloudflare_documentation result')
+    expect(await call(cloudflare.id, 'logs_query_worker_observability', { query: { view: 'events' } })).toContain('logs/query_worker_observability result')
+    const beforeLeak = calls.length
+    await call(cloudflare.id, 'docs_search_cloudflare_documentation', { query: 'internal log contents' }, false)
+    expect(calls.length).toBe(beforeLeak)
+
+    const notion = await create()
+    expect(await call(notion.id, 'notes_notion-fetch', { id: 'page-1' })).toContain('notes/notion-fetch result')
+    expect(await call(notion.id, 'notes_notion-update-page', { page_id: 'page-1', content: 'trusted notes' })).toContain('notes/notion-update-page result')
+    for (const approval of [false, true, 'cancel'] as const) {
+      const session = await create()
+      const page = `review-${approval}`
+      await client.session.prompt({ sessionID: session.id, text: `battery:${JSON.stringify({ name: 'notes_notion-move-pages', input: { page_ids: [page], parent: 'destination' } })}` })
+      let form: any
+      await ready(async () => {
+        form = (await client.session.form.list({ sessionID: 'global' })).find(item => item.metadata?.server === 'appa')
+        if (!form) throw new Error('Waiting for review')
+      }, server, `${directory}/opencode-error.log`)
+      expect(form.metadata.message).toContain(page)
+      expect(form.metadata.message).toContain('notion-review')
+      expect(calls.some(call => call.arguments.page_ids?.includes(page))).toBe(false)
+      if (approval === 'cancel') await client.session.form.cancel({ sessionID: 'global', formID: form.id })
+      else await client.session.form.reply({ sessionID: 'global', formID: form.id, answer: { approval } })
+      await client.session.wait({ sessionID: session.id })
+      expect(calls.filter(call => call.arguments.page_ids?.includes(page))).toHaveLength(approval === true ? 1 : 0)
+    }
+
+    const github = await create()
+    expect(await call(github.id, 'codehub_get_file_contents', { owner: 'acme', repo: 'private', path: 'secret.txt' })).toContain('codehub/get_file_contents result')
+    expect(await call(github.id, 'codehub_create_or_update_file', { owner: 'acme', repo: 'private', path: 'copy.txt', content: 'private data' })).toContain('codehub/create_or_update_file result')
+    expect(await call(github.id, 'notes_notion-update-page', { page_id: 'page-1', content: 'shared with the same readers' })).toContain('notes/notion-update-page result')
+    const beforePublish = calls.length
+    await call(github.id, 'codehub_create_or_update_file', { owner: 'acme', repo: 'public', path: 'leak.txt', content: 'private data' }, false)
+    expect(calls.length).toBe(beforePublish)
+    const publicReader = await create()
+    expect(await call(publicReader.id, 'codehub_get_file_contents', { owner: 'acme', repo: 'public', path: 'README.md' })).toContain('codehub/get_file_contents result')
+    const beforeUntrustedWrite = calls.length
+    await call(publicReader.id, 'notes_notion-update-page', { page_id: 'page-1', content: 'untrusted public text' }, false)
+    expect(calls.length).toBe(beforeUntrustedWrite)
+    expect(apiReads).toContain('/repos/acme/private')
+    expect(apiReads).toContain('/repos/acme/public')
+    expect(apiReads).toContain('/repos/acme/private/collaborators')
+    const missing = await create()
+    const beforeMissing = calls.length
+    await call(missing.id, 'codehub_get_file_contents', { owner: 'acme', repo: 'unavailable', path: 'README.md' }, false)
+    expect(calls.length).toBe(beforeMissing)
+  } finally {
+    fixture.stop(true)
+  }
+}, 120_000)
