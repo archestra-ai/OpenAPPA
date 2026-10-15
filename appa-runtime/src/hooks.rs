@@ -63,6 +63,9 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
             adapter.name,
             appa_runtime_api::AdapterName::Amp | appa_runtime_api::AdapterName::OpenCode
         ),
+        // The runtime serves `yell` only when the deployment lets an agent report, so a block
+        // names it only then, spelled the way this host calls the runtime's MCP server.
+        yell_tool: runtime.agent_yell().then(|| runtime.model_spelling(YELL_TOOL)),
         ..EmbeddedPresentationOptions::default()
     };
     let handled = handle_internal(runtime, event, presentation).await;
@@ -406,6 +409,9 @@ fn file_tracking_context(runtime: &Runtime) -> String {
             ""
         }
 }
+
+/// The runtime's reporting tool as a policy names it.
+const YELL_TOOL: &str = "mcp/appa/yell";
 
 /// A subagent's words reach its parent through the checked return only; a call that
 /// names the file the harness keeps them in is refused before it runs.
@@ -2602,6 +2608,68 @@ mod tests {
             None,
         )
         .expect("the fixture deployment opens")
+    }
+
+    /// The block's reason the model reads for a spawn proposed before its return is declared,
+    /// under a deployment that does or does not let an agent report.
+    async fn spawn_block_reason(agent_yell: bool) -> String {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let text = format!(
+            r#"
+            [reporting]
+            agent_yell = {agent_yell}
+
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "host/claude-code/Agent"
+
+            [policy.deployment]
+            context_control = true
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#
+        );
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        // Served as Claude Code, so tool names come back the way that host spells them.
+        let runtime = Runtime::open_served(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .expect("the fixture deployment opens");
+        let spawn = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_input": {"prompt": "look it up"},
+        });
+        let (status, answer) = hook(&runtime, &json(&spawn)).await;
+        assert_eq!(status, 200, "{answer}");
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+        answer["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("a block carries its reason")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_block_points_at_yell_only_when_the_agent_may_report() {
+        let reporting = spawn_block_reason(true).await;
+        assert!(
+            reporting.contains("Report:\n  If a plan makes no sense") && reporting.contains("call mcp__appa__yell."),
+            "a block names the reporting tool as Claude Code calls it: {reporting}"
+        );
+        let silent = spawn_block_reason(false).await;
+        assert!(
+            !silent.contains("Report:") && !silent.contains("yell"),
+            "a deployment that does not serve yell never mentions it: {silent}"
+        );
     }
 
     fn yell_call(message: &str, with_trajectory: bool) -> serde_json::Value {
