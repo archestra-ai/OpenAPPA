@@ -1310,7 +1310,7 @@ impl Inner {
             } else {
                 PolicyEngine::Retired(self.retired_engine(&opened.policy_file_key, log.policy_file())?)
             };
-        if policy.identity_hex() != opened.policy_identity {
+        if !policy.recognizes(&opened.policy_digest) {
             return Err(EventError::PolicyUnavailable(format!(
                 "the stored policy file compiles to a different identity than the opening of {}",
                 log.root().as_str()
@@ -5683,6 +5683,96 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(
             matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
             "the root's policy file is gone, which is not a storage failure"
+        );
+    }
+
+    /// A root an earlier engine opened records the identity that engine's algorithm gave its
+    /// policy. It reopens under the same policy file, and it pins the same policy as a root this
+    /// engine opens. A digest no algorithm gives the policy still refuses.
+    #[tokio::test]
+    async fn a_root_an_earlier_identity_algorithm_opened_reopens() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let earlier = TrajectoryId("opened-under-v1".to_string());
+        let current = TrajectoryId("opened-under-v2".to_string());
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens"),
+        );
+        for root in [&earlier, &current] {
+            assert_eq!(
+                crate::hooks::handle(
+                    &runtime,
+                    appa_runtime_api::HookEvent::SessionStart {
+                        root: root.clone(),
+                        principal: None,
+                        address: None,
+                        title: None,
+                        launch: None,
+                        start: None,
+                    }
+                )
+                .await,
+                appa_runtime_api::HookDecision::Ack
+            );
+        }
+        let stored = runtime
+            .inner
+            .store
+            .log(&earlier)
+            .expect("the root reads")
+            .policy_file()
+            .to_vec();
+        let compiled = compile_stored_policy(&stored).expect("the stored policy compiles");
+        let hex = |identity: &appa_engine::profile::PolicyIdentity| crate::engine::hex(identity.bytes());
+        let v2 = hex(&compiled.engine().identity());
+        let v1 = hex(compiled
+            .engine()
+            .earlier_identities()
+            .first()
+            .expect("the policy has a v1 identity"));
+
+        // Rewrite the opening's digest as the v1 engine recorded it.
+        let rewrite = |digest: &str| {
+            let connection = rusqlite::Connection::open(&db).expect("the database opens");
+            let (seq, facts): (i64, Vec<u8>) = connection
+                .query_row(
+                    "SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq LIMIT 1",
+                    [earlier.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the opening batch reads");
+            let text = String::from_utf8(facts).expect("the batch is JSON");
+            let current_digest = [v1.as_str(), v2.as_str()]
+                .into_iter()
+                .find(|candidate| text.contains(candidate))
+                .expect("the opening records a digest of this policy");
+            runtime
+                .inner
+                .store
+                .corrupt_batch(&earlier, seq as u64, text.replace(current_digest, digest).as_bytes());
+        };
+        let reopened = || Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment reopens");
+
+        rewrite(&v1);
+        let fresh = reopened();
+        assert!(fresh.live(&earlier, &earlier).is_ok(), "the v1 opening reopens");
+        assert!(fresh.live(&current, &current).is_ok());
+        assert!(
+            peer::pinned_alike(
+                &fresh.inner.log(&earlier).expect("the root reads"),
+                &fresh.inner.log(&current).expect("the root reads"),
+            ),
+            "both roots opened under one policy file"
+        );
+        drop(fresh);
+
+        rewrite(&"07".repeat(32));
+        assert!(
+            matches!(
+                reopened().live(&earlier, &earlier),
+                Err(EventError::PolicyUnavailable(_))
+            ),
+            "a digest no algorithm gives this policy refuses"
         );
     }
 }

@@ -81,10 +81,14 @@ fn opening(log: &Log) -> Option<&TrajectoryOpening> {
 }
 
 /// Two families opened under one policy for one principal: a label one records means the
-/// same to the other.
-fn pinned_alike(one: &Log, other: &Log) -> bool {
+/// same to the other. One stored policy file is one policy even when the engines that opened
+/// the two families recorded its identity under different identity algorithms.
+pub(super) fn pinned_alike(one: &Log, other: &Log) -> bool {
     match (opening(one), opening(other)) {
-        (Some(one), Some(other)) => one.policy_digest == other.policy_digest && one.principal == other.principal,
+        (Some(one), Some(other)) => {
+            (one.policy_digest == other.policy_digest || one.policy_file_key == other.policy_file_key)
+                && one.principal == other.principal
+        }
         _ => false,
     }
 }

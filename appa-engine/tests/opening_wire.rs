@@ -3,7 +3,7 @@ use appa_engine::engine::Engine;
 use appa_engine::fact::{Fact, RootForkOrigin};
 use appa_engine::label::ReaderId;
 use appa_engine::profile::{
-    DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV2,
+    DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity,
     ProfileDeclaration,
 };
 use appa_engine::registry::{PlannerCap, RegistryConfig, TrustChain};
@@ -17,7 +17,7 @@ enum StoredFact<'a> {
         trajectory: &'a TrajectoryId,
         dialect: PolicyDialectVersion,
         profile: &'a DeploymentProfile,
-        policy_digest: PolicyIdentityV2,
+        policy_digest: PolicyIdentity,
         policy_file_key: &'a PolicyFileKey,
         open_vectors: Vec<OpenVector>,
         #[serde(skip_serializing_if = "Option::is_none")]

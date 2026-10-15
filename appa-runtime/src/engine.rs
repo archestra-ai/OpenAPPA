@@ -692,7 +692,7 @@ pub enum DispatchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub policy_file_key: String,
-    pub policy_identity: String,
+    pub policy_digest: appa_engine::profile::PolicyIdentity,
 }
 
 /// Where a trajectory stands in its family's log, as [`RuntimeEngine::liveness`]
@@ -734,9 +734,15 @@ impl PolicyEngine<'_> {
     }
 
     /// The policy identity of the deciding engine, lowercase hex — what
-    /// a root's opening record must name.
+    /// a root's opening record names when this engine opens it.
     pub fn identity_hex(&self) -> String {
         hex(self.engine().engine.identity().bytes())
+    }
+
+    /// Whether an opening record's digest names the deciding engine's policy, under the
+    /// current identity algorithm or an earlier one ([`appa_engine::engine::Engine::recognizes`]).
+    pub fn recognizes(&self, digest: &appa_engine::profile::PolicyIdentity) -> bool {
+        self.engine().engine.recognizes(digest)
     }
 }
 
@@ -753,7 +759,7 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
             ..
         })) => Some(Opened {
             policy_file_key: policy_file_key.as_str().to_string(),
-            policy_identity: hex(policy_digest.bytes()),
+            policy_digest: *policy_digest,
         }),
         _ => None,
     }
