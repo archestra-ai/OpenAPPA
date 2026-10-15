@@ -1,6 +1,7 @@
 #![cfg(feature = "postgres")]
 
 use appa_eventlog::encryption::StorageCipher;
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 #[test]
 fn existing_plaintext_tool_outputs_are_not_encrypted_envelopes() {
@@ -11,10 +12,21 @@ fn existing_plaintext_tool_outputs_are_not_encrypted_envelopes() {
         .seal_text("result", "private output")
         .unwrap();
     for output in ["ordinary result", "appa-storage-v1:user content", &encrypted] {
-        assert_eq!(StorageCipher::Plain.seal_text("result", output).unwrap(), output);
         assert_eq!(
             StorageCipher::Plain.open_text("result", output.to_owned()).unwrap(),
             output
         );
     }
+}
+
+#[test]
+fn existing_plaintext_escapes_still_decode() {
+    let stored = format!(
+        "appa-storage-v1:{}",
+        STANDARD.encode(b"\0appa-storage-v1\0\0appa-storage-v1:user content")
+    );
+    assert_eq!(
+        StorageCipher::Plain.open_text("result", stored).unwrap(),
+        "appa-storage-v1:user content"
+    );
 }

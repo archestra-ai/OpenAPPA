@@ -148,18 +148,29 @@ impl StorageCipher {
     }
 
     pub fn seal_text(&self, context: &str, text: &str) -> Result<String, StorageEncryptionError> {
-        if !self.is_encrypted() {
+        if !self.is_encrypted() && !text.starts_with(TEXT) {
             return Ok(text.to_owned());
         }
-        let bytes = self.seal_bytes(context, text.as_bytes())?;
+        let bytes = if self.is_encrypted() {
+            self.seal_bytes(context, text.as_bytes())?
+        } else {
+            [MAGIC, &[0], text.as_bytes()].concat()
+        };
         Ok(format!("{TEXT}{}", STANDARD.encode(bytes)))
     }
 
     pub fn open_text(&self, context: &str, text: String) -> Result<String, StorageEncryptionError> {
-        // Tool output is arbitrary text, including strings that resemble an
-        // envelope. The receipt reader checks the root's cipher before using
-        // this plain view; content alone cannot identify its storage mode.
+        // The root, not arbitrary tool output, identifies the storage mode.
+        // Plain readers retain literal envelope-like text and also accept the
+        // explicit plaintext escape that existing storage writers produce.
         if !self.is_encrypted() {
+            if let Some(encoded) = text.strip_prefix(TEXT)
+                && let Ok(bytes) = STANDARD.decode(encoded)
+                && let Some(literal) = bytes.strip_prefix(MAGIC).and_then(|body| body.strip_prefix(&[0]))
+                && let Ok(literal) = std::str::from_utf8(literal)
+            {
+                return Ok(literal.to_owned());
+            }
             return Ok(text);
         }
         let Some(encoded) = text.strip_prefix(TEXT) else {
