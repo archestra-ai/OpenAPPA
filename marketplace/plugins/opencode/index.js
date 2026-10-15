@@ -1279,7 +1279,12 @@ ${stdout}`);
       await documents(resolve(dirname(path), include), found);
     return found;
   }
-  return async (input, tools) => {
+  return async (input, tools, servers = []) => {
+    let inventory2 = {
+      scope: "observed",
+      servers,
+      note: "Tools are a live registry observation, not proof of complete MCP discovery or policy coverage. Connected servers can still have registry updates pending. Disabled servers are excluded; resolve pending, failed, or needs_auth servers and inspect again before proposing policy."
+    };
     switch (input.operation) {
       case "inspect": {
         let policy = await readFile(config, "utf8");
@@ -1290,6 +1295,7 @@ ${stdout}`);
           description: await describe(config, tools.map((tool) => tool.canonical)),
           documents: Object.fromEntries(await documents(config)),
           tools,
+          inventory: inventory2,
           batteries: catalog
         });
       }
@@ -1306,6 +1312,9 @@ ${stdout}`);
       case "publish": {
         if (!input.policy || !input.expected_digest)
           throw Error("Publish requires the approved complete policy and inspected digest.");
+        let unavailable = servers.filter((server) => server.status !== "connected" && server.status !== "disabled");
+        if (unavailable.length)
+          throw Error(`MCP discovery is unresolved: ${unavailable.map((server) => `${server.name} (${server.status})`).join(", ")}. Resolve these connections and inspect again before publishing.`);
         if (publishing)
           throw Error("Another publish is in progress; inspect again.");
         publishing = !0;
@@ -1323,6 +1332,7 @@ ${stdout}`);
           return await rename(candidate, config), JSON.stringify({
             state: "saved",
             description,
+            inventory: inventory2,
             next: "Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions retain their opening policy."
           });
         } finally {
@@ -1418,6 +1428,22 @@ var appencode_default = Plugin.define({
         return { name: tool.id, tool: namespace ? `mcp__${namespace}__${tool.name}` : tool.id };
       });
     }
+    let remedyReady = Effect4.gen(function* () {
+      for (;; ) {
+        if ((yield* ctx.tool.list()).some((tool) => tool.options?.namespace === "appa" && tool.name === "execute_remedy_plan" && tool.options.codemode === !1))
+          return;
+        let server = (yield* ctx.mcp.list()).data.find((server2) => server2.name === "appa");
+        if (!server || !["pending", "connected"].includes(server.status.status))
+          return yield* Effect4.fail(new exports_tool.Error({ message: `[appencode] APPA MCP is ${server?.status.status ?? "not configured"}. Connect the appa server before protected work.` }));
+        yield* Effect4.sleep("50 millis");
+      }
+    }).pipe(Effect4.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect4.fail(new exports_tool.Error({ message: "[appencode] APPA remedy tool was not registered within 10 seconds. Check the appa MCP connection and retry the prompt." })) }), Effect4.catch((error) => Effect4.fail(failure(error)))), setupDiscovery = Effect4.gen(function* () {
+      for (;; ) {
+        if (!(yield* ctx.mcp.list()).data.some((server) => server.status.status === "pending"))
+          return;
+        yield* Effect4.sleep("50 millis");
+      }
+    }).pipe(Effect4.timeoutOption("10 seconds"));
     function feedback(value, tools) {
       for (let tool of [...tools].sort((a, b) => b.tool.length - a.tool.length))
         value = value.split(tool.tool).join(tool.name);
@@ -1436,17 +1462,22 @@ var appencode_default = Plugin.define({
             expected_digest: Schema29.optionalKey(Schema29.String)
           }),
           output: Schema29.String,
-          execute: (input, call) => Effect4.tryPromise({ try: async () => {
-            let session = await Effect4.runPromise(ctx.session.get({ sessionID: call.sessionID }));
+          execute: (input, call) => Effect4.gen(function* () {
+            let session = yield* ctx.session.get({ sessionID: call.sessionID });
             if (session.parentID || session.fork)
-              throw Error("Setup requires a fresh root operator session.");
-            let tools = await Effect4.runPromise(ctx.tool.list()), output = await setup(input, tools.map((tool) => ({
-              name: tool.id,
-              description: tool.description,
-              canonical: tool.options?.namespace === "appa" && tool.name === "execute_remedy_plan" ? "appa/execute_remedy_plan" : tool.options?.namespace ? `mcp/${tool.options.namespace}/${tool.name}` : `host/opencode/${tool.name}`
-            })));
+              return yield* Effect4.fail(new exports_tool.Error({ message: "Setup requires a fresh root operator session." }));
+            if (input.operation !== "battery")
+              yield* setupDiscovery;
+            let servers = yield* ctx.mcp.list(), tools = yield* ctx.tool.list(), output = yield* Effect4.tryPromise({
+              try: () => setup(input, tools.map((tool) => ({
+                name: tool.id,
+                description: tool.description,
+                canonical: tool.options?.namespace === "appa" && tool.name === "execute_remedy_plan" ? "appa/execute_remedy_plan" : tool.options?.namespace ? `mcp/${tool.options.namespace}/${tool.name}` : `host/opencode/${tool.name}`
+              })), servers.data.map((server) => ({ name: server.name, status: server.status.status }))),
+              catch: (error) => new exports_tool.Error({ message: error instanceof Error ? error.message : "AppenCode setup failed." })
+            });
             return { output, content: output };
-          }, catch: (error) => new exports_tool.Error({ message: error instanceof Error ? error.message : "AppenCode setup failed." }) })
+          }).pipe(Effect4.catch((error) => Effect4.fail(error instanceof exports_tool.Error ? error : failure(error))))
         });
       editor.add({
         name: "appa_subagent",
@@ -1565,7 +1596,7 @@ var appencode_default = Plugin.define({
           throw Error("[appencode] Child prompts require an exact live foreground delegation; steering and alternate launches are refused.");
       },
       catch: failure
-    }).pipe(Effect4.orDie));
+    }).pipe(Effect4.andThen(setup ? Effect4.void : remedyReady), Effect4.tapError((error) => Effect4.logError(error.message)), Effect4.orDie));
     for (let kind of ["compaction", "generate", "title"])
       yield* ctx.session.hook(kind, (event) => Effect4.tryPromise({
         try: async () => {
