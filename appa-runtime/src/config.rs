@@ -156,7 +156,8 @@ impl HostDefaults {
 
 /// Where the embedding host answers an `archestra` consult, and the bearer token it
 /// expects. Each attempt is one `POST` of `{"system", "input", "schema"}` — the rendered
-/// model prompt — whose 2xx body is the answer object itself. The URL follows every
+/// model prompt — plus, for a consult made on a trajectory, `"attribution": {"root",
+/// "trajectory", "call_id"?}`. The 2xx body is the answer object itself. The URL follows every
 /// endpoint's rules: `https` anywhere, cleartext `http` only to loopback.
 #[cfg(feature = "archestra")]
 #[derive(Debug, Clone)]
