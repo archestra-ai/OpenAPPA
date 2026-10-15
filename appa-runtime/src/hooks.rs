@@ -63,9 +63,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
             adapter.name,
             appa_runtime_api::AdapterName::Amp | appa_runtime_api::AdapterName::OpenCode
         ),
-        // The runtime serves `yell` only when the deployment lets an agent report, so a block
-        // names it only then, spelled the way this host calls the runtime's MCP server.
-        yell_tool: runtime.agent_yell().then(|| runtime.model_spelling(YELL_TOOL)),
+        yell_tool: served_yell_tool(runtime),
         ..EmbeddedPresentationOptions::default()
     };
     let handled = handle_internal(runtime, event, presentation).await;
@@ -411,7 +409,21 @@ fn file_tracking_context(runtime: &Runtime) -> String {
 }
 
 /// The runtime's reporting tool as a policy names it.
+#[cfg(feature = "daemon")]
 const YELL_TOOL: &str = "mcp/appa/yell";
+
+/// The reporting tool a block names. The runtime's MCP server serves `yell` only when the
+/// deployment lets an agent report, so a block names it only then, spelled the way this
+/// host calls that server. A build without the server names none.
+#[cfg(feature = "daemon")]
+fn served_yell_tool(runtime: &Runtime) -> Option<String> {
+    runtime.agent_yell().then(|| runtime.model_spelling(YELL_TOOL))
+}
+
+#[cfg(not(feature = "daemon"))]
+fn served_yell_tool(_runtime: &Runtime) -> Option<String> {
+    None
+}
 
 /// A subagent's words reach its parent through the checked return only; a call that
 /// names the file the harness keeps them in is refused before it runs.
@@ -2610,6 +2622,7 @@ mod tests {
         .expect("the fixture deployment opens")
     }
 
+    #[cfg(feature = "daemon")]
     /// The block's reason the model reads for a spawn proposed before its return is declared,
     /// under a deployment that does or does not let an agent report.
     async fn spawn_block_reason(agent_yell: bool) -> String {
@@ -2658,6 +2671,7 @@ mod tests {
             .to_string()
     }
 
+    #[cfg(feature = "daemon")]
     #[tokio::test]
     async fn a_block_points_at_yell_only_when_the_agent_may_report() {
         let reporting = spawn_block_reason(true).await;
