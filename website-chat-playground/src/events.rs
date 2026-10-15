@@ -155,7 +155,7 @@ pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
             call_id: call.0.clone(),
             text: format!("[appa] refused: {detail}"),
         }],
-        Record::Admitted { body, .. } | Record::Substituted { body, .. } => {
+        Record::Admitted { body, .. } | Record::Substituted { body, .. } | Record::Returned { body, .. } => {
             vec![WireEvent::ToolResult {
                 trajectory,
                 body: body.clone(),

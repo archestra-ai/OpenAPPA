@@ -98,8 +98,11 @@ persistence:
 # Extra environment for battery audience sources (APPA_PROVIDER_*).
 # APPA_BATTERY_TARGET picks each battery's target policy; this runtime
 # serves many users, so it defaults to multi-user.
+# APPA_SESSION_PRINCIPAL=wire reads each session's user from kagent's
+# x-user-id header; enable it only behind authenticated kagent (README).
 env:
   APPA_BATTERY_TARGET: multi-user
+  APPA_SESSION_PRINCIPAL: none
 envFrom: []
 
 # Optionally install the configuring kagent Agent with this runtime.

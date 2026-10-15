@@ -1,0 +1,9 @@
+schema = 1
+name = "opencode"
+description = "AppenCode gates OpenCode V2 tool calls and emissions through the APPA runtime."
+
+[plugin]
+host = "opencode"
+protocol = 1
+default_policy = "default.appa.toml"
+batteries = ["opencode"]

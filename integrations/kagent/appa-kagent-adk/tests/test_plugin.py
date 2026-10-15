@@ -97,6 +97,32 @@ async def test_a_fresh_session_opens_before_its_prompt_crosses():
     ]
 
 
+async def test_a_fresh_session_names_the_requesting_user_as_its_principal():
+    hook = Hook(ACK, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1", state={"headers": {"x-user-id": "alice@corp.example"}})
+    await plugin.on_user_message_callback(
+        invocation_context=FakeInvocationContext(session), user_message=FakeContent("deploy the chart")
+    )
+    assert hook.events[0] == {
+        "protocol": 1,
+        "adapter": "kagent",
+        "event": "session_start",
+        "root_id": "s1",
+        "principal": "alice@corp.example",
+    }
+
+
+async def test_an_empty_user_header_names_no_principal():
+    hook = Hook(ACK, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1", state={"headers": {"x-user-id": ""}})
+    await plugin.on_user_message_callback(
+        invocation_context=FakeInvocationContext(session), user_message=FakeContent("deploy the chart")
+    )
+    assert "principal" not in hook.events[0]
+
+
 async def test_a_continuing_session_sends_only_the_prompt():
     hook = Hook(ACK)
     plugin = plugin_over(hook)

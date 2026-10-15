@@ -715,6 +715,7 @@ impl SessionInner {
             ));
         }
         let spawn = spawn.clone();
+        let value = value.filter(|value| !value.is_empty());
         let (crossing, disposition) = match self.stop(child, value.clone())? {
             HookDecision::Ack => (value, ReturnDisposition::Crossed),
             HookDecision::ChildReturn { value } => match self.stop(child, Some(value.clone()))? {
@@ -1659,12 +1660,15 @@ trust = { from = "suspicious", to = "trusted" }
 
     #[test]
     fn a_void_return_closes_the_spawn_with_nothing_carried() {
-        let mut session = quarantined();
-        let answered: serde_json::Value = serde_json::from_str(&session.finish_child(&child(), None).unwrap()).unwrap();
-        assert_eq!(answered["kind"], "returned");
-        assert!(answered["value"].is_null(), "got: {answered}");
-        let error = session.finish_child(&child(), None).unwrap_err();
-        assert!(error.contains("already returned"), "got: {error}");
+        for value in [None, Some(String::new())] {
+            let mut session = quarantined();
+            let answered: serde_json::Value =
+                serde_json::from_str(&session.finish_child(&child(), value.clone()).unwrap()).unwrap();
+            assert_eq!(answered["kind"], "returned", "{value:?}");
+            assert!(answered["value"].is_null(), "{value:?}: got {answered}");
+            let error = session.finish_child(&child(), None).unwrap_err();
+            assert!(error.contains("already returned"), "got: {error}");
+        }
     }
 
     #[test]

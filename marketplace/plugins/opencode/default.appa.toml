@@ -1,0 +1,11 @@
+include = ["batteries/opencode/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.deployment]
+context_control = true
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

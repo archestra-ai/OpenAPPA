@@ -260,6 +260,15 @@ enum Occasion<'a> {
     Other,
 }
 
+impl<'a> Occasion<'a> {
+    fn call_id(self) -> Option<&'a str> {
+        match self {
+            Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
+            Occasion::Remedy { .. } | Occasion::Other => None,
+        }
+    }
+}
+
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
@@ -1597,11 +1606,24 @@ impl Session {
         let started_at = std::time::SystemTime::now();
         let started = std::time::Instant::now();
         let externals = &self.deployment.externals;
-        let (outcome, transcript) = match &self.inner.recorder {
-            // Boxed: the transport future is large, and every drive awaits it deep in the stack.
-            Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
-            None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
+        let consulting = async {
+            match &self.inner.recorder {
+                // Boxed: the transport future is large, and every drive awaits it deep in the stack.
+                Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
+                None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
+            }
         };
+        #[cfg(feature = "archestra")]
+        let (outcome, transcript) = {
+            let attribution = crate::model::archestra::Attribution {
+                root: self.root.clone(),
+                trajectory: self.trajectory.clone(),
+                call_id: occasion.call_id().map(str::to_owned),
+            };
+            crate::model::archestra::within(self.inner.archestra_context.as_deref(), attribution, consulting).await
+        };
+        #[cfg(not(feature = "archestra"))]
+        let (outcome, transcript) = consulting.await;
         // A transport that read on for the record alone says when the outcome was known.
         let settled = transcript
             .as_ref()
@@ -1627,12 +1649,7 @@ impl Session {
                 let context = ConsultContext {
                     root: self.root.0.clone(),
                     trajectory: self.trajectory.0.clone(),
-                    call_id: match occasion {
-                        Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => {
-                            call_id.map(str::to_string)
-                        }
-                        Occasion::Remedy { .. } | Occasion::Other => None,
-                    },
+                    call_id: occasion.call_id().map(str::to_string),
                     offer_id: match occasion {
                         Occasion::Remedy { offer } => Some(offer.0.clone()),
                         Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,

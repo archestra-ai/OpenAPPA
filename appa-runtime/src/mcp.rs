@@ -296,7 +296,9 @@ impl RuntimeTools {
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
                        contradictory, or its blocking feedback or remedies are \
-                       confusing and leave no clear way forward. Say in `message` what you were \
+                       confusing and leave no clear way forward: a plan makes no sense, you \
+                       keep getting blocked, the user keeps being asked to approve similar \
+                       calls, or the user is frustrated. Say in `message` what you were \
                        trying to do, what APPA did or demanded, and why you are stuck. This \
                        sends diagnostic telemetry and will not bypass the policy or grant \
                        tool permissions. Set `with_trajectory` to include this session's APPA \
@@ -1725,6 +1727,7 @@ max_body_bytes = 4096
                 control_tool: "client_one_remedy".to_owned(),
                 supports_delegation: false,
                 include_display_plan: false,
+                yell_tool: None,
             },
         )
         .await;
@@ -1735,6 +1738,7 @@ max_body_bytes = 4096
                 control_tool: "client_two_remedy".to_owned(),
                 supports_delegation: false,
                 include_display_plan: false,
+                yell_tool: None,
             },
         )
         .await;

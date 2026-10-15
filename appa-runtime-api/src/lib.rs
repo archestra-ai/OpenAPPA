@@ -12,7 +12,8 @@ pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle}
 
 pub use wire::{
     Accepted, Adapter, AsSpoken, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn,
-    OutcomeStatus, PROTOCOL, SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview,
+    OutcomeStatus, PROTOCOL, PrincipalSource, SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn,
+    WireReview,
 };
 
 /// The hosts this runtime serves over the wire, plus the one that is

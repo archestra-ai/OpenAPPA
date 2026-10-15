@@ -20,6 +20,7 @@ use appa_eventlog::{HeldNotice, HeldPeerId, HostObservation, Log, LogStore};
 use appa_runtime_api::{Actor, PeerAddress, PeerDigest, PeerFrame, ProposedCall, SessionTitle, TrajectoryId};
 
 use super::{EventError, Runtime, acting_trajectory};
+use crate::engine::PolicyEngine;
 
 /// The host tool one session messages another with.
 pub(crate) const SEND_MESSAGE: &str = "host/claude-code/SendMessage";
@@ -81,10 +82,15 @@ fn opening(log: &Log) -> Option<&TrajectoryOpening> {
 }
 
 /// Two families opened under one policy for one principal: a label one records means the
-/// same to the other.
-fn pinned_alike(one: &Log, other: &Log) -> bool {
+/// same to the other. `policy` decides for one of them. Each opening names its policy by the
+/// identity its engine recorded, current or earlier, so both openings must name `policy`'s.
+pub(super) fn pinned_alike(policy: &PolicyEngine<'_>, one: &Log, other: &Log) -> bool {
     match (opening(one), opening(other)) {
-        (Some(one), Some(other)) => one.policy_digest == other.policy_digest && one.principal == other.principal,
+        (Some(one), Some(other)) => {
+            one.principal == other.principal
+                && policy.recognizes(&one.policy_digest)
+                && policy.recognizes(&other.policy_digest)
+        }
         _ => false,
     }
 }
@@ -181,11 +187,13 @@ impl Runtime {
         key: &str,
         matches: impl Fn(&Log) -> bool,
     ) -> Result<Option<(TrajectoryId, Log)>, EventError> {
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, sent)?;
         let found: Vec<_> = self
             .mentioning(key)?
             .into_iter()
             .filter(|(root, log)| {
-                root != sender && matches(log) && pinned_alike(sent, log) && self.live(root, root).is_ok()
+                root != sender && matches(log) && pinned_alike(&policy, sent, log) && self.live(root, root).is_ok()
             })
             .collect();
         Ok(match found.len() {
@@ -288,10 +296,12 @@ impl Runtime {
     /// The label every send record of `digest` stands behind, among families pinned like
     /// `receiver`; `None` when none does.
     fn attributed(&self, receiver: &Log, digest: &PeerDigest) -> Result<Option<Label>, EventError> {
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, receiver)?;
         let labels = self
             .mentioning(&appa_eventlog::peer_sent_key(digest))?
             .into_iter()
-            .filter(|(_, log)| pinned_alike(receiver, log))
+            .filter(|(_, log)| pinned_alike(&policy, receiver, log))
             .flat_map(|(_, log)| {
                 log.host_records()
                     .iter()

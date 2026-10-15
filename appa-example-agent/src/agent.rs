@@ -315,7 +315,8 @@ impl Run<'_> {
                             break Outcome::Answer(answer);
                         }
                         Some(mut parent) => {
-                            let crossed = self.return_to_parent(&mut parent, &frame, message.content).await;
+                            let said = message.content.filter(|said| !said.is_empty());
+                            let crossed = self.return_to_parent(&mut parent, &frame, said).await;
                             frame = parent.frame;
                             if let Err(stop) = crossed {
                                 break Outcome::Stopped(stop);
@@ -572,8 +573,8 @@ impl Run<'_> {
             child: child.id.clone(),
             value: said.clone(),
         };
-        let (outcome, crossed) = match hooks::handle(&self.agent.runtime, event).await {
-            HookDecision::Ack | HookDecision::Context { .. } => (spawn_closed(), said),
+        let (outcome, reply) = match hooks::handle(&self.agent.runtime, event).await {
+            HookDecision::Ack | HookDecision::Context { .. } => (spawn_closed(), self.returned(parent, said).await),
             // The runtime names what crosses; this harness speaks for the child
             // and returns it on the child's behalf, which crosses it.
             HookDecision::ChildReturn { value } => {
@@ -583,7 +584,7 @@ impl Run<'_> {
                     value: Some(value.clone()),
                 };
                 match hooks::handle(&self.agent.runtime, echoed).await {
-                    HookDecision::Ack => (spawn_closed(), Some(value)),
+                    HookDecision::Ack => (spawn_closed(), self.returned(parent, Some(value)).await),
                     HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
@@ -594,10 +595,23 @@ impl Run<'_> {
             HookDecision::Refuse { detail } => self.unadmitted_return(parent, withheld(&detail)).await,
             other => return Err(unexpected("a child return", &other)),
         };
+        // The spawn call closes with no body of its own: what the parent reads is the
+        // return above, so the runtime's answer to the close is not the parent's output.
         let id = CallId(parent.reply_to.clone());
-        let call = parent.call.clone();
-        self.report(&mut parent.frame, &id, call, outcome).await?;
-        let reply = crossed.unwrap_or_else(|| VOID_CHILD_COMPLETION.to_string());
+        let event = HookEvent::ToolResult {
+            actor: self.actor(&parent.frame),
+            call: parent.call.clone(),
+            call_id: Some(id.0),
+            outcome,
+        };
+        match hooks::handle(&self.agent.runtime, event).await {
+            HookDecision::Ack
+            | HookDecision::ReplaceOutput { .. }
+            | HookDecision::DeliverValue { .. }
+            | HookDecision::Block { .. }
+            | HookDecision::Refuse { .. } => {}
+            other => return Err(unexpected("a closed spawn", &other)),
+        }
         parent
             .frame
             .transcript
@@ -605,16 +619,28 @@ impl Run<'_> {
         Ok(())
     }
 
-    async fn unadmitted_return(&self, parent: &Suspended, reason: String) -> (ToolOutcome, Option<String>) {
+    /// The parent's spawn result for a return the runtime admitted, or for a void one.
+    async fn returned(&self, parent: &Suspended, crossed: Option<String>) -> String {
+        let body = crossed.unwrap_or_else(|| VOID_CHILD_COMPLETION.to_string());
+        self.record(
+            &parent.frame,
+            Record::Returned {
+                call: CallId(parent.reply_to.clone()),
+                body: body.clone(),
+            },
+        )
+        .await;
+        body
+    }
+
+    async fn unadmitted_return(&self, parent: &Suspended, reason: String) -> (ToolOutcome, String) {
         self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
             .await;
         (
             ToolOutcome::Failure {
                 message: reason.clone(),
             },
-            Some(format!(
-                "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
-            )),
+            format!("{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"),
         )
     }
 

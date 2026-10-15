@@ -13,6 +13,7 @@ use appa_engine::label::{ChainAudience, ReaderId};
 use appa_engine::names::ProviderName;
 use appa_package::BatteryTarget;
 use appa_policy::AnnotatorBuiltin;
+use appa_runtime_api::PrincipalSource;
 use serde::Deserialize;
 
 /// Each policy namespace bound to the connection identities the host reports for it.
@@ -155,7 +156,8 @@ impl HostDefaults {
 
 /// Where the embedding host answers an `archestra` consult, and the bearer token it
 /// expects. Each attempt is one `POST` of `{"system", "input", "schema"}` — the rendered
-/// model prompt — whose 2xx body is the answer object itself. The URL follows every
+/// model prompt — plus, for a consult made on a trajectory, `"attribution": {"root",
+/// "trajectory", "call_id"?}`. The 2xx body is the answer object itself. The URL follows every
 /// endpoint's rules: `https` anywhere, cleartext `http` only to loopback.
 #[cfg(feature = "archestra")]
 #[derive(Debug, Clone)]
@@ -200,6 +202,23 @@ pub fn battery_target() -> Result<BatteryTarget, ConfigError> {
         Some(value) => {
             let value = value.to_string_lossy();
             BatteryTarget::parse(&value).ok_or_else(|| ConfigError::InvalidBatteryTarget {
+                value: value.into_owned(),
+            })
+        }
+    }
+}
+
+/// The variable that opts a served runtime into reading a session's principal off the wire.
+pub const SESSION_PRINCIPAL_VARIABLE: &str = "APPA_SESSION_PRINCIPAL";
+
+/// Where this process reads a session principal from: nowhere unless
+/// [`SESSION_PRINCIPAL_VARIABLE`] names the wire.
+pub fn principal_source() -> Result<PrincipalSource, ConfigError> {
+    match std::env::var_os(SESSION_PRINCIPAL_VARIABLE) {
+        None => Ok(PrincipalSource::None),
+        Some(value) => {
+            let value = value.to_string_lossy();
+            PrincipalSource::parse(&value).ok_or_else(|| ConfigError::InvalidPrincipalSource {
                 value: value.into_owned(),
             })
         }
@@ -746,6 +765,8 @@ pub enum ConfigError {
     DuplicateInclude { path: String },
     #[error("{BATTERY_TARGET_VARIABLE} is {value:?}, which is neither single-user nor multi-user")]
     InvalidBatteryTarget { value: String },
+    #[error("{SESSION_PRINCIPAL_VARIABLE} is {value:?}, which is neither none nor wire")]
+    InvalidPrincipalSource { value: String },
     #[error("cannot read the battery manifest {path}: {source}")]
     UnreadableBatteryManifest {
         path: String,

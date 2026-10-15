@@ -9,8 +9,8 @@ use appa_runtime::api::{
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PromptKey, ProposedCall, SpawnBinding,
-    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, PromptKey,
+    ProposedCall, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 fn the_reexported_vocabulary(
@@ -46,9 +46,15 @@ fn the_declared_reload(runtime: &Runtime, config: Config) {
     }
 }
 
-async fn the_declared_dispatcher(runtime: &Runtime, adapter: &Adapter, event: HookEvent, body: &[u8]) {
+async fn the_declared_dispatcher(
+    runtime: &Runtime,
+    adapter: &Adapter,
+    principal: PrincipalSource,
+    event: HookEvent,
+    body: &[u8],
+) {
     let _: HookDecision = hooks::handle(runtime, event).await;
-    let _: (u16, serde_json::Value) = hooks::answer(runtime, adapter, body).await;
+    let _: (u16, serde_json::Value) = hooks::answer(runtime, adapter, principal, body).await;
 }
 
 fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: ParseRefusal, outcome: ToolOutcome) {

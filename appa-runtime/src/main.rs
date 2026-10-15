@@ -226,6 +226,7 @@ struct AppState {
     config: PathBuf,
     battery_dirs: Vec<PathBuf>,
     target: appa_package::BatteryTarget,
+    principal_source: appa_runtime_api::PrincipalSource,
     battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
@@ -235,7 +236,7 @@ async fn hook(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    let (status, body) = hooks::answer(&state.runtime, &state.adapter, &body).await;
+    let (status, body) = hooks::answer(&state.runtime, &state.adapter, state.principal_source, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
 }
@@ -514,6 +515,13 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let principal_source = match crate::config::principal_source() {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let file_tracking = config.file_tracking.clone();
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
@@ -585,6 +593,7 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
         battery_state: Arc::clone(&battery_state),
         battery_dirs,
         target,
+        principal_source,
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
     };

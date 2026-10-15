@@ -31,18 +31,16 @@
 //! reaches the reviewer, and the reviewer's answer never passes back
 //! through the model.
 //!
-//! The three MCP actions map onto three APPA outcomes that already
-//! differ: accept is an approval, decline is a denial that ends every
+//! An accepted form must contain an explicit boolean `approval`: true
+//! approves, and false denies. Decline is also a denial that ends every
 //! offer naming this authority for this call, and cancel —
 //! like a timeout, a client without the capability, or any transport
 //! failure — is no answer at all, which grants nothing and leaves the
 //! offer standing.
 //!
-//! The request carries an empty schema on purpose. The verdict is the
-//! elicitation action itself, so a form field asking the same question
-//! again would be a second place to disagree with the first. The whole
-//! staged review travels in the message; nothing comes back but the
-//! action.
+//! The required boolean has no default. Accept alone is not approval:
+//! missing or malformed content grants nothing and leaves the offer
+//! standing. The whole staged review travels in the message.
 //!
 //! A review that ends without an answer is withdrawn from the
 //! reviewer's screen, whether its call was cancelled or its window
@@ -64,8 +62,9 @@ const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "daemon")]
 use rmcp::model::{
-    ClientResult, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema, InputRequest,
-    InputRequiredResult, InputResponses, ProtocolVersion, ServerRequest,
+    BooleanSchema, ClientResult, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
+    ElicitationSchema, InputRequest, InputRequiredResult, InputResponses, PrimitiveSchemaDefinition, ProtocolVersion,
+    ServerRequest,
 };
 #[cfg(feature = "daemon")]
 use rmcp::service::{PeerRequestOptions, RequestContext, RoleServer, ServiceError};
@@ -95,9 +94,9 @@ pub enum Elicitation {
     },
     /// The person's answer, returned with the retried call. From MCP 2026-07-28 a server
     /// asks by ending the call with the review as an input request ([`Elicitation::open`]);
-    /// the client shows it and repeats the call carrying this action.
+    /// the client shows it and repeats the call carrying this result.
     #[cfg(feature = "daemon")]
-    Returned(ElicitationAction),
+    Returned(ElicitResult),
     /// The retried call carried an answer this runtime cannot read, which is no answer.
     #[cfg(feature = "daemon")]
     Unreadable,
@@ -137,7 +136,7 @@ impl Elicitation {
         }
         if let Some(answer) = responses.and_then(|mut responses| responses.remove(REVIEW_KEY)) {
             return Review::Proceed(Some(match serde_json::from_value::<ElicitResult>(answer) {
-                Ok(result) => Elicitation::Returned(result.action),
+                Ok(result) => Elicitation::Returned(result),
                 Err(error) => {
                     tracing::warn!(%error, "the returned review is unreadable");
                     Elicitation::Unreadable
@@ -176,7 +175,7 @@ impl Elicitation {
     ) -> ConsultOutcome {
         let (request, timeout) = match self {
             Elicitation::Mcp { request, timeout } => (request, timeout),
-            Elicitation::Returned(action) => return ruled(action.clone()),
+            Elicitation::Returned(result) => return ruled(result),
             Elicitation::Unreadable => return ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         };
         let peer = &request.peer;
@@ -236,7 +235,7 @@ impl Elicitation {
             _ => Err(ServiceError::UnexpectedResponse),
         });
         match answered {
-            Ok(result) => ruled(result.action),
+            Ok(result) => ruled(&result),
             Err(error) => {
                 tracing::warn!(%error, "the elicitation produced no answer: no human ruling in this session");
                 ConsultOutcome::NoAnswer(NoAnswerReason::Transport)
@@ -249,14 +248,29 @@ impl Elicitation {
 #[cfg(feature = "daemon")]
 const REVIEW_KEY: &str = "appa-review";
 
-/// The person's action as the authority wire's answer.
+/// Validate the person's form answer before producing an authority ruling.
 #[cfg(feature = "daemon")]
-fn ruled(action: ElicitationAction) -> ConsultOutcome {
-    match action {
-        ElicitationAction::Accept => {
-            tracing::debug!("the reviewer approved");
-            ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Approve))
-        }
+fn ruled(result: &ElicitResult) -> ConsultOutcome {
+    match result.action {
+        ElicitationAction::Accept => match result
+            .content
+            .as_ref()
+            .and_then(|content| content.get("approval"))
+            .and_then(serde_json::Value::as_bool)
+        {
+            Some(true) => {
+                tracing::debug!("the reviewer approved");
+                ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Approve))
+            }
+            Some(false) => {
+                tracing::debug!("the reviewer refused");
+                ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Deny))
+            }
+            None => {
+                tracing::warn!("the accepted review has no boolean approval: no human ruling");
+                ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)
+            }
+        },
         ElicitationAction::Decline => {
             tracing::debug!("the reviewer refused");
             ConsultOutcome::Answer(AuthorityAnswer::to_wire(Ruling::Deny))
@@ -265,7 +279,7 @@ fn ruled(action: ElicitationAction) -> ConsultOutcome {
             tracing::debug!("the reviewer dismissed the review");
             ConsultOutcome::NoAnswer(NoAnswerReason::Dismissed)
         }
-        action => {
+        ref action => {
             tracing::warn!(?action, "an unreadable elicitation action is no answer");
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)
         }
@@ -277,10 +291,14 @@ fn review_form(message: String) -> ElicitRequest {
     ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
         meta: None,
         message,
-        // No fields: the action is the answer.
+        // A required choice without a default: accepting the dialog alone grants nothing.
         requested_schema: ElicitationSchema::builder()
+            .required_property(
+                "approval",
+                PrimitiveSchemaDefinition::Boolean(BooleanSchema::new().title("Approve this exact call?")),
+            )
             .build()
-            .expect("an empty schema declares no required property"),
+            .expect("the required approval property is declared"),
     })
 }
 
@@ -335,8 +353,8 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
          \n\
          What this ruling would cover:\n{requirements}\n\
          \n\
-         Accept only if this exact call, with these exact arguments, \
-         may run. Decline refuses it. Cancel answers nothing and \
+         Set approval to true only if this exact call, with these exact arguments, \
+         may run. Submit false or decline to refuse it. Cancel answers nothing and \
          leaves the call blocked. The agent's own description of what \
          it is doing is not shown here on purpose.",
         headline = headline(artifact),

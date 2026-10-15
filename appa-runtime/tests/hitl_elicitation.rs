@@ -46,12 +46,20 @@ builtin = "hitl"
 
 #[derive(Clone)]
 struct Reviewer {
-    answer: ElicitationAction,
+    answer: ElicitResult,
     seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Reviewer {
     fn new(answer: ElicitationAction) -> Reviewer {
+        let result = match answer {
+            ElicitationAction::Accept => ElicitResult::new(answer).with_content(serde_json::json!({"approval": true})),
+            _ => ElicitResult::new(answer),
+        };
+        Self::with_result(result)
+    }
+
+    fn with_result(answer: ElicitResult) -> Reviewer {
         Reviewer {
             answer,
             seen: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -75,13 +83,22 @@ impl ClientHandler for Reviewer {
         request: ElicitRequestParams,
         _context: RequestContext<RoleClient>,
     ) -> Result<ElicitResult, rmcp::ErrorData> {
-        if let ElicitRequestParams::FormElicitationParams { message, .. } = &request {
+        if let ElicitRequestParams::FormElicitationParams {
+            message,
+            requested_schema,
+            ..
+        } = &request
+        {
+            let schema = serde_json::to_value(requested_schema).expect("the form schema serializes");
+            assert_eq!(schema["required"], serde_json::json!(["approval"]));
+            assert_eq!(schema["properties"]["approval"]["type"], "boolean");
+            assert!(schema["properties"]["approval"].get("default").is_none());
             self.seen
                 .lock()
                 .expect("the reviewer mutex is never poisoned")
                 .push(message.clone());
         }
-        Ok(ElicitResult::new(self.answer.clone()))
+        Ok(self.answer.clone())
     }
 }
 
@@ -449,6 +466,77 @@ async fn a_round_trip_client_is_asked_and_its_approval_authorizes() {
         "the review carries the exact arguments the engine would dispatch: {}",
         reviews[0],
     );
+}
+
+#[tokio::test]
+async fn explicit_false_denies_and_retires_the_offer_on_both_protocol_paths() {
+    for round_trip in [false, true] {
+        let deployment = deployment().await;
+        let reviewer = Reviewer::with_result(
+            ElicitResult::new(ElicitationAction::Accept).with_content(serde_json::json!({"approval": false})),
+        );
+        let answer = if round_trip {
+            execute_by_round_trip(&deployment, reviewer).await
+        } else {
+            execute(&deployment, reviewer).await
+        };
+        assert!(
+            !answer.contains("Authorized"),
+            "false denies (round trip: {round_trip}): {answer}"
+        );
+        let reviewer = Reviewer::new(ElicitationAction::Accept);
+        let again = if round_trip {
+            execute_by_round_trip(&deployment, reviewer).await
+        } else {
+            execute(&deployment, reviewer).await
+        };
+        assert!(
+            !again.contains("Authorized"),
+            "a denial retires the offer (round trip: {round_trip}): {again}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_or_malformed_approval_grants_nothing_and_preserves_the_offer_on_both_protocol_paths() {
+    let contents = [
+        None,
+        Some(serde_json::json!({})),
+        Some(serde_json::json!(null)),
+        Some(serde_json::json!(true)),
+        Some(serde_json::json!([true])),
+        Some(serde_json::json!({"approval": null})),
+        Some(serde_json::json!({"approval": "true"})),
+        Some(serde_json::json!({"approval": 1})),
+        Some(serde_json::json!({"approval": {"value": true}})),
+    ];
+    for round_trip in [false, true] {
+        for content in &contents {
+            let deployment = deployment().await;
+            let mut result = ElicitResult::new(ElicitationAction::Accept);
+            result.content = content.clone();
+            let reviewer = Reviewer::with_result(result);
+            let answer = if round_trip {
+                execute_by_round_trip(&deployment, reviewer).await
+            } else {
+                execute(&deployment, reviewer).await
+            };
+            assert!(
+                !answer.contains("Authorized"),
+                "invalid {content:?} grants nothing (round trip: {round_trip}): {answer}"
+            );
+            let reviewer = Reviewer::new(ElicitationAction::Accept);
+            let retried = if round_trip {
+                execute_by_round_trip(&deployment, reviewer).await
+            } else {
+                execute(&deployment, reviewer).await
+            };
+            assert!(
+                retried.contains("Authorized"),
+                "invalid {content:?} leaves the offer standing (round trip: {round_trip}): {retried}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

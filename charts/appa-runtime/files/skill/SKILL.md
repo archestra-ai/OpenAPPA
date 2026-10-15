@@ -1,6 +1,6 @@
 ---
 name: appa-guide
-description: Set up and tune OpenAPPA on the host you run in — Claude Code or a kagent cluster. Checks which tools and MCP servers the policy covers, includes the batteries that fit, writes rules for the rest, explains why a call was blocked, and makes the defaults stricter or looser on request.
+description: Set up and tune OpenAPPA on Claude Code, OpenCode, or a kagent cluster. Checks tool coverage, includes matching batteries, writes remaining rules, and explains blocked calls. Use for initial setup or policy changes.
 argument-hint: "[init | adjust | explain | what you want]"
 ---
 
@@ -20,6 +20,10 @@ both exactly. Do not guess their content.
   and then `references/claude-code.md` to this `SKILL.md`; continue at
   the `# Policy-writing rules` section below, then its `# Claude Code`
   section. Do not call `Read` to load either reference.
+- **OpenCode**: the operator setup session provides `appa_setup`.
+  AppenCode appends `references/core.md` and `references/opencode.md` to
+  this text. Continue at `# Policy-writing rules`, then `# OpenCode`.
+  Do not use native file or shell tools to load the references.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
   are available, and this session is a kagent agent chat. Before any
   cluster action, call `read_file` for
@@ -32,7 +36,7 @@ both exactly. Do not guess their content.
   reference, including `appa_update_policy`. Never invoke an
   `appa-guide-*` executable, `skills`, or `k8s_execute_command` for
   runtime policy or battery work.
-- Neither: say that this skill supports Claude Code and kagent hosts,
+- None of these: say that this skill supports Claude Code, OpenCode operator setup, and kagent hosts,
   and stop.
 
 ## Mode
