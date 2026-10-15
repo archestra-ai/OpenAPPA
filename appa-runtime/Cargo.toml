@@ -59,6 +59,7 @@ tower = { version = "0.5", features = ["util"], optional = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-opencode = { path = "../appa-adapter-opencode" }
+appa-adapter-hermes = { path = "../appa-adapter-hermes" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,

@@ -31,6 +31,7 @@ pub enum AdapterName {
     Amp,
     #[serde(rename = "opencode")]
     OpenCode,
+    Hermes,
     /// A host that embeds the runtime in its own process. There is no
     /// served process and no wire: the host builds every event itself,
     /// identifies each call through the [`Adapter`] it opened the runtime
@@ -41,11 +42,12 @@ pub enum AdapterName {
 
 impl AdapterName {
     /// The adapters a served runtime can be started with.
-    pub const ALL: [AdapterName; 4] = [
+    pub const ALL: [AdapterName; 5] = [
         AdapterName::ClaudeCode,
         AdapterName::Kagent,
         AdapterName::Amp,
         AdapterName::OpenCode,
+        AdapterName::Hermes,
     ];
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -58,6 +60,7 @@ impl AdapterName {
             AdapterName::Kagent => "kagent",
             AdapterName::Amp => "amp",
             AdapterName::OpenCode => "opencode",
+            AdapterName::Hermes => "hermes",
             AdapterName::Embedded => "embedded",
         }
     }
@@ -70,6 +73,7 @@ impl AdapterName {
             AdapterName::Kagent => "kagent",
             AdapterName::Amp => "amp",
             AdapterName::OpenCode => "opencode",
+            AdapterName::Hermes => "hermes",
             AdapterName::Embedded => "embedded",
         }
     }
@@ -83,7 +87,9 @@ impl AdapterName {
     /// host has its own surface to show a review on.
     pub fn review_channel(self) -> ReviewChannel {
         match self {
-            AdapterName::ClaudeCode | AdapterName::Amp | AdapterName::OpenCode => ReviewChannel::Runtime,
+            AdapterName::ClaudeCode | AdapterName::Amp | AdapterName::OpenCode | AdapterName::Hermes => {
+                ReviewChannel::Runtime
+            }
             AdapterName::Kagent | AdapterName::Embedded => ReviewChannel::Host,
         }
     }

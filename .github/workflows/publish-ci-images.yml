@@ -50,6 +50,7 @@ jobs:
               - 'appa-builtin/**'
               - 'appa-adapter-amp/**'
               - 'appa-adapter-opencode/**'
+              - 'appa-adapter-hermes/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
               - 'appa-example-agent/**'

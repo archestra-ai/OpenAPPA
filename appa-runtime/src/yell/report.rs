@@ -175,6 +175,7 @@ pub enum Harness {
     Kagent,
     Amp,
     OpenCode,
+    Hermes,
     Embedded(HarnessName),
 }
 
@@ -229,6 +230,7 @@ impl Harness {
             AdapterName::Kagent => Harness::Kagent,
             AdapterName::Amp => Harness::Amp,
             AdapterName::OpenCode => Harness::OpenCode,
+            AdapterName::Hermes => Harness::Hermes,
             AdapterName::Embedded => unreachable!("a served runtime is started with a served adapter"),
         }
     }
@@ -239,6 +241,7 @@ impl Harness {
             Harness::Kagent => "kagent",
             Harness::Amp => "amp",
             Harness::OpenCode => "opencode",
+            Harness::Hermes => "hermes",
             Harness::Embedded(name) => name.as_str(),
         }
     }

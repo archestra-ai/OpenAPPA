@@ -10,6 +10,7 @@ members = [
     "appa-policy",
     "appa-adapter-amp",
     "appa-adapter-opencode",
+    "appa-adapter-hermes",
     "appa-adapter-claude-code",
     "appa-adapter-kagent",
     "appa-runtime-api",

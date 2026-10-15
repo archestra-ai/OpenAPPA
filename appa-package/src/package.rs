@@ -621,8 +621,8 @@ impl RawPlugin {
 
         match host {
             Host::Embedded => unreachable!("Host::parse names only served hosts"),
-            // Amp remains source-distributed.
-            Host::Amp => Err(ManifestError::Host {
+            // Amp and Hermes remain source-distributed.
+            Host::Amp | Host::Hermes => Err(ManifestError::Host {
                 path: path.to_path_buf(),
                 host: self.host,
             }),

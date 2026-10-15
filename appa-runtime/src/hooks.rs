@@ -61,7 +61,9 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         // to delegate on the assumption that the child's labels are inherited.
         supports_delegation: !matches!(
             adapter.name,
-            appa_runtime_api::AdapterName::Amp | appa_runtime_api::AdapterName::OpenCode
+            appa_runtime_api::AdapterName::Amp
+                | appa_runtime_api::AdapterName::OpenCode
+                | appa_runtime_api::AdapterName::Hermes
         ),
         yell_tool: served_yell_tool(runtime),
         ..EmbeddedPresentationOptions::default()

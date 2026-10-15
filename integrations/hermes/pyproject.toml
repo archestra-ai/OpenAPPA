@@ -1,0 +1,18 @@
+[project]
+name = "appa-hermes"
+version = "0.1.0"
+description = "Tests for the OpenAPPA plugin for Hermes Agent"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.16"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

@@ -30,7 +30,7 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
         }
         // kagent and embedding hosts keep their own inventories. Source plugins do not
         // participate in marketplace installation or automatic battery discovery.
-        Host::Kagent | Host::Amp | Host::OpenCode | Host::Embedded => BTreeSet::new(),
+        Host::Kagent | Host::Amp | Host::OpenCode | Host::Hermes | Host::Embedded => BTreeSet::new(),
     }
 }
 
@@ -130,8 +130,8 @@ pub(crate) fn batteries(
 
 /// The batteries of `available` whose `detect` names a program found in a
 /// directory of `search`, a `PATH` value. Only Claude Code uses local program
-/// discovery. kagent and embedding hosts keep their own inventories; amppa
-/// does not participate in automatic battery discovery.
+/// discovery. kagent and embedding hosts keep their own inventories; amppa and Hermes
+/// do not participate in automatic battery discovery.
 pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search: &OsStr) -> Vec<PackageName> {
     match host {
         Host::ClaudeCode => {
@@ -151,7 +151,7 @@ pub(crate) fn detected(host: Host, available: &[(PackageName, Battery)], search:
                 .map(|(name, _)| name.clone())
                 .collect()
         }
-        Host::Kagent | Host::Amp | Host::OpenCode | Host::Embedded => Vec::new(),
+        Host::Kagent | Host::Amp | Host::OpenCode | Host::Hermes | Host::Embedded => Vec::new(),
     }
 }
 

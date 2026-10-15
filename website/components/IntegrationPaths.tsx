@@ -2,7 +2,7 @@ import { PixelMark } from "@/components/Logo";
 
 const paths = [
   { href: "#embed-the-appa-runtime-in-your-agents-code", method: "Your own agent", detail: "Any language. You own the agent loop and tool execution." },
-  { href: "#connect-a-coding-agent-through-hooks", method: "Agents through hooks", detail: "Claude Code, or harnesses such as omp and Hermes with a custom adapter." },
+  { href: "#connect-a-coding-agent-through-hooks", method: "Agents through hooks", detail: "Claude Code and Hermes, or harnesses such as omp with a custom adapter." },
   { href: "#use-appa-at-the-llm-proxy", method: "LLM proxy", detail: "Apply policies centrally through Archestra." },
 ];
 

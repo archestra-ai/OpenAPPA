@@ -1,0 +1,9 @@
+name: appa
+version: "0.1"
+description: OpenAPPA information-flow policy for Hermes tool calls and results
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - pre_tool_call
+  - transform_tool_result
+  - subagent_start

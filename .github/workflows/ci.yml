@@ -128,6 +128,7 @@ jobs:
               - 'appa-builtin/**'
               - 'appa-adapter-amp/**'
               - 'appa-adapter-opencode/**'
+              - 'appa-adapter-hermes/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
               - 'appa-example-agent/**'
@@ -149,6 +150,7 @@ jobs:
               - 'integrations/appa-guide/**'
               - 'website/content/docs/contracts.md'
               - 'scripts/appa-opencode-package.ts'
+              - 'integrations/hermes/**'
               - 'marketplace/plugins/claude-code/*.py'
               - 'marketplace/plugins/claude-code/README.md'
               - 'marketplace/batteries/**'
@@ -228,6 +230,7 @@ jobs:
               - 'appa-builtin/**'
               - 'appa-adapter-amp/**'
               - 'appa-adapter-opencode/**'
+              - 'appa-adapter-hermes/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
               - 'Cargo.toml'
@@ -371,6 +374,12 @@ jobs:
 
       - name: Setup uv for OTLP verification
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Test the Hermes plugin against the runtime
+        run: |
+          uv run --project integrations/hermes ruff check integrations/hermes
+          uv run --project integrations/hermes ruff format --check integrations/hermes
+          uv run --project integrations/hermes pytest integrations/hermes -q
 
       - name: Verify value-safe OTLP export with a real runtime
         run: uv run scripts/verify-runtime-telemetry.py target/debug/appa

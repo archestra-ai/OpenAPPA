@@ -1,0 +1,66 @@
+# A small, explicit starting policy for Hermes Agent. Adapt the paths and tool
+# names to your deployment. Undeclared tools are refused; there is no permissive
+# wildcard. MCP tools keep their battery names (mcp/<server>/<tool>).
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "host/hermes/read_file(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/hermes/read_file"
+
+[[policy.tool]]
+name = "host/hermes/search_files(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/hermes/search_files"
+
+# A web request exposes its arguments to the public destination. Its result
+# also lowers trust, so subsequent trusted-only calls stop.
+[[policy.tool]]
+name = "host/hermes/web_search"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/hermes/web_extract"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/hermes/write_file"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/hermes/patch"
+requires = { trust = "trusted" }
+
+# Arbitrary shell can both read files and transmit them without an intervening
+# hook. This example permits only this exact diagnostic command, not general shell.
+[[policy.tool]]
+name = "host/hermes/terminal(command:pwd)"
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+# Hermes' own bookkeeping: the tool catalog, the plan, a question to the user.
+[[policy.tool]]
+name = "host/hermes/tool_search"
+
+[[policy.tool]]
+name = "host/hermes/tool_describe"
+
+[[policy.tool]]
+name = "host/hermes/todo_list"
+
+[[policy.tool]]
+name = "host/hermes/clarify"
+
+# A subagent's calls are checked on its parent's trajectory.
+[[policy.tool]]
+name = "host/hermes/delegate_task"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

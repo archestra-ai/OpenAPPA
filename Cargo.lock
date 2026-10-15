@@ -108,6 +108,7 @@ version = "0.34.0"
 dependencies = [
  "appa-adapter-amp",
  "appa-adapter-claude-code",
+ "appa-adapter-hermes",
  "appa-adapter-kagent",
  "appa-adapter-opencode",
  "appa-builtin",
@@ -175,6 +176,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "appa-adapter-hermes"
+version = "0.34.0"
+dependencies = [
+ "appa-runtime-api",
+ "proptest",
 ]
 
 [[package]]
