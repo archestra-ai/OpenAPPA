@@ -131,7 +131,12 @@ fn opencode_installs_roundtrips_offline_preserves_settings_and_removes_only_owne
     assert_eq!(registered["mcp"]["servers"]["appa"]["timeout"], 12345);
     assert_eq!(registered["plugins"].as_array().unwrap().len(), 2);
     let plugin = Path::new(registered["plugins"][1]["package"].as_str().unwrap());
-    assert!(plugin.starts_with(target.path()));
+    assert!(
+        plugin
+            .canonicalize()
+            .unwrap()
+            .starts_with(target.path().canonicalize().unwrap())
+    );
     assert!(plugin.join("index.js").is_file());
     assert!(!plugin.join("node_modules").exists());
     assert!(
