@@ -5757,22 +5757,31 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let fresh = reopened();
         assert!(fresh.live(&earlier, &earlier).is_ok(), "the v1 opening reopens");
         assert!(fresh.live(&current, &current).is_ok());
-        assert!(
+        let pinned = |runtime: &Runtime| {
+            let current_log = runtime.inner.log(&current).expect("the root reads");
+            let deployment = runtime.inner.deployment();
+            let policy = runtime
+                .inner
+                .resolve_policy(&deployment, &current_log)
+                .expect("the current root resolves");
             peer::pinned_alike(
-                &fresh.inner.log(&earlier).expect("the root reads"),
-                &fresh.inner.log(&current).expect("the root reads"),
-            ),
-            "both roots opened under one policy file"
-        );
+                &policy,
+                &current_log,
+                &runtime.inner.log(&earlier).expect("the root reads"),
+            )
+        };
+        assert!(pinned(&fresh), "both openings name one policy");
         drop(fresh);
 
         rewrite(&"07".repeat(32));
+        let fresh = reopened();
         assert!(
-            matches!(
-                reopened().live(&earlier, &earlier),
-                Err(EventError::PolicyUnavailable(_))
-            ),
+            matches!(fresh.live(&earlier, &earlier), Err(EventError::PolicyUnavailable(_))),
             "a digest no algorithm gives this policy refuses"
+        );
+        assert!(
+            !pinned(&fresh),
+            "an opening whose digest names no identity of the policy is not pinned alike, though it shares the file"
         );
     }
 }
