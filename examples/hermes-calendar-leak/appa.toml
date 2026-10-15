@@ -1,0 +1,64 @@
+# Policy for the demo calendar and mail tools, served by `appa runtime --adapter hermes`.
+[policy]
+version = 2
+
+[policy.audience]
+self = ["cal:viewer"]
+internal = ["cal:org/members"]
+
+# Lists every event, private ones included: only the owner may read the result.
+[[policy.tool]]
+name = "host/hermes/calendar_list_events"
+delta = { audience = ["self"] }
+
+# One event: its attendees may read it.
+[[policy.tool]]
+name = "host/hermes/calendar_get_event"
+delta = { audience = ["@cal:event/$event_id"] }
+
+# A reason is free text in the attendee notice: the attendees must already be
+# readers of everything the trajectory has read.
+[[policy.tool]]
+name = "host/hermes/calendar_update_event(reason:*)"
+tags = ["calendar-notice"]
+requires = { audience = { contains = ["@cal:event/$event_id"] } }
+delta = {}
+
+# Without a reason, the calendar composes the notice from the event itself.
+[[policy.tool]]
+name = "host/hermes/calendar_update_event"
+tags = ["calendar-notice"]
+delta = {}
+
+# Free text to a recipient: the recipient must already be a reader of
+# everything the trajectory has read.
+[[policy.tool]]
+name = "host/hermes/gmail_send"
+requires = { audience = { contains = ["$to"] } }
+delta = {}
+
+# Removes the reason, so the notice carries only what the event already holds.
+# The tag keeps it off gmail_send, whose body it cannot clean.
+[[policy.sanitizer]]
+name = "drop-reason"
+on = ["tool_input"]
+tags = ["calendar-notice"]
+hint = "Remove the free-text reason; keep the event id and times."
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["internal"] }
+
+[externals]
+timeout_ms = 10000
+max_body_bytes = 65536
+
+[externals.audience.cal]
+command = ["python3", "externals.py", "audience", "calendar.json"]
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "org/members", feeds = "internal" },
+  { template = "event/<event-id>" },
+]
+
+[externals.sanitizers.drop-reason]
+command = ["python3", "externals.py", "drop-reason"]

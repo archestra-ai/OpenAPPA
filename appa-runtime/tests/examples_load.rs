@@ -74,6 +74,19 @@ fn the_kagent_policies_open() {
 
 #[cfg(unix)]
 #[test]
+fn the_hermes_policies_open() {
+    opens(
+        &repo_root().join("integrations/hermes/appa.toml"),
+        BatteryTarget::SingleUser,
+    );
+    opens(
+        &repo_root().join("examples/hermes-calendar-leak/appa.toml"),
+        BatteryTarget::SingleUser,
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn the_live_replay_roots_open() {
     opens(
         &repo_root().join("examples/live-replays/github/appa.toml"),

@@ -50,3 +50,9 @@ run by `cargo test -p appa --test replay` and by CI.
 [`live-replays/`](live-replays) holds two cases whose policies include a
 shipped battery. Their annotators and audience sources call GitHub and
 Linear, so each needs the token its README names.
+
+## Live agent demos
+
+[`hermes-calendar-leak/`](hermes-calendar-leak) runs Hermes Agent on a real
+model through OpenRouter, with mock calendar and mail tools, and compares a
+private-event leak with and without OpenAPPA.

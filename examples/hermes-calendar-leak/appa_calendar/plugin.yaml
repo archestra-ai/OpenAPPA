@@ -1,0 +1,7 @@
+name: appa-calendar
+version: "0.1"
+description: Demo calendar and mail tools, gated by OpenAPPA when APPA_DEMO_POLICY is set
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - transform_tool_result
