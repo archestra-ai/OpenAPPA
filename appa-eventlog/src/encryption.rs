@@ -148,24 +148,22 @@ impl StorageCipher {
     }
 
     pub fn seal_text(&self, context: &str, text: &str) -> Result<String, StorageEncryptionError> {
-        if !self.is_encrypted() && !text.starts_with(TEXT) {
+        if !self.is_encrypted() {
             return Ok(text.to_owned());
         }
-        let bytes = if self.is_encrypted() {
-            self.seal_bytes(context, text.as_bytes())?
-        } else {
-            [MAGIC, &[0], text.as_bytes()].concat()
-        };
+        let bytes = self.seal_bytes(context, text.as_bytes())?;
         Ok(format!("{TEXT}{}", STANDARD.encode(bytes)))
     }
 
     pub fn open_text(&self, context: &str, text: String) -> Result<String, StorageEncryptionError> {
+        // Tool output is arbitrary text, including strings that resemble an
+        // envelope. The receipt reader checks the root's cipher before using
+        // this plain view; content alone cannot identify its storage mode.
+        if !self.is_encrypted() {
+            return Ok(text);
+        }
         let Some(encoded) = text.strip_prefix(TEXT) else {
-            return if self.is_encrypted() {
-                Err(StorageEncryptionError("encrypted storage contains plaintext text"))
-            } else {
-                Ok(text)
-            };
+            return Err(StorageEncryptionError("encrypted storage contains plaintext text"));
         };
         let bytes = STANDARD
             .decode(encoded)

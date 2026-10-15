@@ -1783,12 +1783,14 @@ fn read_result(
             &[&key.session.organization_id, &key.session.session_id, &key.tool_call_id],
         )?
         .map(|row| {
+            let root: String = row.get(2);
+            check_root_cipher(client, &root, cipher)?;
             Ok(StoredResult {
                 session: SessionScope {
                     organization_id: row.get(0),
                     session_id: row.get(1),
                 },
-                root: row.get(2),
+                root,
                 status: row.get(3),
                 approved_output: row
                     .get::<_, Option<String>>(4)

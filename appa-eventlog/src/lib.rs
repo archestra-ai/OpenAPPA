@@ -3294,6 +3294,103 @@ mod tests {
         (operation, result)
     }
 
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_plain_results_replay_verbatim_after_an_upgrade() {
+        let store = postgres_store(1);
+        let (_, mut result) = postgres_receipts();
+        let root = postgres_root(&store, "plaintext-upgrade");
+        result.root = root.clone();
+        let lease = receipt_lease("plain");
+        let decision = serde_json::json!({"decision": "ack"});
+        let output = "appa-storage-v1:user content";
+        store.claim_processed_result(result.clone(), &lease).unwrap();
+        store
+            .complete_processed_result(result.key.clone(), output.to_owned(), decision.clone(), lease.owner())
+            .unwrap();
+        // The previous implementation stored approved_output verbatim. Set it
+        // directly so this also exercises rows written by that implementation.
+        let session = result.key.session.session_id.clone();
+        let stored_session = session.clone();
+        store
+            .lease()
+            .unwrap()
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute(
+                    "UPDATE openappa_processed_results SET approved_output=$2 WHERE session_id=$1",
+                    &[&stored_session, &output],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.claim_processed_result(result, &lease).unwrap(),
+            ProcessedResultClaim::Complete {
+                approved_output: output.to_owned(),
+                decision
+            }
+        );
+        forget_postgres_receipts(&store, &session);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_encrypted_result_completion_requires_the_root_key() {
+        let plain = postgres_store(1);
+        let cipher = encryption::StorageCipher::encrypted(&[7; 32], "encrypted-result".into()).unwrap();
+        let encrypted = plain.encrypted_view(cipher).unwrap();
+        let root = postgres_root(&encrypted, "encrypted-result");
+        let (_, mut result) = postgres_receipts();
+        result.root = root.clone();
+        let session = result.key.session.session_id.clone();
+        let lease = receipt_lease("encrypted");
+        let decision = serde_json::json!({"decision": "ack"});
+        encrypted.claim_processed_result(result.clone(), &lease).unwrap();
+        encrypted
+            .complete_processed_result(
+                result.key.clone(),
+                "private output".into(),
+                decision.clone(),
+                lease.owner(),
+            )
+            .unwrap();
+        let error = plain
+            .complete_processed_result(
+                result.key.clone(),
+                "private output".into(),
+                decision.clone(),
+                lease.owner(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("requires its conversation key"));
+        let wrong = plain
+            .encrypted_view(encryption::StorageCipher::encrypted(&[8; 32], "encrypted-result".into()).unwrap())
+            .unwrap();
+        let error = wrong
+            .complete_processed_result(
+                result.key.clone(),
+                "private output".into(),
+                decision.clone(),
+                lease.owner(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("authentication failed"));
+        assert_eq!(
+            encrypted.claim_processed_result(result, &lease).unwrap(),
+            ProcessedResultClaim::Complete {
+                approved_output: "private output".into(),
+                decision
+            }
+        );
+        forget_postgres_receipts(&encrypted, &session);
+        forget_postgres_roots(&encrypted, vec![root]);
+    }
+
     /// Run `sql` with the session id as `$1`, on a connection of its own.
     #[cfg(feature = "postgres")]
     fn postgres_session_sql(store: &LogStore, sql: &'static str, session: &str) {
