@@ -58,11 +58,11 @@ pub fn build_info() -> ExitCode {
     }
 }
 
-pub struct ClaudeArtifacts {
+pub struct NativeArtifacts {
     binary: PathBuf,
 }
 
-impl ClaudeArtifacts {
+impl NativeArtifacts {
     /// Uses only retained, rehashed archives. It does not write the Claude
     /// profile, start a runtime, or change the active config.
     pub fn prepare(
@@ -72,7 +72,7 @@ impl ClaudeArtifacts {
     ) -> Result<Self, InstallError> {
         if Platform::current() != Some(platform) {
             return Err(InstallError::Invalid(
-                "the selected Claude binary does not target this machine".into(),
+                "the selected runtime binary does not target this machine".into(),
             ));
         }
         let archives = generation.archives();
@@ -150,6 +150,10 @@ impl ClaudeArtifacts {
         Ok(Self {
             binary: destination.join(binary_name),
         })
+    }
+
+    pub fn binary(&self) -> &Path {
+        &self.binary
     }
 
     /// Caller holds the installation lock and durable activation journal.

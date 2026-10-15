@@ -269,6 +269,10 @@ pub enum Plugin {
         default_policy: RelativePath,
         batteries: Vec<PackageName>,
     },
+    OpenCode {
+        default_policy: RelativePath,
+        batteries: Vec<PackageName>,
+    },
     Kagent {
         default_policy: RelativePath,
         batteries: Vec<PackageName>,
@@ -282,13 +286,16 @@ impl Plugin {
     pub fn host(&self) -> Host {
         match self {
             Self::ClaudeCode { .. } => Host::ClaudeCode,
+            Self::OpenCode { .. } => Host::OpenCode,
             Self::Kagent { .. } => Host::Kagent,
         }
     }
 
     pub fn default_policy(&self) -> &RelativePath {
         match self {
-            Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
+            Self::ClaudeCode { default_policy, .. }
+            | Self::OpenCode { default_policy, .. }
+            | Self::Kagent { default_policy, .. } => default_policy,
         }
     }
 
@@ -297,7 +304,9 @@ impl Plugin {
     /// choice.
     pub fn batteries(&self) -> &[PackageName] {
         match self {
-            Self::ClaudeCode { batteries, .. } | Self::Kagent { batteries, .. } => batteries,
+            Self::ClaudeCode { batteries, .. } | Self::OpenCode { batteries, .. } | Self::Kagent { batteries, .. } => {
+                batteries
+            }
         }
     }
 }
@@ -612,11 +621,18 @@ impl RawPlugin {
 
         match host {
             Host::Embedded => unreachable!("Host::parse names only served hosts"),
-            // These integrations are source-distributed, not marketplace installers.
-            Host::Amp | Host::OpenCode => Err(ManifestError::Host {
+            // Amp remains source-distributed.
+            Host::Amp => Err(ManifestError::Host {
                 path: path.to_path_buf(),
                 host: self.host,
             }),
+            Host::OpenCode => {
+                absent(self.images.is_some(), "images")?;
+                Ok(Plugin::OpenCode {
+                    default_policy,
+                    batteries,
+                })
+            }
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
                 Ok(Plugin::ClaudeCode {
@@ -1062,14 +1078,16 @@ mod tests {
     }
 
     #[test]
-    fn source_plugins_are_battery_hosts_but_have_no_marketplace_installer() {
+    fn opencode_is_installable_and_amp_remains_a_source_plugin() {
         for host in ["amp", "opencode"] {
             assert!(manifest(&BATTERY.replace("[\"claude-code\"]", &format!("[\"{host}\"]"))).is_ok());
-            assert!(matches!(
-                manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", &format!("host = \"{host}\""))),
-                Err(ManifestError::Host { .. })
-            ));
         }
+        let opencode = manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"opencode\"")).unwrap();
+        assert_eq!(opencode.plugin().unwrap().host(), Host::OpenCode);
+        assert!(matches!(
+            manifest(&CLAUDE_CODE.replace("host = \"claude-code\"", "host = \"amp\"")),
+            Err(ManifestError::Host { .. })
+        ));
     }
 
     #[test]

@@ -39,7 +39,7 @@ impl Endpoint {
 
     /// `http://` plus a loopback literal and a port. No path, no trailing slash,
     /// no hostname: anything else is refused up front rather than half-applied.
-    pub(super) fn parse(text: &str) -> Result<Self, InitError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, InitError> {
         let malformed = |reason: &str| InitError::MalformedEndpoint {
             value: text.to_owned(),
             reason: reason.to_owned(),
@@ -64,7 +64,7 @@ impl Endpoint {
         })
     }
 
-    pub(super) fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
@@ -90,7 +90,7 @@ const RELOAD_BUDGET: Duration = Duration::from_secs(10);
 /// policy it loaded at startup. A restart loads this file itself, so the keys agree and
 /// there is nothing to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeOutcome {
+pub(crate) enum RuntimeOutcome {
     /// Serving the configuration this activation validated, with nothing to reconcile.
     Healthy,
     /// Served an older policy until this activation reloaded it.
@@ -113,7 +113,7 @@ impl RuntimeOutcome {
 /// own appa process, and refuses it by pid otherwise. Stale runtimes are
 /// cleared before this classification through their separate health protocol.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum EndpointOwner {
+pub(crate) enum EndpointOwner {
     /// Nothing answered, or what answered serves no fingerprint. Before the
     /// start this is the ordinary case; after it, it is a failure.
     Unidentified,
@@ -131,7 +131,7 @@ pub(super) enum EndpointOwner {
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// The endpoint's health answer; `None` when nothing answers it successfully.
-pub(super) fn endpoint_health(endpoint: &Endpoint) -> Option<String> {
+pub(crate) fn endpoint_health(endpoint: &Endpoint) -> Option<String> {
     match endpoint.ask("GET", "/health", PROBE_BUDGET) {
         Ok(answer) if answer.is_success() => Some(String::from_utf8_lossy(&answer.body).trim().to_owned()),
         Ok(_) | Err(_) => None,
@@ -339,7 +339,7 @@ pub(crate) fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
 /// A deployment is a build *and* the configuration it serves. Comparing builds alone makes
 /// every install of one build look like the same deployment, which is how an install ends
 /// up reloading, and reporting on, a runtime that is not its own.
-pub(super) fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
+pub(crate) fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
     let expected = crate::runtime_cli::binary_digest(binary).map_err(|source| InitError::InstallRuntime {
         path: binary.to_path_buf(),
         source,
@@ -397,7 +397,7 @@ fn classify_endpoint_owner(
 /// environment that has it. With no key to compare, the confirmation is the runtime's own:
 /// it validates this file before it swaps, so the key it serves after a reload it accepted
 /// is this file's.
-pub(super) fn reconcile_policy(
+pub(crate) fn reconcile_policy(
     endpoint: &Endpoint,
     config: &Path,
     composed: &ComposedPolicy,
@@ -459,7 +459,7 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
 
 /// The endpoint answers for this deployment: this build, serving this configuration.
 /// Answers with the pid of the process serving it.
-pub(super) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<i32, InitError> {
+pub(crate) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<i32, InitError> {
     match endpoint_owner(runtime, config, endpoint)? {
         EndpointOwner::Deployment { pid } => Ok(pid),
         EndpointOwner::Unidentified => Err(unidentified(endpoint)),

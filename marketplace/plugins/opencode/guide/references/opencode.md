@@ -38,8 +38,8 @@ hosts; include only batteries that list `opencode`.
 
 Use the returned relative battery paths in the root `include` list. Preserve
 existing includes, rules, comments, Authorities, audience mappings, and external
-bindings. Do not copy or edit battery files. This source deployment does not
-use `appa battery install` or the Claude installation store.
+bindings. Do not copy or edit battery files. The installer supplies the version's
+battery files. Use `publish` to change the approved root policy in this session.
 
 The initial OpenCode battery covers selected file, web, shell, and delegation
 tools. It permits only `pwd` through the shell. Explain that limitation and
@@ -64,9 +64,10 @@ failure leaves the root unchanged. Correct errors; obtain approval again if
 the correction changes the proposed behavior.
 
 Publication saves configuration; it does not reload the protected runtime.
-Tell the operator to close setup, restart the protected runtime, and start a
-fresh OpenCode session. Existing sessions retain their opening policy. Do not
-claim the new policy is serving until that restart has happened.
+Tell the operator to close setup, run `appa plugin install opencode` with this
+deployment's `--config` path to reload the protected runtime, and start a fresh
+OpenCode session. Existing sessions retain their opening policy. Do not claim
+the new policy is serving until that reload has happened.
 
 For `adjust`, inspect only the policy and batteries relevant to the request,
 then use the same proposal and publication sequence. For `explain`, inspect
