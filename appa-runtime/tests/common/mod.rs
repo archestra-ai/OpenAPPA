@@ -206,6 +206,19 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// `root` including the shipped Claude Code battery, as `appa plugin install
+/// claude-code` composes them: the battery is copied beside `dir`'s root.
+pub fn including_claude_code_battery(dir: &Path, root: &str) -> String {
+    let battery = dir.join("batteries/claude-code");
+    std::fs::create_dir_all(&battery).expect("the battery directory is created");
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/claude-code/appa.toml"),
+        battery.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
+    format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{root}")
+}
+
 /// Every offer a feedback body names, in the order the feedback lists
 /// them. Which end a suite takes is its own assertion: a remedy plan
 /// that stages several offers surfaces one line each.

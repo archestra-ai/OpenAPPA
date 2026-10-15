@@ -5,7 +5,8 @@ labels on the requester's own secrets. `appa plugin install claude-code`
 includes it on a first install; `appa battery remove claude-code` takes it out,
 and a later plugin install does not bring it back.
 
-It covers seven built-in tools, which the policy names `host/claude-code/Bash`,
+It covers Claude Code's built-in tools. Seven of them carry the rules below,
+which the policy names `host/claude-code/Bash`,
 `host/claude-code/Monitor`, `host/claude-code/PowerShell`,
 `host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write` and
 `host/claude-code/Edit`:
@@ -75,6 +76,24 @@ configs, plus `Get-StoredCredential` and `Get-Secret`; the same publishing selec
 Annotator for every other command; and the same masked results. Both Annotators run the local `claude` command; on Windows it must
 resolve to `claude.exe`. The default config `appa plugin install claude-code`
 writes adds the wildcard fallback for tools no rule names.
+
+The other built-in tools get static rules:
+
+- **Tools that stay inside the session** — `Agent`, `Task`, `Workflow`,
+  `Glob`, `Skill`, `ToolSearch`, `TodoWrite`, the plan, worktree, task, cron
+  and artifact tools, and the other session-local tools take the session's
+  label as it is. `Agent`, `Task` and `Workflow` start subagents, which run
+  as child trajectories when the root sets `context_control`.
+- **WebFetch, WebSearch** — A page or search result is a `suspicious` source,
+  and the URL or query is a `public` sink. A fetch from a listed
+  documentation host keeps the session's label. A Google search URL requires
+  no audience and returns `suspicious` results.
+- **Content from elsewhere** — `FetchInboxMessage`, `ReadMcpResourceTool`,
+  `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
+  `suspicious` content. Starting a remote routine is a `public` sink;
+  `DesignSync` requires `internal`.
+- **SendMessage** — A message to a protected session's socket or pipe address
+  carries the session's label. A send by name is a `public` sink.
 
 ## Add it to a deployment
 

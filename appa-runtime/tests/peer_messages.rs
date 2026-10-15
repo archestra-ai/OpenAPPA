@@ -4,7 +4,7 @@
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 mod common;
-use common::{claude_event, claude_hook, last_offer, repo_root};
+use common::{claude_event, claude_hook, including_claude_code_battery, last_offer, repo_root};
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ const A_ADDRESS: &str = "uds:/tmp/appa-peer/a.sock";
 const B_ADDRESS: &str = "uds:/tmp/appa-peer/b.sock";
 const READ: &str = "mcp__appa__read_peer_message";
 
-/// The shipped default with `extra` rules appended to its tool rules.
+/// The shipped default and battery with `extra` rules appended to the default's tool rules.
 fn config(dir: &Path, extra: &str) -> Config {
     let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
@@ -28,7 +28,7 @@ fn config(dir: &Path, extra: &str) -> Config {
         .expect("the example carries the context-controlling deployment");
     let text = format!("{before}{deployment}\n{extra}\n{after}");
     let path = dir.join(format!("appa-{}.toml", text.len()));
-    std::fs::write(&path, text).expect("the deployment writes");
+    std::fs::write(&path, including_claude_code_battery(dir, &text)).expect("the deployment writes");
     Config::load(&path).expect("the deployment loads")
 }
 
