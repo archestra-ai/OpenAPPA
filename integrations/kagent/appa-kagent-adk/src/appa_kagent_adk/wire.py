@@ -203,6 +203,9 @@ RETURN_AS_SPOKEN = "as_spoken"
 RETURN_SANITIZED = "sanitized"
 """The route of a return a registered sanitizer derives."""
 
+RETURN_VOID = "void"
+"""The route of a declaration that takes no return."""
+
 
 @dataclass(frozen=True)
 class Offer:
@@ -211,8 +214,8 @@ class Offer:
 
     ``offer_id`` is the id ``execute_remedy_plan`` takes. ``returns`` is
     ``None`` on an offer that declares no child return, ``as_spoken``
-    where the return crosses as the child spoke it, and ``sanitized``
-    where a sanitizer derives it. ``sanitizer`` names that sanitizer and
+    where the return crosses as the child spoke it, ``sanitized``
+    where a sanitizer derives it, and ``void`` where nothing crosses. ``sanitizer`` names that sanitizer and
     rides the ``sanitized`` route only."""
 
     offer_id: str
@@ -358,8 +361,8 @@ def _parse_offer_return(raw: Any) -> dict[str, str]:
     is an offer that declares no child return."""
     if raw is None:
         return {}
-    if raw == RETURN_AS_SPOKEN:
-        return {"returns": RETURN_AS_SPOKEN}
+    if raw in (RETURN_AS_SPOKEN, RETURN_VOID):
+        return {"returns": raw}
     sanitizer = raw.get("sanitizer") if isinstance(raw, dict) else None
     if not isinstance(sanitizer, str):
         raise WireError(f"a deny_call offer with a return route outside the wire: {raw!r}")

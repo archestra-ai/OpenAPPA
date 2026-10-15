@@ -1200,14 +1200,15 @@ pub struct WireInputSanitizer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WireReturn {
-    AsSpoken(AsSpoken),
+    Unsanitized(UnsanitizedReturn),
     Sanitized { sanitizer: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AsSpoken {
+pub enum UnsanitizedReturn {
     AsSpoken,
+    Void,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1278,10 +1279,11 @@ impl WireDecision {
                         .map(|offer| WireOffer {
                             offer_id: offer.id.clone(),
                             returns: offer.returns.as_ref().map(|returns| match returns {
-                                OfferedReturn::AsSpoken => WireReturn::AsSpoken(AsSpoken::AsSpoken),
+                                OfferedReturn::AsSpoken => WireReturn::Unsanitized(UnsanitizedReturn::AsSpoken),
                                 OfferedReturn::Sanitized { sanitizer } => WireReturn::Sanitized {
                                     sanitizer: sanitizer.clone(),
                                 },
+                                OfferedReturn::Void => WireReturn::Unsanitized(UnsanitizedReturn::Void),
                             }),
                             input_sanitizer: offer.input_sanitizer.as_ref().map(|sanitizer| WireInputSanitizer {
                                 name: sanitizer.name.clone(),
@@ -1357,7 +1359,8 @@ impl WireDecision {
                     .map(|offer| OfferedRemedy {
                         id: offer.offer_id,
                         returns: offer.returns.map(|returns| match returns {
-                            WireReturn::AsSpoken(_) => OfferedReturn::AsSpoken,
+                            WireReturn::Unsanitized(UnsanitizedReturn::AsSpoken) => OfferedReturn::AsSpoken,
+                            WireReturn::Unsanitized(UnsanitizedReturn::Void) => OfferedReturn::Void,
                             WireReturn::Sanitized { sanitizer } => OfferedReturn::Sanitized { sanitizer },
                         }),
                         input_sanitizer: offer.input_sanitizer.map(|sanitizer| OfferedInputSanitizer {
@@ -2530,6 +2533,11 @@ mod tests {
                         returns: Some(OfferedReturn::Sanitized {
                             sanitizer: "s".to_string(),
                         }),
+                        input_sanitizer: None,
+                    },
+                    OfferedRemedy {
+                        id: "o4".to_string(),
+                        returns: Some(OfferedReturn::Void),
                         input_sanitizer: None,
                     },
                 ],

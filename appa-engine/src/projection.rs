@@ -1524,10 +1524,10 @@ mod tests {
                 trajectory: traj(parent),
                 fork: fork.clone(),
                 snapshot,
-                return_policy: ReturnPolicy {
+                return_policy: ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                     floor: Label::top(),
                     sanitizer: None,
-                },
+                }),
                 kind: crate::transition::SpawnKind::Single,
             },
             Fact::ForkOpened {

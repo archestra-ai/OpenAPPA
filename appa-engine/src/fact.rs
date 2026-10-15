@@ -16,17 +16,36 @@ use crate::value::{
 };
 
 /// How a child bound at fork may return: the policy the parent declared when it approved the
-/// spawn, recorded immutably on the fork. `floor` is the lowest label the parent accepts from
-/// the child — inside the child, no remedy accepts a narrowing below it, and a return that
-/// stands below it is refused at the child's stop. `sanitizer` names the derivation every return
-/// crosses through; the dimension it raises is the one the floor does not bind, so the child may
-/// descend freely there. The submission path is **derived from this binding**, never selected by
-/// the child, so no engine client can route a return through a sanitizer the fork did not
-/// declare — that would be a trust-laundering selector.
+/// spawn, recorded immutably on the fork. `Void` takes no return: nothing the child says crosses,
+/// so the parent's label never changes through this child, and no floor bounds the child. A
+/// `Crossing` return admits one value under its floor and sanitizer. The submission path is
+/// **derived from this binding**, never selected by the child, so no engine client can route a
+/// return through a sanitizer the fork did not declare — that would be a trust-laundering
+/// selector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReturnPolicy {
+pub enum ReturnPolicy {
+    Void,
+    Crossing(CrossingReturn),
+}
+
+/// A return that crosses. `floor` is the lowest label the parent accepts from the child — inside
+/// the child, no remedy accepts a narrowing below it, and a return that stands below it is
+/// refused at the child's stop. `sanitizer` names the derivation every return crosses through;
+/// the dimension it raises is the one the floor does not bind, so the child may descend freely
+/// there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossingReturn {
     pub floor: Label,
     pub sanitizer: Option<ReturnSanitizer>,
+}
+
+/// The return a marked spawn's plan declares, compared step against record: the bare floor, a
+/// floor behind the named sanitizer, or no return.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnRoute {
+    Raw,
+    Sanitized(SanitizerName),
+    Void,
 }
 
 /// The derivation a fork's returns cross through: the reserved `attest-schema` sanitizer over
@@ -54,9 +73,22 @@ impl ReturnSanitizer {
 }
 
 impl ReturnPolicy {
-    /// The sanitizer name a plan step declares for this policy, compared step against record.
-    pub fn sanitizer_name(&self) -> Option<SanitizerName> {
-        self.sanitizer.as_ref().map(ReturnSanitizer::name)
+    /// The route a plan step declares for this policy, compared step against record.
+    pub fn route(&self) -> ReturnRoute {
+        match self {
+            ReturnPolicy::Void => ReturnRoute::Void,
+            ReturnPolicy::Crossing(crossing) => match &crossing.sanitizer {
+                None => ReturnRoute::Raw,
+                Some(sanitizer) => ReturnRoute::Sanitized(sanitizer.name()),
+            },
+        }
+    }
+
+    pub fn crossing(&self) -> Option<&CrossingReturn> {
+        match self {
+            ReturnPolicy::Void => None,
+            ReturnPolicy::Crossing(crossing) => Some(crossing),
+        }
     }
 }
 

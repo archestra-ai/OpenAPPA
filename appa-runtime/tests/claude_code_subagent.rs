@@ -6,7 +6,9 @@ use std::path::Path;
 use appa_runtime::api::{AuditEvent, LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime, TrajectoryId};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, AdapterName, HookDecision, HookEvent, LaunchStart, LaunchToken, WireEvent};
+use appa_runtime_api::{
+    Actor, AdapterName, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedReturn, WireEvent,
+};
 
 /// One recorded Claude Code session: the hook bodies it delivered, in
 /// order, scrubbed of local paths.
@@ -185,7 +187,9 @@ async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
         let name = event["hook_event_name"].as_str().expect("each event names its hook");
         if is_parent_spawn(event) {
             match hooks::handle(runtime, parsed(event)).await {
-                HookDecision::DenyCall { .. } => declare_spawn(runtime, event, None, as_spoken()).await,
+                HookDecision::DenyCall { .. } => {
+                    declare_spawn(runtime, event, OfferedReturn::AsSpoken, as_spoken()).await
+                }
                 HookDecision::AllowCall { spawn: Some(_) } => continue,
                 other => panic!("the recorded spawn answered {other:?}"),
             }
@@ -229,6 +233,12 @@ fn is_parent_spawn(event: &serde_json::Value) -> bool {
 }
 
 /// The bare declaration: the return crosses as spoken, floored at the parent's current label.
+fn sanitized(sanitizer: &str) -> OfferedReturn {
+    OfferedReturn::Sanitized {
+        sanitizer: sanitizer.to_string(),
+    }
+}
+
 fn as_spoken() -> RemedyArguments {
     RemedyArguments {
         label: Some(LabelSpelling::default()),
@@ -263,7 +273,7 @@ fn attested_at(audience: Option<&str>) -> RemedyArguments {
 /// Propose the recorded spawn: blocked on the return menu, the parent declares the
 /// return through `route` (none: as spoken) with `arguments`. The re-proposed spawn
 /// then releases, as `replay` asserts.
-async fn declare_spawn(runtime: &Runtime, spawn: &serde_json::Value, route: Option<&str>, arguments: RemedyArguments) {
+async fn declare_spawn(runtime: &Runtime, spawn: &serde_json::Value, route: OfferedReturn, arguments: RemedyArguments) {
     let HookEvent::ToolCall { actor, .. } = parsed(spawn) else {
         panic!("the spawn is a tool call");
     };
@@ -273,12 +283,7 @@ async fn declare_spawn(runtime: &Runtime, spawn: &serde_json::Value, route: Opti
     };
     let offer = offers
         .iter()
-        .find(|offer| {
-            offer.returns.as_ref().map(|offered| match offered {
-                appa_runtime_api::OfferedReturn::AsSpoken => None,
-                appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
-            }) == Some(route)
-        })
+        .find(|offer| offer.returns.as_ref() == Some(&route))
         .expect("the menu offers the requested return route");
     let declared = runtime
         .execute_remedy_with(&actor, OfferId(offer.id.clone()), arguments)
@@ -481,7 +486,7 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
         "{guidance}"
     );
     assert!(
-        guidance.contains("Returning nothing controls what crosses back; it does not relax what the child may"),
+        guidance.contains("Under a floor, an empty final message controls what crosses back; it does not relax"),
         "{guidance}"
     );
 
@@ -499,7 +504,7 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
         "the attestation route asks for its bound audience dimension: {feedback}"
     );
 
-    declare_spawn(&incompatible, &spawn, Some("attest-schema"), attested_at(None)).await;
+    declare_spawn(&incompatible, &spawn, sanitized("attest-schema"), attested_at(None)).await;
     replay(&incompatible, &events[1..start]).await;
     let (status, answer) = call(&incompatible, &events[start]).await;
     assert_eq!(status, 200);
@@ -521,7 +526,13 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
 
     let compatible = make_runtime();
     replay(&compatible, &events[..1]).await;
-    declare_spawn(&compatible, &spawn, Some("attest-schema"), attested_at(Some("self"))).await;
+    declare_spawn(
+        &compatible,
+        &spawn,
+        sanitized("attest-schema"),
+        attested_at(Some("self")),
+    )
+    .await;
     replay(&compatible, &events[1..start]).await;
     let (status, answer) = call(&compatible, &events[start]).await;
     assert_eq!(status, 200);
@@ -576,7 +587,7 @@ async fn a_parent_that_declared_a_suspicious_floor_takes_the_narrowing_return_at
     declare_spawn(
         &runtime,
         &hook(&events, "PreToolUse", Some("Agent"), false),
-        None,
+        OfferedReturn::AsSpoken,
         floored_at("suspicious"),
     )
     .await;
@@ -640,7 +651,7 @@ permits = { audience = { from = ["internal"], to = ["public"] } }
     declare_spawn(
         &runtime,
         &hook(&events, "PreToolUse", Some("Agent"), false),
-        Some("redactor"),
+        sanitized("redactor"),
         as_spoken(),
     )
     .await;
@@ -827,7 +838,7 @@ permits = { audience = { from = ["internal"], to = ["public"] } }
     declare_spawn(
         &runtime,
         &hook(&events, "PreToolUse", Some("Workflow"), false),
-        Some("redactor"),
+        sanitized("redactor"),
         as_spoken(),
     )
     .await;
@@ -857,6 +868,73 @@ permits = { audience = { from = ["internal"], to = ["public"] } }
         "the exact sanitized input crosses: {answer}"
     );
     assert_eq!(returns(&runtime, &root), vec![Some("redactor".to_string())]);
+}
+
+fn void() -> RemedyArguments {
+    RemedyArguments {
+        label: None,
+        return_schema: None,
+    }
+}
+
+#[tokio::test]
+async fn a_void_subagent_stops_only_empty_and_nothing_crosses() {
+    let runtime = deployment("", "", "delta = {}");
+    let root = SYNC.root();
+    let events = SYNC.events();
+    let start = index_of(&events, &hook(&events, "SubagentStart", None, true));
+    let stop = index_of(&events, &child_stop(&events));
+    declare_spawn(
+        &runtime,
+        &hook(&events, "PreToolUse", Some("Agent"), false),
+        OfferedReturn::Void,
+        void(),
+    )
+    .await;
+    replay(&runtime, &events[..start]).await;
+    let (_, answer) = call(&runtime, &events[start]).await;
+    assert!(
+        answer["hookSpecificOutput"]["additionalContext"].is_string(),
+        "the start tells the subagent it returns nothing: {answer}"
+    );
+    replay(&runtime, &events[start + 1..stop]).await;
+
+    let mut stop = events[stop].clone();
+    stop["last_assistant_message"] = serde_json::json!("Done.");
+    assert!(matches!(
+        hooks::handle(&runtime, parsed(&stop)).await,
+        HookDecision::Block { .. }
+    ));
+    stop["last_assistant_message"] = serde_json::json!("");
+    let (status, answer) = call(&runtime, &stop).await;
+    assert_eq!(
+        (status, answer),
+        (200, serde_json::json!({})),
+        "the empty stop ends the subagent"
+    );
+    assert!(returns(&runtime, &root).is_empty(), "nothing crossed");
+}
+
+#[tokio::test]
+async fn a_void_workflow_agents_structured_output_is_denied() {
+    let runtime = deployment("", "", "delta = {}");
+    let root = STRUCTURED.root();
+    let events = STRUCTURED.events();
+    let output = structured_output(&events);
+    declare_spawn(
+        &runtime,
+        &hook(&events, "PreToolUse", Some("Workflow"), false),
+        OfferedReturn::Void,
+        void(),
+    )
+    .await;
+    let start = index_of(&events, &hook(&events, "SubagentStart", None, true));
+    replay(&runtime, &events[..start]).await;
+    call(&runtime, &events[start]).await;
+    replay(&runtime, &events[start + 1..output]).await;
+    let (_, answer) = call(&runtime, &events[output]).await;
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    assert!(returns(&runtime, &root).is_empty(), "nothing crossed");
 }
 
 const LAUNCH: &str = "0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10";

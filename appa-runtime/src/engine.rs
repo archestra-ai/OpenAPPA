@@ -46,8 +46,8 @@ pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
-    RootForkOrigin,
+    BoundaryKind, CloseOutcome, CrossingReturn, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy,
+    ReturnRoute, ReturnSanitizer, RootForkOrigin,
 };
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
@@ -437,6 +437,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UnbackedReturnPolicy => ReplayRefusalClass("unbacked_return_policy"),
             TransitionRefusal::ReturnShapeViolation => ReplayRefusalClass("return_shape_violation"),
             TransitionRefusal::ReturnBelowFloor => ReplayRefusalClass("return_below_floor"),
+            TransitionRefusal::ReturnVoid => ReplayRefusalClass("return_void"),
             TransitionRefusal::BranchEnded => ReplayRefusalClass("branch_ended"),
             TransitionRefusal::NotForked => ReplayRefusalClass("not_forked"),
             TransitionRefusal::WrongReturnIdentity => ReplayRefusalClass("wrong_return_identity"),
@@ -1769,11 +1770,12 @@ impl RuntimeEngine {
                         })
                     });
                 let returns = plan.and_then(|plan| {
-                    plan.return_step().map(|sanitizer| match sanitizer {
-                        None => OfferedReturn::AsSpoken,
-                        Some(name) => OfferedReturn::Sanitized {
+                    plan.return_step().map(|route| match route {
+                        ReturnRoute::Raw => OfferedReturn::AsSpoken,
+                        ReturnRoute::Sanitized(name) => OfferedReturn::Sanitized {
                             sanitizer: name.as_str().to_string(),
                         },
+                        ReturnRoute::Void => OfferedReturn::Void,
                     })
                 });
                 let input_sanitizer = plan.and_then(|plan| {
@@ -2184,8 +2186,9 @@ impl RuntimeEngine {
     }
 
     /// The return policy an offer's execution declares, where its plan ends in a return step:
-    /// the floor, spelled as a delta over this trajectory's current label, and the schema an
-    /// attesting plan needs. A plan with no return step takes none, whatever was passed.
+    /// no return, which takes no argument, or the floor, spelled as a delta over this
+    /// trajectory's current label, and the schema an attesting plan needs. A plan with no return
+    /// step takes none, whatever was passed.
     fn declared_return_policy(
         &self,
         view: &EngineView,
@@ -2194,12 +2197,26 @@ impl RuntimeEngine {
         offer: &EngineOfferId,
         arguments: &RemedyArguments,
     ) -> Result<Option<ReturnPolicy>, String> {
-        let Some(step) = self
+        let Some(route) = self
             .engine
             .offer_plan(view, owner, offer)
-            .and_then(|plan| plan.return_step().map(|sanitizer| sanitizer.cloned()))
+            .and_then(|plan| plan.return_step().cloned())
         else {
             return Ok(None);
+        };
+        let step = match route {
+            ReturnRoute::Void => {
+                return match (&arguments.label, &arguments.return_schema) {
+                    (None, None) => Ok(Some(ReturnPolicy::Void)),
+                    _ => Err(
+                        "this plan takes no return from the subagent, so it takes no `label` or \
+                              `return_schema`: omit them"
+                            .to_string(),
+                    ),
+                };
+            }
+            ReturnRoute::Raw => None,
+            ReturnRoute::Sanitized(name) => Some(name),
         };
         let Some(spelling) = &arguments.label else {
             return Err(
@@ -2253,7 +2270,7 @@ impl RuntimeEngine {
             None => None,
             Some(name) => Some(ReturnSanitizer::Named(name)),
         };
-        Ok(Some(ReturnPolicy { floor, sanitizer }))
+        Ok(Some(ReturnPolicy::Crossing(CrossingReturn { floor, sanitizer })))
     }
 
     /// Return contract context provided to a starting subagent.
@@ -2263,8 +2280,18 @@ impl RuntimeEngine {
         parent: &TrajectoryId,
         fork: &appa_engine::value::ForkId,
     ) -> Option<String> {
-        let policy = self.engine.prepared_return_policy(view, parent, fork)?;
-        match policy.sanitizer? {
+        let crossing = match self.engine.prepared_return_policy(view, parent, fork)? {
+            ReturnPolicy::Void => {
+                return Some(
+                    "[appa] Your parent takes no return from you: nothing in your final message crosses to it. Do \
+                     the task with your own tools, then end with an empty final message (send no text or \
+                     explanation). A stop with text is blocked."
+                        .to_string(),
+                );
+            }
+            ReturnPolicy::Crossing(crossing) => crossing,
+        };
+        match crossing.sanitizer? {
             ReturnSanitizer::Attest(shape) => Some(format!(
                 "[appa] Your final message is checked when you stop: it must be one JSON object matching this \
                  schema, and nothing else. A stop that does not match is blocked with the reason; a stop that \
@@ -2403,6 +2430,13 @@ impl RuntimeEngine {
                      message (send no text or explanation) to end without a return.",
                     self.label_text(&floor)
                 ));
+            }
+            AudienceRound::Failed(TransitionError::ReturnVoid) => {
+                return blocked(
+                    "[appa] your parent takes no return from this session, so your final message cannot cross. \
+                     Stop with an empty final message (send no text or explanation)."
+                        .to_string(),
+                );
             }
             AudienceRound::Failed(TransitionError::ReturnShapeMismatch(mismatch)) => {
                 let policy = self.engine.return_policy_of(view, child);
@@ -3762,7 +3796,8 @@ fn clause_size(clause: &Clause) -> usize {
 
 fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
     let schema = policy
-        .and_then(|policy| policy.sanitizer.as_ref())
+        .and_then(ReturnPolicy::crossing)
+        .and_then(|crossing| crossing.sanitizer.as_ref())
         .and_then(ReturnSanitizer::shape)
         .map(|shape| shape.normalized().to_string())
         .unwrap_or_default();
@@ -3837,7 +3872,7 @@ impl ReturnSpelling {
 }
 
 fn return_instruction(
-    sanitizer: Option<&appa_engine::names::SanitizerName>,
+    route: &ReturnRoute,
     id: &OfferId,
     spelling: &ReturnSpelling,
     control: &str,
@@ -3845,8 +3880,17 @@ fn return_instruction(
     include_display_plan: bool,
 ) -> String {
     let ReturnSpelling { floor, ranks } = spelling;
-    let body = match sanitizer {
-        None => {
+    let body = match route {
+        ReturnRoute::Void => {
+            let call = remedy_call(control, id, "", description, include_display_plan);
+            format!(
+                "  - Take no return when this session needs no answer from the subagent, for example when it acts \
+             through its own tools. Then call the subagent tool again with the same arguments. Nothing in its final \
+             message crosses, so this session's label never changes through it, and no floor bounds what it may read \
+             or accept. The subagent must end with an empty final message; a stop with text is blocked.\n    {call}"
+            )
+        }
+        ReturnRoute::Raw => {
             let call = remedy_call(
                 control,
                 id,
@@ -3866,7 +3910,7 @@ fn return_instruction(
              or reader ID from the policy; add audience entries as needed"
             )
         }
-        Some(name) if name.is_attest_schema() => {
+        ReturnRoute::Sanitized(name) if name.is_attest_schema() => {
             let call = remedy_call(
                 control,
                 id,
@@ -3887,7 +3931,7 @@ fn return_instruction(
              from the policy; add audience entries as needed"
             )
         }
-        Some(name) => {
+        ReturnRoute::Sanitized(name) => {
             let call = remedy_call(
                 control,
                 id,
@@ -3912,13 +3956,14 @@ fn return_instruction(
     format!("{body}\n    This declaration covers this one subagent call. Each call in a fan-out declares its own.")
 }
 
-fn return_description(sanitizer: Option<&appa_engine::names::SanitizerName>) -> String {
-    match sanitizer {
-        None => "Declare the lowest label this session accepts from the subagent's return".to_string(),
-        Some(name) if name.is_attest_schema() => {
+fn return_description(route: &ReturnRoute) -> String {
+    match route {
+        ReturnRoute::Raw => "Declare the lowest label this session accepts from the subagent's return".to_string(),
+        ReturnRoute::Sanitized(name) if name.is_attest_schema() => {
             "Declare the return label and the JSON schema it must satisfy".to_string()
         }
-        Some(name) => format!(
+        ReturnRoute::Void => "Take no return from the subagent".to_string(),
+        ReturnRoute::Sanitized(name) => format!(
             "Have sanitizer {} rewrite the subagent's return and declare the floor",
             terminal_safe(name.as_str())
         ),
@@ -3991,7 +4036,7 @@ fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
 
 fn remedy_description(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, target: &str) -> String {
     match plan.return_step() {
-        Some(sanitizer) => return_description(sanitizer),
+        Some(route) => return_description(route),
         None => remedy_action(plan, registry, target),
     }
 }
@@ -4014,8 +4059,8 @@ fn remedy_instruction(
     include_display_plan: bool,
 ) -> String {
     let description = remedy_description(plan, registry, target);
-    if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, spelling, control, &description, include_display_plan);
+    if let Some(route) = plan.return_step() {
+        return return_instruction(route, id, spelling, control, &description, include_display_plan);
     }
     let call = remedy_call(control, id, "", &description, include_display_plan);
     // The display plan is the call's own `plan` argument, so it names the remedy. A second
@@ -4281,10 +4326,12 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     } else {
         "this call and all work that uses its result"
     };
-    let declare_floor = "When the spawn asks for a return declaration, choose a floor and sanitizer whose combined \
-                         route permits every narrowing the delegated work needs. A sanitizer unbinds only the dimension \
-                         it raises. Returning nothing controls what crosses back; it does not relax what the child may \
-                         read or accept under that route.";
+    let declare_floor = "When the spawn asks for a return declaration and this session needs no answer from the \
+                         delegated work, take no return: no floor then bounds what the child may read or accept, and \
+                         nothing crosses back. Otherwise choose a floor and sanitizer whose combined route permits \
+                         every narrowing the delegated work needs. A sanitizer unbinds only the dimension it raises. \
+                         Under a floor, an empty final message controls what crosses back; it does not relax what the \
+                         child may read or accept.";
     let preferred = match (standing, preserving_output) {
         (FloorStanding::Unbound | FloorStanding::Within, true) => {
             "An output sanitizer offered under Continue can admit this result without changing this session's \
@@ -4322,14 +4369,16 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
              output sanitizer, a further subagent under the bare floor cannot admit the raw result either. \
              A subagent started \
              here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
-             spawn asks for the return declaration."
+             spawn asks for the return declaration. When this session needs no answer from that work, a subagent \
+             declared with no return can do it too."
         ),
         (FloorStanding::Below, false) => {
             "The parent does not allow this session to admit the raw result. This restriction does not forbid \
              an output sanitizer offered under Continue: execute that offer and retry the call.\nIf no output \
-             sanitizer is offered, finish without the raw result. A further subagent cannot bypass this floor, \
-             and no registered return sanitizer carries the change back. Tell the parent that the work needs \
-             a child declared with a lower floor or a return sanitizer."
+             sanitizer is offered and this session needs no answer from the work, delegate it to a further \
+             subagent declared with no return: nothing it holds crosses back. Otherwise finish without the raw \
+             result, because no registered return sanitizer carries the change back. Tell the parent that the work \
+             needs a child declared with a lower floor, a return sanitizer, or no return."
                 .to_string()
         }
     };
@@ -5102,7 +5151,7 @@ mod tests {
     fn display_plans_describe_return_remedies_in_the_rendered_call() {
         let plan = ExecutableRemedyPlan {
             id: PlanId::new(1),
-            steps: vec![RemedyStep::Return(None)],
+            steps: vec![RemedyStep::Return(appa_engine::fact::ReturnRoute::Raw)],
             required: Vec::new(),
         };
         let instruction = remedy_instruction(

@@ -291,7 +291,8 @@ func TestADenyCarriesEveryOfferWithItsReturnRoute(t *testing.T) {
 	decision, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"blocked","offers":[` +
 		`{"offer_id":"o1"},` +
 		`{"offer_id":"o2","returns":"as_spoken"},` +
-		`{"offer_id":"o3","returns":{"sanitizer":"redact-invoices"}}]}`))
+		`{"offer_id":"o3","returns":{"sanitizer":"redact-invoices"}},` +
+		`{"offer_id":"o4","returns":"void"}]}`))
 	if err != nil {
 		t.Fatalf("the offers must parse: %v", err)
 	}
@@ -299,6 +300,7 @@ func TestADenyCarriesEveryOfferWithItsReturnRoute(t *testing.T) {
 		{OfferID: "o1"},
 		{OfferID: "o2", Returns: ReturnAsSpoken},
 		{OfferID: "o3", Returns: ReturnSanitized, Sanitizer: "redact-invoices"},
+		{OfferID: "o4", Returns: ReturnVoid},
 	}
 	if !reflect.DeepEqual(decision.Offers, want) {
 		t.Errorf("the offers drifted: got %+v, want %+v", decision.Offers, want)

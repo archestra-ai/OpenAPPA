@@ -179,10 +179,13 @@ async fn open_child(
     let offer = offers
         .iter()
         .find(|offer| {
-            offer.returns.as_ref().map(|offered| match offered {
-                appa_runtime_api::OfferedReturn::AsSpoken => None,
-                appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
-            }) == Some(route)
+            offer.returns.as_ref()
+                == Some(&match route {
+                    None => appa_runtime_api::OfferedReturn::AsSpoken,
+                    Some(sanitizer) => appa_runtime_api::OfferedReturn::Sanitized {
+                        sanitizer: sanitizer.to_string(),
+                    },
+                })
         })
         .expect("the menu offers the requested return route");
     let declared = runtime

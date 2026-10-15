@@ -2576,7 +2576,7 @@ pub struct ExecuteRemedyPlanArgs {
     pub offer_id: String,
     /// For a plan that declares a subagent's return: the lowest label this session accepts
     /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
-    /// session's current value.
+    /// session's current value. A plan that takes no return takes no `label`.
     #[serde(default)]
     pub label: Option<LabelArgs>,
     /// For a plan that attests a subagent's return: the JSON schema the return must match.

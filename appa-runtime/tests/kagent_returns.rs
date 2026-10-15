@@ -322,7 +322,12 @@ async fn a_marked_spawn_is_held_on_a_menu_that_carries_every_return_route() {
             "the menu offers every registered output sanitizer, {sanitizer} included: {held}"
         );
     }
-    assert_eq!(routes.len(), 3, "one offer per route, and no other: {held}");
+    assert_eq!(
+        routes.last(),
+        Some(&serde_json::json!("void")),
+        "the declaration that takes no return closes the menu: {held}"
+    );
+    assert_eq!(routes.len(), 4, "one offer per route, and no other: {held}");
 
     let ids: Vec<OfferId> = menu
         .iter()

@@ -171,10 +171,10 @@ mod tests {
                 trajectory: parent.clone(),
                 fork: fork.clone(),
                 snapshot: projection.view(parent).freeze_basis(),
-                return_policy: ReturnPolicy {
+                return_policy: ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                     floor: Label::bottom(),
                     sanitizer: None,
-                },
+                }),
                 kind: crate::transition::SpawnKind::Single,
             },
             Fact::ForkOpened {

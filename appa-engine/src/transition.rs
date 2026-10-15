@@ -525,6 +525,9 @@ pub enum TransitionError {
     /// it, so the child keeps it. Returning nothing is always open to the child.
     #[error("the return stands below the floor the parent set for this child")]
     ReturnBelowFloor { floor: Label },
+    /// The parent declared that this child returns nothing: only an empty stop ends it.
+    #[error("the parent declared that this child returns nothing")]
+    ReturnVoid,
     #[error(transparent)]
     ReturnPolicy(#[from] crate::plan::ReturnPolicyRefusal),
 }
@@ -842,6 +845,8 @@ pub enum TransitionRefusal {
     ReturnShapeViolation,
     #[error("a return record stands below the floor the parent set for its child")]
     ReturnBelowFloor,
+    #[error("a return record crosses a fork whose parent declared no return")]
+    ReturnVoid,
     #[error("a return or fork record names a branch that has already ended")]
     BranchEnded,
     #[error("a return record names a trajectory that was never forked")]
@@ -2701,10 +2706,13 @@ impl<'a> Sequence<'a> {
         if id.child() != child || id.occurrence() != views.returns_by(child) {
             return Err(TransitionRefusal::WrongReturnIdentity);
         }
-        let policy = views
+        let ReturnPolicy::Crossing(policy) = views
             .return_policy_of(child)
             .ok_or(TransitionRefusal::NotForked)?
-            .clone();
+            .clone()
+        else {
+            return Err(TransitionRefusal::ReturnVoid);
+        };
         let fold = views.branch_label(child);
         let expected = match (&policy.sanitizer, derivation) {
             (None, ReturnDerivation::Raw) => fold.clone(),
@@ -3066,7 +3074,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::WrongReturnIdentity);
         }
         let policy = views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)?;
-        match &policy.sanitizer {
+        match policy.crossing().and_then(|crossing| crossing.sanitizer.as_ref()) {
             Some(ReturnSanitizer::Named(bound)) if bound == sanitizer => {}
             _ => return Err(TransitionRefusal::SanitizerUnapplicable),
         }

@@ -11,8 +11,8 @@ pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
 
 pub use wire::{
-    Accepted, Adapter, AsSpoken, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn,
-    OutcomeStatus, PROTOCOL, PrincipalSource, SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn,
+    Accepted, Adapter, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn, OutcomeStatus,
+    PROTOCOL, PrincipalSource, SpellFn, UnsanitizedReturn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn,
     WireReview,
 };
 
@@ -647,12 +647,13 @@ pub struct OfferedInputSanitizer {
 }
 
 /// How a return-declaring plan crosses the child's return: as the child
-/// spoke it, or through the registered sanitizer named (`attest-schema`
-/// attests a schema the declaration supplies).
+/// spoke it, through the registered sanitizer named (`attest-schema`
+/// attests a schema the declaration supplies), or not at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfferedReturn {
     AsSpoken,
     Sanitized { sanitizer: String },
+    Void,
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`

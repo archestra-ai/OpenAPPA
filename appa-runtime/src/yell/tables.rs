@@ -258,7 +258,7 @@ static REMEDY_STEP: Table = Table {
         ("Withhold", Rule::Keep),
         ("Sanitize", Rule::Token(Class::Sanitizer)),
         ("Derive", Rule::Token(Class::Sanitizer)),
-        ("Return", Rule::Token(Class::Sanitizer)),
+        ("Return", Rule::Table(&RETURN_ROUTE)),
     ],
 };
 
@@ -391,8 +391,22 @@ static RETURN_SANITIZER: Table = Table {
     ],
 };
 
+static RETURN_ROUTE: Table = Table {
+    name: "ReturnRoute",
+    entries: &[
+        ("Raw", Rule::Keep),
+        ("Sanitized", Rule::Token(Class::Sanitizer)),
+        ("Void", Rule::Keep),
+    ],
+};
+
 static RETURN_POLICY: Table = Table {
     name: "ReturnPolicy",
+    entries: &[("Void", Rule::Keep), ("Crossing", Rule::Table(&CROSSING_RETURN))],
+};
+
+static CROSSING_RETURN: Table = Table {
+    name: "CrossingReturn",
     entries: &[
         ("floor", Rule::Table(&LABEL)),
         ("sanitizer", Rule::Table(&RETURN_SANITIZER)),
