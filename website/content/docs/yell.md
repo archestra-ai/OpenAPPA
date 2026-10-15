@@ -18,6 +18,15 @@ Agent reporting is off by default. `appa plugin install claude-code` asks whethe
 agent_yell = true
 ```
 
+When reporting is on, every block ends with a Report section that names the tool:
+
+```text
+Report:
+  If a plan makes no sense, you keep getting blocked, the user keeps being asked to approve similar calls, or the user is frustrated, call mcp__appa__yell.
+```
+
+The agent reads this before it retries or asks the user to approve another call, so it can report instead. A host that embeds APPA sets its own reporting tool through `EmbeddedPresentationOptions::yell_tool`. When the tool is unset, blocks do not mention reporting.
+
 The agent describes the problem in `message`. Set `with_trajectory = true` to include session decisions. Set it to `false` to include only policy information.
 
 The normal tool proposal check still controls each agent report. An approved call sends directly and returns a receipt. It does not add a confirmation prompt or a local file.

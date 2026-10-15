@@ -7,6 +7,7 @@
   "trustedDependencies": ["@opencode/cli"],
   "dependencies": {
     "@opencode/plugin": "2.0.28",
+    "@opencode/schema": "2.0.28",
     "effect": "4.0.1"
   },
   "devDependencies": {

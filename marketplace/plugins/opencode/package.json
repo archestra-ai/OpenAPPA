@@ -1,0 +1,13 @@
+{
+  "name": "appa-appencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.28",
+    "effect": "4.0.1"
+  }
+}

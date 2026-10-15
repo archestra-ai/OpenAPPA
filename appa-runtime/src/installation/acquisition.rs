@@ -20,7 +20,7 @@ const MAX_TAG_PAGES: usize = 5;
 #[derive(Debug, Clone, Copy)]
 pub enum Requirements {
     Packages,
-    Claude(Platform),
+    Native(Platform),
     Kagent,
     Both(Platform),
 }
@@ -371,9 +371,12 @@ impl Acquired {
 
 impl Selection {
     pub(super) fn requirements(&self) -> Requirements {
-        match (self.plugins.contains("claude-code"), self.plugins.contains("kagent")) {
+        match (
+            self.plugins.contains("claude-code") || self.plugins.contains("opencode"),
+            self.plugins.contains("kagent"),
+        ) {
             (true, true) => Requirements::Both(self.platform),
-            (true, false) => Requirements::Claude(self.platform),
+            (true, false) => Requirements::Native(self.platform),
             (false, true) => Requirements::Kagent,
             (false, false) => Requirements::Packages,
         }
@@ -385,7 +388,7 @@ pub(super) fn required_archives(
     requirements: Requirements,
 ) -> Result<Vec<String>, InstallError> {
     let mut names: Vec<String> = generation.marketplace_archive().into_iter().collect();
-    if let Requirements::Claude(platform) | Requirements::Both(platform) = requirements {
+    if let Requirements::Native(platform) | Requirements::Both(platform) = requirements {
         if generation
             .build_artifacts()
             .is_some_and(|build| build.platform() != platform)
@@ -715,13 +718,13 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            required_archives(&generation, Requirements::Claude(Platform::MacArm64)).unwrap(),
+            required_archives(&generation, Requirements::Native(Platform::MacArm64)).unwrap(),
             vec![
                 Platform::MacArm64.archive().to_owned(),
                 BUILD_BATTERIES_ARCHIVE.to_owned()
             ]
         );
-        assert!(required_archives(&generation, Requirements::Claude(Platform::LinuxAmd64)).is_err());
+        assert!(required_archives(&generation, Requirements::Native(Platform::LinuxAmd64)).is_err());
         assert!(required_archives(&generation, Requirements::Kagent).is_err());
         assert!(required_archives(&generation, Requirements::Both(Platform::MacArm64)).is_err());
     }

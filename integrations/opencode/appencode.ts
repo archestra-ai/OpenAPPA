@@ -7,6 +7,7 @@ import { Tool } from '@opencode/schema/tool'
 import { Cause, Effect, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { configuration, guide } from './setup'
 
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
@@ -27,7 +28,10 @@ function failure(error: unknown): Tool.Error {
 export default Plugin.define({
   id: 'appa.appencode',
   effect: Effect.fn(function* (ctx) {
-    const base = process.env.APPA_OPENCODE_RUNTIME_URL || 'http://127.0.0.1:8789'
+    const base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || 'http://127.0.0.1:8789'
+    const setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG
+    const setup = setupConfig ? yield* Effect.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || '')).pipe(Effect.orDie) : undefined
+    const setupGuide = setup ? yield* Effect.tryPromise(guide).pipe(Effect.orDie) : undefined
     const pending = new Map<string, { proposal: Proposal; actor: Actor }>()
     const children = new Map<string, {
       root: Tool.Context['sessionID']; promptID: SessionMessage.ID; prompt: string; context: string
@@ -110,6 +114,33 @@ export default Plugin.define({
       })
     }
 
+    // Prompt admission precedes the host's tool snapshot. Waiting in context or
+    // execute.before is too late to add a newly discovered executor to that request.
+    const remedyReady = Effect.gen(function* () {
+      for (;;) {
+        const tools = yield* ctx.tool.list()
+        if (tools.some(tool => tool.options?.namespace === 'appa' &&
+            tool.name === 'execute_remedy_plan' && tool.options.codemode === false)) return
+        const servers = yield* ctx.mcp.list()
+        const server = servers.data.find(server => server.name === 'appa')
+        if (!server || !['pending', 'connected'].includes(server.status.status)) {
+          return yield* Effect.fail(new Tool.Error({ message:
+            `[appencode] APPA MCP is ${server?.status.status ?? 'not configured'}. Connect the appa server before protected work.` }))
+        }
+        yield* Effect.sleep('50 millis')
+      }
+    }).pipe(Effect.timeoutOrElse({ duration: '10 seconds', orElse: () =>
+      Effect.fail(new Tool.Error({ message: '[appencode] APPA remedy tool was not registered within 10 seconds. Check the appa MCP connection and retry the prompt.' })) }),
+    Effect.catch(error => Effect.fail(failure(error))))
+
+    const setupDiscovery = Effect.gen(function* () {
+      for (;;) {
+        const servers = yield* ctx.mcp.list()
+        if (!servers.data.some(server => server.status.status === 'pending')) return
+        yield* Effect.sleep('50 millis')
+      }
+    }).pipe(Effect.timeoutOption('10 seconds'))
+
     function feedback(value: string, tools: Awaited<ReturnType<typeof inventory>>) {
       // Only runtime-authored feedback is respelled; admitted values stay byte-for-byte intact.
       for (const tool of [...tools].sort((a, b) => b.tool.length - a.tool.length)) {
@@ -122,6 +153,31 @@ export default Plugin.define({
 
     yield* ctx.tool.transform(editor => {
       editor.remove('subagent')
+      if (setup) editor.add({
+        name: 'appa_setup',
+        options: { codemode: false },
+        description: 'Inspect AppenCode policy and live tools, read a catalog battery, or publish a complete approved policy. Publish only after a later operator message approves your proposal. Configuration access only; no coding or shell execution.',
+        input: Schema.Struct({
+          operation: Schema.Literals(['inspect', 'battery', 'publish']),
+          battery: Schema.optionalKey(Schema.String),
+          policy: Schema.optionalKey(Schema.String),
+          expected_digest: Schema.optionalKey(Schema.String),
+        }),
+        output: Schema.String,
+        execute: (input, call) => Effect.gen(function* () {
+          const session = yield* ctx.session.get({ sessionID: call.sessionID })
+          if (session.parentID || session.fork) return yield* Effect.fail(new Tool.Error({ message: 'Setup requires a fresh root operator session.' }))
+          if (input.operation !== 'battery') yield* setupDiscovery
+          const servers = yield* ctx.mcp.list()
+          const tools = yield* ctx.tool.list()
+          const output = yield* Effect.tryPromise({ try: () => setup(input, tools.map(tool => ({ name: tool.id, description: tool.description,
+            canonical: tool.options?.namespace === 'appa' && tool.name === 'execute_remedy_plan' ? 'appa/execute_remedy_plan'
+              : tool.options?.namespace ? `mcp/${tool.options.namespace}/${tool.name}` : `host/opencode/${tool.name}` })),
+          servers.data.map(server => ({ name: server.name, status: server.status.status }))),
+          catch: error => new Tool.Error({ message: error instanceof Error ? error.message : 'AppenCode setup failed.' }) })
+          return { output, content: output }
+        }).pipe(Effect.catch(error => Effect.fail(error instanceof Tool.Error ? error : failure(error)))),
+      })
       editor.add({
         name: 'appa_subagent',
         options: { codemode: false },
@@ -265,7 +321,8 @@ export default Plugin.define({
           throw new Error('[appencode] Child prompts require an exact live foreground delegation; steering and alternate launches are refused.')
         }
       }, catch: failure,
-    }).pipe(Effect.orDie))
+    }).pipe(Effect.andThen(setup ? Effect.void : remedyReady),
+      Effect.tapError(error => Effect.logError(error.message)), Effect.orDie))
 
     for (const kind of ['compaction', 'generate', 'title'] as const) {
       yield* ctx.session.hook(kind, event => Effect.tryPromise({
@@ -282,7 +339,10 @@ export default Plugin.define({
         delete event.tools.execute
         delete event.tools.subagent
         if (children.has(event.sessionID)) delete event.tools.appa_subagent
-        event.system.push({ type: 'text', text: context ||
+        if (setup) {
+          for (const name of Object.keys(event.tools)) if (name !== 'appa_setup') delete event.tools[name]
+        }
+        event.system.push({ type: 'text', text: setupGuide || context ||
           'AppenCode checks direct tool flows through APPA. Use the offered remedy tool, then retry. Do not bypass refused flows.' })
       },
       catch: failure,

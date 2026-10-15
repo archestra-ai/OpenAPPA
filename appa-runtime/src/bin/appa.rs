@@ -37,6 +37,11 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Configure an installed OpenCode integration in a private operator session.
+    Opencode {
+        #[command(subcommand)]
+        command: OpencodeCommand,
+    },
     /// Inspect host plugin packages for a deployment.
     Plugin {
         #[command(subcommand)]
@@ -218,6 +223,12 @@ enum PluginCommand {
 }
 
 #[derive(Subcommand)]
+enum OpencodeCommand {
+    /// Inspect and tune the policy with the project's live OpenCode tool inventory.
+    Setup(appa_runtime::installation::opencode::Setup),
+}
+
+#[derive(Subcommand)]
 enum FilesCommand {
     /// Repair a pending file operation from its recorded request and disk state.
     #[command(
@@ -357,6 +368,9 @@ fn main() -> ExitCode {
         } => appa_runtime::ui::status(args),
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
         Command::ActivateClaude { config } => claude_exit(appa_runtime::init::activate_claude_code(&config)),
+        Command::Opencode {
+            command: OpencodeCommand::Setup(args),
+        } => appa_runtime::installation::opencode::setup(args),
         Command::Plugin {
             command: PluginCommand::List(args),
         } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),

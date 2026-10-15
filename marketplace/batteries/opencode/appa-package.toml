@@ -1,0 +1,10 @@
+schema = 1
+name = "opencode"
+description = "OpenCode built-in tool contracts: private reads narrow audience, web results lower trust, edits require trust, and shell access starts with pwd only."
+
+[battery]
+policy = "appa.toml"
+hosts = ["opencode"]
+namespaces = ["opencode"]
+helpers = []
+benefit = "Private reads cannot reach public tools. Web results cannot drive trusted-only edits. Other shell commands need explicit contracts."

@@ -294,6 +294,9 @@ pub struct EmbeddedPresentationOptions {
     pub supports_delegation: bool,
     /// Formats remedy call lines with an explicit plan parameter.
     pub include_display_plan: bool,
+    /// The host's reporting tool, spelled the way the model calls it. When set, every block
+    /// ends with a Report section that names it; when unset, blocks do not mention reporting.
+    pub yell_tool: Option<String>,
 }
 
 impl Default for EmbeddedPresentationOptions {
@@ -302,6 +305,7 @@ impl Default for EmbeddedPresentationOptions {
             control_tool: appa_runtime_api::ADVERTISED_CONTROL_TOOL.to_owned(),
             supports_delegation: true,
             include_display_plan: false,
+            yell_tool: None,
         }
     }
 }

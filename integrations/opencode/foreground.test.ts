@@ -3,9 +3,11 @@ import { OpenCode } from '@opencode/client'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { install } from './setup'
 
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
+const payload = resolve(import.meta.dir, '../../marketplace/plugins/opencode')
 let directory: string
 let runtime: ReturnType<typeof Bun.spawn>
 let server: ReturnType<typeof Bun.spawn>
@@ -19,6 +21,11 @@ const hooks: { event: any; reply: any }[] = []
 const requests: any[] = []
 const slow = new Map<string, { promise: Promise<void>; resolve: () => void }>()
 let corruptDecision: string | undefined
+let setupInspection: any
+let setupPolicy: string
+let appaCatalogGate: Promise<void> | undefined
+let appaCatalogSeen = false
+let projectMcp: ReturnType<typeof Bun.serve> | undefined
 
 function port() {
   const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
@@ -36,18 +43,20 @@ async function ready(check: () => Promise<unknown>, process: ReturnType<typeof B
   throw new Error(`Process did not start: ${await readFile(log, 'utf8')}`)
 }
 
-async function startRuntime() {
+async function startRuntime(config = `${directory}/appa.toml`) {
   runtime = Bun.spawn([resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa'), 'runtime', '--adapter', 'opencode',
-    '--listen', `127.0.0.1:${runtimePort}`, '--config', `${directory}/appa.toml`, '--db', `${directory}/appa.db`],
+    '--listen', `127.0.0.1:${runtimePort}`, '--config', config, '--db', `${directory}/appa.db`],
   { stdout: 'ignore', stderr: Bun.file(`${directory}/appa.log`) })
   await ready(async () => { if (!(await fetch(`http://127.0.0.1:${runtimePort}/health`)).ok) throw new Error() }, runtime, `${directory}/appa.log`)
 }
 
-async function startServer() {
+async function startServer(setupConfig?: string) {
   server = Bun.spawn([resolve(import.meta.dir, 'node_modules/.bin/opencode'), 'serve', '--hostname', '127.0.0.1', '--port', String(serverPort)],
   { cwd: directory, env: { ...process.env, HOME: `${directory}/home`, XDG_CONFIG_HOME: `${directory}/config`,
     XDG_DATA_HOME: `${directory}/data`, XDG_CACHE_HOME: `${directory}/cache`, XDG_STATE_HOME: `${directory}/state`,
     APPA_OPENCODE_RUNTIME_URL: proxy.url.toString(),
+    APPA_OPENCODE_SETUP_CONFIG: setupConfig,
+    APPA_OPENCODE_SETUP_BINARY: setupConfig ? resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa') : undefined,
     OPENCODE_PASSWORD: password, OPENCODE_DISABLE_MODELS_FETCH: '1' },
   stdout: Bun.file(`${directory}/opencode.log`), stderr: Bun.file(`${directory}/opencode-error.log`) })
   client = OpenCode.make({ baseUrl: `http://127.0.0.1:${serverPort}`, headers: {
@@ -89,8 +98,15 @@ builtin = "redact-email"
 `)
   runtimePort = port()
   await startRuntime()
-  proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+  proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 30, async fetch(request) {
     const path = new URL(request.url).pathname
+    if (path === '/mcp' && request.method === 'POST') {
+      const rpc = await request.clone().json()
+      if (rpc.method === 'tools/list' && appaCatalogGate) {
+        appaCatalogSeen = true
+        await appaCatalogGate
+      }
+    }
     const event = path === '/hook' ? await request.clone().json() : undefined
     const response = await fetch(new Request(`http://127.0.0.1:${runtimePort}${path}`, request))
     if (event) {
@@ -107,7 +123,7 @@ builtin = "redact-email"
     const body = await request.json()
     requests.push(body)
     const prompt = [...body.messages].reverse().find((message: any) => message.role === 'user' &&
-      typeof message.content === 'string' && /^(child|delegate|probe-public|probe-shell):/.test(message.content))
+      typeof message.content === 'string' && /^(child|delegate|probe-public|probe-shell|setup):/.test(message.content))
     const user = prompt?.content ?? ''
     const conversation = body.messages.slice(body.messages.indexOf(prompt) + 1)
     const last = [...conversation].reverse().find((message: any) => message.role === 'tool' || message.role === 'assistant')
@@ -115,6 +131,19 @@ builtin = "redact-email"
       try { const parsed = JSON.parse(last.content); return parsed.error?.message ?? last.content } catch { return last.content }
     })() : ''
     const previous = [...conversation].reverse().find((message: any) => message.tool_calls)?.tool_calls?.[0]?.function.name
+    if (user.startsWith('setup:')) {
+      if (last?.role === 'tool') {
+        if (user === 'setup:init') {
+          const decoded = JSON.parse(output)
+          setupInspection = decoded.digest ? decoded : JSON.parse(decoded.output ?? decoded.content)
+          return completion('Proposal: include Microsoft Learn and permit only printf setup-proof in addition to pwd. Approve, or tell me what to change.')
+        }
+        return completion(`Setup result: ${output}`)
+      }
+      return completion(null, [{ name: 'appa_setup', input: user === 'setup:init' ? { operation: 'inspect' }
+        : { operation: 'publish', expected_digest: setupInspection.digest,
+          policy: user === 'setup:invalid' ? 'invalid = [' : setupPolicy } }])
+    }
     if (user === 'delegate:parallel') {
       const batch = [...conversation].reverse().find((message: any) => message.tool_calls)?.tool_calls ?? []
       const outcomes = batch.map((call: any) => conversation.find((message: any) => message.tool_call_id === call.id)?.content ?? '')
@@ -133,7 +162,7 @@ builtin = "redact-email"
     }
     if (user.startsWith('probe-shell:')) {
       return last?.role === 'tool' ? completion(`Public shell: ${output}`)
-        : completion(null, [{ name: 'shell', input: { command: 'pwd' } }])
+        : completion(null, [{ name: 'shell', input: { command: user === 'probe-shell:setup' ? 'printf setup-proof' : 'pwd' } }])
     }
     if (output.includes('offer_id:')) {
       const lines = output.split('\n')
@@ -176,13 +205,17 @@ builtin = "redact-email"
     }
     return completion(null, [{ name: 'appa_subagent', input }])
   } })
+  await mkdir(`${directory}/config/opencode`, { recursive: true })
+  await writeFile(`${directory}/config/opencode/opencode.json`, JSON.stringify({
+    plugins: [payload],
+    mcp: { servers: { appa: { type: 'remote', url: `${proxy.url}mcp`, oauth: false } } },
+  }))
   await writeFile(`${directory}/opencode.json`, JSON.stringify({
-    plugins: [resolve(import.meta.dir)], snapshots: false, share: 'disabled', update: 'disable', model: 'appa-test/fixture',
+    snapshots: false, share: 'disabled', update: 'disable', model: 'appa-test/fixture',
     permissions: [{ action: '*', resource: '*', effect: 'allow' }],
     providers: { 'appa-test': { package: '@opencode/ai/providers/openai-compatible',
       settings: { baseURL: `${provider.url}v1`, apiKey: 'local-test-fixture' },
       models: { fixture: { capabilities: { tools: true }, limit: { context: 128000, output: 4096 } } } } },
-    mcp: { servers: { appa: { type: 'remote', url: `${proxy.url}mcp`, oauth: false } } },
     commands: { alternate: { template: 'child:alternate-command', agent: 'general', subagent: true } },
   }))
   serverPort = port()
@@ -194,16 +227,12 @@ afterAll(async () => {
   if (server) await server.exited
   runtime?.kill()
   if (runtime) await runtime.exited
-  provider?.stop(true); proxy?.stop(true)
+  provider?.stop(true); proxy?.stop(true); projectMcp?.stop(true)
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
 async function begin(task: string) {
   const session = await client.session.create({ location: { directory } })
-  await ready(async () => {
-    const mcp = await client.mcp.list({ location: { directory } })
-    if (!mcp.data.some(item => item.name === 'appa' && item.status.status === 'connected')) throw new Error('MCP discovery pending')
-  }, server, `${directory}/opencode-error.log`)
   await client.session.prompt({ sessionID: session.id, text: `delegate:${task}` })
   return session
 }
@@ -213,6 +242,52 @@ async function delegate(task: string) {
   await client.session.wait({ sessionID: session.id })
   return { session, history: await client.session.context({ sessionID: session.id }) }
 }
+
+test('cold prompts wait for the real remedy executor; unavailable discovery has a deadline', async () => {
+  for (const expire of [false, true]) {
+    server.kill(); await server.exited
+    let release!: () => void
+    appaCatalogGate = new Promise<void>(resolve => { release = resolve })
+    appaCatalogSeen = false
+    try {
+      await startServer()
+      const session = await client.session.create({ location: { directory } })
+      const prior = requests.length
+      const submitted = client.session.prompt({ sessionID: session.id, text: 'delegate:private cold-start' })
+      // Observe rejection immediately too: otherwise a failing baseline leaves an
+      // unhandled rejection while this test is waiting for the catalog request.
+      const outcome = submitted.then(() => 'admitted', error => String(error))
+      await ready(async () => { if (!appaCatalogSeen) throw new Error('Catalog not requested') }, server, `${directory}/opencode-error.log`)
+      expect(await Promise.race([outcome, Bun.sleep(150).then(() => 'waiting')])).toBe('waiting')
+      expect(requests.length).toBe(prior)
+      if (expire) {
+        const started = performance.now()
+        // This host reports prompt-hook failures as HTTP 500, without the message.
+        expect(await outcome).not.toBe('admitted')
+        const elapsed = performance.now() - started
+        expect(elapsed).toBeGreaterThan(9_000)
+        expect(elapsed).toBeLessThan(12_000)
+        expect(requests.length).toBe(prior)
+        release()
+        await client.session.prompt({ sessionID: session.id, text: 'delegate:after-timeout' })
+        await client.session.wait({ sessionID: session.id })
+        expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Parent received: child:after-timeout')
+      } else {
+        release()
+        expect(await outcome).toBe('admitted')
+        await client.session.wait({ sessionID: session.id })
+        const first = requests.slice(prior).find(request => request.tools?.length)
+        expect(first.tools.some((tool: any) => tool.function.name === 'appa_execute_remedy_plan')).toBe(true)
+        expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('alice@corp.example')
+        expect(hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'mcp__appa__execute_remedy_plan' &&
+          hook.reply.decision === 'pass_control')).toBe(true)
+      }
+    } finally {
+      release()
+      appaCatalogGate = undefined
+    }
+  }
+}, 45_000)
 
 test('published CLI runs a checked foreground child and refuses later child prompting', async () => {
   const { session, history } = await delegate('hello')
@@ -368,3 +443,130 @@ test('APPA restart retains a live child binding; OpenCode restart refuses old ch
   const recovered = await delegate('after-restart')
   expect(JSON.stringify(recovered.history)).toContain('Parent received: child:after-restart')
 }, 45_000)
+
+test('operator setup proposes without writing, rejects invalid and stale policies, and publishes for fresh protected sessions only', async () => {
+  const before = await client.session.create({ location: { directory } })
+  await client.session.prompt({ sessionID: before.id, text: 'probe-shell:setup' })
+  await client.session.wait({ sessionID: before.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: before.id }))).toContain('arguments match no registered contract')
+  const target = `${directory}/deployment/appa.toml`
+  const projectSettings = await readFile(`${directory}/opencode.json`, 'utf8')
+  await install(`${directory}/config/opencode`, target, proxy.url.toString().replace(/\/$/, ''))
+  // Exercise the shipped bundle's configuration()/guide(), not a source plugin
+  // added by the developer launcher. Source registration has separate tests.
+  const settingsPath = `${directory}/config/opencode/opencode.json`
+  const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
+  settings.plugins = [payload]
+  await writeFile(settingsPath, JSON.stringify(settings))
+  expect(await readFile(`${directory}/opencode.json`, 'utf8')).toBe(projectSettings)
+  let releaseProject!: () => void
+  let projectCatalogSeen = false
+  const projectCatalog = new Promise<void>(resolve => { releaseProject = resolve })
+  projectMcp = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 30, async fetch(request) {
+    if (request.method !== 'POST') return new Response(null, { status: 405 })
+    const rpc = await request.json()
+    if (rpc.id === undefined) return new Response(null, { status: 202 })
+    if (rpc.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: rpc.id, result: {
+      protocolVersion: rpc.params.protocolVersion, serverInfo: { name: 'project-fixture', version: '1' }, capabilities: { tools: {} },
+    } })
+    if (rpc.method === 'tools/list') {
+      projectCatalogSeen = true
+      await projectCatalog
+      return Response.json({ jsonrpc: '2.0', id: rpc.id, result: { tools: [
+        { name: 'project_marker', description: 'Project-only inventory marker; never execute', inputSchema: { type: 'object', properties: {} } },
+      ] } })
+    }
+    return Response.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Marker must not execute' } })
+  } })
+  await writeFile(`${directory}/opencode.json`, JSON.stringify({ ...JSON.parse(projectSettings), mcp: { servers: {
+    'project-only': { type: 'remote', url: `${projectMcp.url}mcp`, oauth: false },
+    disabled: { type: 'remote', url: 'http://127.0.0.1:1/mcp', disabled: true, oauth: false },
+  } } }))
+  const original = await readFile(target, 'utf8')
+  setupPolicy = original.replace('opencode/appa.toml"]', 'opencode/appa.toml", "batteries/microsoft-learn/appa.toml"]')
+    .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/shell(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
+  server.kill(); await server.exited
+  runtime.kill(); await runtime.exited
+  await writeFile(`${directory}/appa.toml`, '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_setup"\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n')
+  await startRuntime()
+  await startServer(target)
+  const session = await client.session.create({ location: { directory } })
+  await ready(async () => {
+    const mcp = await client.mcp.list({ location: { directory } })
+    if (!projectCatalogSeen || !mcp.data.some(server => server.name === 'appa' && server.status.status === 'connected')) throw new Error('APPA not connected')
+  }, server, `${directory}/opencode-error.log`)
+  setupInspection = undefined
+  await client.session.prompt({ sessionID: session.id, text: 'setup:init' })
+  await ready(async () => {
+    if (!hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'appa_setup')) throw new Error('Inspection not started')
+  }, server, `${directory}/opencode-error.log`)
+  try {
+    await Bun.sleep(150)
+    expect(setupInspection).toBeUndefined()
+    const started = performance.now()
+    await client.session.wait({ sessionID: session.id })
+    expect(performance.now() - started).toBeLessThan(12_000)
+    expect(setupInspection.inventory).toMatchObject({ scope: 'observed', servers: expect.arrayContaining([
+      { name: 'appa', status: 'connected' }, { name: 'project-only', status: 'pending' }, { name: 'disabled', status: 'disabled' },
+    ]) })
+    expect(setupInspection.inventory.note).toContain('not proof of complete MCP discovery')
+    await client.session.prompt({ sessionID: session.id, text: 'setup:approve' })
+    await client.session.wait({ sessionID: session.id })
+    expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('project-only (pending)')
+    expect(await readFile(target, 'utf8')).toBe(original)
+  } finally { releaseProject() }
+  // Connected is not a registry barrier. Reinspection observes later registry updates.
+  await ready(async () => {
+    await client.session.prompt({ sessionID: session.id, text: 'setup:init' })
+    await client.session.wait({ sessionID: session.id })
+    if (!setupInspection.tools.some((tool: any) => tool.canonical === 'mcp/project-only/project_marker')) throw new Error('Registry update pending')
+  }, server, `${directory}/opencode-error.log`)
+  expect(setupInspection.inventory.servers).toContainEqual({ name: 'project-only', status: 'connected' })
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Approve, or tell me what to change.')
+  expect(await readFile(target, 'utf8')).toBe(original)
+  expect(setupInspection.tools.some((tool: any) => tool.canonical === 'host/opencode/shell')).toBe(true)
+  expect(setupInspection.batteries.some((battery: any) => battery.name === 'microsoft-learn' && battery.hosts.includes('opencode'))).toBe(true)
+  const setupRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'setup:init'))
+  expect(setupRequest.tools.map((tool: any) => tool.function.name)).toEqual(['appa_setup'])
+  for (const text of ['setup:invalid', 'setup:approve']) {
+    if (text === 'setup:approve') await writeFile(target, `${original}\n# Concurrent operator change\n`)
+    await client.session.prompt({ sessionID: session.id, text })
+    await client.session.wait({ sessionID: session.id })
+    expect(await readFile(target, 'utf8')).toBe(text === 'setup:invalid' ? original : `${original}\n# Concurrent operator change\n`)
+  }
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Policy validation refused')
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Policy changed; inspect and propose again')
+  await client.session.prompt({ sessionID: session.id, text: 'setup:init' })
+  await client.session.wait({ sessionID: session.id })
+  setupPolicy += '\n# Concurrent operator change\n'
+  await client.session.prompt({ sessionID: session.id, text: 'setup:approve' })
+  await client.session.wait({ sessionID: session.id })
+  expect(await readFile(target, 'utf8')).toBe(setupPolicy)
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('saved')
+  expect(hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'appa_setup' && hook.reply.decision === 'allow_call')).toBe(true)
+
+  // Close operator mode, serve the saved policy, and open an ordinary root.
+  server.kill(); await server.exited
+  runtime.kill(); await runtime.exited
+  await startRuntime(target)
+  await startServer()
+  const normal = await client.session.create({ location: { directory } })
+  await client.session.prompt({ sessionID: normal.id, text: 'probe-shell:setup' })
+  await client.session.wait({ sessionID: normal.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: normal.id }))).toContain('setup-proof')
+  expect(hooks.some(hook => hook.event.root_id === normal.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+  const normalRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'probe-shell:setup'))
+  expect(normalRequest.tools.some((tool: any) => tool.function.name === 'appa_setup')).toBe(false)
+  const other = `${directory}/other-project`
+  await mkdir(other)
+  await writeFile(`${other}/opencode.json`, projectSettings)
+  const second = await client.session.create({ location: { directory: other } })
+  await client.session.prompt({ sessionID: second.id, text: 'probe-shell:setup' })
+  await client.session.wait({ sessionID: second.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: second.id }))).toContain('setup-proof')
+  expect(hooks.some(hook => hook.event.root_id === second.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+  const refusal = await fetch(`${proxy.url}hook`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ protocol: 1, adapter: 'opencode', event: 'tool_call', root_id: normal.id,
+      call_id: 'not-an-operator', tool: 'appa_setup', arguments: { operation: 'inspect' } }) })
+  expect((await refusal.json()).decision).not.toBe('allow_call')
+}, 60_000)

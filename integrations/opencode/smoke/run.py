@@ -24,8 +24,8 @@ from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 HERE = Path(__file__).resolve().parent
-PLUGIN = HERE.parent
-REPO = PLUGIN.parents[1]
+REPO = HERE.parents[2]
+PLUGIN = REPO / "marketplace/plugins/opencode"
 REMEDY = "appa_execute_remedy_plan"
 
 
@@ -266,7 +266,7 @@ def run(output):
     (project / "private").mkdir()
     marker = f"appa-private-{uuid.uuid4().hex}"
     (project / "private/smoke.txt").write_text(marker)
-    (output / "appa.toml").write_bytes((PLUGIN / "appa.toml").read_bytes())
+    (output / "appa.toml").write_bytes((HERE.parent / "appa.toml").read_bytes())
     home = output / "home"
     home.mkdir()
     # Whitelist environment, rather than inheriting credentials, providers or config.

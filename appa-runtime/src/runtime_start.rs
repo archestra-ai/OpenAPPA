@@ -142,6 +142,7 @@ fn probe(endpoint: &Endpoint) -> Health {
 pub struct Deployment {
     pub config: PathBuf,
     pub data_dir: PathBuf,
+    pub adapter: appa_runtime_api::AdapterName,
 }
 
 impl Deployment {
@@ -156,6 +157,7 @@ impl Deployment {
         Ok(Self {
             config: config.unwrap_or_else(crate::init::installed_config_path),
             data_dir,
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         })
     }
 }
@@ -372,6 +374,8 @@ fn start(
     let mut command = Command::new(executable);
     command
         .arg("runtime")
+        .arg("--adapter")
+        .arg(deployment.adapter.as_str())
         .arg("--listen")
         .arg(endpoint.authority())
         .arg("--config")
@@ -445,6 +449,7 @@ mod tests {
         let deployment = Deployment {
             config: PathBuf::from("unused.toml"),
             data_dir: PathBuf::from("unused"),
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         ensure(&target, &deployment, Path::new("unused"), &[]).expect("the session's own runtime is left as it is");
     }
@@ -469,6 +474,7 @@ mod tests {
         let deployment = Deployment {
             config: root.path().join("appa.toml"),
             data_dir: root.path().join("data"),
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         let target = RuntimeTarget { url, user_owned: false };
         let error = ensure(&target, &deployment, Path::new("unused"), &[]).expect_err("no policy");
@@ -491,6 +497,7 @@ mod tests {
         let deployment = Deployment {
             config: root.path().join("config/appa.toml"),
             data_dir: root.path().join("data"),
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         let target = RuntimeTarget { url, user_owned: true };
         let error =
@@ -515,6 +522,7 @@ mod tests {
         let deployment = Deployment {
             config: root.path().join("appa.toml"),
             data_dir: root.path().join("data"),
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         std::fs::write(&deployment.config, "[policy]\nversion = 2\n").expect("the policy is written");
         let target = RuntimeTarget {
@@ -534,6 +542,7 @@ mod tests {
         let deployment = Deployment {
             config: root.path().join("config/appa.toml"),
             data_dir: root.path().join("data"),
+            adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         let target = RuntimeTarget {
             url: vacated_url(),

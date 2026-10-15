@@ -48,7 +48,7 @@ digest = "sha256:311bb46544f752f21f2758b448aac645f96b99af7591ca91b02e6d6dfcb75eb
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"
-digest = "sha256:bb1f1f27bb06c4e7cad9ad89544a9a4079cfa9e9097a0c5c97e1955fac0719c9"
+digest = "sha256:6a9466b2f6029a373b7ed906c61a0988db5c80a66cf77f8edb162473a8e53d03"
 
 [packages.battery.monday]
 path = "batteries/monday"
@@ -57,6 +57,10 @@ digest = "sha256:c8d0ef2c98c994f8c544dd12b351c9ba0df98c8facb2f71a5c1a99af1472980
 [packages.battery.notion]
 path = "batteries/notion"
 digest = "sha256:90cf73b4e722f920a0227571c4b64c155e9fd87d36c11d0a34966d65da69d53e"
+
+[packages.battery.opencode]
+path = "batteries/opencode"
+digest = "sha256:d2d33f5cfb1910baf6c87314deeb3b976da0eb78c7785bdf2d770b83b499699f"
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
@@ -85,3 +89,7 @@ digest = "sha256:626ab9b1828486d2a468f5aaf15ac119a4f17ca0673b7d7d6b0a3ba94a843f8
 [packages.plugin.kagent]
 path = "plugins/kagent"
 digest = "sha256:d45f1756b51d1a64156de0bcd9d7900a6006a473e3c71f147f1e61523c783688"
+
+[packages.plugin.opencode]
+path = "plugins/opencode"
+digest = "sha256:3fa2d85264c3daeb9cfe83f00663bcbdff6a0ea34c313010a16e7332939e3c6a"
