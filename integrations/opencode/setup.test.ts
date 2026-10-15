@@ -2,9 +2,37 @@ import { afterAll, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { configuration, guide } from './setup'
 
 const directory = await mkdtemp(join(tmpdir(), 'appa-setup-test-'))
 afterAll(() => rm(directory, { recursive: true, force: true }))
+
+test('setup reads the installer catalog, filters host compatibility, and keeps deployment-relative includes', async () => {
+  const catalog = join(directory, 'catalog')
+  const config = join(directory, 'deployment/appa.toml')
+  await mkdir(join(directory, 'deployment'), { recursive: true })
+  await writeFile(config, '[policy]\nversion = 2\n')
+  for (const [name, hosts] of [['available', ['opencode']], ['incompatible', ['claude-code']]] as const) {
+    await mkdir(join(catalog, name), { recursive: true })
+    await writeFile(join(catalog, name, 'appa-package.toml'), `description = "Catalog entry"\n[battery]\nhosts = ${JSON.stringify(hosts)}\n`)
+    await writeFile(join(catalog, name, 'appa.toml'), '# Catalog policy\n')
+    await writeFile(join(catalog, name, 'README.md'), 'Catalog documentation')
+  }
+  const previous = process.env.APPA_OPENCODE_BATTERIES
+  process.env.APPA_OPENCODE_BATTERIES = catalog
+  try {
+    const setup = await configuration(config, '/unused/appa')
+    const battery = JSON.parse((await setup({ operation: 'battery', battery: 'available' }, []))!)
+    expect(battery.path).toBe('batteries/available/appa.toml')
+    expect(battery.files['README.md']).toBe('Catalog documentation')
+    expect(battery.contracts).toContain('contract')
+    await expect(setup({ operation: 'battery', battery: 'incompatible' }, [])).rejects.toThrow('catalog')
+    expect(await guide()).toContain('OpenCode')
+  } finally {
+    if (previous === undefined) delete process.env.APPA_OPENCODE_BATTERIES
+    else process.env.APPA_OPENCODE_BATTERIES = previous
+  }
+})
 
 test('source setup is user-global across projects, preserves settings and policy, and refuses conflicting ownership', async () => {
   const project = join(directory, "project with spaces' $(touch APPA_SETUP_INJECTION)")

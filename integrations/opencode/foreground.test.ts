@@ -7,6 +7,7 @@ import { install } from './setup'
 
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
+const payload = resolve(import.meta.dir, '../../marketplace/plugins/opencode')
 let directory: string
 let runtime: ReturnType<typeof Bun.spawn>
 let server: ReturnType<typeof Bun.spawn>
@@ -196,7 +197,7 @@ builtin = "redact-email"
   } })
   await mkdir(`${directory}/config/opencode`, { recursive: true })
   await writeFile(`${directory}/config/opencode/opencode.json`, JSON.stringify({
-    plugins: [resolve(import.meta.dir)],
+    plugins: [payload],
     mcp: { servers: { appa: { type: 'remote', url: `${proxy.url}mcp`, oauth: false } } },
   }))
   await writeFile(`${directory}/opencode.json`, JSON.stringify({
@@ -399,6 +400,12 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   const target = `${directory}/deployment/appa.toml`
   const projectSettings = await readFile(`${directory}/opencode.json`, 'utf8')
   await install(`${directory}/config/opencode`, target, proxy.url.toString().replace(/\/$/, ''))
+  // Exercise the shipped bundle's configuration()/guide(), not a source plugin
+  // added by the developer launcher. Source registration has separate tests.
+  const settingsPath = `${directory}/config/opencode/opencode.json`
+  const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
+  settings.plugins = [payload]
+  await writeFile(settingsPath, JSON.stringify(settings))
   expect(await readFile(`${directory}/opencode.json`, 'utf8')).toBe(projectSettings)
   const original = await readFile(target, 'utf8')
   setupPolicy = original.replace('opencode/appa.toml"]', 'opencode/appa.toml", "batteries/microsoft-learn/appa.toml"]')

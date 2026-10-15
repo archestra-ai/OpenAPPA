@@ -3,9 +3,11 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink
 import { tmpdir, homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
+import { existsSync } from 'node:fs'
 
 const checkout = resolve(import.meta.dir, '../..')
 const batteries = join(checkout, 'marketplace/batteries')
+const assets = existsSync(join(import.meta.dir, 'guide/SKILL.md')) ? import.meta.dir : undefined
 const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`
 
@@ -17,7 +19,7 @@ export type SetupInput = {
 }
 
 export async function guide() {
-  const root = join(checkout, 'integrations/appa-guide')
+  const root = assets ? join(assets, 'guide') : join(checkout, 'integrations/appa-guide')
   return (await Promise.all(['SKILL.md', 'references/core.md', 'references/opencode.md']
     .map(path => readFile(join(root, path), 'utf8')))).join('\n\n')
 }
@@ -27,12 +29,12 @@ export async function guide() {
 export async function configuration(config: string, binary: string) {
   if (!isAbsolute(config) || !isAbsolute(binary)) throw new Error('Setup requires absolute config and appa paths.')
   if (!(await lstat(config)).isFile()) throw new Error('Setup config must be a regular file, not a symlink.')
-  const store = join(dirname(config), 'batteries')
+  const store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), 'batteries')
   const catalog = await Promise.all((await readdir(store)).sort().filter(name => !name.includes('.')).map(async name => {
     const manifest = Bun.TOML.parse(await readFile(join(store, name, 'appa-package.toml'), 'utf8')) as any
     return { name, description: manifest.description, hosts: manifest.battery.hosts,
       namespaces: manifest.battery.namespaces ?? [], path: `batteries/${name}/appa.toml` }
-  }))
+  })).then(items => items.filter(item => item.hosts.includes('opencode')))
   let publishing = false
   async function describe(path: string, tools: string[] = []) {
     const process = Bun.spawn([binary, 'describe', '--adapter', 'opencode', '--config', path, '--check',
@@ -62,7 +64,7 @@ export async function configuration(config: string, binary: string) {
         if (!battery) throw new Error('Choose a battery from the inspected catalog.')
         return JSON.stringify({ ...battery, files: Object.fromEntries(await Promise.all(
           ['appa-package.toml', 'appa.toml', 'README.md'].map(async name => [name, await readFile(join(store, battery.name, name), 'utf8')]))),
-          contracts: await readFile(join(checkout, 'website/content/docs/contracts.md'), 'utf8') })
+          contracts: await readFile(assets ? join(assets, 'contracts.md') : join(checkout, 'website/content/docs/contracts.md'), 'utf8') })
       }
       case 'publish': {
         if (!input.policy || !input.expected_digest) throw new Error('Publish requires the approved complete policy and inspected digest.')

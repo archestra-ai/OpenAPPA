@@ -5,6 +5,35 @@ returns through APPA's runtime. It targets `@opencode/cli` and
 `@opencode/plugin` 2.0.28. It does not support
 OpenCode V1's `@opencode-ai/plugin` API.
 
+## Release payload
+
+`marketplace/plugins/opencode` contains the generated JavaScript plugin and its
+setup documentation. OpenCode V2 2.0.28 loads that directory directly through
+`index.js`; `package.json` also exports that entry point. The operator needs
+no Bun/npm install or source checkout.
+The bundle includes `@opencode/schema`. OpenCode supplies the public `effect`
+and `@opencode/plugin` imports. The source setup launcher is excluded from the
+bundle; importing the plugin does not register settings or start setup.
+
+Maintainers regenerate and check the committed payload with Bun 1.3.10:
+
+```sh
+(cd integrations/opencode && bun install --frozen-lockfile && bun run check)
+bun scripts/appa-opencode-package.ts
+bun scripts/appa-opencode-package.ts --check
+```
+
+The installer must copy `default.appa.toml` into the deployment and retain
+deployment-relative `batteries/<name>/appa.toml` includes. In the private setup
+session, set `APPA_OPENCODE_BATTERIES` to the absolute retained marketplace
+`batteries` directory. The setup catalog lists all batteries declaring the
+`opencode` host, not just batteries already installed in the deployment.
+Publication still validates includes relative to the deployment config.
+The installer must materialize selected batteries there before validation.
+Set `APPA_OPENCODE_SETUP_CONFIG` and `APPA_OPENCODE_SETUP_BINARY` only for the
+operator's private setup session. The loaded plugin reads its guide and
+contracts from its own shipped directory.
+
 ## Install from this checkout
 
 Build APPA and install the plugin's locked dependencies:
@@ -334,16 +363,15 @@ channels. No inference-policy enforcement is claimed.
 
 ### Published CLI smoke check
 
-The CLI smoke check runs separately from `bun test`. Its CLI installation does
-not add dependencies or execution time to the SDK test lane. Build APPA and
-install the plugin dependencies as above, then run:
+The CLI smoke check runs separately from `bun test`. It loads the committed
+marketplace bundle, not the TypeScript source. Build APPA, then run:
 
 ```sh
 (cd integrations/opencode/smoke && bun install --frozen-lockfile)
 python3 integrations/opencode/smoke/run.py
 ```
 
-The check uses the published CLI and plugin SDK at the same pinned version.
+The check uses the published CLI and host plugin SDK at the same pinned version.
 A local OpenAI-compatible SSE fixture scripts tool proposals. No model provider
 credentials, external inference, or paid tokens are used. Native OpenCode tools,
 APPA decisions, and MCP remedy execution are real.

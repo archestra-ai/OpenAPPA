@@ -145,6 +145,10 @@ jobs:
             plugin:
               - 'integrations/amp/**'
               - 'integrations/opencode/**'
+              - 'marketplace/plugins/opencode/**'
+              - 'integrations/appa-guide/**'
+              - 'website/content/docs/contracts.md'
+              - 'scripts/appa-opencode-package.ts'
               - 'marketplace/plugins/claude-code/*.py'
               - 'marketplace/plugins/claude-code/README.md'
               - 'marketplace/batteries/**'
@@ -337,6 +341,9 @@ jobs:
       - name: Test AppenCode against the runtime
         working-directory: integrations/opencode
         run: bun install --frozen-lockfile && bun run check && bun test
+
+      - name: Check generated AppenCode release payload
+        run: bun scripts/appa-opencode-package.ts --check
 
       # Keep the published CLI and its binary install out of the SDK test lane.
       # Inference is a local scripted SSE fixture: no provider key or model usage.
