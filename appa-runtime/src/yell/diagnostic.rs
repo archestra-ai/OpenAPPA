@@ -525,7 +525,13 @@ mod tests {
                 && event["tool_name"] == "Agent"
                 && event.get("agent_id").is_none();
             if spawn {
-                crate::hooks::answer(&runtime, &appa_adapter_claude_code::adapter(), &body).await;
+                crate::hooks::answer(
+                    &runtime,
+                    &appa_adapter_claude_code::adapter(),
+                    appa_runtime_api::PrincipalSource::None,
+                    &body,
+                )
+                .await;
                 let quoted = runtime
                     .minted_offers(&id, &id)
                     .into_iter()
@@ -547,7 +553,13 @@ mod tests {
                     "the declaration approves the spawn, got {outcome:?}"
                 );
             }
-            let (status, answer) = crate::hooks::answer(&runtime, &appa_adapter_claude_code::adapter(), &body).await;
+            let (status, answer) = crate::hooks::answer(
+                &runtime,
+                &appa_adapter_claude_code::adapter(),
+                appa_runtime_api::PrincipalSource::None,
+                &body,
+            )
+            .await;
             assert_eq!(status, 200, "the recorded session replays: {answer}");
             // The recorded file holds several sessions, and the last of them opens no root.
             // The one this test exports is the last that did open one — the session with the

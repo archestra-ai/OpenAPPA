@@ -391,6 +391,22 @@ func TestAFreshSessionOpensBeforeItsPromptCrosses(t *testing.T) {
 	}
 }
 
+func TestAFreshSessionNamesTheRequestingUserAsItsPrincipal(t *testing.T) {
+	h := newHook(t, ack, ack)
+	p := pluginOver(t, h)
+	sess := newFakeSession("s1").withHeaders(map[string]any{UserHeader: "alice@corp.example"})
+	if _, err := p.onUserMessage(newFakeContext(sess), textContent("deploy the chart")); err != nil {
+		t.Fatalf("the prompt must pass: %v", err)
+	}
+	want := map[string]any{
+		"protocol": float64(1), "adapter": "kagent", "event": "session_start", "root_id": "s1",
+		"principal": "alice@corp.example",
+	}
+	if got := h.recorded()[0]; !reflect.DeepEqual(got, want) {
+		t.Errorf("the opening must name the user, got %v, want %v", got, want)
+	}
+}
+
 func TestAContinuingSessionSendsOnlyThePrompt(t *testing.T) {
 	h := newHook(t, ack)
 	p := pluginOver(t, h)

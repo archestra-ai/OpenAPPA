@@ -69,7 +69,7 @@ func TestEveryBuilderSpellsItsFixtureExactly(t *testing.T) {
 	fixtures := fixtureWires(t)
 	scale := map[string]any{"deployment": "api", "replicas": 3}
 	built := map[string]map[string]any{
-		"session_start":  sessionStartEvent(fixtureRoot),
+		"session_start":  sessionStartEvent(fixtureRoot, ""),
 		"prompt":         promptEvent(fixtureRoot, "scale the api deployment to three replicas", ""),
 		"turn_end_root":  turnEndEvent(fixtureRoot, ""),
 		"turn_end_child": turnEndEvent(fixtureRoot, fixtureChild),
@@ -148,6 +148,15 @@ func TestIDsCrossUnprefixed(t *testing.T) {
 	wire := toolCallEvent("session-1", "mcp:demo-tools/k8s_scale", map[string]any{}, "child-1", "")
 	if wire["root_id"] != "session-1" || wire["child_id"] != "child-1" {
 		t.Errorf("the ids cross as the harness spells them, got %v", wire)
+	}
+}
+
+func TestASessionStartCarriesItsPrincipalOnlyWhenGiven(t *testing.T) {
+	if got := sessionStartEvent("s1", "alice@corp.example")["principal"]; got != "alice@corp.example" {
+		t.Errorf("a named principal must cross, got %v", got)
+	}
+	if _, ok := sessionStartEvent("s1", "")["principal"]; ok {
+		t.Error("an absent principal must stay off the wire")
 	}
 }
 

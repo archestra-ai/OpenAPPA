@@ -108,7 +108,13 @@ fn wire(event: &str, fields: serde_json::Value) -> serde_json::Value {
 /// One wire event in, the answer out, with the status it travels under.
 async fn posted(runtime: &Runtime, event: serde_json::Value) -> (u16, serde_json::Value) {
     let body = serde_json::to_vec(&event).expect("the event serializes");
-    hooks::answer(runtime, &appa_adapter_kagent::adapter(), &body).await
+    hooks::answer(
+        runtime,
+        &appa_adapter_kagent::adapter(),
+        appa_runtime_api::PrincipalSource::None,
+        &body,
+    )
+    .await
 }
 
 /// One wire event in, the answer out. The status the answer travels under is

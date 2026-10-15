@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, PrincipalSource, ProposedCall, ToolOutcome, TrajectoryId,
+};
 
 /// No audience source at all: `self` has members only when a session names its principal.
 const POLICY: &str = r#"
@@ -199,4 +201,125 @@ async fn a_root_fork_acts_for_its_parents_principal() {
         on_fork(send("bob@corp.example")).await,
         HookDecision::DenyCall { .. }
     ));
+}
+
+/// A kagent `session_start` posted to `/hook` with the runtime opted into the wire principal.
+async fn wire_start(runtime: &Arc<Runtime>, principal: &str, inventory: Option<serde_json::Value>) -> u16 {
+    let mut body = serde_json::json!({
+        "protocol": 1,
+        "adapter": "kagent",
+        "event": "session_start",
+        "root_id": "s1",
+        "principal": principal,
+    });
+    if let Some(inventory) = inventory {
+        body["inventory"] = inventory;
+    }
+    let body = serde_json::to_vec(&body).expect("the event serializes");
+    hooks::answer(runtime, &appa_adapter_kagent::adapter(), PrincipalSource::Wire, &body)
+        .await
+        .0
+}
+
+/// A kagent inventory observing the one tool `name` on MCP `server`.
+fn inventory(server: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "tools": [{ "name": name, "tool": format!("mcp:{server}/{name}") }],
+        "sources": [{ "server": server, "status": "complete", "dynamic": false }],
+    })
+}
+
+#[tokio::test]
+async fn a_wire_principal_is_the_self_audience() {
+    for inventory in [None, Some(inventory("demo-tools", "k8s_scale"))] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open(&dir);
+        assert_eq!(wire_start(&runtime, ALICE, inventory).await, 200);
+        acts_for_alice(&runtime).await;
+    }
+}
+
+/// The wire-started root narrows to `self` and then reaches exactly Alice.
+async fn acts_for_alice(runtime: &Arc<Runtime>) {
+    let actor = Actor {
+        root: TrajectoryId("kagent:s1".to_string()),
+        child: None,
+    };
+    let call = |call: ProposedCall| {
+        hooks::handle(
+            runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call,
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+    };
+    let HookDecision::DenyCall { feedback, .. } = call(read_secret()).await else {
+        panic!("the narrowing read is offered for acceptance");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor, last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(call(read_secret()).await, HookDecision::AllowCall { spawn: None });
+    let result = HookEvent::ToolResult {
+        actor: actor.clone(),
+        call: read_secret(),
+        call_id: None,
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Available("done".to_string()),
+        },
+    };
+    assert_eq!(hooks::handle(runtime, result).await, HookDecision::Ack);
+
+    assert_eq!(call(send(ALICE)).await, HookDecision::AllowCall { spawn: None });
+    assert!(matches!(
+        call(send("bob@corp.example")).await,
+        HookDecision::DenyCall { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_wire_principal_that_is_not_an_address_refuses_the_start() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(wire_start(&runtime, "alice", None).await, 409);
+    assert_eq!(wire_start(&runtime, ALICE, None).await, 200);
+}
+
+/// A refused principal opens no root before its inventory lands, so the corrected retry
+/// opens the root for its own principal.
+#[tokio::test]
+async fn a_refused_principal_with_an_inventory_leaves_no_root_behind() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    let observed = || Some(inventory("demo-tools", "k8s_scale"));
+    assert_eq!(wire_start(&runtime, "alice", observed()).await, 409);
+    assert_eq!(wire_start(&runtime, ALICE, observed()).await, 200);
+    acts_for_alice(&runtime).await;
+}
+
+/// A reopen naming another principal is refused before its inventory is observed: the name
+/// it would have bound stays free for another server.
+#[tokio::test]
+async fn a_mismatched_reopen_with_an_inventory_changes_no_stored_inventory() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    let start = |principal, server, name| wire_start(&runtime, principal, Some(inventory(server, name)));
+    assert_eq!(start(ALICE, "demo-tools", "k8s_scale").await, 200);
+    assert_eq!(
+        start(ALICE, "other-tools", "k8s_scale").await,
+        409,
+        "a stored name cannot be bound to another server"
+    );
+    assert_eq!(start("bob@corp.example", "demo-tools", "k8s_delete").await, 409);
+    assert_eq!(
+        start(ALICE, "other-tools", "k8s_delete").await,
+        200,
+        "the refused reopen bound nothing"
+    );
 }

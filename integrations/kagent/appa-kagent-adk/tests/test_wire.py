@@ -90,6 +90,11 @@ def test_ids_cross_unprefixed():
     assert (event["root_id"], event["child_id"]) == ("session-1", "child-1")
 
 
+def test_a_session_start_carries_its_principal_only_when_given():
+    assert wire.session_start("s1", principal="alice@corp.example")["principal"] == "alice@corp.example"
+    assert "principal" not in wire.session_start("s1")
+
+
 def test_absent_optionals_stay_off_the_wire():
     event = wire.spawn_result("s1", "t", {}, wire.indeterminate())
     assert "spawned_id" not in event

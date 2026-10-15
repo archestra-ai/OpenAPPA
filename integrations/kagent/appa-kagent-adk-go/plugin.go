@@ -171,6 +171,9 @@ const (
 // delegated entry without it opens no child.
 const SpawnBindingHeader = "x-appa-spawn-binding"
 
+// UserHeader carries the caller kagent authenticated; a root session names it as its principal.
+const UserHeader = "x-user-id"
+
 // FailClosedError reports that the runtime blocked, refused, or could
 // not answer. The gated action stops.
 type FailClosedError struct {
@@ -861,7 +864,7 @@ func (p *AppaPluginKagent) opening(sess session.Session, ids trajectoryIDs) (map
 	}
 	if isFresh(sess) {
 		log.Printf("appa: trajectory %s opens as a root", ids.rootID)
-		return sessionStartEvent(ids.rootID), nil
+		return sessionStartEvent(ids.rootID, lineageHeader(sess, UserHeader)), nil
 	}
 	return nil, nil
 }

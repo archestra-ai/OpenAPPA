@@ -898,7 +898,13 @@ async fn launched_start(
     };
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the start translates");
     let wire = serde_json::to_vec(&wire).expect("the start serializes");
-    hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await
+    hooks::answer(
+        runtime,
+        &appa_adapter_claude_code::adapter(),
+        appa_runtime_api::PrincipalSource::None,
+        &wire,
+    )
+    .await
 }
 
 fn decision(answer: &serde_json::Value) -> &str {

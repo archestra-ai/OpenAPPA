@@ -289,8 +289,11 @@ type lineageSessionService struct {
 }
 
 // lineageHeaders are the two headers kagent's remote agent tool stamps
-// on a delegated call, and the spawn binding the parent's plugin adds.
-var lineageHeaders = []string{"x-kagent-root-context-id", "x-kagent-parent-context-id", appakagentadk.SpawnBindingHeader}
+// on a delegated call, the spawn binding the parent's plugin adds, and
+// the user kagent authenticated.
+var lineageHeaders = []string{
+	"x-kagent-root-context-id", "x-kagent-parent-context-id", appakagentadk.SpawnBindingHeader, appakagentadk.UserHeader,
+}
 
 func (s lineageSessionService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
 	resp, err := s.Service.Create(ctx, req)
