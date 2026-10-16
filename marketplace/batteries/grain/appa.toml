@@ -12,7 +12,7 @@
 # back with the settings, so creating one needs trusted data. Sharing a
 # collection with anyone who has the link, inviting people, and changing
 # seats, teams, or settings need a person. The root config supplies the
-# `hitl` authority.
+# authority that permits the `human-approval` mark.
 
 [policy]
 version = 2
@@ -191,56 +191,56 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/update_collection_share_state"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/invite_to_workspace"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 # --- workspace administration: a person decides ---
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/assign_paid_seat_to_users"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/unassign_paid_seat_from_users"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/create_team"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/move_users_to_team"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/remove_user_from_team"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/update_my_settings"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/update_user_settings"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/update_team_settings"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Grain/update_workspace_settings"
 delta = {}
-requires = { trust = "trusted", attention = ["hitl"] }
+requires = { trust = "trusted", attention = ["human-approval"] }

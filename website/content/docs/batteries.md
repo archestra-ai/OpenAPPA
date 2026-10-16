@@ -96,7 +96,7 @@ This example uses `approve-hidden-file-read`. It calls a local Python script tha
 [[policy.annotator]]
 name = "approve-hidden-file-read"
 audiences = []
-marks = ["hitl"]
+marks = ["human-approval"]
 
 [[policy.tool]]
 name = "host/claude-code/Read"
@@ -217,7 +217,7 @@ delta = { trust = "suspicious", audience = ["internal"] }
 [[policy.annotator]]
 name = "local.read-sensitivity"
 audiences = []
-marks = ["hitl"]
+marks = ["human-approval"]
 
 # This root rule runs before the battery's Read rules.
 [[policy.tool]]

@@ -83,7 +83,7 @@ delta = {}
 # carry is decided by the runtime, not by this rule. Turn the tool off entirely
 # with `[reporting] agent_yell = false` at the end of this file; a deployment
 # that leaves it on and wants a person in the loop can add
-# `requires = { attention = ["hitl"] }` here instead.
+# `requires = { attention = ["human-approval"] }` here instead.
 [[policy.tool]]
 name = "mcp/appa/yell"
 requires = { audience = { contains = ["public"] } }
@@ -92,14 +92,14 @@ delta = {}
 # A compatibility net covers tools installed after this policy. Exact
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
-# two trust ranks, HITL, and no effects. `audiences` is left omitted, so an
-# annotation may narrow a result to `self` or `internal`, or require a reader
-# this policy names, exactly as a static rule above would.
+# two trust ranks, the `human-approval` mark, and no effects. `audiences` is
+# left omitted, so an annotation may narrow a result to `self` or `internal`,
+# or require a reader this policy names, exactly as a static rule above would.
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"
 ranks = ["suspicious", "trusted"]
-marks = ["hitl"]
+marks = ["human-approval"]
 effects = []
 
 [[policy.tool]]

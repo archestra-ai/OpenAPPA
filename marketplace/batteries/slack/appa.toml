@@ -30,7 +30,7 @@
 #
 #   [[policy.tool]]
 #   name = "mcp/claude_ai_Slack/slack_send_message(channel_id:C0ANNOUNCE)"
-#   requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] }, attention = ["hitl"] }
+#   requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] }, attention = ["human-approval"] }
 #   delta = {}
 #
 # The battery also binds `audience-source.py`, the `slack` audience

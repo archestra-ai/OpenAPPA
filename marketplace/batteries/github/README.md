@@ -262,7 +262,7 @@ into it accept what they may see.
 ## Change the behaviour
 
 To make a write ask a person first, add a root rule for that tool with
-`attention = ["hitl"]` in its `requires`. To treat a search of public
+`attention = ["human-approval"]` in its `requires`. To treat a search of public
 repositories as public by its query, or one repository's content as
 `internal` instead of its collaborators, add a root rule naming it
 (`query:`, `repo:`) or its whole organisation (`owner:`). Root rules run

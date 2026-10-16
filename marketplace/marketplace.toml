@@ -8,7 +8,7 @@ digest = "sha256:e70521fb8bcebe9bc44c2eb76bece85ad3209927a2cc12c5d0c9928a45bf627
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:ce1ccfb94566c258641bd98c046c89956cffaf294e10d1110c72920c920a3d4f"
+digest = "sha256:b9d44c857752498b3462fc3d1f47b3156f0dbc5857db7807a94d926871768755"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
@@ -20,7 +20,7 @@ digest = "sha256:a3822d95a2e05ef8071a8aded9e6a73a47980085d35c3e0a149496c410bfb5c
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:202be34feccd5a97a650b2f692b566160ac0e6f075db329779e51aa16e7ef869"
+digest = "sha256:67973f5892376e4e532087a16b24ec023d030271d6d6d3ef8674acf05d600d85"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -28,11 +28,11 @@ digest = "sha256:0904fe42715f86221a93fb0088bb9fef46ed49bd4b8b99086991a2e7595f10d
 
 [packages.battery.grain]
 path = "batteries/grain"
-digest = "sha256:f31063bdaa32bb92ff6b6c18c0c70f6340be565d991d21ba6de224d283730623"
+digest = "sha256:7d92f86fd7e3442b97753451272248e3a3b15b4fe9709b77837bfb9360decc85"
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:a04d3da6968b93b7ab92f317370d6fde6d25ace91e5aac1616425c6f733d20a3"
+digest = "sha256:091343b940cd5e61ab60627b1c7e9bc5e1c0b8bd52ce8abe59fc49c6c188f573"
 
 [packages.battery.jev]
 path = "batteries/jev"
@@ -76,7 +76,7 @@ digest = "sha256:4a8acfb0f38fc5db64b8caa522689412c57b4e304cfb5753591998494ff31ed
 
 [packages.battery.slack]
 path = "batteries/slack"
-digest = "sha256:bf6a630e6fb6858291ddb5f3cc6b00d09d8a9cbb1eb973793b396901bae08e1a"
+digest = "sha256:73cde61764feeea5c8a6ab8eec6a8453b78ed0e631474bdc8ebe5e7240019fd4"
 
 [packages.battery.xmemory]
 path = "batteries/xmemory"
@@ -84,7 +84,7 @@ digest = "sha256:45207ffa0dc12294a04520d37cdc9a2a68bcc285a8d6046d1b1cd63738cba7c
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:d1df57a6bfb47027603718b8b79bf76a0f4f8cc7fb539e3f7358646d531138be"
+digest = "sha256:e8e58fc051ed48c9adeff592a17fec615007cf3d28371988c94181114c9db546"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

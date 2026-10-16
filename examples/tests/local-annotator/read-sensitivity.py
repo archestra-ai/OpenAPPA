@@ -30,7 +30,7 @@ def main():
     )
     annotation = {
         "delta": {"trust": "suspicious"},
-        "requires": {"history": [], "attention": ["hitl"] if sensitive else []},
+        "requires": {"history": [], "attention": ["human-approval"] if sensitive else []},
         "emits": [],
     }
     json.dump({"version": 1, "answer": annotation}, sys.stdout)

@@ -10,7 +10,7 @@ delta = {}
 
 [[policy.tool]]
 name = "mcp/shell/bash(command:git push *)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.authority]]
@@ -18,7 +18,7 @@ name = "hitl"
 hint = "Ask the person running this session."
 
 [policy.authority.permits]
-attention = ["hitl"]
+attention = ["human-approval"]
 
 [externals]
 timeout_ms = 2000

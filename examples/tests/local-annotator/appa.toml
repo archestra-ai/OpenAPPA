@@ -7,7 +7,7 @@ version = 2
 [[policy.annotator]]
 name = "local.read-sensitivity"
 audiences = []
-marks = ["hitl"]
+marks = ["human-approval"]
 
 [[policy.tool]]
 name = "host/claude-code/Read"
@@ -19,7 +19,7 @@ name = "hitl"
 hint = "Ask the person running this session."
 
 [policy.authority.permits]
-attention = ["hitl"]
+attention = ["human-approval"]
 
 [externals]
 timeout_ms = 5000

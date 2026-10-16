@@ -969,22 +969,22 @@ delta = {}
 # other path takes the session's label as it is.
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/appa/appa.toml)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/appa/batteries/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1259,22 +1259,22 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/appa/appa.toml)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/appa/batteries/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1549,12 +1549,12 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*.mcp.json)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*.claude/hooks/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1624,12 +1624,12 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*.mcp.json)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*.claude/hooks/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]

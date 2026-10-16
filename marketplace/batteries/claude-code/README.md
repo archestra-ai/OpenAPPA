@@ -130,7 +130,7 @@ modifying the battery:
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-hint = "Hosts under corp.example are the organization's own: what they return is internal. Require hitl attention before commands that publish releases or change production infrastructure."
+hint = "Hosts under corp.example are the organization's own: what they return is internal. Require human-approval attention before commands that publish releases or change production infrastructure."
 ```
 
 A root Annotator replaces the battery's of the same name. Preserve `builtin`
@@ -146,12 +146,12 @@ these root rules require fresh human approval for every `kubectl` command:
 ```toml
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl *)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.authority]]
@@ -159,7 +159,7 @@ name = "operator"
 hint = "Ask the person running this Claude Code session."
 
 [policy.authority.permits]
-attention = ["hitl"]
+attention = ["human-approval"]
 
 [externals.authorities.operator]
 builtin = "hitl"

@@ -223,7 +223,7 @@ battery with a real token.
 ## Change the behaviour
 
 To make a write ask a person first, add a root rule for that tool with
-`attention = ["hitl"]` in its `requires`. To treat a search of public
+`attention = ["human-approval"]` in its `requires`. To treat a search of public
 repositories as public by its arguments, or one organization's content
 as `internal` instead of its resource groups, add a root rule naming it.
 Root rules run first. Nothing in this file needs editing.
