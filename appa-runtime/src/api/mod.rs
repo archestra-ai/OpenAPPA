@@ -1661,6 +1661,18 @@ impl Runtime {
         prepared.assemble(Backend::Memory)
     }
 
+    /// [`Runtime::open_in_memory`] for a host that names tools through an adapter of its
+    /// own, as [`Runtime::open_with_store_as`] resolves them: the deployment a host's replay
+    /// runs, with the same in-process stand-in for every authority and sanitizer.
+    pub fn open_in_memory_as(config: Config, modules: Option<PathBuf>, adapter: Adapter) -> Result<Runtime, OpenError> {
+        if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
+            return Err(OpenError::UnspelledControlTool);
+        }
+        let mut prepared = Prepared::new(config, modules, ToolNaming::Canonical { adapter })?;
+        prepared.deployment.stand_in_for_remedies();
+        prepared.assemble(Backend::Memory)
+    }
+
     /// `appa runtime annotate`: the serving deployment's Annotator asked afresh about one
     /// call, or `None` when a static contract covers it. No trajectory is opened and nothing
     /// is appended.
