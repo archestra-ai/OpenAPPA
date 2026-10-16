@@ -856,8 +856,10 @@ pub struct CanonicalArguments {
 
 impl CanonicalArguments {
     /// Strictly parse and canonicalize one argument object without applying a tool schema.
-    /// Contract selection reads this value before the selected contract validates it.
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ArgumentError> {
+    /// Contract selection reads this value before the selected contract validates it, and a host
+    /// matching a reported call to the dispatch its log recorded compares these bytes: they do
+    /// not depend on which policy, if any, still declares the tool.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ArgumentError> {
         Self::from_raw_unchecked(bytes)
     }
 

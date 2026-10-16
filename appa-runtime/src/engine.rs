@@ -1251,12 +1251,13 @@ impl RuntimeEngine {
     /// matching of provider-run tools. `None` when the call cannot canonicalize — an
     /// unknown tool or schema-invalid arguments never match a dispatched
     /// call, whose bytes the engine validated.
+    /// The canonical bytes of `call`'s arguments, as a dispatch records them. They depend on the
+    /// arguments alone, so a call released under an earlier revision still matches its dispatch
+    /// after the head stops declaring its tool or changes its schema.
     pub(crate) fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
-            .ok()?;
-        Some(resolved.canonical_arguments().canonical_bytes().to_vec())
+        appa_engine::params::CanonicalArguments::parse(call.arguments.get().as_bytes())
+            .ok()
+            .map(|arguments| arguments.canonical_bytes().to_vec())
     }
 
     pub(crate) fn file_dispatch(
@@ -1640,12 +1641,12 @@ impl RuntimeEngine {
                 detail: "a bound call's recorded batch holds more than its one proposal".to_string(),
             });
         };
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+        // The repeat must name the recorded call byte for byte. It is matched on its arguments
+        // alone: the head need not still declare the tool the decision released.
+        let arguments = appa_engine::params::CanonicalArguments::parse(call.arguments.get().as_bytes())
             .map_err(|_| EngineRefusal::CallIdReused)?;
-        if proposal.tool() != resolved.tool()
-            || proposal.canonical_arguments().canonical_bytes() != resolved.canonical_arguments().canonical_bytes()
+        if proposal.tool().as_str() != call.tool
+            || proposal.canonical_arguments().canonical_bytes() != arguments.canonical_bytes()
         {
             return Err(EngineRefusal::CallIdReused);
         }

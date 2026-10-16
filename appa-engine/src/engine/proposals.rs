@@ -57,8 +57,12 @@ impl Engine {
             return Err(TransitionError::BatchIdentityConflict);
         }
         let recorded = decided.clone();
-        let Ok(proposals) = self.resolve_proposals(batch) else {
-            return Err(TransitionError::BatchIdentityConflict);
+        // A repeat asks about a decision already made, so it names the calls its batch recorded.
+        // The head need not still resolve them: a revision since may have dropped a tool or
+        // tightened what its arguments may be.
+        let proposals = match self.resolve_proposals(batch) {
+            Ok(proposals) => proposals,
+            Err(_) => recorded_repeat(batch, &recorded.proposals).ok_or(TransitionError::BatchIdentityConflict)?,
         };
         if recorded.payload != CanonicalDigest::of_batch(&proposals, batch.spawn) {
             return Err(TransitionError::BatchIdentityConflict);
@@ -515,6 +519,25 @@ impl Engine {
 
 /// The Annotator whose annotation a call still owes, if any. A foreign or
 /// out-of-policy answer is a refusal.
+/// The calls `recorded` holds, when `batch` names exactly them — tool and canonical arguments at
+/// every position — carrying the annotations `batch` pins; `None` otherwise.
+fn recorded_repeat(batch: &ProposalBatch, recorded: &[ResolvedCall]) -> Option<Vec<ResolvedCall>> {
+    if batch.proposals.len() != recorded.len() {
+        return None;
+    }
+    batch
+        .proposals
+        .iter()
+        .zip(recorded)
+        .map(|(proposed, call)| {
+            let arguments = crate::params::CanonicalArguments::parse(&proposed.arguments).ok()?;
+            (&proposed.tool == call.tool()
+                && arguments.canonical_bytes() == call.canonical_arguments().canonical_bytes())
+            .then(|| call.clone().with_annotation(proposed.annotation.clone()))
+        })
+        .collect()
+}
+
 fn unanswered(
     registry: &Registry,
     declaration: &crate::contract::ToolDeclaration,
