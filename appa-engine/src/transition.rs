@@ -1825,12 +1825,11 @@ impl<'a> Sequence<'a> {
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
         let owed = match (&subject, recorded.plan.hop().is_some()) {
             (SubjectKey::Call { .. }, false) => Owed::Approval(*offer),
-            (SubjectKey::Call { .. } | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_), true) => {
-                Owed::Derived(*offer)
-            }
-            (SubjectKey::ConfinedResult(_) | SubjectKey::Return(_), false) => Owed::Accepted(*offer),
-            // No offer ever stands on an approval — that subject exists to be spent by a release.
-            (SubjectKey::Approval(_), _) => return Err(TransitionRefusal::UnbackedOffer),
+            (SubjectKey::Call { .. } | SubjectKey::ConfinedResult(_), true) => Owed::Derived(*offer),
+            (SubjectKey::ConfinedResult(_), false) => Owed::Accepted(*offer),
+            // No offer ever stands on an approval — that subject exists to be spent by a release —
+            // or on a child return, which crosses at the child's stop or is refused there.
+            (SubjectKey::Approval(_) | SubjectKey::Return(_), _) => return Err(TransitionRefusal::UnbackedOffer),
         };
         self.may_spend(trajectory, &subject, &basis)?;
         match &self.declared {
@@ -3226,15 +3225,10 @@ impl<'a> Sequence<'a> {
         if !registered.applies_to(&contract.tags) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
-        {
-            // A rewrite carries only the arguments and a fresh annotation pin; membership
-            // answers are the act's pinned primitives, never the call's.
-            let carried = predecessor
-                .substituting(call.canonical_arguments().clone())
-                .with_annotation(call.annotation().cloned());
-            if call.declaration_id() == predecessor.declaration_id() && call != &carried {
-                return Err(TransitionRefusal::ForgedLabel);
-            }
+        // A rewrite carries only the arguments and a fresh annotation pin, never a host-pinned
+        // file basis.
+        if call.declaration_id() == predecessor.declaration_id() && call.file_basis().is_some() {
+            return Err(TransitionRefusal::ForgedLabel);
         }
         let stage = views.call_stage(subject);
         let context = self.context(expansions);

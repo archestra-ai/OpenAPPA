@@ -763,3 +763,98 @@ fn input_sanitizer_to(name: &str, from: &[&str], to: DeclaredAudience) -> crate:
         ..input_sanitizer(name, from, from)
     }
 }
+
+/// `post` split into two declarations by its body: the `ssn*` bodies select the first, every
+/// other body the second. `redact` has jurisdiction over both.
+fn selecting_substitution_engine() -> Engine {
+    open_engine_at(
+        RegistryConfig {
+            annotators: Vec::new(),
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: declared(vec![
+                post_tool("post(body:ssn*)", vec![crate::names::TagName::new("outbound")]),
+                post_tool("post", vec![crate::names::TagName::new("outbound")]),
+            ]),
+            authorities: Vec::new(),
+            sanitizers: vec![input_sanitizer_to(
+                "redact",
+                &["insider"],
+                DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
+            )],
+            audience: crate::audience::AudienceConfig::default(),
+        },
+        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    )
+}
+
+/// `proposal` blocked and hopped to [`REDACTED`]: the log up to the hop, and the hop's facts.
+fn redacted_hop(e: &Engine, proposal: &ResolvedCall) -> (Vec<Fact>, Vec<Fact>) {
+    let log = internal_log(e);
+    let facts = appended_facts(proposed(e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+    let hop = opened_offers(&facts)[0].0;
+    let log = [log, facts].concat();
+    let hopped = appended_facts(execute_offer(e, &log, hop, substitution(proposal, REDACTED)).expect("the hop runs"));
+    (log, hopped)
+}
+
+/// The hop's derived call, re-recorded with a host-pinned file basis.
+fn with_pinned_file_basis(mut hopped: Vec<Fact>) -> Vec<Fact> {
+    let basis = crate::value::FileBasis::Read(crate::value::FileSource {
+        version: "v1".into(),
+        digest: "content".into(),
+        label: known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    });
+    let mut pinned = false;
+    for fact in &mut hopped {
+        if let Fact::CandidateDerived {
+            derived: DerivedCandidate::Call { call, .. },
+            ..
+        } = fact
+        {
+            *call = call.clone().with_file_basis(Some(basis.clone()));
+            pinned = true;
+        }
+    }
+    assert!(pinned, "the hop derives a call candidate");
+    hopped
+}
+
+#[test]
+fn a_same_declaration_rewrite_carrying_a_file_basis_is_refused() {
+    let e = substituting_engine(TRUSTED);
+    let (log, hopped) = redacted_hop(&e, &call("post", json!({ "body": "ssn 123" })));
+    assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
+    assert_eq!(
+        e.validate_replay(&[log, with_pinned_file_basis(hopped)].concat()),
+        Err(TransitionRefusal::ForgedLabel)
+    );
+}
+
+#[test]
+fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
+    let e = selecting_substitution_engine();
+    let proposal = e
+        .resolve_call(ToolName::new("post"), br#"{"body":"ssn 123"}"#)
+        .expect("the body selects a declaration");
+    let (log, hopped) = redacted_hop(&e, &proposal);
+    let derived = hopped
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::CandidateDerived {
+                derived: DerivedCandidate::Call { call, .. },
+                ..
+            } => Some(call.declaration_id()),
+            _ => None,
+        })
+        .expect("the hop derives a call candidate");
+    assert_ne!(
+        derived,
+        proposal.declaration_id(),
+        "the rewrite selects the other declaration"
+    );
+    assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
+    assert_eq!(
+        e.validate_replay(&[log, with_pinned_file_basis(hopped)].concat()),
+        Ok(())
+    );
+}

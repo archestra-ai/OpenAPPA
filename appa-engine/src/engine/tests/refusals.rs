@@ -466,6 +466,24 @@ fn a_second_take_of_one_candidate_is_stale() {
     );
 }
 
+#[test]
+fn an_offer_on_a_child_return_is_refused() {
+    let e = engine(vec![crm_tool()]);
+    let log = vec![opened(&e)];
+    let mut blocked = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+    assert_eq!(e.validate_replay(&[log.clone(), blocked.clone()].concat()), Ok(()));
+
+    let at = position(&blocked, |fact| matches!(fact, Fact::OfferOpened { .. }));
+    let Fact::OfferOpened { subject, .. } = &mut blocked[at] else {
+        unreachable!("the position names an OfferOpened")
+    };
+    *subject = crate::basis::SubjectKey::Return(crate::value::ChildReturnId::new(TrajectoryId::new("child"), 0));
+    assert_eq!(
+        e.validate_replay(&[log, blocked].concat()),
+        Err(TransitionRefusal::ForeignOffer)
+    );
+}
+
 // --- precedence: which rule refuses a record that breaks two ---
 
 #[test]
