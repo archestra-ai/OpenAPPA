@@ -56,6 +56,7 @@ CREATE TABLE openappa_policy_revisions (
     CONSTRAINT openappa_policy_revisions_pk PRIMARY KEY (deployment, revision),
     CONSTRAINT openappa_policy_revisions_revision_positive CHECK (revision > 0)
 );
+CREATE INDEX openappa_policy_revisions_key_idx ON openappa_policy_revisions (deployment, hash, revision);
 
 CREATE TABLE openappa_sessions (
     actor text PRIMARY KEY,
