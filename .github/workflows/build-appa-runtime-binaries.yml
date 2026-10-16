@@ -31,12 +31,12 @@ jobs:
           # Both Linux runners are pinned to 22.04 because the packaged binary
           # must load on glibc 2.34; a newer image links a newer symbol set and
           # fails the baseline check below.
-          - runner: ubuntu-22.04
+          - runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2204' || 'ubuntu-22.04' }}
             target: x86_64-unknown-linux-gnu
             executable: appa
             asset: appa-x86_64-unknown-linux-gnu
             archive: appa-x86_64-unknown-linux-gnu.tar.gz
-          - runner: ubuntu-22.04-arm
+          - runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-arm-ubuntu-2204' || 'ubuntu-22.04-arm' }}
             target: aarch64-unknown-linux-gnu
             executable: appa
             asset: appa-aarch64-unknown-linux-gnu

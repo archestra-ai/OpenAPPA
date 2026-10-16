@@ -61,35 +61,35 @@ jobs:
           - image: appa-runtime
             arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
           - image: appa-runtime
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-arm-ubuntu-2404' || 'ubuntu-24.04-arm' }}
           - image: appa-kagent-adk
             arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
           - image: appa-kagent-adk
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-arm-ubuntu-2404' || 'ubuntu-24.04-arm' }}
           - image: appa-demo-tools
             arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
           - image: appa-demo-tools
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-arm-ubuntu-2404' || 'ubuntu-24.04-arm' }}
           - image: appa-demo-mocks
             arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
           - image: appa-demo-mocks
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-arm-ubuntu-2404' || 'ubuntu-24.04-arm' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -356,7 +356,7 @@ jobs:
 
   publish-images:
     name: Publish container images
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 60
     permissions:
       contents: read # Required to check out the source that is published.

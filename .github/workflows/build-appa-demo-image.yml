@@ -24,7 +24,7 @@ env:
 jobs:
   build:
     name: Build, push and deploy
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.APPA_UBICLOUD_CI == 'on' && 'ubicloud-standard-8-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 30
     concurrency:
       group: appa-demo-image-${{ github.ref }}
