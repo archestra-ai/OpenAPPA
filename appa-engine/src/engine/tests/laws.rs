@@ -130,10 +130,87 @@ mod held_view_law {
         HostOnly,
         /// The deployment publishes its next revision: a walk that follows it decides there
         /// from then on. A walk pinned to a snapshot ignores it.
-        Publish,
+        Publish(Successor),
+    }
+
+    /// The trust chains a successor revision may name: the walk's own, a rank added between,
+    /// the lower rank dropped, a rank added below (every ordinal moves), the ranks reordered,
+    /// and every rank renamed.
+    const CHAINS: [&[&str]; 6] = [
+        &["suspicious", "trusted"],
+        &["suspicious", "vetted", "trusted"],
+        &["trusted"],
+        &["untrusted", "suspicious", "trusted"],
+        &["trusted", "suspicious"],
+        &["low", "high"],
+    ];
+
+    /// The tools of the law's policy, in declaration order.
+    const LAW_TOOLS: [&str; 12] = [
+        "seen",
+        "suspicious",
+        "quiet",
+        "emit",
+        "wire",
+        "guard",
+        "strict",
+        "get_ticket",
+        "taint",
+        "spawn",
+        "read_file",
+        "strict_read",
+    ];
+
+    /// How one published revision differs from the law's first: the tools it no longer
+    /// declares, whether it keeps the trust lowering, the gates and the officer, and its chain.
+    #[derive(Clone, Debug)]
+    struct Successor {
+        dropped: Vec<bool>,
+        lowering: bool,
+        gates: bool,
+        officer: bool,
+        chain: usize,
+    }
+
+    impl Successor {
+        fn same() -> Successor {
+            Successor {
+                dropped: vec![false; LAW_TOOLS.len()],
+                lowering: true,
+                gates: true,
+                officer: true,
+                chain: 0,
+            }
+        }
+    }
+
+    fn successor() -> impl Strategy<Value = Successor> {
+        (
+            prop::collection::vec(prop::bool::weighted(0.25), LAW_TOOLS.len()),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            0..CHAINS.len(),
+        )
+            .prop_map(|(dropped, lowering, gates, officer, chain)| Successor {
+                dropped,
+                lowering,
+                gates,
+                officer,
+                chain,
+            })
     }
 
     fn step() -> impl Strategy<Value = Step> {
+        step_publishing(Just(Successor::same()).boxed(), 1)
+    }
+
+    /// A step whose publishes draw a different successor each time.
+    fn evolving_step() -> impl Strategy<Value = Step> {
+        step_publishing(successor().boxed(), 3)
+    }
+
+    fn step_publishing(successor: BoxedStrategy<Successor>, weight: u32) -> impl Strategy<Value = Step> {
         let index = || 0usize..8;
         prop_oneof![
             3 => (
@@ -148,7 +225,7 @@ mod held_view_law {
             2 => index().prop_map(|pick| Step::Bind { pick }),
             2 => (index(), any::<bool>()).prop_map(|(pick, value)| Step::Return { pick, value }),
             1 => Just(Step::HostOnly),
-            1 => Just(Step::Publish),
+            weight => successor.prop_map(Step::Publish),
         ]
     }
 
@@ -156,10 +233,24 @@ mod held_view_law {
     /// trust, one officer who can clear either gap, and marked spawns: blocks, offers,
     /// approvals, denials, dispatch outcomes, forks and child returns all arise.
     fn law_engine() -> Engine {
+        law_engine_as(&Successor::same())
+    }
+
+    /// The law's policy as `successor` publishes it. A rank its chain drops resolves as a value
+    /// crossing does: `suspicious` to the lowest rank, `trusted` to the highest.
+    fn law_engine_as(successor: &Successor) -> Engine {
+        let ranks = CHAINS[successor.chain];
+        let chain = TrustChain::new(ranks.iter().map(|rank| rank.to_string()).collect());
+        let highest = Trust::new(u8::try_from(ranks.len() - 1).expect("a fixture chain is short"));
+        let suspicious = chain.rank_of("suspicious").unwrap_or(Trust::new(0));
+        let trusted = chain.rank_of("trusted").unwrap_or(highest);
         let k = || EffectSet::new([EffectKind::new("k")]).unwrap();
-        let lowering = Delta {
-            trust: Some(SUSPICIOUS),
-            audience: None,
+        let lowering = match successor.lowering {
+            true => Delta {
+                trust: Some(suspicious),
+                audience: None,
+            },
+            false => Delta::NONE,
         };
         let mut seen = plain_tool("seen");
         seen.emits = k();
@@ -168,44 +259,59 @@ mod held_view_law {
         let mut emit = plain_tool("emit");
         emit.emits = k();
         let mut wire = plain_tool("wire");
-        wire.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("k"))];
         let mut guard = plain_tool("guard");
-        guard.requires.history = vec![HistoryRequirement::NoPrior(EffectKind::new("k"))];
         let mut strict = plain_tool("strict");
-        strict.requires.label.trust_floor = Some(TRUSTED);
+        let mut crm = crm_tool();
+        let mut strict_read = plain_tool("strict_read");
+        crm.requires.label = Default::default();
+        if successor.gates {
+            wire.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("k"))];
+            guard.requires.history = vec![HistoryRequirement::NoPrior(EffectKind::new("k"))];
+            strict.requires.label.trust_floor = Some(trusted);
+            crm.requires.label = floor(trusted);
+            strict_read.requires.label.trust_floor = Some(trusted);
+        }
         let mut taint = plain_tool("taint");
         taint.delta = lowering;
-        let mut strict_read = plain_tool("strict_read");
-        strict_read.requires.label.trust_floor = Some(TRUSTED);
         let officer = crate::authority::Authority {
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
-                trust_ceiling: Some(TRUSTED),
+                trust_ceiling: Some(trusted),
                 waivers: vec![EffectKind::new("k")],
                 ..crate::authority::Mandate::default()
             },
             scope: crate::authority::Scope::default(),
             hint: None,
         };
+        let tools: Vec<ToolAnnotation> = [
+            seen,
+            suspicious,
+            plain_tool("quiet"),
+            emit,
+            wire,
+            guard,
+            strict,
+            crm,
+            taint,
+            plain_tool("spawn"),
+            plain_tool("read_file"),
+            strict_read,
+        ]
+        .into_iter()
+        .zip(&successor.dropped)
+        .filter_map(|(tool, dropped)| (!dropped).then_some(tool))
+        .collect();
+        let provider_run: Vec<&str> = EXPOSED
+            .into_iter()
+            .filter(|name| tools.iter().any(|tool| tool.name.as_str() == *name))
+            .collect();
         provider_run_engine(
             RegistryConfig {
-                authorities: vec![officer],
-                ..test_config(vec![
-                    seen,
-                    suspicious,
-                    plain_tool("quiet"),
-                    emit,
-                    wire,
-                    guard,
-                    strict,
-                    crm_tool(),
-                    taint,
-                    plain_tool("spawn"),
-                    plain_tool("read_file"),
-                    strict_read,
-                ])
+                trust_chain: chain,
+                authorities: if successor.officer { vec![officer] } else { Vec::new() },
+                ..test_config(tools)
             },
-            &EXPOSED,
+            &provider_run,
         )
     }
 
@@ -283,13 +389,15 @@ mod held_view_law {
                 .expect("every prefix the engines sealed replays across its revisions")
         }
 
-        /// Move a following walk to its deployment's next revision. No offer opened before the
-        /// publish is current after it: executing one consults nothing.
-        fn publish(&mut self) -> Result<(), TestCaseError> {
+        /// Move a following walk to its deployment's next revision, published as `successor`.
+        /// No offer opened before the publish is current after it: executing one consults
+        /// nothing.
+        fn publish(&mut self, successor: &Successor) -> Result<(), TestCaseError> {
             let Some(revision) = self.engine.revision() else {
                 return Ok(());
             };
-            let next = law_engine().at(DeploymentName::new("law"), PolicyRevision::new(revision.value() + 1));
+            let next =
+                law_engine_as(successor).at(DeploymentName::new("law"), PolicyRevision::new(revision.value() + 1));
             self.earlier.push(std::mem::replace(&mut self.engine, next));
             for (trajectory, offer) in &self.offers {
                 let consult = self.engine.offer_consults(&self.held, trajectory, offer);
@@ -428,12 +536,12 @@ mod held_view_law {
                         audience: crate::audience::AudienceEvidence::default(),
                     }))
                 }
-                Step::HostOnly | Step::Publish => None,
+                Step::HostOnly | Step::Publish(_) => None,
             }
         }
 
-        /// Append one batch the way the store does, advance the held view by it, and compare
-        /// against a cold replay of the new log.
+        /// Append one batch the way the store does, advance the held view by it, and compare,
+        /// as the deciding engine reads it, against a cold replay of the new log.
         fn append(&mut self, batch: &ValidatedFactBatch) -> Result<(), TestCaseError> {
             self.held
                 .advance(batch)
@@ -441,7 +549,8 @@ mod held_view_law {
             self.log.extend(batch.facts().iter().cloned());
             self.stamped.push((batch.revision(), batch.facts().to_vec()));
             self.batches += 1;
-            prop_assert_eq!(&self.held, &self.cold());
+            let deciding = self.held.crossed_to(&self.engine);
+            prop_assert_eq!(deciding.as_ref(), &self.cold());
             for fact in batch.facts() {
                 match fact {
                     Fact::DispatchOpened { dispatch, tool, .. } => {
@@ -463,8 +572,8 @@ mod held_view_law {
         }
 
         fn take(&mut self, step: &Step) -> Result<(), TestCaseError> {
-            if let Step::Publish = step {
-                return self.publish();
+            if let Step::Publish(successor) = step {
+                return self.publish(successor);
             }
             if let Step::HostOnly = step {
                 let before = self.held.position();
@@ -514,6 +623,73 @@ mod held_view_law {
                 walk.take(step)?;
             }
         }
+
+        /// The same law when each publish changes the policy: a revision may drop tools, the
+        /// gates, the trust lowering or the officer, and add, drop, reorder or rename trust
+        /// ranks. Every event at the head is decided or refused, never a panic; every prefix
+        /// replays across its revisions to the held view; and no offer an earlier revision
+        /// opened is current after a publish.
+        #[test]
+        fn a_family_crossing_any_successor_revisions_is_decided_and_replays(
+            steps in prop::collection::vec(evolving_step(), 1..48),
+        ) {
+            let mut walk = Walk::following();
+            for step in &steps {
+                walk.take(step)?;
+            }
+        }
+    }
+
+    /// The successor generator is not vacuous: one fixed walk publishes a revision that drops a
+    /// tool and renames every rank, and the family goes on deciding under it. The dropped tool
+    /// opens no dispatch, another tool releases, and the family's label stands in the renamed
+    /// chain at its lowest rank, where a value at a dropped rank crosses to.
+    #[test]
+    fn the_successor_walk_refuses_a_dropped_tool_and_crosses_a_renamed_chain() {
+        let quiet = Step::Propose {
+            on: 0,
+            exposed: vec![],
+            proposed: vec![0],
+        };
+        let emit = Step::Propose {
+            on: 0,
+            exposed: vec![],
+            proposed: vec![1],
+        };
+        let mut dropped = vec![false; LAW_TOOLS.len()];
+        dropped[LAW_TOOLS.iter().position(|tool| *tool == "quiet").unwrap()] = true;
+        let successor = Successor {
+            dropped,
+            chain: CHAINS.iter().position(|chain| *chain == ["low", "high"]).unwrap(),
+            ..Successor::same()
+        };
+        let mut walk = Walk::following();
+        let trust = |walk: &Walk| walk.held.views(&traj()).unwrap().current_label().trust;
+        let opened_after = |walk: &Walk, from: usize, name: &str| {
+            walk.log[from..]
+                .iter()
+                .any(|fact| matches!(fact, Fact::DispatchOpened { tool, .. } if tool.as_str() == name))
+        };
+
+        walk.take(&quiet).unwrap();
+        assert_eq!(trust(&walk), Trust::new(1), "the family opens trusted");
+        let published = walk.log.len();
+        walk.take(&Step::Publish(successor)).unwrap();
+        walk.take(&quiet).unwrap();
+        walk.take(&emit).unwrap();
+        assert!(
+            !opened_after(&walk, published, "quiet"),
+            "the dropped tool opens nothing"
+        );
+        assert!(
+            opened_after(&walk, published, "emit"),
+            "a tool the successor keeps releases"
+        );
+        assert_eq!(
+            trust(&walk),
+            Trust::new(0),
+            "trusted is gone from the chain: the label crosses to low"
+        );
     }
 
     /// The generator is not vacuous: one fixed walk reaches every kind of act the law

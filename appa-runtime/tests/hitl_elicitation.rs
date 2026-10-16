@@ -823,3 +823,104 @@ async fn a_harness_ruling_denies_and_retires_the_offer() {
         "a denied offer is gone; a later approval cannot revive it: {again}",
     );
 }
+
+/// Publish the deployment's next policy revision. `publish` still needs the signoff, so only the
+/// revision moves.
+fn publish_next_revision(deployment: &Deployment) {
+    let path = deployment._dir.path().join("appa.toml");
+    let next = policy(5000).replace(
+        "name = \"read_notes\"",
+        "name = \"read_notes\"\ndescription = \"Read the team's notes.\"",
+    );
+    std::fs::write(&path, next).expect("the revision writes");
+    let reloaded = deployment
+        .runtime
+        .reload(Config::load(&path).expect("the revision validates"))
+        .expect("the revision publishes");
+    assert!(reloaded.changed);
+}
+
+/// The embedded host's path: a ruling the harness obtained for an offer recorded under an earlier
+/// revision authorizes nothing, though the head still asks the same signoff. The call blocks
+/// afresh at the head, and a ruling for the head's own offer authorizes it.
+#[tokio::test]
+async fn a_harness_ruling_for_an_offer_from_an_earlier_revision_authorizes_nothing() {
+    let deployment = deployment().await;
+    publish_next_revision(&deployment);
+    let actor = Actor {
+        root: deployment.root.clone(),
+        child: None,
+    };
+    let vouch = |offer: String| {
+        let actor = actor.clone();
+        let runtime = Arc::clone(&deployment.runtime);
+        async move {
+            let args = serde_json::json!({ "offer_id": offer });
+            let gate = hooks::handle(
+                &runtime,
+                HookEvent::ToolCall {
+                    actor: actor.clone(),
+                    call: ProposedCall {
+                        tool: appa_runtime_api::CONTROL_TOOL.into(),
+                        arguments: raw(args.clone()),
+                        cwd: None,
+                    },
+                    call_id: None,
+                    spawn: None,
+                    prompt: None,
+                    ruling: Some(Ruling::Approve),
+                },
+            )
+            .await;
+            assert!(matches!(gate, HookDecision::PassControl), "{gate:?}");
+            runtime
+                .execute_embedded_remedy(&actor, serde_json::from_value(args).expect("the arguments parse"))
+                .await
+        }
+    };
+
+    assert_eq!(
+        vouch(deployment.offer.clone()).await,
+        appa_runtime::api::RemedyOutcome::Refused {
+            reason: appa_runtime::api::RemedyRefusal::UnknownOffer
+        },
+        "the offer no longer stands, so the ruling is never spent"
+    );
+
+    let blocked = hooks::handle(
+        &deployment.runtime,
+        HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: ProposedCall {
+                tool: "publish".to_string(),
+                arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
+            },
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { feedback, .. } = blocked else {
+        panic!("the head still asks the signoff: {blocked:?}");
+    };
+    let fresh = offer_id(&feedback);
+    assert_ne!(fresh, deployment.offer, "the head records an offer of its own");
+    assert!(matches!(
+        vouch(fresh).await,
+        appa_runtime::api::RemedyOutcome::Authorized { .. }
+    ));
+}
+
+/// A reviewer is never asked about an offer recorded under an earlier revision.
+#[tokio::test]
+async fn no_reviewer_is_asked_about_an_offer_from_an_earlier_revision() {
+    let deployment = deployment().await;
+    publish_next_revision(&deployment);
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let answer = execute(&deployment, reviewer.clone()).await;
+    assert!(!answer.contains("Authorized"), "{answer}");
+    assert!(reviewer.reviews().is_empty(), "nobody reviews a stale offer");
+}
