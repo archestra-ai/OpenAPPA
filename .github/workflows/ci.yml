@@ -1065,7 +1065,8 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        id: docker
+        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
 
       # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
@@ -1200,7 +1201,8 @@ jobs:
       - name: Check fixture and evidence contracts
         run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        id: docker
+        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
       - name: Build runtime
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -1265,7 +1267,8 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        id: docker
+        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
 
       - name: Build the shared runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -1276,7 +1279,7 @@ jobs:
           push: false
           load: true
           cache-from: type=gha,scope=appa-runtime
-          cache-to: type=gha,mode=min,scope=appa-runtime
+          cache-to: ${{ steps.docker.outputs.cache-write == 'true' && 'type=gha,mode=min,scope=appa-runtime' || '' }}
 
       - name: Smoke-test the shared runtime image
         run: |
@@ -1311,7 +1314,7 @@ jobs:
           tags: appa-kagent-adk:ci
           push: false
           cache-from: type=gha,scope=appa-kagent-adk
-          cache-to: type=gha,mode=max,scope=appa-kagent-adk
+          cache-to: ${{ steps.docker.outputs.cache-write == 'true' && 'type=gha,mode=max,scope=appa-kagent-adk' || '' }}
 
       - name: Build the go plugin image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -1320,7 +1323,7 @@ jobs:
           tags: appa-kagent-adk-go:ci
           push: false
           cache-from: type=gha,scope=appa-kagent-adk-go
-          cache-to: type=gha,mode=max,scope=appa-kagent-adk-go
+          cache-to: ${{ steps.docker.outputs.cache-write == 'true' && 'type=gha,mode=max,scope=appa-kagent-adk-go' || '' }}
 
       - name: Build the demo tools image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -1329,7 +1332,7 @@ jobs:
           tags: appa-demo-tools:ci
           push: false
           cache-from: type=gha,scope=appa-demo-tools
-          cache-to: type=gha,mode=max,scope=appa-demo-tools
+          cache-to: ${{ steps.docker.outputs.cache-write == 'true' && 'type=gha,mode=max,scope=appa-demo-tools' || '' }}
 
       - name: Build the demo mocks image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -1338,4 +1341,4 @@ jobs:
           tags: appa-demo-mocks:ci
           push: false
           cache-from: type=gha,scope=appa-demo-mocks
-          cache-to: type=gha,mode=max,scope=appa-demo-mocks
+          cache-to: ${{ steps.docker.outputs.cache-write == 'true' && 'type=gha,mode=max,scope=appa-demo-mocks' || '' }}

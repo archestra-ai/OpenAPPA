@@ -39,3 +39,20 @@ Sources: [runner labels](https://www.ubicloud.com/docs/github-actions-integratio
 [pricing](https://www.ubicloud.com/docs/about/pricing),
 [premium routing](https://www.ubicloud.com/docs/github-actions-integration/use-premium-runners),
 and [transparent caching](https://www.ubicloud.com/docs/github-actions-integration/ubicloud-cache).
+
+## Shared Docker cache
+
+Docker setup is pinned to the organization's shared
+[`setup-docker-builder`](https://github.com/archestra-ai/.github/tree/49f7467c09064f44fc4ab1cf6b78e8855aacccb1/actions/setup-docker-builder)
+action. CI's designated image job warms its existing per-image scopes on main;
+PR consumers restore them without repeating cache uploads. Release publishers
+keep their existing architecture-specific scopes and writer behavior. The action
+preserves the runner's cache protocol, so free GitHub runners use GitHub's cache
+and opted-in Ubicloud runners use their cache proxy. The targeted
+`stale-action-refs` annotations identify a deliberate first-party commit pin;
+SHA pinning and all other workflow audits remain enabled.
+
+Adopt the optional native-image-store profile only after representative warm CI
+stays within 110% of the existing baseline. It must run before any containers.
+The default Docker-container profile and the `APPA_UBICLOUD_CI` opt-in remain in
+place while performance is validated.
