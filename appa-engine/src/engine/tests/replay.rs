@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn a_release_replays_only_as_the_records_its_decision_obliged() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let call = call("get_ticket", json!({}));
     let records = vec![opened(&e)];
     let view = e.view(&traj(), records.clone(), 1).unwrap();
@@ -30,7 +30,7 @@ fn a_release_replays_only_as_the_records_its_decision_obliged() {
         records.clone(),
         vec![
             batch[0].clone(),
-            stray_admission(&traj(), known(SUSPICIOUS, Audience::public())),
+            stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
             batch[1].clone(),
         ],
     ]
@@ -81,7 +81,7 @@ fn a_release_replays_only_as_the_records_its_decision_obliged() {
 fn a_crossing_replays_only_with_its_admission_and_its_merge() {
     let child = TrajectoryId::new("child");
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
+    let e = engine_at(vec![], Label::new(SUSPICIOUS, internal.clone()));
     let mut log = vec![opened(&e)];
     log.extend(forked_child(&e, &log.clone(), &child));
     let crossing = crossed_report(&e, &log, &child, "the answer");
@@ -106,7 +106,7 @@ fn a_crossing_replays_only_with_its_admission_and_its_merge() {
 #[test]
 fn a_result_replays_only_for_a_successful_close() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let call = call("get_ticket", json!({}));
     let mut log = vec![opened(&e)];
     let dispatch = open(&e, &mut log, &call);
@@ -160,7 +160,7 @@ fn a_result_replays_only_for_a_successful_close() {
 fn an_ended_branch_releases_nothing_more() {
     let child = TrajectoryId::new("child");
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let mut log = vec![opened(&e)];
     log.extend(forked_child(&e, &log.clone(), &child));
     let ended = branch::submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
@@ -209,7 +209,7 @@ fn an_ended_branch_releases_nothing_more() {
 #[test]
 fn an_admission_after_a_checkpoint_carries_the_bytes_it_observed() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let call = call("get_ticket", json!({}));
     let mut log = vec![opened(&e)];
     let dispatch = open(&e, &mut log, &call);
@@ -271,12 +271,8 @@ fn a_sanitizer_settlement_replays_only_where_the_deployment_confines_the_result(
         hint: None,
     };
     let config = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![crm_tool()]),
-        authorities: vec![],
         sanitizers: vec![declassify],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![crm_tool()])
     };
     let call = call("get_ticket", json!({}));
 

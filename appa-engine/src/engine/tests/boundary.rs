@@ -3,14 +3,8 @@ use super::*;
 #[test]
 fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
     let pay = |emits: [&str; 2]| ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("pay"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
         emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
-        requires: Requires::default(),
+        ..plain_tool("pay")
     };
     let release = |contract: ToolAnnotation| {
         let e = engine(vec![contract]);
@@ -51,7 +45,7 @@ fn clean_call_allows() {
 #[test]
 fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let records = vec![opened(&e)];
     let view = e.view(&traj(), records, 1).unwrap();
     let call = call("get_ticket", json!({}));
@@ -103,7 +97,7 @@ fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
 #[test]
 fn a_repeated_batch_identity_returns_its_recorded_decision_and_a_reused_one_is_refused() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let records = vec![opened(&e)];
     let view = e.view(&traj(), records.clone(), 1).unwrap();
     let batch = |proposals: Vec<ResolvedCall>| {
@@ -353,7 +347,7 @@ fn the_boundary_plans_a_blocked_proposal_and_opens_nothing() {
 #[test]
 fn repeat_at_same_label_is_not_a_narrowing() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let log = vec![opened(&e)];
     assert_eq!(
         check_call(&e, &log, &call("get_ticket", json!({}))),
@@ -363,17 +357,13 @@ fn repeat_at_same_label_is_not_a_narrowing() {
 
 fn gated(name: &str, delta: Delta, forwards: Delta, requires: LabelRequirements) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
-        parameters: crate::params::ToolParameters::open(),
         delta,
         forwards,
-        emits: EffectSet::default(),
         requires: Requires {
             label: requires,
             ..Requires::default()
         },
+        ..plain_tool(name)
     }
 }
 
@@ -399,7 +389,7 @@ fn a_delta_audience_labels_the_result_and_never_gates_the_call() {
         contains(RecipientSpec::Static(readers(&["b"]))),
     );
     let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-    let e = engine_at(vec![share], known(TRUSTED, both.clone()));
+    let e = engine_at(vec![share], Label::new(TRUSTED, both.clone()));
     let log = vec![opened(&e)];
     match check_call(&e, &log, &call("share", json!({}))) {
         CheckOutcome::Block(block) => {
@@ -407,8 +397,8 @@ fn a_delta_audience_labels_the_result_and_never_gates_the_call() {
             assert_eq!(
                 block.narrowing,
                 Some(crate::check::Narrowing {
-                    from: established(TRUSTED, both),
-                    to: established(TRUSTED, Audience::restricted([ReaderId::new("a")])),
+                    from: Label::new(TRUSTED, both),
+                    to: Label::new(TRUSTED, Audience::restricted([ReaderId::new("a")])),
                 })
             );
         }
@@ -493,17 +483,11 @@ fn forwarded_content_bounds_the_recipients_a_call_reaches() {
 #[test]
 fn attention_is_always_a_gap() {
     let tool = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("wire"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
             attention: vec![MarkName::new("signoff")],
             ..Requires::default()
         },
+        ..plain_tool("wire")
     };
     let e = engine(vec![tool]);
     let log = vec![opened(&e)];

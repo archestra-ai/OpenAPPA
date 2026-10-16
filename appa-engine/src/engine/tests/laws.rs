@@ -185,9 +185,8 @@ mod held_view_law {
         };
         provider_run_engine(
             RegistryConfig {
-                annotators: vec![],
-                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: declared(vec![
+                authorities: vec![officer],
+                ..test_config(vec![
                     seen,
                     suspicious,
                     plain_tool("quiet"),
@@ -200,10 +199,7 @@ mod held_view_law {
                     plain_tool("spawn"),
                     plain_tool("read_file"),
                     strict_read,
-                ]),
-                authorities: vec![officer],
-                sanitizers: vec![],
-                audience: crate::audience::AudienceConfig::default(),
+                ])
             },
             &EXPOSED,
         )

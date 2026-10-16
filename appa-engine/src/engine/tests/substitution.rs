@@ -305,21 +305,6 @@ fn a_repeat_of_a_hop_answers_with_the_same_call_until_a_proposal_takes_it() {
 fn a_derivation_that_no_longer_covers_does_not_starve_the_one_that_does() {
     let e = open_engine_at(
         RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(vec![ToolAnnotation {
-                requires: Requires {
-                    label: LabelRequirements {
-                        trust_floor: Some(TRUSTED),
-                        audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                            DeclaredAudience::restricted([corp_reader("partner")]),
-                        ))],
-                    },
-                    ..Requires::default()
-                },
-                ..post_tool("post", vec![crate::names::TagName::new("outbound")])
-            }]),
-            authorities: vec![],
             sanitizers: vec![
                 // Sorted so the group-labelled hop is the earlier subject's: `by_group` runs
                 // on b1, `by_name` on b2, and subject order puts b1 first.
@@ -331,8 +316,20 @@ fn a_derivation_that_no_longer_covers_does_not_starve_the_one_that_does() {
                 ),
             ],
             audience: slack_groups(&["team"]),
+            ..test_config(vec![ToolAnnotation {
+                requires: Requires {
+                    label: LabelRequirements {
+                        trust_floor: Some(TRUSTED),
+                        audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                            DeclaredAudience::restricted([corp_reader("partner")]),
+                        ))],
+                    },
+                    ..Requires::default()
+                },
+                ..post_tool("post", vec![crate::names::TagName::new("outbound")])
+            }])
         },
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     );
     let proposal = call("post", json!({ "body": "ssn 123" }));
     let log = internal_log(&e);
@@ -524,7 +521,7 @@ fn a_substitution_that_leaves_a_gap_re_plans_over_the_derived_call() {
         offer,
         &plan,
         "post",
-        partial(SUSPICIOUS, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(SUSPICIOUS, Audience::restricted([ReaderId::new("insider")])),
     );
     let approved = execute_offer(&e, &log, offer, OfferOutcome::Approved(evidence)).expect("the officer answers");
     assert_eq!(
@@ -770,20 +767,18 @@ fn selecting_substitution_engine() -> Engine {
     open_engine_at(
         RegistryConfig {
             annotators: Vec::new(),
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(vec![
-                post_tool("post(body:ssn*)", vec![crate::names::TagName::new("outbound")]),
-                post_tool("post", vec![crate::names::TagName::new("outbound")]),
-            ]),
             authorities: Vec::new(),
             sanitizers: vec![input_sanitizer_to(
                 "redact",
                 &["insider"],
                 DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
             )],
-            audience: crate::audience::AudienceConfig::default(),
+            ..test_config(vec![
+                post_tool("post(body:ssn*)", vec![crate::names::TagName::new("outbound")]),
+                post_tool("post", vec![crate::names::TagName::new("outbound")]),
+            ])
         },
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     )
 }
 
@@ -802,7 +797,7 @@ fn with_pinned_file_basis(mut hopped: Vec<Fact>) -> Vec<Fact> {
     let basis = crate::value::FileBasis::Read(crate::value::FileSource {
         version: "v1".into(),
         digest: "content".into(),
-        label: known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     });
     let mut pinned = false;
     for fact in &mut hopped {

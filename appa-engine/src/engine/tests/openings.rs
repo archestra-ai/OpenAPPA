@@ -366,10 +366,6 @@ fn a_root_fork_opening_that_forks_the_root_from_itself_is_refused() {
 #[test]
 fn a_fork_records_the_return_policy_its_spawn_approved() {
     let cfg = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![plain_tool("spawn")]),
-        authorities: vec![],
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("redactor"),
             on: crate::authority::SanitizerPoints {
@@ -383,7 +379,7 @@ fn a_fork_records_the_return_policy_its_spawn_approved() {
             scope: crate::authority::Scope::default(),
             hint: None,
         }],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![plain_tool("spawn")])
     };
     let e = open_engine(cfg);
     let child = TrajectoryId::new("child");
@@ -411,9 +407,9 @@ fn a_fork_records_the_return_policy_its_spawn_approved() {
 #[test]
 fn a_root_folds_from_its_openings_starting_label() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![plain_tool("send")], known(SUSPICIOUS, internal.clone()));
+    let e = engine_at(vec![plain_tool("send")], Label::new(SUSPICIOUS, internal.clone()));
     let t = traj();
-    let starting = partial(SUSPICIOUS, internal.clone());
+    let starting = Label::new(SUSPICIOUS, internal.clone());
 
     let replayed = e.view(&t, vec![opened(&e)], 1).expect("the opened root replays");
     assert_eq!(
@@ -483,7 +479,7 @@ fn an_unopened_trajectory_has_no_views_and_takes_no_event() {
     assert_eq!(
         e.validate_replay(&[
             opened(&e),
-            stray_admission(&unopened, known(SUSPICIOUS, Audience::public()))
+            stray_admission(&unopened, Label::new(SUSPICIOUS, Audience::public()))
         ]),
         Err(TransitionRefusal::ForeignTrajectory)
     );

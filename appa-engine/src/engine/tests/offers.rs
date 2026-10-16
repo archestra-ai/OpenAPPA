@@ -89,12 +89,8 @@ fn an_output_sanitizer_plan_binds_its_sanitizer_when_the_approval_releases() {
         hint: None,
     };
     let e = open_engine(RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![crm_tool()]),
-        authorities: vec![],
         sanitizers: vec![declassify],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![crm_tool()])
     });
     let log = vec![opened(&e)];
     let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
@@ -359,7 +355,7 @@ fn evidence_gathered_for_one_offer_cannot_approve_another() {
     let log = [log, second].concat();
 
     assert_eq!(plan.required, other_plan.required);
-    let fold = partial(SUSPICIOUS, Audience::public());
+    let fold = Label::new(SUSPICIOUS, Audience::public());
     assert_eq!(
         evidence_for(one, &plan, "wire", fold.clone())
             .into_iter()
@@ -405,7 +401,7 @@ fn evidence_gathered_for_one_offer_cannot_approve_another() {
 
 #[test]
 fn a_repeat_returns_the_recorded_outcome_of_a_dispatch_that_already_ran() {
-    let e = engine(vec![open_tool("note")]);
+    let e = engine(vec![plain_tool("note")]);
     let log = vec![opened(&e)];
     let note = call("note", json!({}));
     let release = proposed(&e, &log, "b1", nonce(), note.clone()).expect("the note releases");
@@ -540,7 +536,7 @@ fn only_a_moved_label_stales_an_approval() {
         }
     };
 
-    let e = engine(vec![crm_tool(), neutral_tool()]);
+    let e = engine(vec![crm_tool(), plain_tool("read_note")]);
     let log = prepared(&e, vec![opened(&e)]);
     let neutral = appended_facts(
         proposed(&e, &log, "b2", nonce(), call("read_note", json!({}))).expect("the neutral call releases"),
@@ -578,10 +574,7 @@ fn only_a_moved_label_stales_an_approval() {
 /// until a result moves the label, whoever declared the delta.
 #[test]
 fn an_annotated_release_leaves_an_approval_standing() {
-    let classified = ToolAnnotation {
-        name: ToolName::new("read_note"),
-        ..neutral_tool()
-    };
+    let classified = plain_tool("read_note");
     let pin = pinned_for(
         {
             let mut produced = classified.clone();
@@ -631,7 +624,7 @@ fn an_annotated_release_leaves_an_approval_standing() {
 
 #[test]
 fn a_later_basis_change_does_not_revoke_an_open_dispatch() {
-    let e = engine(vec![crm_tool(), open_tool("note")]);
+    let e = engine(vec![crm_tool(), plain_tool("note")]);
     let log = vec![opened(&e)];
     let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
     let offer = opened_offers(&opened)[0].0;
@@ -758,7 +751,7 @@ fn accepting_one_offer_ends_every_sibling_on_its_candidate() {
     let sibling = offers[1].0;
     let log = [log, opened].concat();
 
-    let evidence = evidence_for(chosen, &plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let evidence = evidence_for(chosen, &plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
     let done = execute_offer(&e, &log, chosen, OfferOutcome::Approved(evidence)).expect("the offer executes");
     let facts = appended_facts(done);
     assert!(
@@ -888,7 +881,7 @@ fn a_denial_ends_the_plans_that_named_the_authority_and_re_offers_the_rest() {
         fresh_offer,
         &fresh_plan,
         "wire",
-        partial(SUSPICIOUS, Audience::public()),
+        Label::new(SUSPICIOUS, Audience::public()),
     );
     let executed =
         execute_offer(&e, &log, fresh_offer, OfferOutcome::Approved(evidence)).expect("the fresh offer executes");
@@ -918,7 +911,7 @@ fn an_incomplete_or_misreviewed_evidence_set_is_refused() {
     let opened = appended_facts(decision);
     let (offer, plan) = opened_offers(&opened)[0].clone();
     let log = [log, opened].concat();
-    let complete = evidence_for(offer, &plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let complete = evidence_for(offer, &plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
 
     assert!(matches!(
         execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())),
@@ -934,7 +927,7 @@ fn an_incomplete_or_misreviewed_evidence_set_is_refused() {
         "an overlapping mandate cannot reroute the grouping the agent was shown"
     );
     let mut moved_fold = complete;
-    moved_fold[0].reviewed.trajectory_label = partial(TRUSTED, Audience::public());
+    moved_fold[0].reviewed.trajectory_label = Label::new(TRUSTED, Audience::public());
     assert!(matches!(
         execute_offer(&e, &log, offer, OfferOutcome::Approved(moved_fold)),
         Err(TransitionError::Plan(PlanError::ReviewMismatch))
@@ -1054,7 +1047,7 @@ fn an_acceptance_whose_batch_prepares_no_approval_is_refused() {
     let unrelated = opened_offers(&elsewhere)[0].0;
     let opening = [opening, elsewhere].concat();
 
-    let evidence = evidence_for(chosen, &plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let evidence = evidence_for(chosen, &plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
     let approval = appended_facts(
         execute_offer(&e, &opening, chosen, OfferOutcome::Approved(evidence)).expect("the offer executes"),
     );
@@ -1082,7 +1075,10 @@ fn an_acceptance_whose_batch_prepares_no_approval_is_refused() {
     );
 
     let mut deferred = approval.clone();
-    deferred.insert(position, stray_admission(&traj(), known(TRUSTED, Audience::public())));
+    deferred.insert(
+        position,
+        stray_admission(&traj(), Label::new(TRUSTED, Audience::public())),
+    );
     assert_eq!(
         e.validate_replay(&[opening.clone(), deferred].concat()),
         Err(TransitionRefusal::UndischargedAcceptance)
@@ -1127,7 +1123,7 @@ fn the_approval_window_admits_no_ending_from_before_the_offer_it_approves() {
         "the predecessor is stale, and no record ended it"
     );
 
-    let evidence = evidence_for(fresh, &fresh_plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let evidence = evidence_for(fresh, &fresh_plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
     let approval = appended_facts(
         execute_offer(&e, &log, fresh, OfferOutcome::Approved(evidence)).expect("the fresh offer executes"),
     );

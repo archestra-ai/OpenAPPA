@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal.clone()));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal.clone()));
     let call = call("get_ticket", json!({}));
     let mut log = vec![opened(&e)];
     let dispatch = open(&e, &mut log, &call);
@@ -31,7 +31,7 @@ fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
         e.validate_replay(&forged)
     };
     assert_eq!(
-        widened(known(TRUSTED, Audience::public())),
+        widened(Label::new(TRUSTED, Audience::public())),
         Err(TransitionRefusal::ForgedLabel)
     );
     let admitted = match log.last() {
@@ -41,7 +41,7 @@ fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
     assert_eq!(widened(admitted), Ok(()));
 
     let child = TrajectoryId::new("child");
-    let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal.clone()));
+    let e = engine_at(vec![crm_tool()], Label::new(SUSPICIOUS, internal.clone()));
     let mut branched = vec![opened(&e)];
     branched.extend(forked_child(&e, &branched.clone(), &child));
     let crossing = crossed_report(&e, &branched.clone(), &child, "done");
@@ -74,11 +74,11 @@ fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
         .position(|fact| matches!(fact, Fact::ChildReturn { .. }))
         .expect("the return records its crossing");
     assert_eq!(
-        forge(crossing_at, known(TRUSTED, Audience::public())),
+        forge(crossing_at, Label::new(TRUSTED, Audience::public())),
         Err(TransitionRefusal::ForgedLabel)
     );
     assert_eq!(
-        forge(crossing_at + 1, known(TRUSTED, Audience::public())),
+        forge(crossing_at + 1, Label::new(TRUSTED, Audience::public())),
         Err(TransitionRefusal::ForgedLabel)
     );
 }
@@ -89,7 +89,7 @@ fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
 #[test]
 fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let call = call("get_ticket", json!({}));
     let records = vec![opened(&e)];
     let view = e.view(&traj(), records.clone(), 1).unwrap();
@@ -152,7 +152,7 @@ fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
 #[test]
 fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
     let call = call("get_ticket", json!({}));
     let records = vec![opened(&e)];
     let view = e.view(&traj(), records.clone(), 1).unwrap();

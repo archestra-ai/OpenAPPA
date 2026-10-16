@@ -12,12 +12,9 @@ fn audience_engine(authorities: Vec<crate::authority::Authority>, starting: Labe
     };
     open_engine_at(
         RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(vec![send]),
             authorities,
-            sanitizers: vec![],
             audience: slack_groups(&["team", "wide", "nobody"]),
+            ..test_config(vec![send])
         },
         starting,
     )
@@ -59,10 +56,6 @@ fn masking_config(from: DeclaredAudience, groups: &[&str]) -> RegistryConfig {
         ))),
     };
     RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![read]),
-        authorities: vec![],
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("mask"),
             on: crate::authority::SanitizerPoints {
@@ -81,11 +74,12 @@ fn masking_config(from: DeclaredAudience, groups: &[&str]) -> RegistryConfig {
         } else {
             slack_groups(groups)
         },
+        ..test_config(vec![read])
     }
 }
 
 fn internal_session() -> Label {
-    known(
+    Label::new(
         TRUSTED,
         Audience::of_declared(&chain_audience(crate::label::ChainAudience::Internal)),
     )
@@ -200,7 +194,7 @@ fn a_public_placeholder_argument_is_the_public_audience() {
             1,
         ),
     ] {
-        let e = audience_engine(authorities, known(TRUSTED, label));
+        let e = audience_engine(authorities, Label::new(TRUSTED, label));
         let log = vec![opened(&e)];
         let decision = e
             .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![send_to("public")]))
@@ -228,7 +222,7 @@ fn a_public_placeholder_argument_is_the_public_audience() {
 fn a_group_placeholder_reads_the_acts_pinned_answer() {
     let e = audience_engine(
         vec![],
-        known(
+        Label::new(
             TRUSTED,
             Audience::restricted([corp_reader("alice"), corp_reader("bob")]),
         ),
@@ -281,7 +275,10 @@ fn a_group_placeholder_reads_the_acts_pinned_answer() {
 
 #[test]
 fn an_unanswered_group_refuses_the_batch_with_no_fact() {
-    let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = audience_engine(
+        vec![],
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
     let log = vec![opened(&e)];
     let needed = e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![send_to("@team")]));
     assert_eq!(
@@ -306,7 +303,7 @@ fn an_unanswered_group_refuses_the_batch_with_no_fact() {
             };
             send
         }],
-        known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
     );
     assert!(matches!(
         unregistered.handle(
@@ -331,7 +328,10 @@ fn an_unanswered_group_refuses_the_batch_with_no_fact() {
 
 #[test]
 fn evidence_is_scoped_to_the_asked_atoms_and_the_registered_sources() {
-    let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = audience_engine(
+        vec![],
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
     let log = vec![opened(&e)];
 
     // Evidence outside the registered sources is refused, not ignored.
@@ -377,7 +377,10 @@ fn evidence_is_scoped_to_the_asked_atoms_and_the_registered_sources() {
 
 #[test]
 fn replay_refuses_pinned_evidence_no_operation_requested() {
-    let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = audience_engine(
+        vec![],
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
     let log = vec![opened(&e)];
     let exact = source_evidence(vec![user_group(
         "team",
@@ -408,7 +411,10 @@ fn replay_refuses_pinned_evidence_no_operation_requested() {
 
 #[test]
 fn audience_evidence_is_batch_payload() {
-    let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = audience_engine(
+        vec![],
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
     let log = vec![opened(&e)];
     let team = |member: ReaderId| source_evidence(vec![user_group("team", vec![member])]);
     let first = e
@@ -450,7 +456,10 @@ fn audience_evidence_is_batch_payload() {
 
 #[test]
 fn replay_refuses_tampered_audience_evidence() {
-    let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = audience_engine(
+        vec![],
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
     let records = vec![opened(&e)];
     let decision = e
         .handle(
@@ -520,7 +529,7 @@ fn a_produced_symbolic_audience_reads_membership_per_act_and_replays_from_the_pi
     cfg.tools.push(annotated(notify.clone(), "acl"));
     cfg.annotators.push(annotator("acl"));
     cfg.audience = slack_groups(&["team"]);
-    let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = open_engine_at(cfg, Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])));
     let log = vec![opened(&e)];
     let requiring = {
         let mut produced = notify.clone();
@@ -602,7 +611,7 @@ fn a_produced_symbolic_delta_narrows_without_a_membership_read() {
     let mut cfg = test_config(vec![]);
     cfg.tools.push(annotated(notify.clone(), "acl"));
     cfg.annotators.push(annotator("acl"));
-    let e = open_engine_at(cfg, known(TRUSTED, Audience::public()));
+    let e = open_engine_at(cfg, Label::new(TRUSTED, Audience::public()));
     let log = vec![opened(&e)];
     let internal = DeclaredAudience::Union(
         crate::label::Clause::new([crate::label::ChainAudience::Internal], [], []).expect("a chain clause"),
@@ -630,7 +639,7 @@ fn a_produced_symbolic_delta_narrows_without_a_membership_read() {
     assert!(blocked[0].block.raw.requirement_gaps.is_empty());
     assert_eq!(
         narrowing.to,
-        known(TRUSTED, Audience::of_declared(&internal)),
+        Label::new(TRUSTED, Audience::of_declared(&internal)),
         "the chain word reaches the offered narrowing unexpanded"
     );
 }
@@ -647,7 +656,7 @@ fn a_call_approval_extends_the_offered_calls_pins() {
         hint: None,
     };
     let alice = Audience::restricted([corp_reader("alice")]);
-    let e = audience_engine(vec![officer], known(TRUSTED, alice.clone()));
+    let e = audience_engine(vec![officer], Label::new(TRUSTED, alice.clone()));
     let opening = vec![opened(&e)];
     let evidence = source_evidence(vec![user_group(
         "wide",
@@ -670,7 +679,7 @@ fn a_call_approval_extends_the_offered_calls_pins() {
             &e,
             &log,
             offer,
-            OfferOutcome::Approved(evidence_for(offer, &plan, "send", partial(TRUSTED, alice))),
+            OfferOutcome::Approved(evidence_for(offer, &plan, "send", Label::new(TRUSTED, alice))),
         )
         .expect("the officer's ruling arms the call"),
     );
@@ -707,7 +716,7 @@ fn replay_names_the_refusal_of_a_duplicated_pin() {
     };
     let e = audience_engine(
         vec![officer],
-        known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
     );
     let opening = vec![opened(&e)];
     let mut blocked = appended_facts(
@@ -759,7 +768,7 @@ fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<Engin
         hint: None,
     };
     let alice = Audience::restricted([corp_reader("alice")]);
-    let e = audience_engine(vec![officer], known(TRUSTED, alice.clone()));
+    let e = audience_engine(vec![officer], Label::new(TRUSTED, alice.clone()));
     let opening = vec![opened(&e)];
     let pinned = source_evidence(vec![user_group("wide", wide_as_reported())]);
     let blocked = appended_facts(
@@ -776,7 +785,7 @@ fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<Engin
             &e,
             &log,
             offer,
-            OfferOutcome::Approved(evidence_for(offer, &plan, "send", partial(TRUSTED, alice))),
+            OfferOutcome::Approved(evidence_for(offer, &plan, "send", Label::new(TRUSTED, alice))),
         )
         .expect("the officer's ruling arms the call"),
     );
@@ -855,12 +864,9 @@ mod symbolic_audiences {
 
     fn config(tools: Vec<ToolAnnotation>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
         RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(tools),
             authorities,
-            sanitizers: vec![],
             audience: slack_groups(&["team", "board", "officers"]),
+            ..test_config(tools)
         }
     }
 
@@ -944,7 +950,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![backup, wire], vec![officer]),
             &[],
-            known(TRUSTED, Audience::public()),
+            Label::new(TRUSTED, Audience::public()),
         );
         let log = vec![opened(&e)];
         let decided = e
@@ -1021,7 +1027,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![send], vec![officer]),
             &[],
-            known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+            Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
         );
         let log = vec![opened(&e)];
         let bob_in_team = || user_group("team", vec![slack_member("slack:UB", Some("bob@corp.com"))]);
@@ -1096,7 +1102,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![team_delta("seen")], vec![]),
             &["seen"],
-            known(TRUSTED, Audience::public()),
+            Label::new(TRUSTED, Audience::public()),
         );
         let log = vec![opened(&e)];
         let seen = || vec![exposed("seen", "what the provider saw")];
@@ -1131,7 +1137,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![team_send()], vec![]),
             &[],
-            known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+            Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
         );
         let log = vec![opened(&e)];
         let send = || vec![raw(&call("send", json!({})))];
@@ -1194,7 +1200,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![team_delta("seen"), to_alice], vec![]),
             &["seen"],
-            known(TRUSTED, Audience::public()),
+            Label::new(TRUSTED, Audience::public()),
         );
         let log = vec![opened(&e)];
         let act = |audience| {
@@ -1255,7 +1261,7 @@ mod symbolic_audiences {
         let e = grouped_engine(
             config(vec![send], vec![officer]),
             &[],
-            known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+            Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
         );
         let log = vec![opened(&e)];
         let send = || vec![raw(&call("send", json!({})))];
@@ -1314,7 +1320,7 @@ mod symbolic_audiences {
             offer,
             &plan,
             "send",
-            partial(TRUSTED, Audience::restricted([corp_reader("alice")])),
+            Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
         );
         let approved = execute_offer(&e, &log, offer, OfferOutcome::Approved(evidence)).expect("the offer approves");
         assert!(matches!(
@@ -1714,7 +1720,7 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
     };
     let mut cfg = test_config(vec![read]);
     cfg.audience = channel_source();
-    let at_channel = |id: &str| known(TRUSTED, Audience::of_declared(&channel_group(id)));
+    let at_channel = |id: &str| Label::new(TRUSTED, Audience::of_declared(&channel_group(id)));
     let e = open_engine_at(cfg, at_channel("C1"));
     let log = vec![opened(&e)];
     let to_channel = |id: &str| {
@@ -1807,7 +1813,7 @@ fn a_contains_placeholder_requires_the_collection_the_call_spells() {
     };
     let mut cfg = test_config(vec![send]);
     cfg.audience = channel_source();
-    let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = open_engine_at(cfg, Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])));
     let log = vec![opened(&e)];
     let to_channel = |id: &str| raw(&call("send", json!({ "channel": id })));
     let atom = SymbolicAtom::Group(crate::label::GroupRef::Source {
@@ -1878,7 +1884,7 @@ fn a_contains_placeholder_filled_from_an_array_requires_every_collection() {
     };
     let mut cfg = test_config(vec![send]);
     cfg.audience = channel_source();
-    let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+    let e = open_engine_at(cfg, Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])));
     let log = vec![opened(&e)];
     let to_channels = raw(&call("send", json!({ "channel": ["C1", "C2"] })));
     let atom = |id: &str| {
@@ -1971,7 +1977,7 @@ fn a_mandate_placeholder_admits_the_collection_each_call_spells() {
     cfg.annotators = vec![acl];
     cfg.tools = vec![annotated(lookup, "acl")];
     cfg.audience = channel_source();
-    let e = open_engine_at(cfg.clone(), known(TRUSTED, Audience::public()));
+    let e = open_engine_at(cfg.clone(), Label::new(TRUSTED, Audience::public()));
     let declaration = e.registry().tool(&ToolName::new("lookup")).expect("lookup registers");
     let unpinned = call("lookup", json!({ "channel": "C1" }));
     let pinned = |id: &str| {

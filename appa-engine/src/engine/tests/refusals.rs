@@ -10,7 +10,7 @@ fn insider() -> Audience {
 
 /// An engine under which `get_ticket` releases with no remedy.
 fn releasing_engine() -> Engine {
-    engine_at(vec![crm_tool()], known(TRUSTED, insider()))
+    engine_at(vec![crm_tool()], Label::new(TRUSTED, insider()))
 }
 
 fn ticket() -> ResolvedCall {
@@ -66,7 +66,7 @@ fn ruled_release(e: &Engine) -> (Vec<Fact>, Vec<Fact>) {
     let blocked = appended_facts(proposed(e, &log, "b1", nonce(), wire.clone()).expect("the batch decides"));
     let (offer, plan) = opened_offers(&blocked)[0].clone();
     let log = [log, blocked].concat();
-    let evidence = evidence_for(offer, &plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let evidence = evidence_for(offer, &plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
     let approval =
         appended_facts(execute_offer(e, &log, offer, OfferOutcome::Approved(evidence)).expect("the officer approves"));
     let log = [log, approval].concat();
@@ -217,7 +217,7 @@ fn a_spawn_mark_past_the_batchs_proposals_is_refused() {
 #[test]
 fn a_member_fork_prepared_twice_is_refused() {
     let e = engine(vec![plain_tool("spawn")]);
-    let (mut log, fan_out) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+    let (mut log, fan_out) = fan_out_family(&e, Label::new(TRUSTED, Audience::public()));
     member_started(&e, &mut log, &fan_out, &TrajectoryId::new("child"));
     assert_eq!(e.validate_replay(&log), Ok(()));
 

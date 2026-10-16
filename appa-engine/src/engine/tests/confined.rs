@@ -16,25 +16,16 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         hint: None,
     };
     let fetch = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("fetch"),
-        tags: vec![],
         delta: Delta {
             trust: Some(SUSPICIOUS),
             audience: None,
         },
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
         emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
-        requires: Requires::default(),
+        ..plain_tool("fetch")
     };
     let e = open_engine(RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![fetch]),
-        authorities: vec![],
         sanitizers: vec![redactor],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![fetch])
     });
     let call = call("fetch", json!({}));
     let (log, dispatch) = released_under_output_sanitizer(&e, vec![opened(&e)], &call);
@@ -206,19 +197,6 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
 /// provider-run result that narrows the audience. The trajectory starts trusted and public.
 fn file_redacting_engine() -> Engine {
     let cfg = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![
-            read_tool(
-                "fetch",
-                Delta {
-                    trust: Some(SUSPICIOUS),
-                    audience: None,
-                },
-            ),
-            restrictable_tool("taint"),
-        ]),
-        authorities: vec![],
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("redactor"),
             on: crate::authority::SanitizerPoints {
@@ -232,10 +210,19 @@ fn file_redacting_engine() -> Engine {
             scope: crate::authority::Scope::default(),
             hint: None,
         }],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![
+            read_tool(
+                "fetch",
+                Delta {
+                    trust: Some(SUSPICIOUS),
+                    audience: None,
+                },
+            ),
+            restrictable_tool("taint"),
+        ])
     };
     let mut profile = crate::profile::ProfileDeclaration {
-        starting_label: known(TRUSTED, Audience::public()),
+        starting_label: Label::new(TRUSTED, Audience::public()),
         ..crate::profile::covering_declaration(&cfg)
     };
     profile
@@ -255,7 +242,7 @@ fn insider_file() -> crate::value::FileSource {
     crate::value::FileSource {
         version: "v1".into(),
         digest: "content".into(),
-        label: known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     }
 }
 
@@ -357,7 +344,7 @@ fn derived_result_label(facts: &[Fact]) -> Label {
 #[test]
 fn a_sanitized_file_read_keeps_the_files_audience() {
     let e = file_redacting_engine();
-    let insider = known(TRUSTED, Audience::restricted([ReaderId::new("insider")]));
+    let insider = Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")]));
     let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
     assert!(log.iter().any(|fact| matches!(
         fact,
@@ -415,7 +402,7 @@ fn a_sanitized_file_edit_derives_from_the_bound_its_dispatch_received() {
     let facts = appended_facts(derived);
     assert_eq!(
         derived_result_label(&facts),
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")]))
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")]))
     );
     assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
 }
@@ -425,7 +412,7 @@ fn a_sanitized_file_edit_derives_from_the_bound_its_dispatch_received() {
 #[test]
 fn a_file_derivation_recorded_without_the_files_label_is_refused() {
     let e = file_redacting_engine();
-    let declared_only = known(TRUSTED, Audience::public());
+    let declared_only = Label::new(TRUSTED, Audience::public());
     let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
     let mut forged = log.clone();
     for fact in forged.iter_mut() {
@@ -475,8 +462,8 @@ fn a_narrowing_derivation_stages_its_candidate_instead_of_admitting_it() {
     assert_eq!(
         confined.residual,
         crate::check::Narrowing {
-            from: established(Trust::new(2), Audience::public()),
-            to: established(Trust::new(1), Audience::public()),
+            from: Label::new(Trust::new(2), Audience::public()),
+            to: Label::new(Trust::new(1), Audience::public()),
         }
     );
     let facts = appended_facts(staged.clone());
@@ -729,7 +716,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         .expect("the hop's batch replays");
     assert_eq!(
         after.projection().view(&traj()).current_label(),
-        established(Trust::new(2), Audience::public()),
+        Label::new(Trust::new(2), Audience::public()),
         "a candidate that narrows nothing costs the trajectory nothing"
     );
     assert!(
@@ -760,7 +747,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         .expect("the acceptance's batch replays");
     assert_eq!(
         after.projection().view(&traj()).current_label(),
-        established(Trust::new(1), Audience::public())
+        Label::new(Trust::new(1), Audience::public())
     );
     assert!(
         after
@@ -871,7 +858,7 @@ fn stray_evidence(offer: crate::value::OfferId) -> crate::execute::AuthorityEvid
         covers: Vec::new(),
         reviewed: crate::execute::AuthorityReview {
             tool: ToolName::new("anything"),
-            trajectory_label: established(Trust::new(0), Audience::public()),
+            trajectory_label: Label::new(Trust::new(0), Audience::public()),
         },
     }
 }

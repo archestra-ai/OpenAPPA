@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
+    let e = engine_at(vec![], Label::new(SUSPICIOUS, internal.clone()));
     let child = TrajectoryId::new("child");
     let mut log = vec![opened(&e)];
     log.extend(forked_child(&e, &log.clone(), &child));
@@ -71,7 +71,7 @@ fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
 fn a_fan_out_child_starts_at_the_parents_label_including_earlier_siblings_returns() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
     let e = engine(vec![plain_tool("spawn"), internal_read()]);
-    let (mut log, fan_out) = fan_out_family(&e, known(TRUSTED, internal.clone()));
+    let (mut log, fan_out) = fan_out_family(&e, Label::new(TRUSTED, internal.clone()));
     let (first, second) = (TrajectoryId::new("first"), TrajectoryId::new("second"));
 
     member_started(&e, &mut log, &fan_out, &first);
@@ -81,7 +81,7 @@ fn a_fan_out_child_starts_at_the_parents_label_including_earlier_siblings_return
             .expect("the member's child is opened")
             .current_label()
     };
-    assert_eq!(seed(&log, &first), partial(TRUSTED, Audience::public()));
+    assert_eq!(seed(&log, &first), Label::new(TRUSTED, Audience::public()));
 
     reads(&e, &mut log, &first, "read_internal");
     let crossing = crossed_report(&e, &log, &first, "what the first child read");
@@ -117,7 +117,7 @@ fn a_fan_out_child_starts_at_the_parents_label_including_earlier_siblings_return
 #[test]
 fn one_fan_out_declaration_backs_a_member_fork_per_child() {
     let e = engine(vec![plain_tool("spawn")]);
-    let (mut log, fan_out) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+    let (mut log, fan_out) = fan_out_family(&e, Label::new(TRUSTED, Audience::public()));
     let children = ["a", "b", "c"].map(TrajectoryId::new);
     for child in &children {
         member_started(&e, &mut log, &fan_out, child);
@@ -192,7 +192,7 @@ fn a_spawn_fork_prepared_as_another_kind_than_its_release_named_is_refused() {
     assert_eq!(e.validate_replay(&single), Ok(()));
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::UnbackedDecision));
 
-    let (fan_out, _) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+    let (fan_out, _) = fan_out_family(&e, Label::new(TRUSTED, Audience::public()));
     let (fan_out, forged) = flipped(&fan_out, crate::transition::SpawnKind::Single);
     assert_eq!(e.validate_replay(&fan_out), Ok(()));
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::UnbackedDecision));
@@ -201,7 +201,7 @@ fn a_spawn_fork_prepared_as_another_kind_than_its_release_named_is_refused() {
 #[test]
 fn a_member_fork_replays_only_under_its_fan_out_spawn_and_for_its_own_child() {
     let e = engine(vec![plain_tool("spawn")]);
-    let (mut log, fan_out) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+    let (mut log, fan_out) = fan_out_family(&e, Label::new(TRUSTED, Audience::public()));
     let child = TrajectoryId::new("child");
     let before = log.len();
     member_started(&e, &mut log, &fan_out, &child);
@@ -255,7 +255,7 @@ fn a_member_fork_replays_only_under_its_fan_out_spawn_and_for_its_own_child() {
 #[test]
 fn a_single_spawn_releases_while_a_fan_out_fork_is_open() {
     let e = engine(vec![plain_tool("spawn")]);
-    let (log, _) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+    let (log, _) = fan_out_family(&e, Label::new(TRUSTED, Audience::public()));
     let view = viewing(&e, &log);
     assert!(e.forks_in_flight(&view).is_empty());
     let single = [log.clone(), declared_spawn(&e, &log, "single")].concat();
@@ -326,7 +326,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
         .view(&traj(), [log.clone(), opened].concat(), log.len() as u64 + 1)
         .unwrap();
     let child_views = after.views(&child).expect("the bound child is opened");
-    assert_eq!(child_views.current_label(), partial(TRUSTED, Audience::public()));
+    assert_eq!(child_views.current_label(), Label::new(TRUSTED, Audience::public()));
     assert_eq!(child_views.parent_of(&child), Some(&traj()));
 
     let resumed = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
@@ -475,7 +475,7 @@ fn a_fork_preparation_replays_only_as_its_marked_release() {
     let mut displaced = batch.clone();
     displaced.insert(
         prepared_at,
-        stray_admission(&traj(), known(SUSPICIOUS, Audience::public())),
+        stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
     );
     let displaced = e.validate_replay(&[records, displaced].concat());
     assert!(
@@ -486,14 +486,7 @@ fn a_fork_preparation_replays_only_as_its_marked_release() {
 
 #[test]
 fn a_spawn_mark_takes_declared_context_control() {
-    let config = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![plain_tool("spawn")]),
-        authorities: vec![],
-        sanitizers: vec![],
-        audience: crate::audience::AudienceConfig::default(),
-    };
+    let config = test_config(vec![plain_tool("spawn")]);
     let mut declaration = crate::profile::covering_declaration(&config);
     declaration.context_control = false;
     let e = Engine::open(DeploymentPolicy {

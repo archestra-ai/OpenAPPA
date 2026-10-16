@@ -80,7 +80,7 @@ fn only_a_blocked_standing_call_has_routes() {
 
     assert_eq!(at(&subject("never")), Err(RouteError::UnknownSubject));
     assert_eq!(
-        engine(vec![neutral_tool()]).recovery_routes(
+        engine(vec![plain_tool("read_note")]).recovery_routes(
             &view,
             &subject("never"),
             &crate::audience::AudienceEvidence::default(),
@@ -99,7 +99,7 @@ fn only_a_blocked_standing_call_has_routes() {
 
     let e = engine_at(
         vec![crm_tool()],
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     );
     let log = vec![opened(&e)];
     let released =
@@ -135,7 +135,7 @@ fn a_route_reads_the_ordered_contract_the_standing_call_selected() {
     };
     let e = engine_at(
         vec![plain_tool("read(path:public/*)"), private],
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     );
     let log = vec![opened(&e)];
     let proposal = e

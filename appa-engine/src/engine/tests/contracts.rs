@@ -26,13 +26,7 @@ fn an_exact_declaration_beats_the_wildcard_on_a_proposal() {
 #[test]
 fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
     let send = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("send_email"),
-        tags: vec![],
-        delta: Delta::NONE,
         parameters: crate::params::test_string_argument_schema("to"),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
             label: LabelRequirements {
                 trust_floor: None,
@@ -40,6 +34,7 @@ fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_undern
             },
             ..Requires::default()
         },
+        ..plain_tool("send_email")
     };
     let e = engine(vec![send]);
     let malformed = call("send_email", json!({}));
@@ -80,20 +75,11 @@ fn required_rulings_route_each_gap_to_its_authority() {
     use crate::names::AuthorityName;
 
     let wire = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("wire"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
-            label: LabelRequirements {
-                trust_floor: Some(TRUSTED),
-                audience: vec![],
-            },
+            label: floor(TRUSTED),
             ..Requires::default()
         },
+        ..plain_tool("wire")
     };
     let officer = Authority {
         name: AuthorityName::new("officer"),
@@ -105,14 +91,10 @@ fn required_rulings_route_each_gap_to_its_authority() {
         hint: None,
     };
     let cfg = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![wire]),
         authorities: vec![officer],
-        sanitizers: vec![],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![wire])
     };
-    let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::public()));
+    let e = open_engine_at(cfg, Label::new(SUSPICIOUS, Audience::public()));
     let log = vec![opened(&e)];
     let p = Projection::build(&log, log.len() as u64);
     let t = traj();
@@ -372,24 +354,22 @@ fn ordered_read_engine_tagged(desks: &[&str], private_tag: &str) -> Engine {
     };
     open_engine_at(
         RegistryConfig {
-            annotators: vec![annotator_with_readers(
-                "classify",
-                &["insider", "partner", "auditor", "legal", "press"],
-            )],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: {
                 let mut tools = vec![public];
                 tools.extend(declared(vec![private, plain_tool("note")]));
                 tools
             },
-            authorities: vec![],
+            annotators: vec![annotator_with_readers(
+                "classify",
+                &["insider", "partner", "auditor", "legal", "press"],
+            )],
             sanitizers: vec![
                 input_sanitizer("redact", &["insider"], &["insider", "partner"]),
                 input_sanitizer("widen", &["partner"], &["insider", "partner", "auditor"]),
             ],
-            audience: crate::audience::AudienceConfig::default(),
+            ..test_config(vec![])
         },
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     )
 }
 
@@ -399,10 +379,7 @@ fn classified_read() -> EffectSet {
 
 fn ordered_read(name: &str) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
         tags: vec![crate::names::TagName::new("outbound")],
-        delta: Delta::NONE,
         parameters: crate::params::ToolParameters::compile(&json!({
             "type": "object",
             "properties": { "path": { "type": "string" } },
@@ -410,15 +387,11 @@ fn ordered_read(name: &str) -> ToolAnnotation {
             "additionalProperties": false,
         }))
         .unwrap(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
-            label: LabelRequirements {
-                trust_floor: Some(TRUSTED),
-                audience: vec![],
-            },
+            label: floor(TRUSTED),
             ..Requires::default()
         },
+        ..plain_tool(name)
     }
 }
 
@@ -788,9 +761,13 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
     };
     let e = open_engine_at(
         RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(vec![
+            sanitizers: vec![input_sanitizer(
+                "redact",
+                &["insider"],
+                &["insider", "partner", "partner@corp.com"],
+            )],
+            audience: slack_groups(&["team"]),
+            ..test_config(vec![
                 send(
                     "send(to:@*)",
                     AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
@@ -801,16 +778,9 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
                         Audience::restricted([ReaderId::new("partner")]),
                     ))),
                 ),
-            ]),
-            authorities: vec![],
-            sanitizers: vec![input_sanitizer(
-                "redact",
-                &["insider"],
-                &["insider", "partner", "partner@corp.com"],
-            )],
-            audience: slack_groups(&["team"]),
+            ])
         },
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     );
     let proposal = e
         .resolve_call(ToolName::new("send"), br#"{"to":"partner-desk"}"#)
@@ -902,8 +872,8 @@ fn replay_refuses_a_corrupt_dispatched_call() {
                 tool: ToolName::new(tool),
                 declaration: Default::default(),
                 arguments: crate::params::test_arguments(&payload),
-                proposed_label: established(TRUSTED, Audience::public()),
-                receiving: established(TRUSTED, Audience::public()),
+                proposed_label: Label::new(TRUSTED, Audience::public()),
+                receiving: Label::new(TRUSTED, Audience::public()),
                 proposed_effects: EffectSet::default(),
                 annotation: None,
                 file_basis: None,
@@ -960,14 +930,10 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
         hint: None,
     };
     let cfg = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![wire]),
         authorities: vec![officer],
-        sanitizers: vec![],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![wire])
     };
-    let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::public()));
+    let e = open_engine_at(cfg, Label::new(SUSPICIOUS, Audience::public()));
 
     let wire_call = call("wire", json!({ "to": "distinctive-recipient-hr" }));
     let log = vec![opened(&e)];
@@ -978,7 +944,7 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
         .expect("the block offers an authority plan");
     let log = [log, blocked].concat();
 
-    let evidence = evidence_for(offer, &plan, "wire", partial(SUSPICIOUS, Audience::public()));
+    let evidence = evidence_for(offer, &plan, "wire", Label::new(SUSPICIOUS, Audience::public()));
     let approved =
         appended_facts(execute_offer(&e, &log, offer, OfferOutcome::Approved(evidence)).expect("the offer executes"));
     let log = [log, approved].concat();
@@ -1008,12 +974,12 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
 #[test]
 fn an_opening_records_the_label_the_call_was_proposed_at() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
-    let e = engine_at(vec![crm_tool()], known(TRUSTED, internal.clone()));
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal.clone()));
     let mut log = vec![opened(&e)];
     open(&e, &mut log, &call("get_ticket", json!({})));
     match log.last().expect("the release opens a dispatch") {
         Fact::DispatchOpened { proposed_label, .. } => {
-            assert_eq!(*proposed_label, established(TRUSTED, internal));
+            assert_eq!(*proposed_label, Label::new(TRUSTED, internal));
         }
         other => panic!("expected DispatchOpened, got {other:?}"),
     }

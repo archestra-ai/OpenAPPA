@@ -113,14 +113,8 @@ pub(super) fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
 
 pub(super) fn read_tool(name: &str, delta: Delta) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
         delta,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
-        requires: Requires::default(),
+        ..plain_tool(name)
     }
 }
 
@@ -435,18 +429,6 @@ pub(super) fn open_engine_at(mut cfg: RegistryConfig, starting: Label) -> Engine
     .unwrap()
 }
 
-pub(super) fn known(trust: Trust, audience: Audience) -> Label {
-    Label::new(trust, audience)
-}
-
-pub(super) fn established(trust: Trust, audience: Audience) -> Label {
-    Label::new(trust, audience)
-}
-
-pub(super) fn partial(trust: Trust, audience: Audience) -> Label {
-    Label::new(trust, audience)
-}
-
 pub(super) fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
     ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&args))
 }
@@ -467,25 +449,17 @@ pub(super) fn check_call(engine: &Engine, log: &[Fact], call: &ResolvedCall) -> 
 
 pub(super) fn crm_tool() -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("get_ticket"),
-        tags: vec![],
         delta: Delta {
             trust: None,
             audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
                 "insider",
             )]))),
         },
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
-            label: LabelRequirements {
-                trust_floor: Some(TRUSTED),
-                audience: vec![],
-            },
+            label: floor(TRUSTED),
             ..Requires::default()
         },
+        ..plain_tool("get_ticket")
     }
 }
 
@@ -539,8 +513,6 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
     let post = post_tool;
     open_engine_at(
         RegistryConfig {
-            annotators: vec![annotator("acl")],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: {
                 let mut tools = declared(vec![
                     post("post", vec![crate::names::TagName::new("outbound")]),
@@ -553,6 +525,7 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
                 ));
                 tools
             },
+            annotators: vec![annotator("acl")],
             authorities: vec![crate::authority::Authority {
                 name: AuthorityName::new("officer"),
                 mandate: crate::authority::Mandate {
@@ -578,9 +551,9 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
                 },
                 hint: None,
             }],
-            audience: crate::audience::AudienceConfig::default(),
+            ..test_config(vec![])
         },
-        known(trust, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(trust, Audience::restricted([ReaderId::new("insider")])),
     )
 }
 
@@ -590,17 +563,13 @@ pub(super) fn internal_log(e: &Engine) -> Vec<Fact> {
 
 pub(super) fn post_tool(name: &str, tags: Vec<crate::names::TagName>) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
         tags,
-        delta: Delta::NONE,
         parameters: crate::params::ToolParameters::compile(&json!({
             "type": "object",
             "properties": { "body": { "type": "string" } },
             "required": ["body"],
         }))
         .unwrap(),
-        forwards: Delta::NONE,
         emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
         requires: Requires {
             label: LabelRequirements {
@@ -611,6 +580,7 @@ pub(super) fn post_tool(name: &str, tags: Vec<crate::names::TagName>) -> ToolAnn
             },
             ..Requires::default()
         },
+        ..plain_tool(name)
     }
 }
 
@@ -624,19 +594,6 @@ pub(super) fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutco
 }
 
 pub(super) const REDACTED: &str = r#"{"body":"[redacted]"}"#;
-
-pub(super) fn neutral_tool() -> ToolAnnotation {
-    ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("read_note"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
-        requires: Requires::default(),
-    }
-}
 
 pub(super) fn quiet_subject() -> crate::basis::SubjectKey {
     crate::basis::SubjectKey::Call {
@@ -765,29 +722,16 @@ pub(super) fn two_officer_engine() -> Engine {
         hint: None,
     };
     let cfg = RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
+        authorities: vec![officer("officer-a"), officer("officer-b")],
+        ..test_config(vec![ToolAnnotation {
             requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+                label: floor(TRUSTED),
                 ..Requires::default()
             },
-        }]),
-        authorities: vec![officer("officer-a"), officer("officer-b")],
-        sanitizers: vec![],
-        audience: crate::audience::AudienceConfig::default(),
+            ..plain_tool("wire")
+        }])
     };
-    open_engine_at(cfg, known(SUSPICIOUS, Audience::public()))
+    open_engine_at(cfg, Label::new(SUSPICIOUS, Audience::public()))
 }
 
 pub(super) fn opened_offers(facts: &[Fact]) -> Vec<(crate::value::OfferId, plan::ExecutableRemedyPlan)> {
@@ -869,38 +813,19 @@ pub(super) fn restrictable_tool(name: &str) -> ToolAnnotation {
                 "reviewer",
             )]))),
         },
-        ..open_tool(name)
-    }
-}
-
-pub(super) fn open_tool(name: &str) -> ToolAnnotation {
-    ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
-        delta: crate::contract::Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
-        requires: Requires::default(),
+        ..plain_tool(name)
     }
 }
 
 pub(super) fn strict_tool(name: &str) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
         parameters: crate::params::ToolParameters::compile(&json!({
             "type": "object",
             "properties": { "to": { "type": "string" } },
             "required": ["to"],
         }))
         .unwrap(),
-        delta: Delta::NONE,
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
-        requires: Requires::default(),
+        ..plain_tool(name)
     }
 }
 
@@ -986,17 +911,7 @@ pub(super) fn plain_tool(name: &str) -> ToolAnnotation {
 }
 
 pub(super) fn engine_with_provider_run(tools: Vec<ToolAnnotation>, provider_run: &[&str]) -> Engine {
-    provider_run_engine(
-        RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(tools),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-        },
-        provider_run,
-    )
+    provider_run_engine(test_config(tools), provider_run)
 }
 
 pub(super) fn provider_run_engine(cfg: RegistryConfig, provider_run: &[&str]) -> Engine {
@@ -1155,18 +1070,14 @@ pub(super) fn corp_reader(local: &str) -> ReaderId {
 
 pub(super) fn returning_registry(sanitizers: Vec<crate::authority::Sanitizer>) -> RegistryConfig {
     RegistryConfig {
-        annotators: vec![],
-        trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-        tools: declared(vec![
+        sanitizers,
+        ..test_config(vec![
             plain_tool("spawn"),
-            open_tool("fetch"),
+            plain_tool("fetch"),
             suspicious_read(),
             internal_read(),
             suspicious_internal_read(),
-        ]),
-        authorities: vec![],
-        sanitizers,
-        audience: crate::audience::AudienceConfig::default(),
+        ])
     }
 }
 
@@ -1291,30 +1202,22 @@ pub(super) fn staged_engine() -> Engine {
         hint: None,
     };
     open_engine(RegistryConfig {
-        annotators: vec![],
         trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
-        tools: declared(vec![
-            ToolAnnotation {
-                description: Some("A test tool.".to_string()),
-                name: ToolName::new("fetch"),
-                tags: vec![],
-                delta: Delta {
-                    trust: Some(Trust::new(0)),
-                    audience: None,
-                },
-                parameters: crate::params::ToolParameters::open(),
-                forwards: Delta::NONE,
-                emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
-                requires: Requires::default(),
-            },
-            restrictable_tool("ping"),
-        ]),
-        authorities: vec![],
         sanitizers: vec![
             sanitizer("redactor", Trust::new(0), Trust::new(1)),
             sanitizer("scrubber", Trust::new(1), Trust::new(2)),
         ],
-        audience: crate::audience::AudienceConfig::default(),
+        ..test_config(vec![
+            ToolAnnotation {
+                delta: Delta {
+                    trust: Some(Trust::new(0)),
+                    audience: None,
+                },
+                emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
+                ..plain_tool("fetch")
+            },
+            restrictable_tool("ping"),
+        ])
     })
 }
 

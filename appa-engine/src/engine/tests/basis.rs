@@ -2,16 +2,14 @@ use super::*;
 
 fn emitting_tool() -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("send_note"),
         emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
-        ..neutral_tool()
+        ..plain_tool("send_note")
     }
 }
 
 #[test]
 fn a_neutral_release_advances_no_basis_component() {
-    let e = engine(vec![neutral_tool()]);
+    let e = engine(vec![plain_tool("read_note")]);
     let log = vec![opened(&e)];
     let before = basis_of(&e, &log);
     let facts = appended_facts(decide(&e, &log, "b1", &call("read_note", json!({}))));
@@ -31,7 +29,7 @@ fn a_release_advances_the_family_and_leaves_the_flow_to_its_admission() {
 
     let restricting = engine_at(
         vec![crm_tool()],
-        known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     );
     let internal = vec![opened(&restricting)];
     let before = basis_of(&restricting, &internal);

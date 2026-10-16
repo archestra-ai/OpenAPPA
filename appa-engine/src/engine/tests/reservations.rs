@@ -2,30 +2,18 @@ use super::*;
 
 fn emitting(name: &str, kind: &str) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
         emits: EffectSet::new([EffectKind::new(kind)]).unwrap(),
-        requires: Requires::default(),
+        ..plain_tool(name)
     }
 }
 
 fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolAnnotation {
     ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new(name),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
-        emits: EffectSet::default(),
         requires: Requires {
             history: vec![requirement],
             ..Requires::default()
         },
+        ..plain_tool(name)
     }
 }
 
@@ -141,17 +129,12 @@ fn two_reservations_of_one_kind_settle_independently() {
 #[test]
 fn a_calls_own_emits_never_fail_its_own_check() {
     let selfguard = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("selfguard"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
         emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
         requires: Requires {
             history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
             ..Requires::default()
         },
+        ..plain_tool("selfguard")
     };
     let e = engine(vec![selfguard]);
     let mut log = vec![opened(&e)];
@@ -169,14 +152,8 @@ fn a_calls_own_emits_never_fail_its_own_check() {
 #[test]
 fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
     let scan = ToolAnnotation {
-        description: Some("A test tool.".to_string()),
-        name: ToolName::new("scan"),
-        tags: vec![],
-        delta: Delta::NONE,
-        parameters: crate::params::ToolParameters::open(),
-        forwards: Delta::NONE,
         emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
-        requires: Requires::default(),
+        ..plain_tool("scan")
     };
     let tools = vec![
         scan,

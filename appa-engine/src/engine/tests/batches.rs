@@ -68,8 +68,8 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 tool: proposal.tool().clone(),
                 declaration: proposal.declaration_id(),
                 arguments: proposal.canonical_arguments().clone(),
-                proposed_label: established(TRUSTED, Audience::public()),
-                receiving: established(TRUSTED, Audience::public()),
+                proposed_label: Label::new(TRUSTED, Audience::public()),
+                receiving: Label::new(TRUSTED, Audience::public()),
                 proposed_effects: EffectSet::default(),
                 annotation: None,
                 file_basis: None,
@@ -158,7 +158,10 @@ fn provider_run_tools_leave_every_plan_family() {
     };
     let mut emitter = plain_tool("emit");
     emitter.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-    let log = vec![crate::profile::opening_at(traj(), known(TRUSTED, Audience::public()))];
+    let log = vec![crate::profile::opening_at(
+        traj(),
+        Label::new(TRUSTED, Audience::public()),
+    )];
     let offered_tools = |e: &Engine| -> Vec<String> {
         let p = Projection::build(&log, 1);
         let t = traj();
@@ -572,16 +575,13 @@ fn a_siblings_release_is_state_for_the_siblings_after_it() {
 fn a_refused_sibling_is_planned_against_the_batchs_final_state() {
     let mut strict = plain_tool("strict");
     strict.requires = Requires {
-        label: LabelRequirements {
-            trust_floor: Some(TRUSTED),
-            audience: vec![],
-        },
+        label: floor(TRUSTED),
         history: vec![HistoryRequirement::NoPrior(EffectKind::new("k"))],
         ..Requires::default()
     };
     let mut emit = plain_tool("emit");
     emit.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-    let e = engine_at(vec![strict, emit], known(SUSPICIOUS, Audience::public()));
+    let e = engine_at(vec![strict, emit], Label::new(SUSPICIOUS, Audience::public()));
 
     let log = vec![opened(&e)];
     let decision = e
@@ -706,7 +706,7 @@ fn a_marked_spawn_prepares_its_fork_from_its_own_position() {
 
 #[test]
 fn an_approval_is_spent_only_by_a_singleton_batch() {
-    let e = engine(vec![crm_tool(), neutral_tool()]);
+    let e = engine(vec![crm_tool(), plain_tool("read_note")]);
     let log = opening_log(&e);
     let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
     let offer = opened_offers(&opened)[0].0;
@@ -847,7 +847,7 @@ fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_annotation_opened() {
     cfg.tools.push(annotated(notify.clone(), "acl"));
     cfg.annotators
         .push(annotator_with_readers("acl", &["insider", "outsider"]));
-    let e = open_engine_at(cfg, known(TRUSTED, internal.clone()));
+    let e = open_engine_at(cfg, Label::new(TRUSTED, internal.clone()));
     let log = vec![opened(&e)];
     let arguments = json!({ "room": "lobby" });
     let pinned = |audience: &Audience| {
@@ -909,7 +909,10 @@ fn a_produced_forwards_outside_the_mandate_is_refused_live_and_on_replay() {
     let mut cfg = test_config(vec![]);
     cfg.tools.push(annotated(notify.clone(), "acl"));
     cfg.annotators.push(annotator_with_readers("acl", &["insider"]));
-    let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([ReaderId::new("insider")])));
+    let e = open_engine_at(
+        cfg,
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    );
     let log = vec![opened(&e)];
     let unpinned = call("notify", json!({ "room": "lobby" }));
     let forwarding = |reader: &str| {

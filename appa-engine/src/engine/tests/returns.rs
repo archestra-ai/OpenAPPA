@@ -50,7 +50,7 @@ fn a_marked_spawn_blocks_with_one_return_declaration_per_untagged_output_sanitiz
     scoped.scope = crate::authority::Scope {
         tags: vec![crate::names::TagName::new("outbound")],
     };
-    let mut tagged = open_tool("post");
+    let mut tagged = plain_tool("post");
     tagged.tags = vec![crate::names::TagName::new("outbound")];
     let mut cfg = returning_registry(vec![lifting_sanitizer("redactor"), scoped]);
     cfg.tools.push(crate::contract::ToolDeclaration::Declared(tagged));
@@ -94,7 +94,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
     let internal = Audience::restricted([ReaderId::new("insider")]);
     let e = open_engine_at(
         returning_registry(vec![lifting_sanitizer("redactor")]),
-        known(SUSPICIOUS, internal.clone()),
+        Label::new(SUSPICIOUS, internal.clone()),
     );
     let log = vec![opened(&e)];
     let blocked = e
@@ -125,7 +125,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
     };
     let bare = offer_for(crate::fact::ReturnRoute::Raw);
     let redacting = offer_for(crate::fact::ReturnRoute::Sanitized(SanitizerName::new("redactor")));
-    let floor = known(SUSPICIOUS, internal.clone());
+    let floor = Label::new(SUSPICIOUS, internal.clone());
 
     assert!(matches!(
         execute(bare, None),
@@ -160,7 +160,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
             execute(
                 bare,
                 Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
-                    floor: known(TRUSTED, internal.clone()),
+                    floor: Label::new(TRUSTED, internal.clone()),
                     sanitizer: None,
                 }))
             ),
@@ -175,7 +175,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
             execute(
                 bare,
                 Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
-                    floor: known(SUSPICIOUS, Audience::public()),
+                    floor: Label::new(SUSPICIOUS, Audience::public()),
                     sanitizer: None,
                 }))
             ),
@@ -188,7 +188,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
     let approved = execute(
         bare,
         Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
-            floor: known(SUSPICIOUS, internal),
+            floor: Label::new(SUSPICIOUS, internal),
             sanitizer: None,
         })),
     )
