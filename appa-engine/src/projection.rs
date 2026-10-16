@@ -133,8 +133,9 @@ pub struct Projection {
     revision: u64,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
-    /// The meet of every label in `local`, per trajectory: the fold is associative,
-    /// commutative and has `top` as identity, so this equals walking the list.
+    /// The meet of each trajectory's opened base and every label in `local`. The meet is
+    /// associative, commutative and idempotent, so this equals walking the list; seeding it
+    /// with the base keeps clauses the base subsumes from accumulating.
     local_label: OrdMap<TrajectoryId, Label>,
     effects: Vector<EffectKind>,
     open: OrdSet<DispatchId>,
@@ -354,6 +355,10 @@ impl Projection {
                     opening.is_none(),
                     "the validator admits one opening per family log, as its first record"
                 );
+                local_label
+                    .entry(trajectory.clone())
+                    .or_insert_with(Label::top)
+                    .fold(&starting);
                 *opening = Some((trajectory.clone(), starting));
                 *principal = opened_for.clone();
             }
@@ -590,6 +595,10 @@ impl Projection {
                 if let Some(preparation) = prepared.get(fork) {
                     bound.insert(fork.clone(), trajectory.clone());
                     fork_of.insert(trajectory.clone(), fork.clone());
+                    local_label
+                        .entry(trajectory.clone())
+                        .or_insert_with(Label::top)
+                        .fold(preparation.snapshot.base());
                     if !preparation.denials.is_empty() {
                         denials.insert(trajectory.clone(), preparation.denials.clone());
                     }
@@ -1814,8 +1823,8 @@ mod tests {
     }
 
     /// Audiences whose meets exercise every canonicalization rule: stable readers merging and
-    /// emptying to nobody, a chain clause a narrower clause drops, a group clause, and a clause
-    /// holding a provider-qualified reader that never merges.
+    /// emptying to nobody, a chain clause a narrower clause drops, a group clause the bare
+    /// `self` clause subsumes, and a clause holding a provider-qualified reader that never merges.
     fn palette(index: usize) -> Audience {
         use crate::label::{ChainAudience, Clause, GroupRef};
         let clause = |chain: Option<ChainAudience>, groups: &[&str], readers: &[&str]| {
@@ -1828,14 +1837,15 @@ mod tests {
             )
             .expect("palette readers are literal")
         };
-        match index % 7 {
+        match index % 8 {
             0 => Audience::public(),
             1 => Audience::restricted([ReaderId::new("emp"), ReaderId::new("boss")]),
             2 => Audience::restricted([ReaderId::new("emp")]),
             3 => Audience::restricted([ReaderId::new("other")]),
             4 => Audience::of_clauses([clause(Some(ChainAudience::Internal), &[], &["emp"])]),
             5 => Audience::of_clauses([clause(Some(ChainAudience::Self_), &["finance"], &[])]),
-            _ => Audience::of_clauses([clause(None, &[], &["slack:U1", "emp"])]),
+            6 => Audience::of_clauses([clause(None, &[], &["slack:U1", "emp"])]),
+            _ => Audience::of_clauses([clause(Some(ChainAudience::Self_), &[], &[])]),
         }
     }
 
@@ -1899,17 +1909,60 @@ mod tests {
         assert_cached_fold_matches_walk(&log);
     }
 
+    /// A trajectory opened at `self` that admits many incomparable broader audiences: the base
+    /// subsumes every one of them, so the cached fold stays the one `self` clause instead of
+    /// growing a clause per admission.
+    #[test]
+    fn a_narrow_base_keeps_the_cached_fold_from_accumulating_subsumed_clauses() {
+        use crate::label::{ChainAudience, Clause, GroupRef};
+        let own = Audience::of_clauses([Clause::new([ChainAudience::Self_], [], []).unwrap()]);
+        let broader = |group: usize| {
+            Audience::of_clauses([Clause::new(
+                [ChainAudience::Self_],
+                [GroupRef::Named(crate::names::GroupName::new(format!("group-{group}")))],
+                [],
+            )
+            .unwrap()])
+        };
+        let mut log = vec![crate::profile::opening_at(
+            traj("a"),
+            Label::new(Trust::new(3), own.clone()),
+        )];
+        log.extend(fork_pair(
+            "a",
+            "b",
+            ForkSnapshot::freeze(Label::new(Trust::new(3), own.clone()), []),
+        ));
+        for group in 0..64 {
+            log.push(admit("a", labeled(3, broader(group))));
+            log.push(admit("b", labeled(3, broader(group))));
+        }
+        assert_cached_fold_matches_walk(&log);
+        let projection = build(&log);
+        for trajectory in [traj("a"), traj("b")] {
+            let cached = &projection.local_label[&trajectory];
+            assert_eq!(cached, &Label::new(Trust::new(3), own.clone()));
+            assert_eq!(cached.audience.clauses().count(), 1);
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn the_cached_label_fold_equals_the_walk_on_generated_logs(
-            records in proptest::collection::vec((0u8..3, 0u8..4, 0usize..7), 0..40),
+            // A root's opening is a policy profile, which cannot name an undeclared group.
+            root_base in proptest::sample::select(vec![0usize, 1, 2, 3, 4, 6, 7]),
+            child_base in 0usize..8,
+            records in proptest::collection::vec((0u8..3, 0u8..4, 0usize..8), 0..40),
         ) {
             let inherited = labeled(3, palette(1));
-            let mut log = vec![opened("a")];
+            let mut log = vec![crate::profile::opening_at(traj("a"), Label::new(Trust::new(3), palette(root_base)))];
             log.extend(fork_pair(
                 "a",
                 "b",
-                ForkSnapshot::freeze(base(), [(ValueId::new(1), &inherited.label), (ValueId::new(4), &inherited.label)]),
+                ForkSnapshot::freeze(
+                    Label::new(Trust::new(3), palette(child_base)),
+                    [(ValueId::new(1), &inherited.label), (ValueId::new(4), &inherited.label)],
+                ),
             ));
             log.extend(records.into_iter().map(|(kind, trust, audience)| {
                 let label = Label::new(Trust::new(trust), palette(audience));
