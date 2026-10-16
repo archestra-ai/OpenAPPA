@@ -115,7 +115,7 @@ fn assert_file_tracking_left_the_database_alone(db: &Path) {
             |row| row.get(0),
         )
         .expect("the optional table count reads");
-    assert_eq!(version, 8, "ordinary runtimes retain the frozen core schema version");
+    assert_eq!(version, 9, "ordinary runtimes retain the frozen core schema version");
     assert_eq!(
         file_tables, 0,
         "ordinary runtimes do not install experimental file tables"
@@ -217,8 +217,10 @@ fn a_session_in_a_database_too_old_to_upgrade_stays_refused_after_archiving() {
     assert!(allowed(&allow), "{allow}");
 }
 
+/// A restart under an edited policy publishes it as the deployment's next revision, and every
+/// root follows it: an old root and a new one decide alike.
 #[test]
-fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
+fn a_changed_policy_moves_old_and_new_roots_to_the_next_revision() {
     let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
@@ -248,14 +250,24 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
     );
     let server = serve_runtime(&changed, &db);
 
-    let old_allows = post_hook(
+    // The edited policy no longer covers Bash: the hook refuses the call typed, a non-2xx
+    // answer, for the old root as for a new one.
+    assert!(
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"pwd"},"tool_use_id":"t2"}"#,
+        )
+        .is_none(),
+        "the old root follows the edited policy: nothing covers Bash",
+    );
+    let old_reads = post_hook(
         &server,
-        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"pwd"},"tool_use_id":"t2"}"#,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Read","tool_input":{"command":"x"},"tool_use_id":"t5"}"#,
     )
     .expect("the old root answers");
     assert!(
-        allowed(&old_allows),
-        "the old root keeps its opening policy: {old_allows}",
+        allowed(&old_reads),
+        "the edited policy's tool releases on the old root: {old_reads}",
     );
 
     post_hook(
@@ -340,14 +352,13 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
         "the answer names what is serving now: {installed}",
     );
 
-    let old_allows = post_hook(
-        &server,
-        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"id"},"tool_use_id":"t3"}"#,
-    )
-    .expect("the old root answers");
     assert!(
-        allowed(&old_allows),
-        "the old root keeps the policy it opened with: {old_allows}",
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"id"},"tool_use_id":"t3"}"#,
+        )
+        .is_none(),
+        "the old root follows the installed policy: nothing covers Bash",
     );
 
     post_hook(

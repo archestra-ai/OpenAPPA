@@ -139,6 +139,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&trajectory),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         });
         log.push(Fact::DispatchClosed {
             trajectory: trajectory.clone(),
@@ -321,6 +322,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         });
         log.push(Fact::DispatchClosed {
             trajectory: child(),
@@ -444,6 +446,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         });
         let projection = build(&log);
         let parent_id = parent();

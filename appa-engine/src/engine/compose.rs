@@ -78,6 +78,7 @@ pub(crate) fn opened_dispatch(
         file_basis: call.file_basis().cloned(),
         evidence: act.pinned().clone(),
         subject,
+        terms: Some(crate::fact::ReleaseTerms::of(contract)),
     };
     (dispatch, fact)
 }

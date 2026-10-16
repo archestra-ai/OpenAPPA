@@ -193,8 +193,13 @@ pub enum RouteError {
     MembershipNeeded(Vec<SymbolicAtom>),
     #[error(transparent)]
     Evidence(#[from] EvidenceRefusal),
-    #[error("the view was built under another policy")]
-    ForeignView,
+    #[error("the view stands at policy revision {view}, later than revision {engine} this engine decides at")]
+    NewerRevision {
+        view: crate::profile::PolicyRevision,
+        engine: crate::profile::PolicyRevision,
+    },
+    #[error("the view and the engine do not belong to one family kind")]
+    ForeignLine,
 }
 
 impl From<MembershipNeeded> for RouteError {
@@ -1096,6 +1101,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         }
     }
 

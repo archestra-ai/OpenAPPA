@@ -2,7 +2,7 @@
 //! backends store and read the same bytes.
 
 use appa_engine::fact::{Fact, TrajectoryOpening};
-use appa_engine::profile::PolicyFileKey;
+use appa_engine::profile::{DeploymentName, PolicyFileKey, PolicyRevision};
 use appa_engine::value::TrajectoryId;
 
 use crate::{HostObservation, HostRecord, Log, ReadError};
@@ -101,11 +101,34 @@ pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Po
     }
 }
 
+/// The policy revision that decided a batch, where its first record carries one: the opening's
+/// revision, or the stamp on the `BasisAdvanced` record every decided batch of a family that
+/// follows a deployment begins with. `None` for a host-only batch, a batch a snapshot engine
+/// decided, and every batch of a family pinned to a policy snapshot.
+pub(crate) fn stamp_of(facts: &[Fact]) -> Option<PolicyRevision> {
+    match facts.first()? {
+        Fact::TrajectoryOpened(TrajectoryOpening { revision, .. }) => *revision,
+        Fact::BasisAdvanced { revision, .. } => *revision,
+        _ => None,
+    }
+}
+
+/// The deployment a family follows, as its opening names it; `None` for a family pinned to a
+/// policy snapshot.
+pub(crate) fn deployment_of(opening: &[Fact]) -> Option<DeploymentName> {
+    match opening.first()? {
+        Fact::TrajectoryOpened(TrajectoryOpening { deployment, .. }) => deployment.clone(),
+        _ => None,
+    }
+}
+
 pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
     let mut log = Log {
         root: root.clone(),
+        deployment: None,
         facts: Vec::new(),
         batch_ends: Vec::new(),
+        stamps: Vec::new(),
         basis: 0,
         policy_file,
         host: Vec::new(),
@@ -119,6 +142,10 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
 pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
     for batch in batches {
         let record = decode(&batch)?;
+        if log.basis == 0 {
+            log.deployment = deployment_of(&record.facts);
+        }
+        log.stamps.push(stamp_of(&record.facts));
         log.facts.extend(record.facts);
         log.batch_ends.push(log.facts.len());
         if let Some(observation) = record.host {

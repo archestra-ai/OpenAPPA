@@ -505,18 +505,18 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
     source.members(Some(vec!["bob@corp.example"]));
     let prepared = runtime.prepare_deployment(revised()).expect("the revision loads again");
     prepared.probe_sources().await.expect("the source recovered");
-    let reloaded = runtime.install(prepared);
+    let reloaded = runtime.install(prepared).expect("the revision publishes");
     assert!(
         reloaded.changed,
         "the refused probe installed nothing, so this reload is the change"
     );
 }
 
-/// A trajectory opened under one routing keeps it after a reload retargets the provider:
-/// its lookups still reach the entry its stored policy file names, while a trajectory opened
-/// under the reloaded deployment reaches the new one.
+/// A trajectory opened under one routing follows its deployment when a reload retargets the
+/// provider: the revision that decides its next call is the one whose externals answer it, so
+/// its lookups reach the entry the reloaded policy names.
 #[tokio::test]
-async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
+async fn a_trajectory_takes_the_lookup_routing_its_deployment_now_serves() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, source) = serve_source().await;
     let policy = POLICY.replace(SLACK_BINDING, LOOKUP_URL_BINDINGS);
@@ -552,8 +552,8 @@ async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
         .collect();
     assert_eq!(lookups.len(), 1);
     assert_eq!(
-        lookups[0]["name"], "people",
-        "the retired trajectory's lookup goes where its own policy file sends it"
+        lookups[0]["name"], "directory",
+        "the trajectory's lookup goes where the head's policy sends it"
     );
 }
 

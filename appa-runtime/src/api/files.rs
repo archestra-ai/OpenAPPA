@@ -92,6 +92,10 @@ mod process;
 
 pub(super) struct FileTracking {
     pub(super) initial: appa_engine::label::Label,
+    /// The deployment whose following families share the tracked workspaces.
+    pub deployment: String,
+    /// The key of the policy file the runtime opened with. A new workspace stream opens under
+    /// it, and a pinned family's ledger must still name it.
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
     pub process_backend: Option<PathBuf>,
@@ -136,7 +140,6 @@ impl FileTracking {
         Ok(std::sync::Arc::new(FileStore::for_root(
             std::sync::Arc::clone(authority),
             root,
-            &self.policy_key,
             &self.initial,
         )?))
     }
@@ -1427,6 +1430,107 @@ else:
             version.content_dependencies
         );
         assert!(!version.content_dependencies.is_empty());
+    }
+
+    /// Publish an edit of the fixture policy: `from` replaced by `to`.
+    fn publish_an_edit(runtime: &Runtime, dir: &Path, from: &str, to: &str) {
+        let config = dir.join("policy.toml");
+        let edited = std::fs::read_to_string(&config).unwrap().replacen(from, to, 1);
+        std::fs::write(&config, edited).unwrap();
+        assert!(runtime.reload(Config::load(&config).unwrap()).unwrap().changed);
+    }
+
+    /// Publish an edit of the fixture policy that adds one unrelated tool.
+    fn publish_a_tool(runtime: &Runtime, dir: &Path) {
+        publish_an_edit(
+            runtime,
+            dir,
+            "[policy.deployment]",
+            "[[policy.tool]]\nname = \"mcp/github/list_issues\"\ndelta = {}\n[policy.deployment]",
+        );
+    }
+
+    fn refused_ledger(refused: &Result<ToolCallDecision, crate::api::EventError>) -> bool {
+        matches!(refused, Err(crate::api::EventError::RemedyArguments { detail }) if detail.contains("workspace ledger"))
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_serves_every_family_of_its_deployment_across_a_publish() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let before = TrajectoryId("opened-before-the-publish".into());
+        bind(&runtime, &before, dir.path());
+        runtime.create_session(before.clone(), None).unwrap();
+        allow(&runtime, &before, call("Read", "source.txt")).await;
+        success(&runtime, &before, call("Read", "source.txt")).await;
+
+        publish_a_tool(&runtime, dir.path());
+        let after = TrajectoryId("opened-after-the-publish".into());
+        bind(&runtime, &after, dir.path());
+        runtime.create_session(after.clone(), None).unwrap();
+        for id in [&before, &after] {
+            allow(&runtime, id, call("Read", "source.txt")).await;
+            success(&runtime, id, call("Read", "source.txt")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pinned_family_shares_the_workspace_ledger_only_while_the_runtime_serves_its_file() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let pinned = TrajectoryId("opened-by-the-previous-version".into());
+        bind(&runtime, &pinned, dir.path());
+        runtime.create_pinned_session(pinned.clone()).unwrap();
+        let following = TrajectoryId("following".into());
+        bind(&runtime, &following, dir.path());
+        runtime.create_session(following.clone(), None).unwrap();
+        for id in [&pinned, &following] {
+            allow(&runtime, id, call("Read", "source.txt")).await;
+            success(&runtime, id, call("Read", "source.txt")).await;
+        }
+        let files = runtime.inner.shared.files.as_ref().unwrap();
+        assert_eq!(
+            files.store(&runtime.inner.store, &pinned).unwrap().policy().unwrap(),
+            files.policy_key,
+            "the ledger opens under the serving policy file, as the previous version opens it"
+        );
+
+        publish_a_tool(&runtime, dir.path());
+        let refused = runtime
+            .session(&pinned, &pinned)
+            .unwrap()
+            .on_tool_call(call("Read", "source.txt"), false)
+            .await;
+        assert!(refused_ledger(&refused), "{refused:?}");
+        allow(&runtime, &following, call("Read", "source.txt")).await;
+        success(&runtime, &following, call("Read", "source.txt")).await;
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_refuses_a_family_judged_under_another_trust_chain() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("following".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        success(&runtime, &id, call("Read", "source.txt")).await;
+
+        publish_an_edit(
+            &runtime,
+            dir.path(),
+            "version = 2",
+            "version = 2\ntrust_chain = [\"suspicious\", \"vendor\", \"trusted\"]",
+        );
+        let refused = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_call(call("Read", "source.txt"), false)
+            .await;
+        assert!(
+            refused_ledger(&refused),
+            "the ledger's labels rank against the chain it opened under: {refused:?}"
+        );
     }
 
     #[tokio::test]
