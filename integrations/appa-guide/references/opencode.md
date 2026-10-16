@@ -91,10 +91,10 @@ failure leaves the root unchanged. Correct errors; obtain approval again if
 the correction changes the proposed behavior.
 
 Publication saves configuration; it does not reload the protected runtime.
-Tell the operator to close setup, run `appa plugin install opencode` with this
-deployment's `--config` path to reload the protected runtime, and start a fresh
-OpenCode session. Existing sessions retain their opening policy. Do not claim
-the new policy is serving until that reload has happened.
+Tell the operator to close setup and run `appa plugin install opencode` with
+this deployment's `--config` path to reload the protected runtime. Every
+OpenCode session, open or new, then decides its next tool call under the new
+policy. Do not claim the new policy is serving until that reload has happened.
 
 For `adjust`, inspect only the policy and batteries relevant to the request,
 then use the same proposal and publication sequence. For `explain`, inspect
