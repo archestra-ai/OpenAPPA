@@ -248,6 +248,7 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         },
     ];
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::MisdecidedBatch));

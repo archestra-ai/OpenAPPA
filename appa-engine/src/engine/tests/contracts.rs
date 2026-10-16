@@ -879,6 +879,7 @@ fn replay_refuses_a_corrupt_dispatched_call() {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
         ]
     };

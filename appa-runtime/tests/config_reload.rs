@@ -139,8 +139,10 @@ fn refused_undeclared(decision: &HookDecision) -> bool {
     matches!(decision, HookDecision::Refuse { detail } if detail.contains("notes"))
 }
 
+/// A reload publishes the deployment's next revision, and every root decides at it: a root
+/// already running follows the new file exactly as a root opened after the swap does.
 #[tokio::test]
-async fn a_running_root_keeps_its_opening_policy_and_a_new_root_binds_the_new_file() {
+async fn a_running_root_and_a_new_root_both_decide_at_the_reloaded_revision() {
     let deployment = Deployment::open(&with_notes()).expect("the fixture opens");
     let before = TrajectoryId("reload:before".to_string());
     start(&deployment.runtime, &before).await;
@@ -152,15 +154,21 @@ async fn a_running_root_keeps_its_opening_policy_and_a_new_root_binds_the_new_fi
     assert!(deployment.reload(&without_notes()).expect("the edit loads"));
 
     assert!(
-        allowed(&propose_notes(&deployment.runtime, &before).await),
-        "a root already running keeps the policy it opened with"
+        refused_undeclared(&propose_notes(&deployment.runtime, &before).await),
+        "a root already running follows the reloaded file"
     );
 
     let after = TrajectoryId("reload:after".to_string());
     start(&deployment.runtime, &after).await;
     assert!(
         refused_undeclared(&propose_notes(&deployment.runtime, &after).await),
-        "a root opened after the swap binds the new file"
+        "a root opened after the swap decides under the new file"
+    );
+
+    assert!(deployment.reload(&with_notes()).expect("the restoring edit loads"));
+    assert!(
+        allowed(&propose_notes(&deployment.runtime, &before).await),
+        "publishing the first file again restores it for every root"
     );
 }
 

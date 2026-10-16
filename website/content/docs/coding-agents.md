@@ -105,6 +105,8 @@ A path receives the configured initial Label only when a call first touches it a
 
 Workspace events and root bindings use the configured SQLite, memory, or PostgreSQL event-log backend. Durable backends preserve them across runtime restarts. A restart does not clear an active quarantine.
 
+A workspace's event stream records the policy it opened under, and its Labels rank against that policy's trust chain. Every root of the runtime's `deployment` can use the stream across policy revisions while each revision keeps the same trust chain. After a revision changes the chain, file tools refuse calls in that workspace. A root opened by a runtime version that did not follow a deployment can use the stream only while the runtime serves the exact policy file that the root and the stream opened under.
+
 The runtime requires exclusive ownership of a dedicated workspace. No other process may edit it. The workspace cannot contain symlinks or hard links. Keep policy, database, credentials, plugins, and sandbox backends outside it.
 
 ### Durability and repair

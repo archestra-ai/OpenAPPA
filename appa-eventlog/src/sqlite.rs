@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
-use appa_engine::profile::PolicyFileKey;
+use appa_engine::profile::{PolicyFileKey, PolicyRevision};
 use appa_engine::value::TrajectoryId;
 use appa_runtime_api::PeerDigest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -28,14 +28,16 @@ use crate::receipts::{
     StoredOperation, StoredOperationInput, StoredResult, resolve_operation_claim, resolve_operation_completion,
     resolve_result_claim, resolve_result_completion,
 };
-use crate::{AppendError, CreateError, Log, OpenError, ReadError};
+use crate::{
+    AppendError, Batch, CreateError, DeploymentName, Fence, Log, OpenError, PolicyHead, PublishError, ReadError,
+};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// The oldest version a database upgrades from. A fresh database installs [`BASE_SCHEMA`] at
 /// this version and then runs every step of [`UPGRADES`], so the fresh and the upgraded paths
 /// are one path.
-const BASE_VERSION: i64 = 5;
+pub(crate) const BASE_VERSION: i64 = 5;
 
 /// Step `n` moves a database from `BASE_VERSION + n` to the next version. A change that cannot
 /// carry the stored data forward raises `BASE_VERSION` instead of adding a step.
@@ -61,6 +63,18 @@ const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
      ALTER TABLE processed_results ADD COLUMN lease_owner TEXT;
      ALTER TABLE processed_results ADD COLUMN lease_expires_at INTEGER;
      ALTER TABLE processed_results ADD COLUMN completed_at INTEGER;",
+    // Deployments and the policy revisions each has published. Logs written before this step
+    // belong to families pinned to the policy file their opening names, and stay so.
+    "CREATE TABLE deployments (
+         name TEXT PRIMARY KEY,
+         head INTEGER NOT NULL
+     );
+     CREATE TABLE policy_revisions (
+         deployment TEXT NOT NULL,
+         revision   INTEGER NOT NULL,
+         key        TEXT NOT NULL,
+         PRIMARY KEY (deployment, revision)
+     );",
 ];
 
 const BASE_SCHEMA: &str = "CREATE TABLE logs (
@@ -250,7 +264,7 @@ impl Sqlite {
         for step in &UPGRADES[(version - BASE_VERSION) as usize..] {
             transaction.execute_batch(step)?;
         }
-        if version != SCHEMA_VERSION {
+        if stamped != SCHEMA_VERSION {
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         if !has_schema(&transaction)? {
@@ -269,14 +283,15 @@ impl Sqlite {
             .expect("the log store mutex is never poisoned: no panics under the lock")
     }
 
-    /// Store a root's opening batch and the policy file it opens under, in one transaction.
-    /// `before_commit` runs last inside it, and an error from it rolls the opening back.
+    /// Store a root's opening batch and the policy file it opens under, in one transaction, fenced
+    /// at its deployment's head where it follows one. `before_commit` runs last inside it, and an
+    /// error from it rolls the opening back.
     pub(crate) fn create(
         &self,
         root: &TrajectoryId,
         key: &PolicyFileKey,
         policy_file: &[u8],
-        bytes: &[u8],
+        batch: &Batch<'_>,
         before_commit: impl FnOnce() -> Result<(), CreateError>,
     ) -> Result<(), CreateError> {
         immediate(&mut self.connection(), |transaction| {
@@ -292,15 +307,15 @@ impl Sqlite {
                     root: root.as_str().to_string(),
                 });
             }
+            if let Some(head) = moved(transaction, batch.fence.as_ref())? {
+                return Err(CreateError::PolicyMoved { head });
+            }
             transaction.execute(
                 "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
                 params![key.as_str(), policy_file],
             )?;
-            match transaction.execute(
-                "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
-                params![root.as_str(), bytes],
-            ) {
-                Ok(_) => {}
+            match insert_batch(transaction, root, 0, batch) {
+                Ok(()) => {}
                 Err(error) if is_taken(&error) => {
                     return Err(CreateError::AlreadyExists {
                         root: root.as_str().to_string(),
@@ -310,6 +325,89 @@ impl Sqlite {
             }
             before_commit()
         })
+    }
+
+    pub(crate) fn head(&self, deployment: &DeploymentName) -> Result<Option<PolicyHead>, ReadError> {
+        let connection = self.connection();
+        let Some(revision) = head_of(&connection, deployment)? else {
+            return Ok(None);
+        };
+        let key: String = connection.query_row(
+            "SELECT key FROM policy_revisions WHERE deployment = ?1 AND revision = ?2",
+            params![deployment.as_str(), revision.value() as i64],
+            |row| row.get(0),
+        )?;
+        Ok(Some(PolicyHead {
+            revision,
+            key: stored_key(key)?,
+        }))
+    }
+
+    /// Store `policy_file` and move `deployment`'s head from `expected` to `head`, in one
+    /// transaction that every append serializes against.
+    pub(crate) fn publish(
+        &self,
+        deployment: &DeploymentName,
+        expected: Option<PolicyRevision>,
+        head: &PolicyHead,
+        policy_file: &[u8],
+    ) -> Result<(), PublishError> {
+        immediate(&mut self.connection(), |transaction| {
+            let current = head_of(transaction, deployment)?;
+            if current != expected {
+                return Err(PublishError::Moved { head: current });
+            }
+            transaction.execute(
+                "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+                params![head.key.as_str(), policy_file],
+            )?;
+            transaction.execute(
+                "INSERT INTO policy_revisions (deployment, revision, key) VALUES (?1, ?2, ?3)",
+                params![deployment.as_str(), head.revision.value() as i64, head.key.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO deployments (name, head) VALUES (?1, ?2)
+                 ON CONFLICT (name) DO UPDATE SET head = excluded.head",
+                params![deployment.as_str(), head.revision.value() as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The key `revision` of `deployment` names.
+    pub(crate) fn policy_key(
+        &self,
+        deployment: &DeploymentName,
+        revision: PolicyRevision,
+    ) -> Result<String, ReadError> {
+        revision_key(&self.connection(), deployment, revision)
+    }
+
+    pub(crate) fn published_as(&self, deployment: &DeploymentName, key: &str) -> Result<Option<i64>, ReadError> {
+        Ok(self.connection().query_row(
+            "SELECT MIN(revision) FROM policy_revisions WHERE deployment = ?1 AND key = ?2",
+            params![deployment.as_str(), key],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The key `revision` of `deployment` names, and the bytes stored under it.
+    pub(crate) fn policy_file(
+        &self,
+        deployment: &DeploymentName,
+        revision: PolicyRevision,
+    ) -> Result<(String, Vec<u8>), ReadError> {
+        let connection = self.connection();
+        let key = revision_key(&connection, deployment, revision)?;
+        let bytes = connection
+            .query_row("SELECT bytes FROM policy_files WHERE key = ?1", params![key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match bytes {
+            Some(bytes) => Ok((key, bytes)),
+            None => Err(ReadError::PolicyFileMissing { key }),
+        }
     }
 
     /// The connection an append runs on, held until the append is done.
@@ -1266,16 +1364,12 @@ impl Appender<'_> {
         mut self,
         root: &TrajectoryId,
         basis: u64,
-        bytes: &[u8],
-        key: Option<&str>,
+        batch: &Batch<'_>,
         before_commit: impl FnOnce() -> Result<(), AppendError>,
     ) -> Result<(), AppendError> {
         immediate(&mut self.0, |transaction| {
-            let current = position(transaction, root)?;
-            if current != basis {
-                return Err(AppendError::Conflict { current });
-            }
-            insert_batch(transaction, root, current, bytes, key)?;
+            admissible(transaction, root, basis, batch)?;
+            insert_batch(transaction, root, basis, batch)?;
             before_commit()
         })
     }
@@ -1286,16 +1380,12 @@ impl Appender<'_> {
         mut self,
         root: &TrajectoryId,
         basis: u64,
-        bytes: &[u8],
-        key: Option<&str>,
+        batch: &Batch<'_>,
         hold: &crate::embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
         immediate(&mut self.0, |transaction| {
-            let current = position(transaction, root)?;
-            if current != basis {
-                return Err(AppendError::Conflict { current });
-            }
-            insert_batch(transaction, root, current, bytes, key)?;
+            admissible(transaction, root, basis, batch)?;
+            insert_batch(transaction, root, basis, batch)?;
             let opening = read_ticket(TICKET_OPENING, hold.generation);
             let bound = read_ticket(TICKET_BOUND, hold.generation);
             let owned: i64 = transaction.query_row(
@@ -1333,8 +1423,12 @@ impl Appender<'_> {
         immediate(&mut self.0, |transaction| {
             for (root, observation) in records {
                 let at = position(transaction, root)?;
-                let key = observation.and_then(HostObservation::key);
-                insert_batch(transaction, root, at, &encode(&[], *observation), key.as_deref())?;
+                let batch = Batch {
+                    bytes: encode(&[], *observation),
+                    key: observation.and_then(HostObservation::key),
+                    fence: None,
+                };
+                insert_batch(transaction, root, at, &batch)?;
             }
             Ok(())
         })
@@ -1384,18 +1478,77 @@ fn immediate<T, E: From<rusqlite::Error>>(
     Ok(result)
 }
 
+/// Whether `batch` may follow the log of `root` at `basis`: the log still stands there, and a
+/// decided batch's revision is still its deployment's head.
+fn admissible(connection: &Connection, root: &TrajectoryId, basis: u64, batch: &Batch<'_>) -> Result<(), AppendError> {
+    let current = position(connection, root)?;
+    if current != basis {
+        return Err(AppendError::Conflict { current });
+    }
+    match moved(connection, batch.fence.as_ref())? {
+        Some(head) => Err(AppendError::PolicyMoved { head }),
+        None => Ok(()),
+    }
+}
+
+/// Where the head stands when it is not the revision `fence` requires; `None` when the fence
+/// holds or there is none.
+fn moved(
+    connection: &Connection,
+    fence: Option<&Fence<'_>>,
+) -> Result<Option<Option<PolicyRevision>>, rusqlite::Error> {
+    let Some(fence) = fence else {
+        return Ok(None);
+    };
+    let head = head_of(connection, fence.deployment)?;
+    Ok((head != Some(fence.revision)).then_some(head))
+}
+
+fn revision_key(
+    connection: &Connection,
+    deployment: &DeploymentName,
+    revision: PolicyRevision,
+) -> Result<String, ReadError> {
+    connection
+        .query_row(
+            "SELECT key FROM policy_revisions WHERE deployment = ?1 AND revision = ?2",
+            params![deployment.as_str(), revision.value() as i64],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| ReadError::UnknownRevision {
+            deployment: deployment.as_str().to_string(),
+            revision,
+        })
+}
+
+fn head_of(connection: &Connection, deployment: &DeploymentName) -> Result<Option<PolicyRevision>, rusqlite::Error> {
+    let head: Option<i64> = connection
+        .query_row(
+            "SELECT head FROM deployments WHERE name = ?1",
+            params![deployment.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(head.map(|head| PolicyRevision::new(head as u64)))
+}
+
+fn stored_key(key: String) -> Result<appa_engine::profile::PolicyFileKey, ReadError> {
+    serde_json::from_value(serde_json::Value::String(key))
+        .map_err(|error| ReadError::Undecodable(format!("a stored policy file key: {error}")))
+}
+
 fn insert_batch(
     connection: &Connection,
     root: &TrajectoryId,
     at: u64,
-    bytes: &[u8],
-    key: Option<&str>,
+    batch: &Batch<'_>,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-        params![root.as_str(), at as i64, bytes],
+        params![root.as_str(), at as i64, batch.bytes],
     )?;
-    if let Some(key) = key {
+    if let Some(key) = &batch.key {
         connection.execute(
             "INSERT OR IGNORE INTO host_keys (key, root) VALUES (?1, ?2)",
             params![key, root.as_str()],
@@ -1422,9 +1575,11 @@ fn is_taken(error: &rusqlite::Error) -> bool {
     )
 }
 
-const TABLES: [&str; 7] = [
+const TABLES: [&str; 9] = [
     "logs",
     "policy_files",
+    "deployments",
+    "policy_revisions",
     "host_keys",
     "operations",
     "processed_results",
@@ -1688,19 +1843,23 @@ mod tests {
         let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected: Vec<(String, String, Option<String>)> = [
             ("archived_roots", Some("CREATE TABLE archived_roots ( root TEXT PRIMARY KEY )")),
+            ("deployments", Some("CREATE TABLE deployments ( name TEXT PRIMARY KEY, head INTEGER NOT NULL )")),
             ("held_peer_messages", Some("CREATE TABLE held_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, receiver TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL, expires_at INTEGER NOT NULL, notified INTEGER NOT NULL )")),
             ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
+            ("policy_revisions", Some("CREATE TABLE policy_revisions ( deployment TEXT NOT NULL, revision INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY (deployment, revision) )")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, completed_at INTEGER, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_archived_roots_1", None),
+            ("sqlite_autoindex_deployments_1", None),
             ("sqlite_autoindex_held_peer_messages_1", None),
             ("sqlite_autoindex_host_keys_1", None),
             ("sqlite_autoindex_logs_1", None),
             ("sqlite_autoindex_operations_1", None),
             ("sqlite_autoindex_policy_files_1", None),
+            ("sqlite_autoindex_policy_revisions_1", None),
             ("sqlite_autoindex_processed_results_1", None),
         ]
         .into_iter()

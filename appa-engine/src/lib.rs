@@ -59,38 +59,46 @@
 //! not on a `ForkOpened` child binding. It freezes the source label, family effects and
 //! unsettled reservations, and source denials. Replay reads that opening record without
 //! reading the parent log; later activity on either side does not update the other.
-//! No spawn dispatch or child-return contract is created. The runtime must also preserve
-//! the source family's opening policy when it creates the new log.
+//! No spawn dispatch or child-return contract is created. The new family belongs to the
+//! source family's deployment.
 //!
-//! ## File content: a pinned basis, and two labels
+//! ## Policy revisions
 //!
-//! A call that touches a file the runtime tracks carries a host-pinned [`value::FileBasis`]
-//! on its [`value::ResolvedCall`]: the version, digest and Label of the content it reads,
-//! replaces, edits, copies, moves or processes, all supplied by the trusted harness and
-//! never by model arguments. The basis is part of the call's proposal-batch identity, so the
-//! same rendered call over different content is a different act, while the call's own
-//! canonical digest stays the digest of its tool and arguments.
+//! A **deployment** ([`profile::DeploymentName`]) is a policy line that advances through numbered
+//! **policy revisions** ([`profile::PolicyRevision`]). A family that follows a deployment names it,
+//! and the revision that opened it, on its opening record. An [`engine::Engine`] deciding at a
+//! revision ([`engine::Engine::at`]) stamps every batch it seals with that revision, on the
+//! `BasisAdvanced` record the batch begins with, so the family's next decision is always made at
+//! the deployment's head and a family's stamps never decrease.
 //!
-//! Two labels follow from it, and they are not the same label:
+//! [`engine::Engine::replay`] judges each batch under the engine of the revision stamped on it,
+//! so a later revision never changes what an earlier record meant. An earlier revision's engine
+//! only validates; replay consults nothing. A batch no revision stamped — one an engine that read
+//! the family as pinned to its opening file decided — is judged under the opening revision. No
+//! decision is made on a view stamped later than the deciding engine's revision.
 //!
-//! - [`value::ResolvedCall::output_label`] is what the call returns to the trajectory. A
-//!   read returns content and carries the file's Label into the trajectory; a write or a
-//!   transfer returns a constant acknowledgement, so its content does not enter the
-//!   trajectory's Label and only a later read does.
-//! - [`value::ResolvedCall::file_output_label`] is what the call publishes as file content.
-//!   A copy or move puts the source's Label there even though the trajectory never sees the
-//!   bytes, and a replacement drops the Label of the content it destroyed.
+//! Labels index the trust chain of the revision that wrote them. Where a later revision's chain
+//! names other ranks, the labels a view holds cross into it by rank name
+//! ([`label::TrustCrossing`]): a value at a rank the new chain drops falls to its lowest rank,
+//! and a return floor at such a rank rises to its highest. Audience atoms are symbolic and cross
+//! unchanged.
 //!
-//! Checking a call's requirements reads neither. It reads what the call sends, before the
-//! call runs: the trajectory's current label, met with the annotation's `forwards` and the
-//! file content the host sends with the call
-//! ([`value::ResolvedCall::forwarded_file_label`]) — an edit's predecessor, a copy's or a
-//! move's source, a process's inputs, never a replacement's predecessor. So a copy into a
-//! destination is checked against the source's Label, and an input substitution, which
-//! replaces only the arguments, replaces only the current label in the `contains` check. A
-//! file call that fails admits its error text at the same value Label a success would have
-//! used ([`transition::ToolOutcome::FailureWithBody`]), so an error can never say more than
-//! the call it came from.
+//! Deferred authorizations do not cross. A view that crosses to a later revision advances its
+//! family basis, so no offer or approval an earlier revision recorded is current: executing such
+//! an offer consults nothing, an approval releases nothing, and the call is decided afresh under
+//! the later revision. A derived candidate keeps its derivation, and the call or result it stands
+//! for is planned again from it.
+//!
+//! A call released under one revision and reported under a later one is judged by the
+//! [`fact::ReleaseTerms`] its `DispatchOpened` record pinned, met with the later revision's
+//! declaration of the call: the result's label is the meet of both, and the effects are those
+//! the release reserved. A result whose release bound an output sanitizer that the later
+//! revision no longer registers is withheld.
+//!
+//! A family whose opening names no deployment is **pinned to a policy snapshot**: the stored
+//! policy file its opening names. A snapshot engine ([`engine::Engine::open`], never `at`) judges
+//! and decides it for its whole life, stamps nothing, and refuses a view of a family that follows
+//! a deployment, as an engine at a revision refuses a pinned view.
 //!
 pub mod admit;
 pub mod audience;

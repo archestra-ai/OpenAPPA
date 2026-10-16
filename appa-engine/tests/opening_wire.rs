@@ -50,7 +50,9 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
         .expect("the parent opens")
         .into_unsealed();
     let view = engine.view(&parent, ordinary.clone(), 1).expect("the parent replays");
-    let origin = view.root_fork_origin(&parent).expect("the parent can be forked");
+    let origin = engine
+        .root_fork_origin(&view, &parent)
+        .expect("the parent can be forked");
     let forked = engine
         .open_root_fork(&fork, key.clone(), origin.clone())
         .expect("the independent root opens")
@@ -115,7 +117,9 @@ fn a_principal_opening_forks_with_its_principal_and_replay_holds_it_to_shape() {
     let view = engine.view(&parent, opened.clone(), 1).expect("the parent replays");
     assert_eq!(view.principal(), Some(&alice));
 
-    let origin = view.root_fork_origin(&parent).expect("the parent can be forked");
+    let origin = engine
+        .root_fork_origin(&view, &parent)
+        .expect("the parent can be forked");
     let forked = engine
         .open_root_fork(&fork, key, origin)
         .expect("the independent root opens")

@@ -130,7 +130,10 @@ struct ReturnedChild {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Projection {
-    revision: u64,
+    /// How many batches the family log held when this was folded.
+    position: u64,
+    /// The policy revision that opened the family, where it follows a deployment.
+    opening_revision: Option<crate::profile::PolicyRevision>,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
     /// The meet of every label in `local`, met with only terms the trajectory's live fold also
@@ -149,6 +152,8 @@ pub struct Projection {
     occurrences: OrdMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: OrdMap<DispatchId, ResolvedCall>,
     receiving_bounds: OrdMap<DispatchId, Label>,
+    /// The terms each dispatch's release pinned, with the effects it reserved.
+    release_terms: OrdMap<DispatchId, (crate::fact::ReleaseTerms, EffectSet)>,
     dispatch_evidence: OrdMap<DispatchId, AudienceEvidence>,
     subject_dispatches: OrdMap<crate::basis::SubjectKey, DispatchId>,
     observations: OrdMap<DispatchId, ObservedResult>,
@@ -247,6 +252,16 @@ fn rebuilt_local_label(
     fold
 }
 
+/// Apply `change` to every value of `map` in place.
+fn each_mut<K: Ord + Clone, V: Clone>(map: &mut OrdMap<K, V>, mut change: impl FnMut(&mut V)) {
+    let keys: Vec<K> = map.keys().cloned().collect();
+    for key in keys {
+        if let Some(value) = map.get_mut(&key) {
+            change(value);
+        }
+    }
+}
+
 fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &crate::value::OfferId, end: OfferEnd) {
     if let Some(open) = offers.get_mut(offer) {
         open.end = Some(end);
@@ -254,9 +269,10 @@ fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &
 }
 
 impl Projection {
-    pub(crate) fn empty(revision: u64) -> Self {
+    pub(crate) fn empty(position: u64) -> Self {
         Projection {
-            revision,
+            position,
+            opening_revision: None,
             values: Default::default(),
             local: Default::default(),
             local_label: Default::default(),
@@ -268,6 +284,7 @@ impl Projection {
             occurrences: Default::default(),
             dispatch_calls: Default::default(),
             receiving_bounds: Default::default(),
+            release_terms: Default::default(),
             dispatch_evidence: Default::default(),
             subject_dispatches: Default::default(),
             observations: Default::default(),
@@ -296,8 +313,8 @@ impl Projection {
 
     /// Fold every view from the family log **without** the transition rules.
     #[cfg(test)]
-    pub(crate) fn build(log: &[Fact], revision: u64) -> Self {
-        let mut projection = Projection::empty(revision);
+    pub(crate) fn build(log: &[Fact], position: u64) -> Self {
+        let mut projection = Projection::empty(position);
         projection.fold_all(log);
         projection
     }
@@ -308,15 +325,80 @@ impl Projection {
         }
     }
 
-    pub(crate) fn set_revision(&mut self, revision: u64) {
-        self.revision = revision;
+    pub(crate) fn set_position(&mut self, position: u64) {
+        self.position = position;
+    }
+
+    /// Carry every label this projection decides from into the trust chain `crossing` arrives
+    /// at. Values, bounds, seeds and candidates cross as values; a fork's return floor crosses as
+    /// a requirement. What the log recorded as an identity — a call, an offer's plan, an
+    /// approval's terms — is not rewritten: it either still matches what the arriving policy
+    /// derives when it is used, or it retires there. A cached local fold is rebuilt from its
+    /// crossed terms, never crossed itself: crossing by rank name need not keep the order of
+    /// ranks, so a crossed meet is not the meet of the crossed terms.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        for value in self.values.iter_mut() {
+            value.label.cross_value(crossing);
+        }
+        each_mut(&mut self.receiving_bounds, |bound| bound.cross_value(crossing));
+        each_mut(&mut self.release_terms, |(terms, _)| {
+            if let Some(trust) = &mut terms.delta.trust {
+                *trust = crossing.value(*trust);
+            }
+        });
+        each_mut(&mut self.prepared, |fork| {
+            fork.snapshot.cross(crossing);
+            fork.return_policy.cross(crossing);
+        });
+        for returned in self.child_returns.iter_mut() {
+            returned.value.label.cross_value(crossing);
+        }
+        each_mut(&mut self.resumed, |label| label.cross_value(crossing));
+        if let Some((_, label)) = self.opening.as_mut() {
+            label.cross_value(crossing);
+        }
+        each_mut(&mut self.candidates, |candidate| candidate.derived.cross(crossing));
+        let trajectories: Vec<TrajectoryId> = self.local_label.keys().cloned().collect();
+        for trajectory in trajectories {
+            let snapshot = self
+                .fork_of
+                .get(&trajectory)
+                .and_then(|fork| self.prepared.get(fork))
+                .map(|prepared| &prepared.snapshot);
+            let base = match snapshot {
+                Some(snapshot) => Some(snapshot.base()),
+                None => self
+                    .opening
+                    .as_ref()
+                    .filter(|(root, _)| *root == trajectory)
+                    .map(|(_, starting)| starting),
+            };
+            let rebuilt = rebuilt_local_label(
+                base,
+                snapshot,
+                self.resumed.get(&trajectory),
+                &self.values,
+                self.local.get(&trajectory),
+            );
+            self.local_label.insert(trajectory, rebuilt);
+        }
+    }
+
+    /// Carry this fold to a later policy revision: the family's basis advances, so every offer and
+    /// approval an earlier revision recorded stops being current. A call one of them stood for is
+    /// decided afresh under the later revision, and a confined result is staged again from its
+    /// standing candidate. The advance is no record: replay, the advance of a held view and a live
+    /// decision each apply it where the revision they fold at moves, so all three agree.
+    pub(crate) fn cross_revision(&mut self) {
+        self.versions.advance(&crate::basis::BasisAdvance::family());
     }
 
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
         let Projection {
-            revision: _,
+            position: _,
+            opening_revision,
             values,
             local,
             local_label,
@@ -328,6 +410,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            release_terms,
             dispatch_evidence,
             subject_dispatches,
             observations,
@@ -356,10 +439,12 @@ impl Projection {
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
                 profile,
+                revision,
                 forked_from,
                 principal: opened_for,
                 ..
             }) => {
+                *opening_revision = *revision;
                 let mut starting = profile.starting_label().clone();
                 // A root opened as a fork starts where its parent stood: the parent's label
                 // folds into the base every later admission folds onto, and the parent
@@ -516,8 +601,12 @@ impl Projection {
                 file_basis,
                 subject,
                 evidence,
+                terms,
                 proposed_label: _,
             } => {
+                if let Some(terms) = terms {
+                    release_terms.insert(dispatch.clone(), (terms.clone(), proposed_effects.clone()));
+                }
                 dispatch_calls.insert(
                     dispatch.clone(),
                     opened_call(tool, *declaration, arguments, annotation, file_basis),
@@ -679,8 +768,13 @@ impl Projection {
         }
     }
 
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
+    pub(crate) fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// The revision that opened the family, or `None` for a family pinned to a policy snapshot.
+    pub(crate) fn opening_revision(&self) -> Option<crate::profile::PolicyRevision> {
+        self.opening_revision
     }
 
     fn value(&self, id: ValueId) -> Option<&AdmittedValue> {
@@ -805,7 +899,7 @@ impl Projection {
         Some(RootForkOrigin {
             parent_root: family.clone(),
             parent: trajectory.clone(),
-            basis: self.revision,
+            basis: self.position,
             label: self.fold_for(trajectory),
             effects: EffectSet::distinct(&self.effects),
             reservations: EffectSet::distinct(reserved),
@@ -1308,6 +1402,12 @@ impl Views<'_> {
         self.projection.bound_sanitizers.get(dispatch)
     }
 
+    /// The terms this dispatch's release pinned and the effects it reserved, where its
+    /// `DispatchOpened` carries them.
+    pub(crate) fn release_terms(&self, dispatch: &DispatchId) -> Option<&(crate::fact::ReleaseTerms, EffectSet)> {
+        self.projection.release_terms.get(dispatch)
+    }
+
     pub(crate) fn withholds_output(&self, dispatch: &DispatchId) -> bool {
         self.projection.withheld_outputs.contains(dispatch)
     }
@@ -1633,6 +1733,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1664,6 +1765,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1694,6 +1796,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1803,6 +1906,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),

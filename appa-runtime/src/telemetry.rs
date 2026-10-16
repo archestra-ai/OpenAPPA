@@ -66,6 +66,7 @@ fn error_class(error: &EventError) -> &'static str {
         EventError::Storage(_) => "storage",
         EventError::UntrustedLog(_) => "untrusted_log",
         EventError::PolicyUnavailable(_) => "policy_unavailable",
+        EventError::PolicyMoved { .. } => "policy_moved",
         EventError::InventoryRefused(_) => "inventory_refused",
         EventError::EngineInvariant(_) | EventError::UnexpectedDecision => "engine_invariant",
         EventError::Contended { .. } => "contended",
@@ -166,7 +167,7 @@ pub(crate) fn runtime_event(root: Option<&appa_runtime_api::TrajectoryId>, event
                 "appa.trajectory.root" = root, "appa.hook.event" = spelling(event),
                 "appa.outcome" = spelling(outcome) }, "hook completed");
         }
-        RuntimeEvent::Reload { .. } => {}
+        RuntimeEvent::PolicyPublished { .. } => {}
     }
 }
 

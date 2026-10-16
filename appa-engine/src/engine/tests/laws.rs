@@ -408,13 +408,13 @@ mod held_view_law {
 
         fn take(&mut self, step: &Step) -> Result<(), TestCaseError> {
             if let Step::HostOnly = step {
-                let before = self.held.revision();
+                let before = self.held.position();
                 let empty = self
                     .engine
                     .seal(&self.held, Vec::new())
                     .expect("no facts pass the validator at an opened view");
                 self.append(&empty)?;
-                prop_assert_eq!(self.held.revision(), before + 1);
+                prop_assert_eq!(self.held.position(), before + 1);
                 return Ok(());
             }
             let Some(event) = self.event(step) else {

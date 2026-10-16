@@ -269,7 +269,12 @@ impl Engine {
             facts.extend(opened_offers);
             blocked.push(block);
         }
-        let decided = self.declaring(crate::basis::DecidedAct::Proposals(batch.id.clone()), advance, facts);
+        let decided = self.declaring(
+            view.family(),
+            crate::basis::DecidedAct::Proposals(batch.id.clone()),
+            advance,
+            facts,
+        );
         let append = self.seal(view, decided)?;
         Ok(EngineDecision {
             append: Some(append),
@@ -323,7 +328,12 @@ impl Engine {
             return Ok(None);
         }
         let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(crate::basis::DecidedAct::Proposals(id.clone()), advance, facts);
+        let batch = self.declaring(
+            view.family(),
+            crate::basis::DecidedAct::Proposals(id.clone()),
+            advance,
+            facts,
+        );
         Ok(Some(self.seal(view, batch)?))
     }
 

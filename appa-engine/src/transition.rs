@@ -16,8 +16,9 @@ use crate::fact::{
 use crate::label::{Expansions, Label, MembershipContext};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::PolicyIdentity;
+use crate::profile::PolicyRevision;
 use crate::projection::{Projection, Views};
+use crate::registry::TrustChain;
 use crate::value::{
     ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
 };
@@ -436,8 +437,15 @@ pub enum FollowUp {
 pub enum TransitionError {
     #[error(transparent)]
     Call(#[from] crate::engine::EngineError),
-    #[error("the view was built under another policy identity")]
-    ForeignView,
+    #[error("the view stands at policy revision {view}, later than revision {engine} this engine decides at")]
+    NewerRevision {
+        view: PolicyRevision,
+        engine: PolicyRevision,
+    },
+    #[error("the view is a family pinned to a policy snapshot; an engine deciding at a revision does not decide it")]
+    PinnedView,
+    #[error("the view is a family that follows a deployment; a snapshot engine does not decide it")]
+    FollowingView,
     #[error("the event names a trajectory this family has not opened")]
     UnopenedTrajectory,
     #[error("the decision does not pass the transition validator: {0}")]
@@ -547,29 +555,29 @@ pub struct EngineDecision {
 }
 
 /// A batch the engine validated and sealed. The runtime treats it as opaque: it performs the
-/// whole-batch revision append and advances its [`EngineView`] with it, and never
-/// reconstructs engine work by reading the facts.
+/// whole-batch append and advances its [`EngineView`] with it, and never reconstructs engine work
+/// by reading the facts.
+///
+/// The batch is stamped with the policy revision that decided it, and carries that revision's
+/// trust chain: the ranks its labels index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedFactBatch {
     facts: Vec<Fact>,
     basis: u64,
-    policy: PolicyIdentity,
+    revision: Option<PolicyRevision>,
+    chain: TrustChain,
     family: TrajectoryId,
 }
 
 impl ValidatedFactBatch {
     /// Seal a validated batch. Crate-private on purpose: every call site is an engine transition
     /// that has already run the facts through the [`Sequence`] validator.
-    pub(crate) fn seal(
-        facts: Vec<Fact>,
-        basis: u64,
-        policy: PolicyIdentity,
-        family: TrajectoryId,
-    ) -> ValidatedFactBatch {
+    pub(crate) fn seal(facts: Vec<Fact>, basis: u64, engine: &Engine, family: TrajectoryId) -> ValidatedFactBatch {
         ValidatedFactBatch {
             facts,
             basis,
-            policy,
+            revision: engine.revision(),
+            chain: engine.registry().trust_chain().clone(),
             family,
         }
     }
@@ -580,8 +588,10 @@ impl ValidatedFactBatch {
         self.basis
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentity {
-        self.policy
+    /// The policy revision that decided this batch, and that a replay judges it under; `None`
+    /// for a batch a snapshot engine decided.
+    pub fn revision(&self) -> Option<PolicyRevision> {
+        self.revision
     }
 
     pub(crate) fn family(&self) -> &TrajectoryId {
@@ -607,8 +617,15 @@ pub enum ViewMismatch {
     Stale { view: u64, batch: u64 },
     #[error("the batch belongs to another trajectory family")]
     ForeignFamily,
-    #[error("the batch was decided under another policy identity")]
-    ForeignPolicy,
+    #[error("the batch was decided at policy revision {batch}, earlier than revision {view} the view stands at")]
+    RevisionRegressed {
+        view: PolicyRevision,
+        batch: PolicyRevision,
+    },
+    #[error(
+        "the batch and the view do not belong to one family kind: one is pinned to a policy snapshot, the other follows a deployment"
+    )]
+    ForeignLine,
 }
 
 /// Why [`crate::Engine::admit_batch`] did not advance a view: the batch's records failed the
@@ -627,26 +644,82 @@ pub enum BatchRefusal {
 ///
 /// Equality is equality of the derived picture: a view advanced batch by batch equals the view
 /// a replay of the same log builds, because both reach the log through the one fold.
+///
+/// A view knows the policy revision of its last batch, its stamp, and the trust chain its labels
+/// index. A batch decided at a later revision whose chain names other ranks crosses the view's
+/// labels into that chain before its records fold ([`crate::label::TrustCrossing`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
-    policy: PolicyIdentity,
+    stamp: Option<PolicyRevision>,
+    chain: TrustChain,
     family: TrajectoryId,
 }
 
 impl EngineView {
-    /// Take the projection a [`Sequence`] validated. Crate-private: the public entry is
-    /// `Engine::view`, which runs that validation.
-    pub(crate) fn validated(projection: Projection, policy: PolicyIdentity, family: TrajectoryId) -> EngineView {
+    /// Take the projection a [`Sequence`] validated under `engine`. Crate-private: the public
+    /// entries are `Engine::view` and `Engine::replay`, which run that validation.
+    pub(crate) fn validated(projection: Projection, engine: &Engine, family: TrajectoryId) -> EngineView {
         EngineView {
             projection,
-            policy,
+            stamp: engine.revision(),
+            chain: engine.registry().trust_chain().clone(),
             family,
         }
     }
 
     pub(crate) fn projection(&self) -> &Projection {
         &self.projection
+    }
+
+    /// The policy revision this view stands at: that of the last stamped batch it folded, or a
+    /// later one an engine deciding at it crossed the view to; `None` for a family pinned to a
+    /// policy snapshot.
+    pub fn stamp(&self) -> Option<PolicyRevision> {
+        self.stamp
+    }
+
+    /// The revision that opened the family, or `None` for a family pinned to a policy snapshot.
+    pub fn opening_revision(&self) -> Option<PolicyRevision> {
+        self.projection.opening_revision()
+    }
+
+    /// Move past batches that fold nothing: host observations alone, or a stamp carried over. A
+    /// later stamp crosses the family basis to its revision, as a folded batch's does.
+    pub(crate) fn pass(&mut self, revision: Option<PolicyRevision>, position: u64) {
+        if let (Some(revision), Some(stamp)) = (revision, self.stamp)
+            && revision > stamp
+        {
+            self.projection.cross_revision();
+        }
+        self.stamp = revision.or(self.stamp);
+        self.projection.set_position(position);
+    }
+
+    /// This view as `engine` decides on it, standing at the same position: its labels carried
+    /// into `engine`'s trust chain, and — where `engine` decides at a later revision than the
+    /// view stands at — its family basis advanced to that revision, so no offer or approval an
+    /// earlier revision recorded is current. Borrowed unchanged when neither moves. A view never
+    /// crosses back to an earlier revision; the engine refuses to decide on it instead.
+    pub(crate) fn crossed_to<'v>(&'v self, engine: &Engine) -> std::borrow::Cow<'v, EngineView> {
+        let arriving = engine.registry().trust_chain();
+        let crossing = self.chain.crossing_to(arriving);
+        let later = engine
+            .revision()
+            .filter(|revision| self.stamp.is_some_and(|stamp| stamp < *revision));
+        if crossing.is_none() && later.is_none() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut crossed = self.clone();
+        if let Some(crossing) = crossing {
+            crossed.projection.cross(&crossing);
+            crossed.chain = arriving.clone();
+        }
+        if let Some(revision) = later {
+            crossed.projection.cross_revision();
+            crossed.stamp = Some(revision);
+        }
+        std::borrow::Cow::Owned(crossed)
     }
 
     /// The reader this family acts for, as its opening pinned it.
@@ -663,20 +736,9 @@ impl EngineView {
             .then(|| self.projection.view(trajectory))
     }
 
-    /// Freeze what an independent conversation-root fork of `trajectory` carries over from this
-    /// family at this view's position. This opens no same-family child and creates no spawn or
-    /// return contract. `None` for a trajectory this family never opened or one that has ended.
-    pub fn root_fork_origin(&self, trajectory: &TrajectoryId) -> Option<crate::fact::RootForkOrigin> {
-        self.projection.root_fork_origin(&self.family, trajectory)
-    }
-
     /// Which trajectory surfaced this offer, anywhere in the family.
     pub fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {
         self.projection.offer_trajectory(offer)
-    }
-
-    pub(crate) fn policy(&self) -> PolicyIdentity {
-        self.policy
     }
 
     /// The root whose log this view was built from. Public because an outer layer
@@ -686,8 +748,9 @@ impl EngineView {
         &self.family
     }
 
-    pub fn revision(&self) -> u64 {
-        self.projection.revision()
+    /// How many batches of the family log this view has folded.
+    pub fn position(&self) -> u64 {
+        self.projection.position()
     }
 
     /// Advance the cache by a batch the store accepted: the runtime may advance only
@@ -699,23 +762,42 @@ impl EngineView {
     ///
     /// The batch's basis must be exactly where this view stands, which is what the store's
     /// conditional append already proved before accepting it. A batch computed against
-    /// any other revision belongs to another view, and applying it would leave records and
-    /// revision describing different logs.
+    /// any other position belongs to another view, and applying it would leave records and
+    /// position describing different logs. Its revision may not be earlier than the view's stamp:
+    /// a family's stamps never decrease.
     pub fn advance(&mut self, batch: &ValidatedFactBatch) -> Result<(), ViewMismatch> {
-        if batch.policy() != self.policy {
-            return Err(ViewMismatch::ForeignPolicy);
-        }
         if batch.family() != &self.family {
             return Err(ViewMismatch::ForeignFamily);
         }
-        if batch.basis() != self.revision() {
+        if batch.basis() != self.position() {
             return Err(ViewMismatch::Stale {
-                view: self.revision(),
+                view: self.position(),
                 batch: batch.basis(),
             });
         }
+        if let (Some(batch_revision), Some(view_revision)) = (batch.revision, self.stamp)
+            && batch_revision < view_revision
+        {
+            return Err(ViewMismatch::RevisionRegressed {
+                view: view_revision,
+                batch: batch_revision,
+            });
+        }
+        if batch.revision.is_some() != self.opening_revision().is_some() && self.projection.is_opened(&self.family) {
+            return Err(ViewMismatch::ForeignLine);
+        }
+        if let Some(crossing) = self.chain.crossing_to(&batch.chain) {
+            self.projection.cross(&crossing);
+            self.chain = batch.chain.clone();
+        }
+        if let (Some(batch_revision), Some(view_revision)) = (batch.revision, self.stamp)
+            && batch_revision > view_revision
+        {
+            self.projection.cross_revision();
+        }
         self.projection.fold_all(batch.facts());
-        self.projection.set_revision(batch.basis() + 1);
+        self.projection.set_position(batch.basis() + 1);
+        self.stamp = batch.revision.or(self.stamp);
         Ok(())
     }
 }
@@ -738,6 +820,8 @@ pub enum OpeningTransitionRefusal {
     ProfileMismatch,
     #[error("the opening record's open vectors are not the set derived from its declaration")]
     VectorMismatch,
+    #[error("the opening record names a deployment and policy revision other than the engine judging it decides at")]
+    DeploymentMismatch,
     #[error("the opening record forks the root from its own family")]
     SelfFork,
     #[error("the opening record's principal {found:?} is not an address")]
@@ -759,6 +843,8 @@ pub enum TransitionRefusal {
     Opening(#[from] OpeningTransitionRefusal),
     #[error("a record names a trajectory this family has not opened")]
     ForeignTrajectory,
+    #[error("a batch is stamped at a policy revision other than the one judging it")]
+    ForeignRevision,
     #[error("dispatched call names unregistered tool {0}")]
     UnknownTool(String),
     #[error("dispatched call payload fails its registered schema: {0}")]
@@ -1111,7 +1197,17 @@ impl<'a> Sequence<'a> {
         match fact {
             // Judged in full by `member`, which admits it only as the family's first record.
             Fact::TrajectoryOpened(_) => {}
-            Fact::BasisAdvanced { act, advance, .. } => self.declare(act, advance)?,
+            Fact::BasisAdvanced {
+                act, advance, revision, ..
+            } => {
+                // A stamped batch was decided at the revision judging it; an unstamped one was
+                // decided under the opening file, which is what a snapshot engine, or the opening
+                // revision's engine standing in for one, judges it by.
+                if revision.is_some() && *revision != self.engine.revision() {
+                    return Err(TransitionRefusal::ForeignRevision);
+                }
+                self.declare(act, advance)?
+            }
             Fact::OfferOpened {
                 trajectory,
                 offer,
@@ -1186,10 +1282,16 @@ impl<'a> Sequence<'a> {
                 file_basis,
                 subject,
                 evidence,
+                terms,
             } => {
                 let call = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
+                // The recorded ordinal names the declaration this revision selects for these
+                // arguments; any other ordinal names no declaration of this revision.
+                if !self.engine.registry().selection_matches(&call) {
+                    return Err(TransitionRefusal::UnknownTool(tool.as_str().to_string()));
+                }
                 self.opened(trajectory, dispatch, &call, subject, released, evidence)?;
-                self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects)?;
+                self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects, terms)?;
             }
             Fact::DispatchSucceeded {
                 trajectory,
@@ -1363,6 +1465,7 @@ impl<'a> Sequence<'a> {
         proposed_label: &Label,
         receiving: &Label,
         proposed_effects: &EffectSet,
+        terms: &Option<crate::fact::ReleaseTerms>,
     ) -> Result<(), TransitionRefusal> {
         let tool = call.tool();
         let entry = self
@@ -1398,6 +1501,14 @@ impl<'a> Sequence<'a> {
         if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
             return Err(TransitionRefusal::ForgedLabel);
         }
+        // The terms a release pins are the contract it was checked under, exactly. A record with
+        // none was written by an engine that pinned none.
+        if terms
+            .as_ref()
+            .is_some_and(|terms| terms != &crate::fact::ReleaseTerms::of(&checked))
+        {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
         Ok(())
     }
 
@@ -1412,7 +1523,7 @@ impl<'a> Sequence<'a> {
         if self.projection.view(trajectory).is_succeeded(dispatch) {
             return Err(TransitionRefusal::RepeatCheckpoint);
         }
-        if effects != &contract.emits {
+        if effects != &contract.contract.emits {
             return Err(TransitionRefusal::EffectsMismatch);
         }
         Ok(())
@@ -1442,7 +1553,7 @@ impl<'a> Sequence<'a> {
             (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
-            (CloseOutcome::Success { effects }, false) if effects != &contract.emits => {
+            (CloseOutcome::Success { effects }, false) if effects != &contract.contract.emits => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
             _ => Ok(()),
@@ -1789,7 +1900,7 @@ impl<'a> Sequence<'a> {
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
                 crate::plan::confined_stage(
                     self.engine.registry(),
-                    &contract,
+                    &contract.contract,
                     receiving,
                     &value.label,
                     residual,
@@ -2294,9 +2405,10 @@ impl<'a> Sequence<'a> {
     /// the family, at a dialect this engine reads, carrying a digest that names this policy
     /// ([`crate::engine::Engine::recognizes`]), its validated declaration byte for byte — which
     /// subsumes re-running the coverage matrix over it — and the open vectors that declaration
-    /// derives. `policy_file_key` is deliberately not judged here: it names a stored file this
-    /// engine never sees, and the outer layer re-hashes the file it loaded against the record on
-    /// every event.
+    /// derives. An opening that follows a deployment names the deployment and revision the
+    /// engine judging it decides at. `policy_file_key` is deliberately not judged here: it names a
+    /// stored file this engine never sees, and the outer layer re-hashes the file it loaded against
+    /// the record on every event.
     fn root_opened(&self, opening: &TrajectoryOpening) -> Result<(), OpeningTransitionRefusal> {
         if self.projection.is_opened(&self.family) {
             return Err(OpeningTransitionRefusal::Duplicate);
@@ -2319,6 +2431,9 @@ impl<'a> Sequence<'a> {
         }
         if opening.open_vectors != self.engine.open_vectors() {
             return Err(OpeningTransitionRefusal::VectorMismatch);
+        }
+        if opening.deployment.as_ref() != self.engine.deployment() || opening.revision != self.engine.revision() {
+            return Err(OpeningTransitionRefusal::DeploymentMismatch);
         }
         if let Some(principal) = &opening.principal
             && crate::audience::session_principal(principal.as_str()).as_ref() != Some(principal)
@@ -2693,8 +2808,10 @@ impl<'a> Sequence<'a> {
                     .projection
                     .dispatch_call_of(dispatch)
                     .ok_or(TransitionRefusal::UnknownDispatch)?;
-                let contract = annotation_or_unknown(self.engine.registry(), call)?;
                 let views = self.projection.view(trajectory);
+                let contract =
+                    crate::admit::outcome_contract(self.engine.registry(), call, views.release_terms(dispatch))
+                        .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
                 // Admission lands with the close, and only a success admits anything.
                 if !views.closed_successfully(dispatch) && !views.failed_with_body(dispatch) {
                     return Err(TransitionRefusal::DispatchNotOpen);
@@ -2741,7 +2858,7 @@ impl<'a> Sequence<'a> {
                             let receiving = views
                                 .receiving_bound(dispatch)
                                 .ok_or(TransitionRefusal::UnknownDispatch)?;
-                            call.output_label(&contract, receiving)
+                            call.output_label_from(&contract.output_label(), receiving)
                         }
                     },
                 };
@@ -2972,11 +3089,13 @@ impl<'a> Sequence<'a> {
         MembershipContext::new(audience.within_assertions(), audience.providers(), expansions)
     }
 
+    /// The contract a dispatch's outcome is judged under: the terms its release pinned, met with
+    /// the judging revision's declaration ([`crate::admit::OutcomeContract`]).
     fn dispatch_contract(
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
+    ) -> Result<crate::admit::OutcomeContract<'_>, TransitionRefusal> {
         if dispatch.trajectory() != trajectory {
             return Err(TransitionRefusal::ForeignDispatch);
         }
@@ -2984,14 +3103,16 @@ impl<'a> Sequence<'a> {
             .projection
             .dispatch_call_of(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
-        annotation_or_unknown(self.engine.registry(), call)
+        let pinned = self.projection.view(trajectory).release_terms(dispatch).cloned();
+        crate::admit::outcome_contract(self.engine.registry(), call, pinned.as_ref())
+            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
     }
 
     fn open_dispatch_contract(
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
+    ) -> Result<crate::admit::OutcomeContract<'_>, TransitionRefusal> {
         let contract = self.dispatch_contract(trajectory, dispatch)?;
         if !self.projection.view(trajectory).is_open(dispatch) {
             return Err(TransitionRefusal::DispatchNotOpen);
@@ -3092,10 +3213,14 @@ impl<'a> Sequence<'a> {
                 .projection
                 .dispatch_call_of(dispatch)
                 .expect("dispatch_contract resolved this dispatch's recorded call")
-                .output_label(&contract, &receiving),
+                .output_label_from(&contract.output_label(), &receiving),
             Some((body, _)) => body.label.clone(),
         };
-        let label = sanitized_label(registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)))?;
+        let label = sanitized_label(registered.derive_output(
+            &from_label,
+            &contract.contract.tags,
+            &self.context(&expansions),
+        ))?;
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
         }
@@ -3501,9 +3626,8 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{LabelRequirements, Requires};
+    use crate::contract::{LabelRequirements, Requires, ToolAnnotation};
     use crate::label::{Audience, ReaderId, Trust};
-    use crate::profile::PolicyFileKey;
     use crate::value::{LabeledValue, OfferNonce, ToolName, ValueBody, ValueId};
 
     fn traj() -> TrajectoryId {
@@ -3530,8 +3654,13 @@ mod tests {
     }
 
     fn engine() -> Engine {
+        engine_over(&["suspicious", "trusted"])
+    }
+
+    /// The test policy over the trust chain `ranks`, lowest first.
+    fn engine_over(ranks: &[&str]) -> Engine {
         let config = crate::registry::RegistryConfig {
-            trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            trust_chain: crate::registry::TrustChain::new(ranks.iter().map(|rank| rank.to_string()).collect()),
             tools: vec![crate::contract::ToolDeclaration::Declared(note_tool())],
             annotators: vec![],
             authorities: vec![],
@@ -3552,9 +3681,13 @@ mod tests {
         Label::new(Trust::new(1), Audience::public())
     }
 
+    fn line() -> crate::profile::DeploymentName {
+        crate::profile::DeploymentName::new("default")
+    }
+
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, PolicyFileKey::of(b"policy"), None)
+            .open_trajectory(family, crate::profile::PolicyFileKey::of(b"policy"), None)
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)
@@ -3619,7 +3752,7 @@ mod tests {
         let whole = [first, released.facts().to_vec(), closed.facts().to_vec()].concat();
         let rebuilt = engine.view(&traj(), whole, 3).expect("the log validates");
 
-        assert_eq!(held.revision(), rebuilt.revision());
+        assert_eq!(held.position(), rebuilt.position());
         assert_eq!(held.projection(), rebuilt.projection());
         let family = traj();
         let views = held.projection().view(&family);
@@ -3671,8 +3804,8 @@ mod tests {
     }
 
     #[test]
-    fn a_view_takes_no_batch_from_another_family_or_policy() {
-        let engine = engine();
+    fn a_view_takes_no_batch_from_another_family_or_an_earlier_revision() {
+        let engine = engine().at(line(), PolicyRevision::new(2));
         let mut view = engine
             .view(&traj(), vec![opening(&engine, &traj())], 1)
             .expect("the log validates");
@@ -3683,23 +3816,361 @@ mod tests {
         let foreign = engine.seal(&elsewhere, vec![]).expect("the candidate validates");
         assert_eq!(view.advance(&foreign), Err(ViewMismatch::ForeignFamily));
 
-        let other_policy = ValidatedFactBatch::seal(
-            vec![],
-            1,
-            crate::profile::identity_of(
-                &crate::registry::RegistryConfig {
-                    trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),
-                    tools: vec![],
-                    annotators: vec![],
-                    authorities: vec![],
-                    sanitizers: vec![],
-                    audience: crate::audience::AudienceConfig::default(),
-                },
-                engine.profile(),
-            ),
-            traj(),
+        let earlier = engine.clone().at(line(), PolicyRevision::FIRST);
+        let regressed = earlier.seal(&view, vec![]).expect("the candidate validates");
+        assert_eq!(
+            view.advance(&regressed),
+            Err(ViewMismatch::RevisionRegressed {
+                view: PolicyRevision::new(2),
+                batch: PolicyRevision::FIRST,
+            })
         );
-        assert_eq!(view.advance(&other_policy), Err(ViewMismatch::ForeignPolicy));
+        assert!(
+            matches!(
+                earlier.admit_batch(&mut view, vec![]),
+                Err(BatchRefusal::View(ViewMismatch::RevisionRegressed { .. }))
+            ),
+            "an earlier revision admits nothing after a later one"
+        );
+    }
+
+    /// A batch decided at a revision whose trust chain names other ranks carries the view's labels
+    /// across by rank name: a rank the new chain keeps keeps its name wherever it now sits, and the
+    /// view advanced batch by batch equals a replay that judges each batch under its own revision.
+    #[test]
+    fn a_later_revision_carries_trust_across_by_rank_name() {
+        let first = engine_over(&["suspicious", "trusted"]).at(line(), PolicyRevision::FIRST);
+        let second = engine_over(&["untrusted", "suspicious", "trusted"]).at(line(), PolicyRevision::new(2));
+        let opened = vec![opening(&first, &traj())];
+        let mut held = first.view(&traj(), opened.clone(), 1).expect("the log validates");
+        let trust = |view: &EngineView| view.views(&traj()).expect("the root is opened").current_label().trust;
+        assert_eq!(trust(&held), Trust::new(1), "trusted is the first chain's top");
+
+        let later = second.seal(&held, vec![]).expect("the candidate validates");
+        assert_eq!(later.revision(), Some(PolicyRevision::new(2)));
+        held.advance(&later).expect("a later revision follows an earlier one");
+        assert_eq!(held.stamp(), Some(PolicyRevision::new(2)));
+        assert_eq!(
+            trust(&held),
+            Trust::new(2),
+            "trusted keeps its name in the second chain"
+        );
+
+        let batches = [
+            crate::engine::StampedBatch {
+                revision: Some(PolicyRevision::FIRST),
+                facts: &opened,
+            },
+            crate::engine::StampedBatch {
+                revision: Some(PolicyRevision::new(2)),
+                facts: later.facts(),
+            },
+        ];
+        let replayed = second.replay(&traj(), &batches, &[&first]).expect("the log replays");
+        assert_eq!(replayed, held, "replay across revisions equals the advanced view");
+
+        assert_eq!(
+            second.replay(&traj(), &batches, &[]),
+            Err(crate::engine::ReplayRefusal::PolicyUnavailable {
+                position: 0,
+                revision: PolicyRevision::FIRST,
+            }),
+            "a batch is judged under its own revision or not at all"
+        );
+        assert_eq!(
+            first.replay(&traj(), &batches, &[]),
+            Err(crate::engine::ReplayRefusal::NewerRevision {
+                position: 1,
+                engine: PolicyRevision::FIRST,
+                batch: PolicyRevision::new(2),
+            })
+        );
+        let reversed = [batches[1], batches[0]];
+        assert!(matches!(
+            second.replay(&traj(), &reversed, &[&first]),
+            Err(crate::engine::ReplayRefusal::RevisionRegressed { .. } | crate::engine::ReplayRefusal::Transition(_))
+        ));
+        let regressed = [
+            batches[0],
+            batches[1],
+            crate::engine::StampedBatch {
+                revision: Some(PolicyRevision::FIRST),
+                facts: &[],
+            },
+        ];
+        assert_eq!(
+            second.replay(&traj(), &regressed, &[&first]),
+            Err(crate::engine::ReplayRefusal::RevisionRegressed {
+                position: 2,
+                before: PolicyRevision::new(2),
+                batch: PolicyRevision::FIRST,
+            })
+        );
+    }
+
+    /// A family that follows a deployment holds two kinds of batch without a stamp. A batch of
+    /// host observations alone decides nothing and leaves the stamp where it was, after a publish
+    /// too. A decided one is what an engine reading the family as pinned to its opening file wrote
+    /// during a rolling release: it is judged under the opening revision, and refused once a later
+    /// stamp precedes it.
+    #[test]
+    fn an_unstamped_batch_of_a_following_family_is_judged_under_its_opening_revision() {
+        let first = engine_noting(Some(noting(None)), 1);
+        let second = engine_noting(Some(noting(None)), 2);
+        let (released, _, release) = released_note(&first);
+        let unstamped: Vec<Fact> = release
+            .into_iter()
+            .map(|fact| match fact {
+                Fact::BasisAdvanced {
+                    trajectory,
+                    act,
+                    advance,
+                    ..
+                } => Fact::BasisAdvanced {
+                    trajectory,
+                    act,
+                    advance,
+                    revision: None,
+                },
+                other => other,
+            })
+            .collect();
+        let opened = vec![opening(&first, &traj())];
+        let batch = |revision: Option<u64>, facts| crate::engine::StampedBatch {
+            revision: revision.map(PolicyRevision::new),
+            facts,
+        };
+
+        let replayed = second
+            .replay(&traj(), &[batch(Some(1), &opened), batch(None, &unstamped)], &[&first])
+            .expect("an unstamped decision replays under the opening revision");
+        assert_eq!(
+            replayed,
+            *released.crossed_to(&second),
+            "the decision is the opening revision's, and the view stands at the deciding one"
+        );
+        assert_eq!(replayed.stamp(), Some(PolicyRevision::new(2)));
+
+        let after_a_publish = second
+            .replay(
+                &traj(),
+                &[batch(Some(1), &opened), batch(Some(2), &[]), batch(None, &[])],
+                &[&first],
+            )
+            .expect("a host observation after a publish decides nothing");
+        assert_eq!(after_a_publish.stamp(), Some(PolicyRevision::new(2)));
+        assert_eq!(after_a_publish.position(), 3);
+
+        assert_eq!(
+            second.replay(
+                &traj(),
+                &[batch(Some(1), &opened), batch(Some(2), &[]), batch(None, &unstamped)],
+                &[&first],
+            ),
+            Err(crate::engine::ReplayRefusal::RevisionRegressed {
+                position: 2,
+                before: PolicyRevision::new(2),
+                batch: PolicyRevision::FIRST,
+            }),
+            "a decision under the opening file after a publish is a regression"
+        );
+    }
+
+    /// The test policy over two ranks with `note` declared as `note`, at `revision`.
+    fn engine_noting(note: Option<ToolAnnotation>, revision: u64) -> Engine {
+        let config = crate::registry::RegistryConfig {
+            trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: note
+                .into_iter()
+                .map(crate::contract::ToolDeclaration::Declared)
+                .collect(),
+            annotators: vec![],
+            authorities: vec![],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig::default(),
+        };
+        // The family starts suspicious, so a suspicious result narrows nothing and every
+        // variant of `note` releases alike: only the result's label tells them apart.
+        let profile = crate::profile::ProfileDeclaration {
+            starting_label: Label::new(Trust::new(0), Audience::public()),
+            ..crate::profile::covering_declaration(&config)
+        };
+        Engine::open(crate::profile::DeploymentPolicy {
+            registry: config,
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: crate::profile::PolicyDialectVersion::new(1),
+            profile,
+        })
+        .expect("the test policy opens")
+        .at(line(), PolicyRevision::new(revision))
+    }
+
+    /// Release one `note` call on a freshly opened family under `first`, and return the view
+    /// after the release with the dispatch it opened and the batch that released it.
+    fn released_note(first: &Engine) -> (EngineView, DispatchId, Vec<Fact>) {
+        let mut held = first
+            .view(&traj(), vec![opening(first, &traj())], 1)
+            .expect("the log validates");
+        let call = first
+            .resolve_call(ToolName::new("note"), b"{}")
+            .expect("the call resolves");
+        let decision = first
+            .handle(
+                &held,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![ProposedCall {
+                        tool: call.tool().clone(),
+                        arguments: call.canonical_arguments().canonical_bytes().to_vec(),
+                        annotation: None,
+                    }],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the batch decides");
+        let dispatch = match &decision.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("expected a release, got {other:?}"),
+        };
+        let batch = decision.append.expect("a release appends");
+        held.advance(&batch).unwrap();
+        (held, dispatch, batch.facts().to_vec())
+    }
+
+    /// Report `dispatch`'s success under `judge`, and return the label its result was admitted at
+    /// once the batch replays under the revision that decided it.
+    fn admitted_under(judge: &Engine, earlier: &Engine, held: &EngineView, dispatch: &DispatchId) -> Label {
+        let decision = judge
+            .handle(
+                held,
+                EngineEvent::Outcome(ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("the note")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the outcome decides");
+        let batch = decision.append.expect("the close appends");
+        let replayed = judge
+            .extend(
+                held.clone(),
+                &[crate::engine::StampedBatch {
+                    revision: batch.revision(),
+                    facts: batch.facts(),
+                }],
+                &[earlier],
+            )
+            .expect("the outcome replays under the revision that decided it");
+        assert!(!replayed.projection().view(&traj()).is_open(dispatch));
+        batch
+            .facts()
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::ValueAdmitted { value, .. } => Some(value.label.clone()),
+                _ => None,
+            })
+            .expect("a success admits its result")
+    }
+
+    /// `note` with the delta `trust` and no requirement of its own.
+    fn noting(trust: Option<u8>) -> ToolAnnotation {
+        ToolAnnotation {
+            delta: crate::contract::Delta {
+                trust: trust.map(Trust::new),
+                audience: None,
+            },
+            requires: Requires::default(),
+            ..note_tool()
+        }
+    }
+
+    /// A result reported after a later revision dropped its tool is admitted under the terms its
+    /// release pinned: the revision judging it has no declaration of the call, and the release's
+    /// own terms are what the call ran under.
+    #[test]
+    fn a_result_after_its_tool_is_dropped_is_admitted_under_its_release_terms() {
+        let first = engine_noting(Some(noting(Some(0))), 1);
+        let (held, dispatch, _) = released_note(&first);
+        let second = engine_noting(None, 2);
+        assert_eq!(
+            admitted_under(&second, &first, &held, &dispatch),
+            Label::new(Trust::new(0), Audience::public()),
+            "the release's delta labels the result"
+        );
+    }
+
+    /// A result reported after a later revision redeclared its tool is labelled by the meet of the
+    /// release's terms and the judging revision's: a revision can tighten what a running call
+    /// returns, and never loosen what its release promised.
+    #[test]
+    fn a_result_after_a_revision_is_labelled_by_release_terms_met_with_the_heads() {
+        // Released as trusted output; the next revision says the tool returns suspicious data.
+        let first = engine_noting(Some(noting(None)), 1);
+        let (held, dispatch, _) = released_note(&first);
+        let tightened = engine_noting(Some(noting(Some(0))), 2);
+        assert_eq!(
+            admitted_under(&tightened, &first, &held, &dispatch),
+            Label::new(Trust::new(0), Audience::public()),
+            "the head tightens a running call's result"
+        );
+
+        // Released as suspicious output; the next revision forgets the restriction.
+        let first = engine_noting(Some(noting(Some(0))), 1);
+        let (held, dispatch, _) = released_note(&first);
+        let loosened = engine_noting(Some(noting(None)), 2);
+        assert_eq!(
+            admitted_under(&loosened, &first, &held, &dispatch),
+            Label::new(Trust::new(0), Audience::public()),
+            "the head never loosens what the release pinned"
+        );
+    }
+
+    /// A rank the arriving chain drops crosses a value to its lowest rank and a floor to its
+    /// highest: a crossing never loosens.
+    #[test]
+    fn a_dropped_rank_crosses_values_down_and_floors_up() {
+        let leaving = crate::registry::TrustChain::new(vec!["low".into(), "mid".into(), "high".into()]);
+        let arriving = crate::registry::TrustChain::new(vec!["low".into(), "high".into()]);
+        assert!(
+            leaving.crossing_to(&leaving).is_none(),
+            "the same chain crosses as the identity"
+        );
+        let crossing = leaving.crossing_to(&arriving).expect("the chains differ");
+        let crossed = |trust: u8, floor: bool| {
+            let mut label = Label::new(Trust::new(trust), Audience::public());
+            if floor {
+                label.cross_floor(&crossing);
+            } else {
+                label.cross_value(&crossing);
+            }
+            label.trust
+        };
+        assert_eq!(crossed(0, false), Trust::new(0));
+        assert_eq!(crossed(2, false), Trust::new(1), "high keeps its name");
+        assert_eq!(
+            crossed(1, false),
+            Trust::new(0),
+            "a value at a dropped rank drops to the lowest"
+        );
+        assert_eq!(
+            crossed(1, true),
+            Trust::new(1),
+            "a floor at a dropped rank rises to the highest"
+        );
+        assert_eq!(
+            crossed(u8::MAX, false),
+            Trust::new(u8::MAX),
+            "top trust is above every chain"
+        );
     }
 
     #[test]
