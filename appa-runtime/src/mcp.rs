@@ -193,8 +193,8 @@ impl RuntimeTools {
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
-                       session accepts from the return; a plan that attests it also takes \
-                       `return_schema`. After execution succeeds, propose the call again with \
+                       session accepts from the return, unless it takes no return; a plan \
+                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
@@ -368,8 +368,8 @@ impl RuntimeToolService {
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
-                       session accepts from the return; a plan that attests it also takes \
-                       `return_schema`. After execution succeeds, propose the call again with \
+                       session accepts from the return, unless it takes no return; a plan \
+                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,

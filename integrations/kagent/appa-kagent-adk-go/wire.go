@@ -220,11 +220,12 @@ type Review struct {
 }
 
 // The return routes an offer declares: ReturnAsSpoken crosses the child's
-// return as the child spoke it, and ReturnSanitized crosses what the
-// named sanitizer derives.
+// return as the child spoke it, ReturnSanitized crosses what the named
+// sanitizer derives, and ReturnVoid crosses nothing.
 const (
 	ReturnAsSpoken  = "as_spoken"
 	ReturnSanitized = "sanitized"
+	ReturnVoid      = "void"
 )
 
 // Offer is one remedy a deny_call offers, for the plugin that routes one
@@ -394,10 +395,10 @@ func parseOfferReturn(id string, raw any) (Offer, error) {
 	case nil:
 		return Offer{OfferID: id}, nil
 	case string:
-		if route != ReturnAsSpoken {
+		if route != ReturnAsSpoken && route != ReturnVoid {
 			return Offer{}, wireErrorf("a deny_call offer with a return route outside the wire: %q", route)
 		}
-		return Offer{OfferID: id, Returns: ReturnAsSpoken}, nil
+		return Offer{OfferID: id, Returns: route}, nil
 	case map[string]any:
 		sanitizer, ok := route["sanitizer"].(string)
 		if !ok {

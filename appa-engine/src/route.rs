@@ -128,8 +128,8 @@ pub enum RouteStep {
     },
     Sanitize(SanitizerName),
     /// Declare the child's return policy for a marked spawn: a floor, behind the named untagged
-    /// output sanitizer when one is given.
-    Return(Option<SanitizerName>),
+    /// output sanitizer when one is given, or no return.
+    Return(crate::fact::ReturnRoute),
 }
 
 /// `Complete` ends with the blocked call's release. `Prefix` stops earlier, where the next state
@@ -667,7 +667,7 @@ impl<'a> Search<'a> {
                 RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                 RemedyStep::Withhold => RouteStep::Withhold,
                 RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
-                RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
+                RemedyStep::Return(route) => RouteStep::Return(route.clone()),
             })
             .collect()
     }
@@ -1214,8 +1214,11 @@ mod tests {
                 RouteStep::Accept(_) => "accept".to_string(),
                 RouteStep::Withhold => "withhold".to_string(),
                 RouteStep::Sanitize(sanitizer) => format!("sanitize:{}", sanitizer.as_str()),
-                RouteStep::Return(None) => "return".to_string(),
-                RouteStep::Return(Some(sanitizer)) => format!("return:{}", sanitizer.as_str()),
+                RouteStep::Return(crate::fact::ReturnRoute::Raw) => "return".to_string(),
+                RouteStep::Return(crate::fact::ReturnRoute::Sanitized(sanitizer)) => {
+                    format!("return:{}", sanitizer.as_str())
+                }
+                RouteStep::Return(crate::fact::ReturnRoute::Void) => "void".to_string(),
             })
             .collect()
     }
@@ -1747,7 +1750,7 @@ mod tests {
                                     RemedyStep::Withhold => RouteStep::Withhold,
                                     RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                                     RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
-                                    RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
+                                    RemedyStep::Return(route) => RouteStep::Return(route.clone()),
                                 })
                                 .collect(),
                             RouteOutcome::Complete,

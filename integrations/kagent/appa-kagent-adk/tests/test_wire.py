@@ -227,6 +227,7 @@ def test_a_deny_carries_its_offers_and_review():
             {"offer_id": "offer-1", "returns": "as_spoken"},
             {"offer_id": "offer-2", "returns": {"sanitizer": "strip-instructions"}},
             {"offer_id": "offer-3"},
+            {"offer_id": "offer-4", "returns": "void"},
         ],
         "review": [{"offer_id": "offer-3", "text": "rule on this"}],
     }
@@ -235,5 +236,6 @@ def test_a_deny_carries_its_offers_and_review():
         wire.Offer("offer-1", returns=wire.RETURN_AS_SPOKEN),
         wire.Offer("offer-2", returns=wire.RETURN_SANITIZED, sanitizer="strip-instructions"),
         wire.Offer("offer-3"),
+        wire.Offer("offer-4", returns=wire.RETURN_VOID),
     )
     assert decision.review == (("offer-3", "rule on this"),)
