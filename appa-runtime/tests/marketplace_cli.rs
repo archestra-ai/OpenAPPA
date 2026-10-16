@@ -3,6 +3,182 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+/// The same public installer acquires a build, exports it, and restores its
+/// runtime/plugin into a different global profile without Bun or a checkout.
+#[cfg(unix)]
+#[test]
+fn opencode_installs_roundtrips_offline_preserves_settings_and_removes_only_owned_entries() {
+    use appa_package::generation::ArtifactDigest;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let port = || {
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        socket.local_addr().unwrap().port()
+    };
+    let source_port = port();
+    let target_port = port();
+    let config = |root: &Path| root.join("xdg/appa/opencode/appa.toml");
+    let settings = |root: &Path| root.join("xdg/opencode/opencode.json");
+    let invoke = |root: &Path, port: u16, args: &[&str], restricted: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
+        command
+            .args(args)
+            .current_dir(root)
+            .env("HOME", root)
+            .env("XDG_CONFIG_HOME", root.join("xdg"))
+            .env_remove("OPENCODE_CONFIG_DIR")
+            .env_remove("APPA_CONFIG")
+            .env("APPA_OPENCODE_ENDPOINT", format!("http://127.0.0.1:{port}"))
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null());
+        if restricted {
+            command.env("PATH", root.join("no-programs"));
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    // A guard reaps only runtimes these isolated installs start, even if an
+    // assertion fails. The runtime confirms its identity before the pid is used.
+    struct Runtimes(Vec<u32>);
+    impl Drop for Runtimes {
+        fn drop(&mut self) {
+            for pid in &self.0 {
+                unsafe {
+                    libc::kill(*pid as i32, libc::SIGTERM);
+                }
+            }
+        }
+    }
+    let mut runtimes = Runtimes(Vec::new());
+    let get = |port: u16, path: &str| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.split_once("\r\n\r\n").unwrap().1.to_owned()
+    };
+    invoke(
+        source.path(),
+        source_port,
+        &["plugin", "install", "opencode", "--json"],
+        false,
+    );
+    let fingerprint = get(source_port, "/binary-fingerprint");
+    runtimes
+        .0
+        .push(fingerprint.split_whitespace().nth(1).unwrap().parse().unwrap());
+    assert!(fingerprint.contains(config(source.path()).to_str().unwrap()));
+    let bundle = source.path().join("appa.tar.gz");
+    invoke(
+        source.path(),
+        source_port,
+        &[
+            "bundle",
+            "--config",
+            config(source.path()).to_str().unwrap(),
+            "--output",
+            bundle.to_str().unwrap(),
+            "--json",
+        ],
+        false,
+    );
+    let digest = ArtifactDigest::of_bytes(&std::fs::read(&bundle).unwrap());
+    let existing = serde_json::json!({"model":"project/model", "plugins":["unrelated-plugin"],
+        "commands":{"mine":{"template":"Keep this"}}, "mcp":{"servers":{"other":{"type":"remote","url":"http://localhost:9999/mcp"},
+            "appa":{"type":"remote","url":format!("http://127.0.0.1:{target_port}/mcp"),"timeout":12345}}}});
+    std::fs::create_dir_all(settings(target.path()).parent().unwrap()).unwrap();
+    std::fs::write(settings(target.path()), existing.to_string()).unwrap();
+    let install = [
+        "plugin",
+        "install",
+        "opencode",
+        "--from",
+        bundle.to_str().unwrap(),
+        "--sha256",
+        digest.hex(),
+        "--json",
+    ];
+    invoke(target.path(), target_port, &install, true);
+    let fingerprint = get(target_port, "/binary-fingerprint");
+    runtimes
+        .0
+        .push(fingerprint.split_whitespace().nth(1).unwrap().parse().unwrap());
+    assert!(fingerprint.contains(config(target.path()).to_str().unwrap()));
+    assert_eq!(get(target_port, "/health").trim(), "ok");
+    let before = std::fs::read(settings(target.path())).unwrap();
+    let mut registered: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(registered["model"], existing["model"]);
+    assert_eq!(registered["commands"]["mine"], existing["commands"]["mine"]);
+    assert_eq!(
+        registered["mcp"]["servers"]["other"],
+        existing["mcp"]["servers"]["other"]
+    );
+    assert_eq!(registered["mcp"]["servers"]["appa"]["timeout"], 12345);
+    assert_eq!(registered["plugins"].as_array().unwrap().len(), 2);
+    let plugin = Path::new(registered["plugins"][1]["package"].as_str().unwrap());
+    assert!(
+        plugin
+            .canonicalize()
+            .unwrap()
+            .starts_with(target.path().canonicalize().unwrap())
+    );
+    assert!(plugin.join("index.js").is_file());
+    assert!(!plugin.join("node_modules").exists());
+    assert!(
+        registered["commands"]["appa-guide"]["template"]
+            .as_str()
+            .unwrap()
+            .contains("appa opencode setup")
+    );
+    assert!(!target.path().join("opencode.json").exists(), "no project registration");
+    let custom = format!(
+        "{}\n# Operator customization\n",
+        std::fs::read_to_string(config(target.path())).unwrap()
+    );
+    std::fs::write(config(target.path()), &custom).unwrap();
+    invoke(
+        target.path(),
+        target_port,
+        &["plugin", "install", "opencode", "--json"],
+        true,
+    );
+    assert_eq!(std::fs::read(settings(target.path())).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(config(target.path())).unwrap(), custom);
+    // Removal leaves an operator-edited command, unrelated settings, and the
+    // running runtime intact; a second removal is harmless.
+    registered["commands"]["appa-guide"]["template"] = serde_json::json!("Operator command");
+    std::fs::write(settings(target.path()), registered.to_string()).unwrap();
+    for _ in 0..2 {
+        invoke(
+            target.path(),
+            target_port,
+            &["plugin", "remove", "opencode", "--json"],
+            true,
+        );
+    }
+    let removed: serde_json::Value = serde_json::from_slice(&std::fs::read(settings(target.path())).unwrap()).unwrap();
+    assert_eq!(removed["plugins"], serde_json::json!(["unrelated-plugin"]));
+    assert!(removed["mcp"]["servers"].get("appa").is_none());
+    assert_eq!(removed["commands"]["appa-guide"]["template"], "Operator command");
+    assert_eq!(std::fs::read_to_string(config(target.path())).unwrap(), custom);
+    assert_eq!(get(target_port, "/health").trim(), "ok");
+}
+
 fn run(root: &Path, args: &[&str]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
         .args(args)

@@ -22,6 +22,7 @@ pub(crate) mod includes;
 mod kagent;
 mod kagent_images;
 pub mod native;
+pub mod opencode;
 pub use acquisition::{Acquired, Requirements};
 
 #[derive(Debug, Error)]
@@ -642,12 +643,16 @@ impl Installation {
         let previous = self.selection()?;
         if activation == Activation::Claude {
             // Missing or mismatched executables fail before the config changes.
-            native::ClaudeArtifacts::prepare(self, selection.generation(), selection.platform)?;
+            native::NativeArtifacts::prepare(self, selection.generation(), selection.platform)?;
         } else if activation == Activation::RemoveClaude {
             let previous = previous
                 .as_ref()
                 .ok_or_else(|| InstallError::Invalid("native removal has no prior selection".into()))?;
-            native::ClaudeArtifacts::prepare(self, previous.generation(), previous.platform)?;
+            native::NativeArtifacts::prepare(self, previous.generation(), previous.platform)?;
+        }
+        if selection.plugins.contains("opencode") {
+            native::NativeArtifacts::prepare(self, selection.generation(), selection.platform)?;
+            opencode::verify(self, selection)?;
         }
         let journal_path = self.state.join("transaction.json");
         let journal = ConfigTransaction {
@@ -734,10 +739,25 @@ impl Installation {
                 path: path.clone(),
                 reason: format!("{error}."),
             })?;
+            let opencode_activation = if transaction.selection.plugins.contains("opencode") {
+                opencode::activate(self, &transaction.selection)
+            } else if transaction
+                .previous
+                .as_ref()
+                .is_some_and(|previous| previous.plugins.contains("opencode"))
+            {
+                opencode::remove(&self.config)
+            } else {
+                Ok(())
+            };
+            opencode_activation.map_err(|error| InstallError::Recovery {
+                path: path.clone(),
+                reason: format!("{error}."),
+            })?;
             if transaction.activation != Activation::None {
                 let activate = || {
                     match transaction.activation {
-                        Activation::Claude => native::ClaudeArtifacts::prepare(
+                        Activation::Claude => native::NativeArtifacts::prepare(
                             self,
                             transaction.selection.generation(),
                             transaction.selection.platform,
@@ -751,7 +771,7 @@ impl Installation {
                                 .ok_or_else(|| {
                                     InstallError::Invalid("removal requires its prior native artifact".into())
                                 })?;
-                            native::ClaudeArtifacts::prepare(self, previous.generation(), previous.platform)?
+                            native::NativeArtifacts::prepare(self, previous.generation(), previous.platform)?
                                 .remove(&self.config)?
                         }
                         Activation::None => unreachable!("native activation branch excludes None"),
@@ -1254,6 +1274,7 @@ mod tests {
             BTreeMap::from([
                 ("claude-code".to_owned(), vec!["claude-code".to_owned()]),
                 ("kagent".to_owned(), vec![]),
+                ("opencode".to_owned(), vec!["opencode".to_owned()]),
             ])
         );
     }

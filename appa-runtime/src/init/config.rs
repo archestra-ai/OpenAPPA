@@ -9,7 +9,7 @@ use super::InitError;
 
 /// The policy key of the config file this activation validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ComposedPolicy {
+pub(crate) enum ComposedPolicy {
     /// The key, comparable against the one a runtime serves.
     Key(String),
     /// A `token_env` resolves only where the runtime runs, so this process cannot compose
@@ -38,7 +38,7 @@ pub(super) fn discard_file(path: &Path) {
 /// this file has changed.
 /// Answers with the policy key this file composes to, or [`ComposedPolicy::Unknowable`]
 /// when the file resolves only where the runtime runs.
-pub(super) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
+pub(crate) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
     let config = match Config::load_local(path, &[]) {
         Ok(config) => config,
         // A `token_env` resolves where the runtime runs, not here. A hook starts

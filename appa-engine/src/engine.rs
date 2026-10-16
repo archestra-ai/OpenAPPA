@@ -14,7 +14,7 @@ use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom}
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
-use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV2};
+use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentity};
 use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry, ToolKind};
@@ -61,7 +61,10 @@ pub enum ForkStatus {
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
-    identity: PolicyIdentityV2,
+    identity: PolicyIdentity,
+    /// What earlier identity algorithms give this policy: the digest an opening an earlier engine
+    /// recorded names it by.
+    earlier_identities: Vec<PolicyIdentity>,
     dialect: PolicyDialectVersion,
 }
 
@@ -90,10 +93,12 @@ impl Engine {
         let profile = DeploymentProfile::declare(declaration.clone())?;
         let registry = Registry::build(config, planner_cap, profile)?;
         profile::validate_coverage(&registry, &declaration)?;
-        let identity = PolicyIdentityV2::of_registry(&registry);
+        let identity = PolicyIdentity::of_registry(&registry);
+        let earlier_identities = PolicyIdentity::earlier_of_registry(&registry);
         Ok(Engine {
             registry,
             identity,
+            earlier_identities,
             dialect,
         })
     }
@@ -106,8 +111,21 @@ impl Engine {
         self.registry.profile()
     }
 
-    pub fn identity(&self) -> PolicyIdentityV2 {
+    pub fn identity(&self) -> PolicyIdentity {
         self.identity
+    }
+
+    /// Whether a durable opening's `policy_digest` names this engine's policy: its identity, or
+    /// the identity an earlier identity algorithm gives the same policy. Every opening this engine
+    /// records carries [`Engine::identity`].
+    pub fn recognizes(&self, digest: &PolicyIdentity) -> bool {
+        *digest == self.identity || self.earlier_identities.contains(digest)
+    }
+
+    /// What earlier identity algorithms give this policy, newest first. Empty for a policy no
+    /// earlier algorithm could express.
+    pub fn earlier_identities(&self) -> &[PolicyIdentity] {
+        &self.earlier_identities
     }
 
     /// The open vectors derived from the validated declaration and the registered tool set —
@@ -10516,6 +10534,32 @@ mod tests {
                 }
             }),
             Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
+        );
+        // An opening an earlier engine recorded carries the identity its algorithm gave this
+        // policy, and names this policy as surely as the current identity does.
+        let earlier = *e
+            .earlier_identities()
+            .first()
+            .expect("a policy that forwards nothing has a v1 identity");
+        assert_ne!(earlier, e.identity(), "the algorithms differ in their domain tag");
+        assert!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    *policy_digest = earlier;
+                }
+            })
+            .is_ok(),
+            "the v1 identity of this policy reopens its trajectory"
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    let other = engine(vec![plain_tool("send")]);
+                    *policy_digest = other.earlier_identities()[0];
+                }
+            }),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch)),
+            "the v1 identity of another policy does not"
         );
         assert_eq!(
             mutated(&|fact| {

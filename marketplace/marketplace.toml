@@ -12,7 +12,7 @@ digest = "sha256:b352564763dc215a4bfbccb65aa0c53cb9262850d726f60077fbb67d807eaa3
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
-digest = "sha256:4352a8f13df935e43d571738007df80912b9f58d50d2ae50ed556888f42d4474"
+digest = "sha256:2d31e6f39ccfc15659942cd2ee7020cad2ce5c33077dd442f39e4e0c96ec9bb4"
 
 [packages.battery.databricks]
 path = "batteries/databricks"
@@ -20,7 +20,7 @@ digest = "sha256:c04aa3aa7a3559d935b7f0f509573a72aa8e806b2d4d6e4198fcb8cb1e99c2f
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:a7a175a2c1b1e025e6b322abbb7504a3d41ecaff00294ac192b3f5c48e74922c"
+digest = "sha256:202be34feccd5a97a650b2f692b566160ac0e6f075db329779e51aa16e7ef869"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -48,7 +48,7 @@ digest = "sha256:311bb46544f752f21f2758b448aac645f96b99af7591ca91b02e6d6dfcb75eb
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"
-digest = "sha256:bb1f1f27bb06c4e7cad9ad89544a9a4079cfa9e9097a0c5c97e1955fac0719c9"
+digest = "sha256:6a9466b2f6029a373b7ed906c61a0988db5c80a66cf77f8edb162473a8e53d03"
 
 [packages.battery.monday]
 path = "batteries/monday"
@@ -56,7 +56,11 @@ digest = "sha256:c8d0ef2c98c994f8c544dd12b351c9ba0df98c8facb2f71a5c1a99af1472980
 
 [packages.battery.notion]
 path = "batteries/notion"
-digest = "sha256:90cf73b4e722f920a0227571c4b64c155e9fd87d36c11d0a34966d65da69d53e"
+digest = "sha256:ed071cf879f00de24bdaeaa5ea10eee585847c6a79676cf73dbc9472b17d1ec8"
+
+[packages.battery.opencode]
+path = "batteries/opencode"
+digest = "sha256:d2d33f5cfb1910baf6c87314deeb3b976da0eb78c7785bdf2d770b83b499699f"
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
@@ -85,3 +89,7 @@ digest = "sha256:626ab9b1828486d2a468f5aaf15ac119a4f17ca0673b7d7d6b0a3ba94a843f8
 [packages.plugin.kagent]
 path = "plugins/kagent"
 digest = "sha256:d45f1756b51d1a64156de0bcd9d7900a6006a473e3c71f147f1e61523c783688"
+
+[packages.plugin.opencode]
+path = "plugins/opencode"
+digest = "sha256:20e2ca538c4dd99ed659591fc99a30f6ba47b911f447918a4feb4bb900823a1f"

@@ -9,7 +9,7 @@ use crate::execute::AuthorityReview;
 use crate::label::{Label, ReaderId};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlanId;
-use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV2};
+use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
     ValueId,
@@ -305,7 +305,7 @@ pub struct TrajectoryOpening {
     pub trajectory: TrajectoryId,
     pub dialect: PolicyDialectVersion,
     pub profile: DeploymentProfile,
-    pub policy_digest: PolicyIdentityV2,
+    pub policy_digest: PolicyIdentity,
     pub policy_file_key: PolicyFileKey,
     pub open_vectors: Vec<OpenVector>,
     /// Set when the root opened as a fork of another family's trajectory. Its label starts

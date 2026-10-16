@@ -1,0 +1,36 @@
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "host/opencode/appa_subagent"
+
+[[policy.tool]]
+name = "host/opencode/read(path:*/private/*)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/opencode/read"
+
+[[policy.tool]]
+name = "host/opencode/webfetch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/opencode/websearch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/opencode/write"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/opencode/edit"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/opencode/shell(command:pwd)"
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[externals]

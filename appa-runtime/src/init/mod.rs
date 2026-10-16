@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use thiserror::Error;
 
-mod config;
+pub(crate) mod config;
 pub(crate) mod endpoint;
 mod mcp;
 pub(crate) mod paths;

@@ -1,7 +1,8 @@
 //! The `archestra` builtin: the rendered [`ModelPrompt`] posted to an endpoint the embedding
 //! host supplies, which picks and calls the model itself. The host sees what an `llm`
 //! provider would — the declaration in `system`, the redacted artifact in `input`, the
-//! per-kind output schema in `schema` — and answers with the schema object as the body.
+//! per-kind output schema in `schema` — plus, in `attribution`, the trajectory the consult
+//! is made for, and answers with the schema object as the body.
 
 use std::time::Duration;
 
@@ -9,7 +10,45 @@ use super::consult_with_retries;
 use crate::config::{Endpoint, EndpointHost, EndpointToken, ModelLimits};
 use crate::consult::ModelPrompt;
 use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, error_line, read_body};
+use appa_engine::value::TrajectoryId;
 use appa_policy::AnnotatorBuiltin;
+
+/// The trajectory a consult is made for, and the tool call it judges, if any. The host
+/// files the model call it makes under the session and caller that own this trajectory.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct Attribution {
+    pub(crate) root: TrajectoryId,
+    pub(crate) trajectory: TrajectoryId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) call_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct Scope {
+    context: Option<String>,
+    attribution: Attribution,
+}
+
+// Scoped around the exact consult future, including retries and hedges; no spawned task
+// or process-wide endpoint configuration carries another request's context or attribution.
+tokio::task_local! { static SCOPE: Scope; }
+
+pub(crate) async fn within<T>(context: Option<&str>, attribution: Attribution, future: impl Future<Output = T>) -> T {
+    let scope = Scope {
+        context: context.map(str::to_owned),
+        attribution,
+    };
+    SCOPE.scope(scope, future).await
+}
+
+#[derive(serde::Serialize)]
+struct Request<'a> {
+    system: &'a str,
+    input: &'a str,
+    schema: &'a serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attribution: Option<&'a Attribution>,
+}
 
 /// One client for the host's endpoint, shared by every `builtin = "archestra"` Annotator of
 /// the deployment. Its permit pool is the runtime's `archestra` gate.
@@ -63,16 +102,23 @@ impl ArchestraBackend {
     /// One request; the answer text is read to one byte past `max_body_bytes`, enough for
     /// the caller to call it oversized.
     async fn send(&self, prompt: &ModelPrompt) -> Result<String, NoAnswerReason> {
-        let body = serde_json::json!({
-            "system": prompt.system,
-            "input": prompt.input,
-            "schema": prompt.schema,
-        });
+        let scope = SCOPE.try_with(Clone::clone).ok();
+        let body = Request {
+            system: &prompt.system,
+            input: &prompt.input,
+            schema: &prompt.schema,
+            attribution: scope.as_ref().map(|scope| &scope.attribution),
+        };
         let mut request = self.http.post(&self.endpoint.url).json(&body);
         match &self.endpoint.token {
             Some(EndpointToken::Set(token)) => request = request.bearer_auth(token.reveal()),
             Some(EndpointToken::Deferred) => return Err(NoAnswerReason::Unregistered),
             None => {}
+        }
+        if let Some(context) = scope.and_then(|scope| scope.context) {
+            let mut value = reqwest::header::HeaderValue::from_str(&context).map_err(|_| NoAnswerReason::Malformed)?;
+            value.set_sensitive(true);
+            request = request.header("x-archestra-openappa-context", value);
         }
         let mut response = request.send().await.map_err(|error| {
             tracing::debug!(%error, "the archestra consult failed");
@@ -186,6 +232,48 @@ mod tests {
         );
         assert_eq!(seen.raw_response.as_deref(), Some(&b"{\"ruling\":\"approve\"}"[..]));
         assert_eq!(seen.http_status, None);
+        assert!(!headers.contains_key("x-archestra-openappa-context"));
+    }
+
+    #[tokio::test]
+    async fn a_scoped_consult_names_its_trajectory_and_call_and_carries_the_host_context() {
+        let (url, requests) = serve(StatusCode::OK, "{\"ruling\":\"approve\"}").await;
+        let backend = backend(url, 65_536);
+        let attribution = |call_id: Option<&str>| Attribution {
+            root: TrajectoryId::new("archestra:root"),
+            trajectory: TrajectoryId::new("archestra:child"),
+            call_id: call_id.map(str::to_owned),
+        };
+
+        within(
+            Some("token-1"),
+            attribution(Some("toolu_1")),
+            backend.consult(&prompt(), "judge", None),
+        )
+        .await
+        .unwrap();
+        within(None, attribution(None), backend.consult(&prompt(), "judge", None))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        let [(headers, body), (bare_headers, bare_body)] = &requests[..] else {
+            panic!("two requests: {requests:?}");
+        };
+        assert_eq!(headers["x-archestra-openappa-context"], "token-1");
+        assert_eq!(
+            body["attribution"],
+            serde_json::json!({
+                "root": "archestra:root",
+                "trajectory": "archestra:child",
+                "call_id": "toolu_1",
+            })
+        );
+        assert!(!bare_headers.contains_key("x-archestra-openappa-context"));
+        assert_eq!(
+            bare_body["attribution"],
+            serde_json::json!({ "root": "archestra:root", "trajectory": "archestra:child" })
+        );
     }
 
     #[tokio::test]

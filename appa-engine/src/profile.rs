@@ -283,23 +283,59 @@ impl PolicyFileKey {
     }
 }
 
-/// The versioned policy identity: a domain-separated SHA-256 digest over the RFC 8785
-/// canonical bytes of the identity document — the normalized engine-visible policy and deployment
-/// declaration. The document is field-aware: it names every included field explicitly, preserves
-/// the semantic sequences (the trust chain's rank order, authority registration order), sorts
-/// true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
+/// The policy identity a durable opening records: a domain-separated SHA-256 digest over the
+/// RFC 8785 canonical bytes of the identity document — the normalized engine-visible policy and
+/// deployment declaration. The document is field-aware: it names every included field explicitly,
+/// preserves the semantic sequences (the trust chain's rank order, authority registration order),
+/// sorts true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
+///
+/// The domain tag names the identity algorithm, and an opening records the digest the algorithm
+/// of the engine that opened it gave its policy. [`PolicyIdentity::of_registry`] computes the
+/// current algorithm. An engine also recognizes what [`PolicyIdentity::earlier_of_registry`]
+/// computes, so a trajectory an earlier engine opened still reopens under the same policy after
+/// the identity document changes. A change to the identity document keeps the replaced algorithm
+/// there. Drop an earlier algorithm only once no host keeps a trajectory that it opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyIdentityV2(#[serde(with = "crate::hex32")] [u8; 32]);
+pub struct PolicyIdentity(#[serde(with = "crate::hex32")] [u8; 32]);
 
-impl PolicyIdentityV2 {
+impl PolicyIdentity {
+    /// The identity under the current algorithm, `appa:policy-identity:v2`.
     pub(crate) fn of_registry(registry: &Registry) -> Self {
-        let document = identity_document_from_registry(registry);
-        let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
+        Self::digest(
+            b"appa:policy-identity:v2",
+            &identity_document_from_registry(registry, true),
+        )
+    }
+
+    /// The identities earlier identity algorithms give this policy. `appa:policy-identity:v1`
+    /// is the current document without `forwards`, which v1 did not know. A policy where a rule
+    /// declares `forwards` has no v1 identity: no v1 engine compiled such a policy, so no opening
+    /// a v1 engine recorded names it.
+    pub(crate) fn earlier_of_registry(registry: &Registry) -> Vec<Self> {
+        let forwards_nothing = registry
+            .semantic_tools()
+            .filter_map(|(_, declaration)| match declaration {
+                ToolDeclaration::Declared(tool) => Some(tool),
+                ToolDeclaration::Annotated { .. } => None,
+            })
+            .chain(registry.provider_run_annotations())
+            .all(|tool| tool.forwards == crate::contract::Delta::NONE);
+        if !forwards_nothing {
+            return Vec::new();
+        }
+        vec![Self::digest(
+            b"appa:policy-identity:v1",
+            &identity_document_from_registry(registry, false),
+        )]
+    }
+
+    fn digest(tag: &[u8], document: &serde_json::Value) -> Self {
+        let canonical = serde_json_canonicalizer::to_vec(document).expect("an identity document canonicalizes");
         let mut hasher = Sha256::new();
-        hasher.update(b"appa:policy-identity:v2");
+        hasher.update(tag);
         hasher.update([0u8]);
         hasher.update(&canonical);
-        PolicyIdentityV2(hasher.finalize().into())
+        PolicyIdentity(hasher.finalize().into())
     }
 
     /// The digest bytes, for hosts that persist the identity beside a
@@ -309,9 +345,11 @@ impl PolicyIdentityV2 {
     }
 }
 
-fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
-    fn render_annotation(matcher: &crate::registry::ToolMatcher, tool: &ToolAnnotation) -> serde_json::Value {
-        serde_json::json!({
+/// The identity document. `with_forwards` is `false` only for the v1 algorithm, which predates
+/// the `forwards` rule field.
+fn identity_document_from_registry(registry: &Registry, with_forwards: bool) -> serde_json::Value {
+    let render_annotation = |matcher: &crate::registry::ToolMatcher, tool: &ToolAnnotation| {
+        let mut rendered = serde_json::json!({
             "name": tool.name,
             "matcher": matcher,
             "tags": sorted_set(&tool.tags),
@@ -326,8 +364,15 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
                 "history": sorted_set(&tool.requires.history),
                 "attention": sorted_set(&tool.requires.attention),
             },
-        })
-    }
+        });
+        if !with_forwards {
+            rendered
+                .as_object_mut()
+                .expect("a rendered annotation is an object")
+                .remove("forwards");
+        }
+        rendered
+    };
     let render = |matcher: &crate::registry::ToolMatcher, declaration: &ToolDeclaration| match declaration {
         ToolDeclaration::Declared(tool) => render_annotation(matcher, tool),
         ToolDeclaration::Annotated {
@@ -387,14 +432,14 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
 /// production reads [`crate::engine::Engine::identity`], which is this same digest taken
 /// from the registry the engine actually holds.
 #[cfg(test)]
-pub(crate) fn identity_of(registry: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV2 {
+pub(crate) fn identity_of(registry: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentity {
     let built = crate::registry::Registry::build(
         registry.clone(),
         crate::registry::PlannerCap::default(),
         profile.clone(),
     )
     .expect("a fixture configuration builds");
-    PolicyIdentityV2::of_registry(&built)
+    PolicyIdentity::of_registry(&built)
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -1218,7 +1263,7 @@ mod tests {
         assert_eq!(engine.open_vectors(), vec![]);
     }
 
-    fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV2 {
+    fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentity {
         super::identity_of(cfg, profile)
     }
 
@@ -1312,7 +1357,7 @@ mod tests {
     fn an_annotator_mandate_renders_its_audience_vocabulary_in_the_identity_document() {
         let rendered = |cfg: &RegistryConfig| -> Vec<String> {
             let engine = open(cfg.clone(), covering_declaration(cfg)).expect("the fixture opens");
-            let document = identity_document_from_registry(engine.registry());
+            let document = identity_document_from_registry(engine.registry(), true);
             document["annotators"][0]["audiences"]
                 .as_array()
                 .expect("a mandate renders its audiences as an array")
@@ -1380,6 +1425,47 @@ mod tests {
             identity(&explicit, &covering_profile(&explicit)),
             identity(&with_group, &covering_profile(&with_group))
         );
+    }
+
+    /// v1 is the current document without `forwards`. A policy that forwards nothing has one
+    /// v1 identity, which moves with every other edit; a policy that declares `forwards` has
+    /// none, since no v1 engine compiled such a policy.
+    #[test]
+    fn the_v1_identity_covers_every_field_but_forwards() {
+        let earlier = |cfg: &RegistryConfig| {
+            let built = crate::registry::Registry::build(
+                cfg.clone(),
+                crate::registry::PlannerCap::default(),
+                covering_profile(cfg),
+            )
+            .expect("a fixture configuration builds");
+            PolicyIdentity::earlier_of_registry(&built)
+        };
+        let cfg = config(vec![tool("fetch")]);
+        let [v1] = earlier(&cfg)[..] else {
+            panic!("a policy that forwards nothing has one v1 identity")
+        };
+        assert_ne!(v1, identity(&cfg, &covering_profile(&cfg)));
+
+        let delta_edit = config(vec![{
+            let mut t = tool("fetch");
+            t.delta = Delta {
+                trust: Some(Trust::new(0)),
+                audience: None,
+            };
+            t
+        }]);
+        assert_ne!(earlier(&delta_edit), vec![v1], "v1 still covers delta");
+
+        let forwards_edit = config(vec![{
+            let mut t = tool("fetch");
+            t.forwards = Delta {
+                trust: Some(Trust::new(0)),
+                audience: None,
+            };
+            t
+        }]);
+        assert_eq!(earlier(&forwards_edit), vec![], "no v1 policy declares forwards");
     }
 
     #[test]
@@ -1465,7 +1551,7 @@ mod tests {
         let base = identity(&viewer_only, &profile);
 
         let engine = open(viewer_only.clone(), covering_declaration(&viewer_only)).expect("the fixture opens");
-        let document = identity_document_from_registry(engine.registry());
+        let document = identity_document_from_registry(engine.registry(), true);
         assert_eq!(
             document["audience"]["sources"],
             serde_json::json!([{ "provider": "slack", "templates": [{ "template": "viewer", "feeds": "self" }] }])

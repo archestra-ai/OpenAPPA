@@ -693,7 +693,7 @@ pub enum DispatchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub policy_file_key: String,
-    pub policy_identity: String,
+    pub policy_digest: appa_engine::profile::PolicyIdentity,
 }
 
 /// Where a trajectory stands in its family's log, as [`RuntimeEngine::liveness`]
@@ -735,9 +735,15 @@ impl PolicyEngine<'_> {
     }
 
     /// The policy identity of the deciding engine, lowercase hex — what
-    /// a root's opening record must name.
+    /// a root's opening record names when this engine opens it.
     pub fn identity_hex(&self) -> String {
         hex(self.engine().engine.identity().bytes())
+    }
+
+    /// Whether an opening record's digest names the deciding engine's policy, under the
+    /// current identity algorithm or an earlier one ([`appa_engine::engine::Engine::recognizes`]).
+    pub fn recognizes(&self, digest: &appa_engine::profile::PolicyIdentity) -> bool {
+        self.engine().engine.recognizes(digest)
     }
 }
 
@@ -754,7 +760,7 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
             ..
         })) => Some(Opened {
             policy_file_key: policy_file_key.as_str().to_string(),
-            policy_identity: hex(policy_digest.bytes()),
+            policy_digest: *policy_digest,
         }),
         _ => None,
     }
@@ -4285,10 +4291,26 @@ fn block_feedback(
             fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
         ));
     }
+    if let Some(yell) = &presentation.yell_tool {
+        lines.push(String::new());
+        lines.push("Report:".to_string());
+        lines.push(format!("  {}", report_text(yell)));
+    }
     RenderedBlock {
         text: lines.join("\n"),
         display,
     }
+}
+
+/// Points the model at the host's reporting tool. A block reaches the model before it asks
+/// the person again, so this is where it learns that a plan which makes no sense, a run of
+/// blocks, or a person tired of approving is worth reporting instead of retrying.
+fn report_text(yell: &str) -> String {
+    format!(
+        "If a plan makes no sense, you keep getting blocked, the user keeps being asked to approve similar \
+         calls, or the user is frustrated, call {}.",
+        terminal_safe(yell)
+    )
 }
 
 fn fork_heading(advice: ForkAdvice) -> &'static str {
@@ -5229,6 +5251,7 @@ mod tests {
                     control_tool: "approve_remedy".to_string(),
                     supports_delegation: false,
                     include_display_plan,
+                    yell_tool: None,
                 };
                 let feedback = block_feedback(
                     &planned,
@@ -5293,6 +5316,7 @@ mod tests {
                 control_tool: "approve_remedy".to_string(),
                 supports_delegation: false,
                 include_display_plan: true,
+                yell_tool: None,
             };
             block_feedback(
                 &planned,
@@ -5339,6 +5363,7 @@ mod tests {
             control_tool: "approve_remedy".to_string(),
             supports_delegation: false,
             include_display_plan: true,
+            yell_tool: None,
         };
         let planned = PlannedBlock {
             raw: RawBlock {
@@ -5383,6 +5408,47 @@ mod tests {
         let display = feedback.display.expect("the opt-in carries a typed display plan");
         assert_eq!(display.plans[0].offer_id, "0123456789abcdef");
         assert_eq!(display.plans[0].text, "Submit for approval");
+    }
+
+    #[test]
+    fn a_host_reporting_tool_ends_the_block_with_a_report_section() {
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![],
+            fork_advice: Some(super::ForkAdvice::SameLabel),
+            narrowing_impact: None,
+        };
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let render = |yell_tool: Option<&str>| {
+            block_feedback(
+                &planned,
+                &[],
+                policy.engine().registry(),
+                &ReturnBounds {
+                    label: appa_engine::label::Label::top(),
+                    lowest: Trust::new(0),
+                },
+                ToolNaming::AsAuthored,
+                "tool",
+                &EmbeddedPresentationOptions {
+                    yell_tool: yell_tool.map(str::to_string),
+                    ..EmbeddedPresentationOptions::default()
+                },
+            )
+            .text
+        };
+        let reporting = render(Some("archestra__yell"));
+        assert!(
+            reporting.ends_with(
+                "Report:\n  If a plan makes no sense, you keep getting blocked, the user keeps being asked to \
+                 approve similar calls, or the user is frustrated, call archestra__yell."
+            ),
+            "the Report section comes last and names the host's spelling: {reporting}"
+        );
+        assert!(!render(None).contains("Report:"));
     }
 
     #[test]

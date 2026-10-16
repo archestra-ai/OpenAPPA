@@ -16,7 +16,7 @@ use crate::fact::{
 use crate::label::{Expansions, Label, MembershipContext};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::PolicyIdentityV2;
+use crate::profile::PolicyIdentity;
 use crate::projection::{Projection, Views};
 use crate::value::{
     ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
@@ -560,7 +560,7 @@ pub struct EngineDecision {
 pub struct ValidatedFactBatch {
     facts: Vec<Fact>,
     basis: u64,
-    policy: PolicyIdentityV2,
+    policy: PolicyIdentity,
     family: TrajectoryId,
 }
 
@@ -570,7 +570,7 @@ impl ValidatedFactBatch {
     pub(crate) fn seal(
         facts: Vec<Fact>,
         basis: u64,
-        policy: PolicyIdentityV2,
+        policy: PolicyIdentity,
         family: TrajectoryId,
     ) -> ValidatedFactBatch {
         ValidatedFactBatch {
@@ -587,7 +587,7 @@ impl ValidatedFactBatch {
         self.basis
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
+    pub(crate) fn policy(&self) -> PolicyIdentity {
         self.policy
     }
 
@@ -637,14 +637,14 @@ pub enum BatchRefusal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
-    policy: PolicyIdentityV2,
+    policy: PolicyIdentity,
     family: TrajectoryId,
 }
 
 impl EngineView {
     /// Take the projection a [`Sequence`] validated. Crate-private: the public entry is
     /// `Engine::view`, which runs that validation.
-    pub(crate) fn validated(projection: Projection, policy: PolicyIdentityV2, family: TrajectoryId) -> EngineView {
+    pub(crate) fn validated(projection: Projection, policy: PolicyIdentity, family: TrajectoryId) -> EngineView {
         EngineView {
             projection,
             policy,
@@ -682,7 +682,7 @@ impl EngineView {
         self.projection.offer_trajectory(offer)
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
+    pub(crate) fn policy(&self) -> PolicyIdentity {
         self.policy
     }
 
@@ -2195,11 +2195,12 @@ impl<'a> Sequence<'a> {
     }
 
     /// The strict judgment of the durable opening: the family's first record, naming
-    /// the family, at a dialect this engine reads, carrying this policy's digest, its validated
-    /// declaration byte for byte — which subsumes re-running the coverage matrix over it — and
-    /// the open vectors that declaration derives. `policy_file_key` is deliberately not judged
-    /// here: it names a stored file this engine never sees, and the outer layer re-hashes the
-    /// file it loaded against the record on every event.
+    /// the family, at a dialect this engine reads, carrying a digest that names this policy
+    /// ([`crate::engine::Engine::recognizes`]), its validated declaration byte for byte — which
+    /// subsumes re-running the coverage matrix over it — and the open vectors that declaration
+    /// derives. `policy_file_key` is deliberately not judged here: it names a stored file this
+    /// engine never sees, and the outer layer re-hashes the file it loaded against the record on
+    /// every event.
     fn root_opened(&self, opening: &TrajectoryOpening) -> Result<(), OpeningTransitionRefusal> {
         if self.projection.is_opened(&self.family) {
             return Err(OpeningTransitionRefusal::Duplicate);
@@ -2214,7 +2215,7 @@ impl<'a> Sequence<'a> {
                 found: opening.dialect.value(),
             });
         }
-        if opening.policy_digest != self.engine.identity() {
+        if !self.engine.recognizes(&opening.policy_digest) {
             return Err(OpeningTransitionRefusal::DigestMismatch);
         }
         if opening.profile != *self.engine.registry().profile() {

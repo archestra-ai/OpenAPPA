@@ -294,6 +294,9 @@ pub struct EmbeddedPresentationOptions {
     pub supports_delegation: bool,
     /// Formats remedy call lines with an explicit plan parameter.
     pub include_display_plan: bool,
+    /// The host's reporting tool, spelled the way the model calls it. When set, every block
+    /// ends with a Report section that names it; when unset, blocks do not mention reporting.
+    pub yell_tool: Option<String>,
 }
 
 impl Default for EmbeddedPresentationOptions {
@@ -302,6 +305,7 @@ impl Default for EmbeddedPresentationOptions {
             control_tool: appa_runtime_api::ADVERTISED_CONTROL_TOOL.to_owned(),
             supports_delegation: true,
             include_display_plan: false,
+            yell_tool: None,
         }
     }
 }
@@ -1007,6 +1011,8 @@ impl Prepared {
                 }),
                 store,
                 recorder: None,
+                #[cfg(feature = "archestra")]
+                archestra_context: None,
                 pinned: None,
             }),
         }
@@ -1018,6 +1024,8 @@ struct Inner {
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
     recorder: Option<Arc<dyn ConsultRecorder>>,
+    #[cfg(feature = "archestra")]
+    archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
     pinned: Option<Arc<Deployment>>,
 }
@@ -1109,6 +1117,13 @@ impl Runtime {
         self.view(|view| view.recorder = Some(recorder))
     }
 
+    /// A request-scoped opaque context returned only to the host's archestra
+    /// endpoint. It is never part of a consult artifact, record, or trajectory.
+    #[cfg(feature = "archestra")]
+    pub fn with_archestra_context(&self, context: String) -> Runtime {
+        self.view(|view| view.archestra_context = Some(context))
+    }
+
     /// This view serving `deployment` instead of the runtime's serving one: every root it
     /// opens, event it decides and consult it makes reads this deployment, whatever a
     /// concurrent [`Runtime::install`] swaps in. A host that serves many policies from one
@@ -1143,6 +1158,8 @@ impl Runtime {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
             recorder: self.inner.recorder.clone(),
+            #[cfg(feature = "archestra")]
+            archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),
         };
         vary(&mut inner);
@@ -1310,7 +1327,7 @@ impl Inner {
             } else {
                 PolicyEngine::Retired(self.retired_engine(&opened.policy_file_key, log.policy_file())?)
             };
-        if policy.identity_hex() != opened.policy_identity {
+        if !policy.recognizes(&opened.policy_digest) {
             return Err(EventError::PolicyUnavailable(format!(
                 "the stored policy file compiles to a different identity than the opening of {}",
                 log.root().as_str()
@@ -5683,6 +5700,105 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(
             matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
             "the root's policy file is gone, which is not a storage failure"
+        );
+    }
+
+    /// A root an earlier engine opened records the identity that engine's algorithm gave its
+    /// policy. It reopens under the same policy file, and it pins the same policy as a root this
+    /// engine opens. A digest no algorithm gives the policy still refuses.
+    #[tokio::test]
+    async fn a_root_an_earlier_identity_algorithm_opened_reopens() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let earlier = TrajectoryId("opened-under-v1".to_string());
+        let current = TrajectoryId("opened-under-v2".to_string());
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens"),
+        );
+        for root in [&earlier, &current] {
+            assert_eq!(
+                crate::hooks::handle(
+                    &runtime,
+                    appa_runtime_api::HookEvent::SessionStart {
+                        root: root.clone(),
+                        principal: None,
+                        address: None,
+                        title: None,
+                        launch: None,
+                        start: None,
+                    }
+                )
+                .await,
+                appa_runtime_api::HookDecision::Ack
+            );
+        }
+        let stored = runtime
+            .inner
+            .store
+            .log(&earlier)
+            .expect("the root reads")
+            .policy_file()
+            .to_vec();
+        let compiled = compile_stored_policy(&stored).expect("the stored policy compiles");
+        let hex = |identity: &appa_engine::profile::PolicyIdentity| crate::engine::hex(identity.bytes());
+        let v2 = hex(&compiled.engine().identity());
+        let v1 = hex(compiled
+            .engine()
+            .earlier_identities()
+            .first()
+            .expect("the policy has a v1 identity"));
+
+        // Rewrite the opening's digest as the v1 engine recorded it.
+        let rewrite = |digest: &str| {
+            let connection = rusqlite::Connection::open(&db).expect("the database opens");
+            let (seq, facts): (i64, Vec<u8>) = connection
+                .query_row(
+                    "SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq LIMIT 1",
+                    [earlier.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the opening batch reads");
+            let text = String::from_utf8(facts).expect("the batch is JSON");
+            let current_digest = [v1.as_str(), v2.as_str()]
+                .into_iter()
+                .find(|candidate| text.contains(candidate))
+                .expect("the opening records a digest of this policy");
+            runtime
+                .inner
+                .store
+                .corrupt_batch(&earlier, seq as u64, text.replace(current_digest, digest).as_bytes());
+        };
+        let reopened = || Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment reopens");
+
+        rewrite(&v1);
+        let fresh = reopened();
+        assert!(fresh.live(&earlier, &earlier).is_ok(), "the v1 opening reopens");
+        assert!(fresh.live(&current, &current).is_ok());
+        let pinned = |runtime: &Runtime| {
+            let current_log = runtime.inner.log(&current).expect("the root reads");
+            let deployment = runtime.inner.deployment();
+            let policy = runtime
+                .inner
+                .resolve_policy(&deployment, &current_log)
+                .expect("the current root resolves");
+            peer::pinned_alike(
+                &policy,
+                &current_log,
+                &runtime.inner.log(&earlier).expect("the root reads"),
+            )
+        };
+        assert!(pinned(&fresh), "both openings name one policy");
+        drop(fresh);
+
+        rewrite(&"07".repeat(32));
+        let fresh = reopened();
+        assert!(
+            matches!(fresh.live(&earlier, &earlier), Err(EventError::PolicyUnavailable(_))),
+            "a digest no algorithm gives this policy refuses"
+        );
+        assert!(
+            !pinned(&fresh),
+            "an opening whose digest names no identity of the policy is not pinned alike, though it shares the file"
         );
     }
 }
