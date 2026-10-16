@@ -23,6 +23,11 @@ const READ: &str = "mcp__appa__read_peer_message";
 fn config(dir: &Path, extra: &str) -> Config {
     let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
+    config_from(dir, &example, extra)
+}
+
+/// `example` with `extra` rules appended to its tool rules.
+fn config_from(dir: &Path, example: &str, extra: &str) -> Config {
     let deployment = "[policy.deployment]\ncontext_control = true\n";
     let (before, after) = example
         .split_once(deployment)
@@ -278,6 +283,41 @@ async fn a_message_that_would_narrow_the_receiver_is_held_and_read_at_the_sender
     // The sender's call arguments are logged as every call's are; the receiver's log never
     // carries the body.
     assert_eq!(roots_spelling(dir.path(), "the numbers are 42"), ["cc:a"]);
+}
+
+/// A Bash result narrows the session to `suspicious`.
+const SUSPICIOUS_BASH: &str = "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { trust = \"suspicious\" }\n";
+
+#[tokio::test]
+async fn a_held_message_keeps_its_trust_rank_by_name_when_a_revision_reorders_the_chain() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config(dir.path(), SUSPICIOUS_BASH), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    start(&runtime, "a", A_ADDRESS, None).await;
+    start(&runtime, "b", B_ADDRESS, None).await;
+    narrowed(&runtime, "a", "a1").await;
+    sent(&runtime, "a", B_ADDRESS, "the numbers are 42", "a2").await;
+    assert!(blocked(&prompt(&runtime, "b", &frame("the numbers are 42")).await));
+
+    // The revision adds a rank below every rank the chain had, so each held ordinal now names
+    // the rank below the one it was written at.
+    let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
+        .expect("the shipped example is readable")
+        .replacen(
+            "version = 2\n",
+            "version = 2\ntrust_chain = [\"untrusted\", \"suspicious\", \"trusted\"]\n",
+            1,
+        );
+    assert!(
+        runtime
+            .reload(config_from(dir.path(), &example, SUSPICIOUS_BASH))
+            .expect("the revision publishes")
+            .changed
+    );
+    let notice = context(&prompt(&runtime, "b", "anything new?").await).expect("the next prompt carries the notice");
+    assert!(notice.contains("trust suspicious"), "{notice}");
+    accepted(&runtime, "b", READ, json!({ "id": held_id(&notice) }), "b1").await;
+    assert_eq!(label(&runtime, "b"), ("suspicious".to_string(), "public".to_string()));
 }
 
 #[tokio::test]

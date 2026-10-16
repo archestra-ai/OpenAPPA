@@ -273,6 +273,13 @@ impl TrustChain {
     pub(crate) fn contains_rank(&self, trust: Trust) -> bool {
         (trust.rank() as usize) < self.ranks.len()
     }
+
+    /// How a label held under this chain crosses to `arriving`, or `None` when both name the
+    /// same ranks in the same order.
+    pub(crate) fn crossing_to(&self, arriving: &TrustChain) -> Option<crate::label::TrustCrossing> {
+        let arriving: Vec<&str> = arriving.names().collect();
+        crate::label::TrustCrossing::between(self.names(), &arriving)
+    }
 }
 
 /// The audience vocabulary an Annotator's answers may draw on: the built-in chain words, group
@@ -1505,8 +1512,13 @@ impl Registry {
         }
     }
 
+    /// The declaration this registry selects for a call: by its tool and arguments, never by
+    /// the ordinal the call carries. A call recorded at one policy revision is read at another,
+    /// whose declarations stand in another order; the transition validator holds a recorded
+    /// ordinal to this selection only under the revision that recorded it.
     pub fn declaration(&self, call: &crate::value::ResolvedCall) -> Option<&ToolDeclaration> {
-        self.keyed_tool(call.tool(), call.declaration_id())
+        self.select_tool(call.tool(), call.arguments())
+            .map(|(_, declaration)| declaration)
     }
 
     /// The one annotation this call is judged under: its declaration's static annotation,

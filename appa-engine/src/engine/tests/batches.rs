@@ -75,6 +75,7 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: None,
             },
         ]
     };
@@ -993,9 +994,12 @@ fn replay_refuses_a_provider_admission_no_act_declared() {
     let on_ended: Vec<Fact> = decided
         .into_iter()
         .map(|fact| match fact {
-            Fact::BasisAdvanced { act, advance, .. } => Fact::BasisAdvanced {
+            Fact::BasisAdvanced {
+                act, advance, revision, ..
+            } => Fact::BasisAdvanced {
                 trajectory: child.clone(),
                 act,
+                revision,
                 advance: crate::basis::BasisAdvance {
                     flows: [child.clone()].into(),
                     ..advance

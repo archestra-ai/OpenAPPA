@@ -338,36 +338,44 @@ impl FileStore {
 
     /// Open the event stream for one canonical workspace. Its projection is rebuilt
     /// from this stream for every operation; no independently writable snapshot exists.
+    /// A new stream records `policy`, the key of the policy file it opens under. An existing
+    /// stream keeps the key it recorded: which policies may share it is the caller's decision
+    /// ([`FileStore::policy`]).
     pub fn open(
         authority: Arc<LogStore>,
         workspace: &Path,
         policy: &str,
         initial: &Label,
     ) -> Result<Self, FileStoreError> {
-        Self::open_or_load(authority, workspace, policy, initial, true)
+        Self::open_or_load(authority, workspace, Some(policy), initial)
     }
 
+    /// Load a workspace's stream; with `opening`, first open it under that policy file key
+    /// unless it exists.
     fn open_or_load(
         authority: Arc<LogStore>,
         workspace: &Path,
-        policy: &str,
+        opening: Option<&str>,
         initial: &Label,
-        create: bool,
     ) -> Result<Self, FileStoreError> {
         let workspace = canonical_workspace(workspace)?;
         check_links(&workspace)?;
         let key = workspace.to_string_lossy().into_owned();
-        if create {
+        if let Some(policy) = opening {
             authority.open_workspace(&key, policy, initial)?;
         }
         let store = Self { authority, workspace };
-        let state = store.state()?;
-        if state.policy != policy || state.initial != *initial {
+        if store.state()?.initial != *initial {
             return Err(FileStoreError::Configuration(
-                "the workspace event stream belongs to a different policy or initial label".into(),
+                "the workspace event stream belongs to a different initial label".into(),
             ));
         }
         Ok(store)
+    }
+
+    /// The key of the policy file the stream opened under.
+    pub fn policy(&self) -> Result<String, FileStoreError> {
+        Ok(self.state()?.policy)
     }
 
     /// Bind a root durably. A restart cannot move an existing root to another workspace.
@@ -376,16 +384,11 @@ impl FileStore {
     }
 
     /// Resolve a root through the derived index, then reopen its authoritative workspace stream.
-    pub fn for_root(
-        authority: Arc<LogStore>,
-        root: &TrajectoryId,
-        policy: &str,
-        initial: &Label,
-    ) -> Result<Self, FileStoreError> {
+    pub fn for_root(authority: Arc<LogStore>, root: &TrajectoryId, initial: &Label) -> Result<Self, FileStoreError> {
         let workspace = authority.workspace_for_root(root)?.ok_or_else(|| {
             FileStoreError::Configuration("the session has not supplied a working directory for file tracking".into())
         })?;
-        let store = Self::open_or_load(authority, Path::new(&workspace), policy, initial, false)?;
+        let store = Self::open_or_load(authority, Path::new(&workspace), None, initial)?;
         if !store.state()?.roots.contains(root) {
             return Err(FileStoreError::Corrupt(
                 "the derived root index has no authoritative binding event".into(),
@@ -1673,7 +1676,7 @@ mod tests {
         authority.lock().execute("DELETE FROM file_events", []).unwrap();
 
         assert!(matches!(
-            FileStore::for_root(Arc::clone(&authority), &root, "policy", &Label::top()),
+            FileStore::for_root(Arc::clone(&authority), &root, &Label::top()),
             Err(FileStoreError::Corrupt(_))
         ));
         let count: i64 = authority
@@ -1696,7 +1699,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            FileStore::for_root(authority, &root, "policy", &Label::top()),
+            FileStore::for_root(authority, &root, &Label::top()),
             Err(FileStoreError::Corrupt(_))
         ));
     }

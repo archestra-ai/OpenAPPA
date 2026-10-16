@@ -34,6 +34,68 @@ impl Trust {
     }
 }
 
+/// How trust crosses from one policy's trust chain to another's. A [`Trust`] is a rank index into
+/// a chain, and a chain names its ranks, so a rank crosses to the rank of the same name. A name
+/// the arriving chain lacks crosses by role, toward the restrictive end: a value's trust drops to
+/// the arriving chain's lowest rank, and a floor's requirement rises to its highest. Top trust,
+/// the fold identity above every chain, crosses unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustCrossing {
+    /// The arriving rank of each leaving rank, by leaving ordinal; `None` for a name the
+    /// arriving chain lacks.
+    ranks: Vec<Option<Trust>>,
+    highest: Trust,
+}
+
+impl TrustCrossing {
+    /// The crossing between two chains given as their rank names, lowest first, or `None` when
+    /// the names are the same and the crossing is the identity.
+    pub(crate) fn between<'a>(
+        leaving: impl IntoIterator<Item = &'a str>,
+        arriving: &[&'a str],
+    ) -> Option<TrustCrossing> {
+        let leaving: Vec<&str> = leaving.into_iter().collect();
+        if leaving == arriving {
+            return None;
+        }
+        let ranks = leaving
+            .iter()
+            .map(|name| {
+                arriving
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .and_then(|rank| u8::try_from(rank).ok())
+                    .map(Trust)
+            })
+            .collect();
+        let highest = Trust(u8::try_from(arriving.len().saturating_sub(1)).unwrap_or(u8::MAX));
+        Some(TrustCrossing { ranks, highest })
+    }
+
+    /// Where a value's trust lands: a rank the arriving chain lacks drops to its lowest.
+    pub(crate) fn value(&self, trust: Trust) -> Trust {
+        if trust.0 == u8::MAX {
+            return trust;
+        }
+        self.ranks
+            .get(usize::from(trust.0))
+            .copied()
+            .flatten()
+            .unwrap_or(Trust(0))
+    }
+
+    fn floor(&self, trust: Trust) -> Trust {
+        if trust.0 == u8::MAX {
+            return trust;
+        }
+        self.ranks
+            .get(usize::from(trust.0))
+            .copied()
+            .flatten()
+            .unwrap_or(self.highest)
+    }
+}
+
 /// A literal reader identity — an opaque atom to the pure algebra. Restricted audiences
 /// intersect and compare readers exactly, so equality is exact string equality; a
 /// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by a
@@ -920,6 +982,18 @@ pub struct Label {
 impl Label {
     pub fn new(trust: Trust, audience: Audience) -> Self {
         Label { trust, audience }
+    }
+
+    /// This label as a value under the chain `crossing` arrives at: a rank the arriving chain
+    /// lacks drops to its lowest. The audience is the same under every policy.
+    pub(crate) fn cross_value(&mut self, crossing: &TrustCrossing) {
+        self.trust = crossing.value(self.trust);
+    }
+
+    /// This label as a floor under the chain `crossing` arrives at: a rank the arriving chain
+    /// lacks rises to its highest, so a crossing never loosens a requirement.
+    pub(crate) fn cross_floor(&mut self, crossing: &TrustCrossing) {
+        self.trust = crossing.floor(self.trust);
     }
 
     /// The fold identity: maximally permissive (top trust, public audience). Top trust is

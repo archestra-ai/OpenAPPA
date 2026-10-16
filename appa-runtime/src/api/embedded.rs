@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appa_engine::fact::Fact;
 use appa_engine::value::{FileBasis, FileSource, Provenance};
-use appa_eventlog::Log;
 use appa_eventlog::embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, ReadTake};
+use appa_eventlog::{Log, StoredLabel};
 use appa_runtime_api::{
     Actor, HookDecision, OutcomeBody, PeerDigest, PeerValueError, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId,
 };
@@ -117,7 +117,13 @@ impl Runtime {
             .find(|binding| binding.trajectory == sender && binding.call_id == call_id)
             .map(|binding| binding.dispatch.clone())
             .ok_or_else(|| refused("the send call is not a released dispatch of this sender"))?;
-        let label = self.current_label(&log, sender).map_err(peer_error)?;
+        let label = StoredLabel::named(
+            &self.current_label(&log, sender).map_err(peer_error)?,
+            &self
+                .inner
+                .trust_chain(&self.inner.deployment(), &log)
+                .map_err(peer_error)?,
+        );
         let dispatch =
             serde_json::to_string(&dispatch).map_err(|error| EmbeddedPeerError::Storage(error.to_string()))?;
         let claimed = self.inner.store.claim_embedded_peer(
@@ -168,7 +174,13 @@ impl Runtime {
             self.live(family, recipient).map_err(peer_error)?;
             let log = self.inner.log(family).map_err(peer_error)?;
             let current = self.current_label(&log, recipient).map_err(peer_error)?;
-            if current.combine(&row.label) != current {
+            let label = row.label.under(
+                &self
+                    .inner
+                    .trust_chain(&self.inner.deployment(), &log)
+                    .map_err(peer_error)?,
+            );
+            if current.combine(&label) != current {
                 return Err(refused("the recipient no longer covers this message"));
             }
             return direct_body(&row);
@@ -183,7 +195,13 @@ impl Runtime {
         }
         let log = self.inner.log(family).map_err(peer_error)?;
         let current = self.current_label(&log, recipient).map_err(peer_error)?;
-        if current.combine(&row.label) != current {
+        let label = row.label.under(
+            &self
+                .inner
+                .trust_chain(&self.inner.deployment(), &log)
+                .map_err(peer_error)?,
+        );
+        if current.combine(&label) != current {
             return Ok(EmbeddedPeerArrival::Held(notice(&row)?));
         }
         match self
@@ -235,8 +253,12 @@ impl Runtime {
         if loaded.recipient != recipient.as_str() {
             return Err(refused("no peer message with this id is held for this recipient"));
         }
-        let basis = message_basis(&loaded);
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
+        let chain = self
+            .inner
+            .trust_chain(&self.inner.deployment(), &log)
+            .map_err(peer_error)?;
+        let basis = message_basis(&loaded, &chain);
         if matches!(prior_call(&log, recipient, &call_id, &basis), PriorCall::Foreign) {
             return Err(refused("this call id is already a different dispatch"));
         }
@@ -459,7 +481,12 @@ impl Runtime {
             .load_embedded_peer(&actor.root, id.as_str())
             .map_err(store_error)?
             .ok_or_else(|| refused("no peer message with this id is held for this family"))?;
-        let basis = message_basis(&loaded);
+        let log = self.inner.log(&actor.root).map_err(peer_error)?;
+        let chain = self
+            .inner
+            .trust_chain(&self.inner.deployment(), &log)
+            .map_err(peer_error)?;
+        let basis = message_basis(&loaded, &chain);
         let claim = self
             .inner
             .store
@@ -557,11 +584,13 @@ fn deliver(body: String) -> EmbeddedHookOutcome {
     }
 }
 
-pub(crate) fn message_basis(row: &EmbeddedRow) -> FileBasis {
+/// The basis a read of `row` reads under: the message's digest, and its label under `chain`, the
+/// trust chain the reading family is judged under.
+pub(crate) fn message_basis(row: &EmbeddedRow, chain: &appa_engine::registry::TrustChain) -> FileBasis {
     FileBasis::Read(FileSource {
         version: row.id.clone(),
         digest: row.digest.clone(),
-        label: row.label.clone(),
+        label: row.label.under(chain),
     })
 }
 

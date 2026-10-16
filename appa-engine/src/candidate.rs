@@ -130,3 +130,19 @@ pub enum DerivedCandidate {
         value: LabeledValue,
     },
 }
+
+impl DerivedCandidate {
+    /// The candidate under the trust chain a policy crossing arrives at.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        match self {
+            DerivedCandidate::Call { label, .. } => label.cross_value(crossing),
+            DerivedCandidate::Result { value, residual, .. } => {
+                value.label.cross_value(crossing);
+                if let Some(residual) = residual {
+                    residual.cross(crossing);
+                }
+            }
+            DerivedCandidate::Return { value, .. } => value.label.cross_value(crossing),
+        }
+    }
+}

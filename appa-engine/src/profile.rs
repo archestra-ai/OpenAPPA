@@ -239,19 +239,34 @@ pub fn neutral_starting_label(chain: &TrustChain) -> Label {
     Label::new(top, crate::label::Audience::public())
 }
 
-/// The version of the policy configuration dialect a policy file was written in, carried on the
-/// durable opening record. Never part of the policy identity: normalization already
-/// erases source syntax.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyDialectVersion(u32);
+/// Where one policy stands in its deployment's sequence. A deployment's first published policy
+/// is revision 1, and every publish moves the head to the next revision. A family log stamps each
+/// batch with the revision that decided it, and replay judges the batch under that revision's
+/// policy, so a later publish never changes what an earlier record meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PolicyRevision(u64);
 
-impl PolicyDialectVersion {
-    pub const fn new(version: u32) -> Self {
-        PolicyDialectVersion(version)
+impl PolicyRevision {
+    pub const FIRST: PolicyRevision = PolicyRevision(1);
+
+    pub const fn new(revision: u64) -> Self {
+        PolicyRevision(revision)
     }
 
-    pub const fn value(self) -> u32 {
+    pub const fn value(self) -> u64 {
         self.0
+    }
+
+    /// The revision a publish over this one produces.
+    pub const fn next(self) -> Self {
+        PolicyRevision(self.0 + 1)
+    }
+}
+
+impl std::fmt::Display for PolicyRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -265,6 +280,45 @@ pub struct DeploymentPolicy {
     pub planner_cap: PlannerCap,
     pub dialect: PolicyDialectVersion,
     pub profile: ProfileDeclaration,
+}
+
+/// The version of the policy configuration dialect a policy file was written in, carried on the
+/// durable opening record. Never part of the policy identity: normalization already erases source
+/// syntax.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyDialectVersion(u32);
+
+impl PolicyDialectVersion {
+    pub const fn new(version: u32) -> Self {
+        PolicyDialectVersion(version)
+    }
+
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+/// The name of a deployment: a policy line that advances through policy revisions. A standalone
+/// runtime serves one; an embedding host serves one per tenant. A family that follows a line names
+/// it on its opening record.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeploymentName(String);
+
+impl DeploymentName {
+    pub fn new(name: impl Into<String>) -> DeploymentName {
+        DeploymentName(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DeploymentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The key of a stored policy file: the SHA-256 of its exact bytes, lowercase hex.
@@ -283,18 +337,14 @@ impl PolicyFileKey {
     }
 }
 
-/// The policy identity a durable opening records: a domain-separated SHA-256 digest over the
-/// RFC 8785 canonical bytes of the identity document — the normalized engine-visible policy and
-/// deployment declaration. The document is field-aware: it names every included field explicitly,
-/// preserves the semantic sequences (the trust chain's rank order, authority registration order),
-/// sorts true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
-///
-/// The domain tag names the identity algorithm, and an opening records the digest the algorithm
-/// of the engine that opened it gave its policy. [`PolicyIdentity::of_registry`] computes the
-/// current algorithm. An engine also recognizes what [`PolicyIdentity::earlier_of_registry`]
-/// computes, so a trajectory an earlier engine opened still reopens under the same policy after
-/// the identity document changes. A change to the identity document keeps the replaced algorithm
-/// there. Drop an earlier algorithm only once no host keeps a trajectory that it opened.
+/// The policy identity: a domain-separated SHA-256 digest over the RFC 8785 canonical bytes of
+/// the identity document — the normalized engine-visible policy and deployment declaration. The
+/// document is field-aware: it names every included field explicitly, preserves the semantic
+/// sequences (the trust chain's rank order, authority registration order), sorts true maps and
+/// sets, and excludes source syntax, runtime bindings, `[limits]`, and hints. Two policy files
+/// with one identity decide every call alike. A family's opening record carries the identity of
+/// the policy it opened under, and an engine reopens the family only while it recognises that
+/// digest ([`crate::engine::Engine::recognizes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyIdentity(#[serde(with = "crate::hex32")] [u8; 32]);
 
@@ -345,6 +395,7 @@ impl PolicyIdentity {
     }
 }
 
+/// The identity document.
 /// The identity document. `with_forwards` is `false` only for the v1 algorithm, which predates
 /// the `forwards` rule field.
 fn identity_document_from_registry(registry: &Registry, with_forwards: bool) -> serde_json::Value {
@@ -654,6 +705,8 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         profile,
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
+        deployment: None,
+        revision: None,
         forked_from: None,
         principal: None,
     })
@@ -1425,47 +1478,6 @@ mod tests {
             identity(&explicit, &covering_profile(&explicit)),
             identity(&with_group, &covering_profile(&with_group))
         );
-    }
-
-    /// v1 is the current document without `forwards`. A policy that forwards nothing has one
-    /// v1 identity, which moves with every other edit; a policy that declares `forwards` has
-    /// none, since no v1 engine compiled such a policy.
-    #[test]
-    fn the_v1_identity_covers_every_field_but_forwards() {
-        let earlier = |cfg: &RegistryConfig| {
-            let built = crate::registry::Registry::build(
-                cfg.clone(),
-                crate::registry::PlannerCap::default(),
-                covering_profile(cfg),
-            )
-            .expect("a fixture configuration builds");
-            PolicyIdentity::earlier_of_registry(&built)
-        };
-        let cfg = config(vec![tool("fetch")]);
-        let [v1] = earlier(&cfg)[..] else {
-            panic!("a policy that forwards nothing has one v1 identity")
-        };
-        assert_ne!(v1, identity(&cfg, &covering_profile(&cfg)));
-
-        let delta_edit = config(vec![{
-            let mut t = tool("fetch");
-            t.delta = Delta {
-                trust: Some(Trust::new(0)),
-                audience: None,
-            };
-            t
-        }]);
-        assert_ne!(earlier(&delta_edit), vec![v1], "v1 still covers delta");
-
-        let forwards_edit = config(vec![{
-            let mut t = tool("fetch");
-            t.forwards = Delta {
-                trust: Some(Trust::new(0)),
-                audience: None,
-            };
-            t
-        }]);
-        assert_eq!(earlier(&forwards_edit), vec![], "no v1 policy declares forwards");
     }
 
     #[test]

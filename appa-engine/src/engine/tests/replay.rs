@@ -200,6 +200,7 @@ fn an_ended_branch_releases_nothing_more() {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: None,
         }],
     ]
     .concat();

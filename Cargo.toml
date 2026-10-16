@@ -19,7 +19,7 @@ members = [
     "website-chat-playground",
     "bench/corp-agent",
 ]
-exclude = ["bench/corp-systems"]
+exclude = ["bench/corp-systems", "scripts/mixed-version"]
 
 [workspace.package]
 edition = "2024"

@@ -1757,6 +1757,7 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
                 file_basis,
                 subject,
                 evidence,
+                terms,
             } => Fact::DispatchOpened {
                 trajectory,
                 dispatch,
@@ -1770,6 +1771,7 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
                 file_basis,
                 subject,
                 evidence,
+                terms,
             },
             other => other,
         })

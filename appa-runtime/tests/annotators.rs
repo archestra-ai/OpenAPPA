@@ -367,9 +367,13 @@ async fn wait_for_file(path: &std::path::Path) {
     panic!("timed out waiting for {}", path.display());
 }
 
+/// A reload that publishes while a call's consult is in flight orders before that call's
+/// decision: the answer the old revision's Annotator gave is not committed, and the call is
+/// decided again at the head, where the new revision's Annotator answers it. No decision
+/// commits after a publish unless the published revision made it.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_command_consult_keeps_its_deployment_during_reload() {
+async fn a_call_in_flight_across_a_reload_is_decided_at_the_head() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config_path = dir.path().join("appa.toml");
     let started = dir.path().join("started");
@@ -395,10 +399,12 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
     assert!(reloaded.changed);
     std::fs::write(&gate, "go").expect("the old annotator is released");
 
-    assert_eq!(
-        in_flight.await.expect("the proposal task completes"),
-        HookDecision::AllowCall { spawn: None },
-        "the in-flight call finishes with the deployment that started it"
+    assert!(
+        matches!(
+            in_flight.await.expect("the proposal task completes"),
+            HookDecision::Refuse { detail, .. } if detail.contains("status=7")
+        ),
+        "the in-flight call is decided again at the head, whose Annotator refuses it"
     );
 }
 
@@ -1625,26 +1631,43 @@ async fn open_hosted(config: Config) -> Arc<Runtime> {
     runtime
 }
 
-/// One runtime serving two policies that bind the same annotator to different endpoints:
-/// a view pinned to the policy a trajectory runs under consults that policy's endpoint,
-/// whatever the runtime installed since.
+/// One runtime serving two deployment lines whose policies bind the same annotator to
+/// different endpoints: a view pinned to one line's head consults that line's endpoint,
+/// whatever the runtime installed on its own line since, and a family of one line is never
+/// decided under the other's.
 #[tokio::test]
 async fn a_pinned_view_consults_its_own_deployment_after_the_runtime_serves_another() {
     let (url_a, annotator_a) = serve_annotator().await;
     let (url_b, annotator_b) = serve_annotator().await;
     annotator_a.set("classifier", Answer::Wire(produced("trusted")));
     annotator_b.set("classifier", Answer::Wire(produced("trusted")));
-    let runtime = open_hosted(hosted_policy(&url_a, None)).await;
+    let store =
+        Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+    let runtime =
+        Arc::new(Runtime::open_with_store(hosted_policy(&url_b, None), store, None).expect("the deployment opens"));
 
     let deployment_a = runtime
         .prepare_deployment(hosted_policy(&url_a, None))
         .expect("policy A loads");
-    let deployment_b = runtime
-        .prepare_deployment(hosted_policy(&url_b, None))
-        .expect("policy B loads");
-    runtime.install(deployment_b);
-
-    let pinned = Arc::new(runtime.pinned(&deployment_a));
+    let published_a = runtime
+        .publish(&appa_eventlog::DeploymentName::new("tenant-a"), &deployment_a)
+        .expect("policy A publishes as its line's head");
+    let pinned = Arc::new(runtime.pinned(&published_a));
+    assert_eq!(
+        hooks::handle(
+            &pinned,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
     assert_eq!(
         propose(&pinned, fetch("https://a.example")).await,
         HookDecision::AllowCall { spawn: None }
@@ -1653,13 +1676,13 @@ async fn a_pinned_view_consults_its_own_deployment_after_the_runtime_serves_anot
     assert!(annotator_b.requests().is_empty(), "the pinned view never reaches B");
     ran(&pinned, fetch("https://a.example")).await;
 
-    // Unpinned, the same trajectory reaches whatever the runtime serves now.
-    assert_eq!(
+    // Unpinned, the runtime serves its own line, and refuses a family of another.
+    assert!(matches!(
         propose(&runtime, fetch("https://b.example")).await,
-        HookDecision::AllowCall { spawn: None }
-    );
+        HookDecision::Refuse { .. }
+    ));
     assert_eq!(annotator_a.requests().len(), 1);
-    assert_eq!(annotator_b.requests().len(), 1);
+    assert!(annotator_b.requests().is_empty());
 }
 
 /// A hosted document's `token_env` resolves through the host's lookup, and the consult

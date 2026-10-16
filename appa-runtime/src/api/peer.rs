@@ -16,11 +16,10 @@ use std::time::{Duration, SystemTime};
 use appa_engine::fact::{Fact, TrajectoryOpening};
 use appa_engine::label::{Audience, Label, Trust};
 use appa_engine::value::{DispatchId, FileBasis, FileSource};
-use appa_eventlog::{HeldNotice, HeldPeerId, HostObservation, Log, LogStore};
+use appa_eventlog::{HeldNotice, HeldPeerId, HostObservation, Log, LogStore, StoredLabel};
 use appa_runtime_api::{Actor, PeerAddress, PeerDigest, PeerFrame, ProposedCall, SessionTitle, TrajectoryId};
 
 use super::{EventError, Runtime, acting_trajectory};
-use crate::engine::PolicyEngine;
 
 /// The host tool one session messages another with.
 pub(crate) const SEND_MESSAGE: &str = "host/claude-code/SendMessage";
@@ -81,15 +80,22 @@ fn opening(log: &Log) -> Option<&TrajectoryOpening> {
     }
 }
 
-/// Two families opened under one policy for one principal: a label one records means the
-/// same to the other. `policy` decides for one of them. Each opening names its policy by the
-/// identity its engine recorded, current or earlier, so both openings must name `policy`'s.
-pub(super) fn pinned_alike(policy: &PolicyEngine<'_>, one: &Log, other: &Log) -> bool {
+/// Two families of one deployment line acting for one principal: both decide at the line's
+/// head, so a label one records means the same to the other.
+pub(super) fn pinned_alike(one: &Log, other: &Log) -> bool {
     match (opening(one), opening(other)) {
-        (Some(one), Some(other)) => {
-            one.principal == other.principal
-                && policy.recognizes(&one.policy_digest)
-                && policy.recognizes(&other.policy_digest)
+        (Some(one_opening), Some(other_opening)) => {
+            let same_policy = match (one.deployment(), other.deployment()) {
+                // Two following families of one line decide at its head.
+                (Some(one_line), Some(other_line)) => one_line == other_line,
+                // Two pinned families decide under one file.
+                (None, None) => {
+                    one_opening.policy_file_key == other_opening.policy_file_key
+                        && one_opening.policy_digest == other_opening.policy_digest
+                }
+                _ => false,
+            };
+            same_policy && one_opening.principal == other_opening.principal
         }
         _ => false,
     }
@@ -122,8 +128,14 @@ pub(crate) fn held_read(call: &ProposedCall) -> Option<HeldPeerId> {
     HeldPeerId::parse(&args.id).ok()
 }
 
-/// The basis a `read_peer_message` call reads under: the held message's digest and label.
-pub(super) fn held_basis(store: &LogStore, root: &TrajectoryId, id: &HeldPeerId) -> Result<FileBasis, EventError> {
+/// The basis a `read_peer_message` call reads under: the held message's digest, and its label
+/// under `chain`, the trust chain the holding family is judged under.
+pub(super) fn held_basis(
+    store: &LogStore,
+    root: &TrajectoryId,
+    id: &HeldPeerId,
+    chain: &appa_engine::registry::TrustChain,
+) -> Result<FileBasis, EventError> {
     let notice = store
         .peek_peer_message(root, id, SystemTime::now())
         .map_err(|error| EventError::Storage(error.to_string()))?
@@ -133,7 +145,7 @@ pub(super) fn held_basis(store: &LogStore, root: &TrajectoryId, id: &HeldPeerId)
     Ok(FileBasis::Read(FileSource {
         version: notice.id.as_str().to_string(),
         digest: notice.digest.to_string(),
-        label: notice.label,
+        label: notice.label.under(chain),
     }))
 }
 
@@ -188,12 +200,12 @@ impl Runtime {
         matches: impl Fn(&Log) -> bool,
     ) -> Result<Option<(TrajectoryId, Log)>, EventError> {
         let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, sent)?;
+        self.inner.resolve_policy(&deployment, sent)?;
         let found: Vec<_> = self
             .mentioning(key)?
             .into_iter()
             .filter(|(root, log)| {
-                root != sender && matches(log) && pinned_alike(&policy, sent, log) && self.live(root, root).is_ok()
+                root != sender && matches(log) && pinned_alike(sent, log) && self.live(root, root).is_ok()
             })
             .collect();
         Ok(match found.len() {
@@ -274,11 +286,12 @@ impl Runtime {
     ) -> Result<(), EventError> {
         let log = self.inner.log(&actor.root)?;
         let label = self.current_label(&log, acting_trajectory(actor))?;
+        let chain = self.inner.trust_chain(&self.inner.deployment(), &log)?;
         self.inner.append_host(
             &actor.root,
             &HostObservation::PeerSent {
                 digest,
-                label,
+                label: StoredLabel::named(&label, &chain),
                 dispatch,
             },
         )
@@ -287,7 +300,7 @@ impl Runtime {
     pub(crate) fn current_label(&self, log: &Log, trajectory: &TrajectoryId) -> Result<Label, EventError> {
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, log)?;
-        let view = policy.engine().rebuild_view(log).map_err(EventError::from)?;
+        let view = policy.rebuild_view(log).map_err(EventError::from)?;
         view.views(trajectory)
             .map(|views| views.current_label())
             .ok_or(EventError::UnknownTrajectory)
@@ -297,18 +310,18 @@ impl Runtime {
     /// `receiver`; `None` when none does.
     fn attributed(&self, receiver: &Log, digest: &PeerDigest) -> Result<Option<Label>, EventError> {
         let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, receiver)?;
+        let chain = self.inner.trust_chain(&deployment, receiver)?;
         let labels = self
             .mentioning(&appa_eventlog::peer_sent_key(digest))?
             .into_iter()
-            .filter(|(_, log)| pinned_alike(&policy, receiver, log))
+            .filter(|(_, log)| pinned_alike(receiver, log))
             .flat_map(|(_, log)| {
                 log.host_records()
                     .iter()
                     .filter_map(|record| match &record.observation {
                         HostObservation::PeerSent {
                             digest: sent, label, ..
-                        } if sent == digest => Some(label.clone()),
+                        } if sent == digest => Some(label.under(&chain)),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -344,7 +357,10 @@ impl Runtime {
                 .append_host(root, &HostObservation::PeerAdmitted { digest })?;
             return Ok(Received::Direct);
         }
-        let label = attributed.unwrap_or_else(unattributed);
+        let label = StoredLabel::named(
+            &attributed.unwrap_or_else(unattributed),
+            &self.inner.trust_chain(&self.inner.deployment(), &log)?,
+        );
         let notice = self
             .inner
             .store
@@ -369,7 +385,9 @@ impl Runtime {
         let lines: Vec<String> = notices
             .iter()
             .map(|notice| {
-                let label = policy.engine().render_label(&notice.label);
+                let label = policy
+                    .engine()
+                    .render_label(&notice.label.under(policy.engine().trust_chain()));
                 let (trust, audience) = label.map_or(("?".into(), "?".into()), |label| (label.trust, label.audience));
                 format!(
                     "- id {}: reading it brings trust {trust}, audience {audience}",

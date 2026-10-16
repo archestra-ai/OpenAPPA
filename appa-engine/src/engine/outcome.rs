@@ -16,10 +16,15 @@ impl Engine {
         if matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && call.file_basis().is_none() {
             return Err(TransitionError::FailureBodyOutsideFile);
         }
-        let withheld = views.withholds_output(dispatch)
+        let withholds_output = views.withholds_output(dispatch);
+        // What the trajectory does not get: the plan withheld the output at release, the
+        // release bound an output sanitizer this revision no longer registers, or a failure's
+        // body sits behind a bound sanitizer. The observation below keys on the plan alone, so
+        // a digest checkpointed before a revision dropped the sanitizer still matches.
+        let withheld = self.withholds(&views, dispatch)
             || matches!(report.outcome, ToolOutcome::FailureWithBody { .. })
                 && views.bound_sanitizer(dispatch).is_some();
-        let observed = match (&report.outcome, withheld) {
+        let observed = match (&report.outcome, withholds_output) {
             (ToolOutcome::Success { .. }, true) => Some(ObservedResult::Unavailable),
             (
                 ToolOutcome::Success {
@@ -114,7 +119,7 @@ impl Engine {
                 };
                 match views.bound_sanitizer(dispatch) {
                     None => {
-                        self.validated_contract(&call)?;
+                        self.outcome_contract(&views, dispatch, &call)?;
                         ResultAdmission::SuccessRaw { body: raw.clone() }
                     }
                     Some(sanitizer) => {
@@ -130,7 +135,7 @@ impl Engine {
                                 })),
                             });
                         };
-                        let contract = self.validated_contract(&call)?;
+                        let contract = self.outcome_contract(&views, dispatch, &call)?;
                         let (candidate, lineage) = crate::admit::bound_candidate(
                             &self.registry,
                             &views,
@@ -189,7 +194,7 @@ impl Engine {
         admission: ResultAdmission,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
-        let withheld = views.withholds_output(dispatch) || matches!(admission, ResultAdmission::FailureNoValue { .. });
+        let withheld = self.withholds(views, dispatch) || matches!(admission, ResultAdmission::FailureNoValue { .. });
         let batch = admit::admit_result(
             &self.registry,
             views,
@@ -210,6 +215,15 @@ impl Engine {
         })
     }
 
+    /// Whether this revision withholds `dispatch`'s result from its trajectory: a plan withheld
+    /// it at release, or release bound an output sanitizer this revision no longer registers.
+    fn withholds(&self, views: &Views, dispatch: &DispatchId) -> bool {
+        views.withholds_output(dispatch)
+            || views
+                .bound_sanitizer(dispatch)
+                .is_some_and(|sanitizer| self.registry.sanitizer(sanitizer).is_none())
+    }
+
     /// The remedy menu a confined result's stage offers under its dispatch's contract, with the
     /// group requirement raised before the menu reads anything.
     #[allow(clippy::too_many_arguments)]
@@ -223,10 +237,10 @@ impl Engine {
         lineage: &SanitizerLineage,
         act: &ActEvidence,
     ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
-        let contract = self.dispatch_contract(views, dispatch)?;
+        let outcome = self.dispatch_contract(views, dispatch)?;
         Ok(plan::confined_stage(
             &self.registry,
-            &contract,
+            &outcome.contract,
             receiving,
             label,
             residual,
@@ -245,12 +259,17 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         source: RawResultDigest,
-    ) -> Vec<Fact> {
+    ) -> Result<Vec<Fact>, TransitionError> {
         if views.observed_result(dispatch).is_some() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source))
-            .expect("an open, unreported dispatch checkpoints its observed success")
+        admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source)).map_err(
+            |error| match error {
+                // The revision deciding now no longer declares the tool the dispatch released.
+                AdmitError::UnknownTool(name) => TransitionError::Call(EngineError::UnknownTool(name)),
+                other => unreachable!("an open, unreported dispatch checkpoints its observed success: {other}"),
+            },
+        )
     }
 
     /// [`Self::observed_checkpoint`] sealed as its own batch, for the paths that append it and
@@ -263,7 +282,7 @@ impl Engine {
         call: &ResolvedCall,
         source: RawResultDigest,
     ) -> Result<Option<ValidatedFactBatch>, TransitionError> {
-        let checkpoint = self.observed_checkpoint(views, dispatch, call, source);
+        let checkpoint = self.observed_checkpoint(views, dispatch, call, source)?;
         if checkpoint.is_empty() {
             return Ok(None);
         }
@@ -292,7 +311,7 @@ impl Engine {
             } => *source,
             _ => unreachable!("a staged record is a derived candidate"),
         };
-        let mut facts = self.observed_checkpoint(views, dispatch, call, source);
+        let mut facts = self.observed_checkpoint(views, dispatch, call, source)?;
         facts.push(derived);
         let (batch, confined) = self.staged(
             view,
@@ -354,7 +373,7 @@ impl Engine {
             evidence,
         );
         facts.extend(opened);
-        let batch = self.declaring(act, advance, facts);
+        let batch = self.declaring(view.family(), act, advance, facts);
         Ok((
             self.seal(view, batch)?,
             Confined {
@@ -414,7 +433,7 @@ impl Engine {
             &stage,
             evidence,
         );
-        let batch = self.declaring(act, advance, opened);
+        let batch = self.declaring(view.family(), act, advance, opened);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Staged(Box::new(Confined {
@@ -433,6 +452,9 @@ fn admission_refusal(error: AdmitError) -> TransitionError {
             TransitionError::SanitizerUnapplicable
         }
         AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
+        // The revision deciding now no longer declares the tool the dispatch released, or the
+        // output sanitizer it bound.
+        AdmitError::UnknownTool(name) => TransitionError::Call(EngineError::UnknownTool(name)),
         other => unreachable!("the outcome path admits what the log already proved: {other}"),
     }
 }

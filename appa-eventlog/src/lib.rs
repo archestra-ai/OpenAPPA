@@ -4,7 +4,8 @@
 //! state transition they own. A root trajectory and its branches append to one shared log. It
 //! holds two streams at one position: the engine's lasting facts, and the host's own observations —
 //! what a harness saw of its inventory, its calls, its turns and the standing it recorded for them. The stored
-//! policy files are immutable, content-addressed inputs. A canonical file workspace has its own
+//! policy files are immutable, content-addressed inputs, and each deployment's policy revisions
+//! name them in order. A canonical file workspace has its own
 //! event stream because independent root families can share it. Everything else — a branch's
 //! parent, whether it has ended, which dispatch is open, whether an offer still stands, file
 //! versions, Labels, receipts and reservations — is projected by replaying the owning stream.
@@ -20,7 +21,9 @@
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
 //! - workspace file events, one row per appended transition, keyed by canonical workspace;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
-//!   and shared by every root that opened under them;
+//!   and shared by every revision that names them;
+//! - deployments and their policy revisions: each deployment's head revision, and the policy
+//!   file every revision it published names;
 //! - the host keys, one row per (key, root) pair a host record ever named, written in the
 //!   same transaction as the record that names it. This is the one derived table: it answers
 //!   which families stand behind a key without a pass over every family's rows, and it cannot
@@ -53,6 +56,18 @@
 //! basis cannot be forged, and appending against a position that was never read cannot be
 //! written down.
 //!
+//! ## A decided batch of a following family is fenced at its deployment's head
+//!
+//! A family either follows a deployment — its opening names the deployment and the policy
+//! revision that opened it — or is pinned to the policy file its opening names. A decided batch
+//! of a following family is stamped with the revision that decided it (the `revision` its first
+//! record carries), and the store commits it only while that revision is still the deployment's
+//! head, read inside the append's own transaction. A [`LogStore::publish`] that moves the head
+//! therefore orders against every such append: each stamped batch committed after it was decided
+//! at the revision it published, and a batch decided before it is refused as
+//! [`AppendError::PolicyMoved`] for its caller to decide again. A host-only batch, an unstamped
+//! batch, and every batch of a pinned family are not fenced.
+//!
 //! ## What this crate does not do
 //!
 //! It never judges. It stores what the engine produced and returns what it stored. A log whose
@@ -63,9 +78,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use appa_engine::engine::StampedBatch;
 pub use appa_engine::fact::Fact;
-use appa_engine::label::Label;
-use appa_engine::profile::PolicyFileKey;
+use appa_engine::profile::{PolicyFileKey, PolicyRevision};
 use appa_engine::value::DispatchId;
 pub use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{
@@ -78,6 +93,7 @@ mod encoding;
 pub mod encryption;
 pub mod files;
 mod held;
+mod label;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod receipts;
@@ -88,6 +104,7 @@ use sqlite::Sqlite;
 
 use embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, ReadTake};
 pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
+pub use label::StoredLabel;
 pub use receipts::{
     LeaseOwner, LeaseValueError, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
     ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptLease, Renewal, SessionScope,
@@ -136,14 +153,29 @@ struct FaultPoints {
     contending_record: std::sync::Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
+pub use appa_engine::profile::DeploymentName;
+
+/// Where a deployment's line stands: its head revision, and the policy file that revision names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyHead {
+    pub revision: PolicyRevision,
+    pub key: PolicyFileKey,
+}
+
 /// The records of one read, and the position they were read at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Log {
     root: TrajectoryId,
+    /// The deployment the family follows, as its opening named it; `None` for a family pinned
+    /// to the policy snapshot its opening names.
+    deployment: Option<DeploymentName>,
     facts: Vec<Fact>,
     /// How many facts the log holds after each batch, so the facts of one batch can be told
     /// from the next.
     batch_ends: Vec<usize>,
+    /// The policy revision each batch's first record carries; `None` for a host-only batch, a
+    /// batch a snapshot engine decided, and every batch of a pinned family.
+    stamps: Vec<Option<PolicyRevision>>,
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
@@ -222,7 +254,7 @@ pub enum HostObservation {
     /// the dispatch the send ran under.
     PeerSent {
         digest: PeerDigest,
-        label: Label,
+        label: StoredLabel,
         dispatch: DispatchId,
     },
     /// This root admitted the peer message whose body digests to `digest`.
@@ -327,24 +359,53 @@ impl Log {
         self.basis
     }
 
-    /// The facts of every batch after position `basis`, one slice per batch in log order.
-    /// `None` when this read stands before `basis`.
-    pub fn batches_after(&self, basis: u64) -> Option<impl Iterator<Item = &[Fact]>> {
+    /// The deployment this family follows, as its opening named it; `None` for a family pinned
+    /// to the policy snapshot its opening names.
+    pub fn deployment(&self) -> Option<&DeploymentName> {
+        self.deployment.as_ref()
+    }
+
+    /// The policy revision of the latest stamped batch; `None` for a pinned family.
+    pub fn stamp(&self) -> Option<PolicyRevision> {
+        self.stamps.iter().rev().find_map(|stamp| *stamp)
+    }
+
+    /// Every policy revision a batch of this log is stamped with.
+    pub fn revisions(&self) -> std::collections::BTreeSet<PolicyRevision> {
+        self.stamps.iter().flatten().copied().collect()
+    }
+
+    /// Every batch, with the revision its first record carries.
+    pub fn stamped_batches(&self) -> Vec<StampedBatch<'_>> {
+        self.stamped_after(0)
+            .expect("every read stands at or after the empty log")
+    }
+
+    /// Every batch after position `basis` in log order, with the revision its first record
+    /// carries: `None` for a host-only batch and for a batch no revision stamped, which the
+    /// engine judges by the family's opening. `None` when this read stands before `basis`.
+    pub fn stamped_after(&self, basis: u64) -> Option<Vec<StampedBatch<'_>>> {
         let first = usize::try_from(basis)
             .ok()
             .filter(|first| *first <= self.batch_ends.len())?;
-        let start = match first {
+        let mut start = match first {
             0 => 0,
             first => self.batch_ends[first - 1],
         };
-        let ends = &self.batch_ends[first..];
-        Some(ends.iter().scan(start, |start, end| {
-            let batch = &self.facts[*start..*end];
-            *start = *end;
-            Some(batch)
-        }))
+        let mut batches = Vec::with_capacity(self.batch_ends.len() - first);
+        for (end, stamp) in self.batch_ends[first..].iter().zip(&self.stamps[first..]) {
+            batches.push(StampedBatch {
+                revision: *stamp,
+                facts: &self.facts[start..*end],
+            });
+            start = *end;
+        }
+        Some(batches)
     }
 
+    /// The policy file the family opened under, byte for byte: what a pinned family is judged by
+    /// for its whole life, and what a following family's opening revision compiled with the
+    /// family's inventory.
     pub fn policy_file(&self) -> &[u8] {
         &self.policy_file
     }
@@ -421,13 +482,16 @@ pub enum StoreErrorClass {
     AlreadyExists,
     /// The root's log is in an archived database.
     Archived,
-    /// The opening's policy file is missing from the store.
+    /// A policy revision's file, or the deployment itself, is missing from the store.
     PolicyUnavailable,
     /// The supplied policy file is not the one the opening names.
     PolicyMismatch,
+    /// The deployment's head moved past the revision a batch was decided under.
+    PolicyMoved,
     /// A stored batch does not decode.
     Undecodable,
-    /// The opening batch is not usable as one.
+    /// The batch is not usable as one: an opening that opens nothing, or a decided batch of a
+    /// following family that names no revision.
     Malformed,
     /// The log moved under a decision that was computed against an earlier position.
     Conflict,
@@ -441,6 +505,7 @@ impl From<&CreateError> for StoreErrorClass {
             CreateError::AlreadyExists { .. } => StoreErrorClass::AlreadyExists,
             CreateError::Archived { .. } => StoreErrorClass::Archived,
             CreateError::Malformed { .. } => StoreErrorClass::Malformed,
+            CreateError::PolicyMoved { .. } => StoreErrorClass::PolicyMoved,
             CreateError::PolicyFileMismatch => StoreErrorClass::PolicyMismatch,
             CreateError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
@@ -455,8 +520,10 @@ impl From<&ReadError> for StoreErrorClass {
     fn from(error: &ReadError) -> Self {
         match error {
             ReadError::UnknownRoot { .. } => StoreErrorClass::UnknownRoot,
-            ReadError::PolicyFileMissing { .. } => StoreErrorClass::PolicyUnavailable,
-            ReadError::Undecodable { .. } => StoreErrorClass::Undecodable,
+            ReadError::PolicyFileMissing { .. }
+            | ReadError::PolicyFileMismatch { .. }
+            | ReadError::UnknownRevision { .. } => StoreErrorClass::PolicyUnavailable,
+            ReadError::Undecodable { .. } | ReadError::UndecodableKey { .. } => StoreErrorClass::Undecodable,
             ReadError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             ReadError::Postgres(_) => StoreErrorClass::Storage,
@@ -471,6 +538,8 @@ impl From<&AppendError> for StoreErrorClass {
         match error {
             AppendError::Conflict { .. } => StoreErrorClass::Conflict,
             AppendError::ReadClaimLost => StoreErrorClass::Conflict,
+            AppendError::PolicyMoved { .. } => StoreErrorClass::PolicyMoved,
+            AppendError::Unstamped => StoreErrorClass::Malformed,
             AppendError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             AppendError::Postgres(_) => StoreErrorClass::Storage,
@@ -516,6 +585,9 @@ pub enum CreateError {
     /// never opened under.
     #[error("the supplied policy file does not hash to the key the opening names")]
     PolicyFileMismatch,
+    /// The opening was decided at a revision that is no longer its deployment's head.
+    #[error("the deployment's head is {head:?}, not the revision the opening was decided at")]
+    PolicyMoved { head: Option<PolicyRevision> },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -532,8 +604,17 @@ pub enum ReadError {
     UnknownRoot { root: String },
     #[error("the stored policy file {key} is missing")]
     PolicyFileMissing { key: String },
+    #[error("the stored policy file {key} is not the bytes its key names")]
+    PolicyFileMismatch { key: String },
+    #[error("deployment {deployment} has published no revision {revision}")]
+    UnknownRevision {
+        deployment: String,
+        revision: PolicyRevision,
+    },
     #[error("stored batch {seq} does not decode: {detail}")]
     Undecodable { seq: u64, detail: String },
+    #[error("the stored policy file key {key} does not parse: {detail}")]
+    UndecodableKey { key: String, detail: String },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -550,6 +631,15 @@ pub enum AppendError {
     Conflict { current: u64 },
     #[error("the embedded read no longer owns its claim")]
     ReadClaimLost,
+    /// The batch was decided at a revision that is no longer its deployment's head: nothing is
+    /// written, and the caller decides again at the head.
+    #[error("the deployment's head is {head:?}, not the revision this batch was decided at")]
+    PolicyMoved { head: Option<PolicyRevision> },
+    /// A decided batch of a family that follows a deployment names no revision: nothing is
+    /// written. A replay would judge it under the opening revision, as it judges a batch the
+    /// previous version wrote during a rolling release.
+    #[error("a decided batch of a family that follows a deployment names no policy revision")]
+    Unstamped,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -558,6 +648,19 @@ pub enum AppendError {
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublishError {
+    /// Another publish moved the head first: nothing is written, and the publisher reads the
+    /// head again before deciding whether to publish over it.
+    #[error("the deployment's head is {head:?}, not the revision this publish expected")]
+    Moved { head: Option<PolicyRevision> },
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL storage failure: {0}")]
+    Postgres(#[from] postgres::PostgresError),
 }
 
 /// One read-decide-append step on one root's log; see [`LogStore::step`]. An append ends the
@@ -591,14 +694,18 @@ impl Step<'_> {
     }
 
     /// [`LogStore::append`] within this step.
-    pub fn append(self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        self.write(based_on, encode(facts, None), None, None)
+    pub fn append(
+        self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: Option<&HostObservation>,
+    ) -> Result<(), AppendError> {
+        self.write(based_on, Batch::of(based_on, facts, observation)?, None)
     }
 
     /// [`LogStore::append_host`] within this step.
-    pub fn append_host(self, based_on: &Log, facts: &[Fact], observation: &HostObservation) -> Result<(), AppendError> {
-        let key = observation.key();
-        self.write(based_on, encode(facts, Some(observation)), key.as_deref(), None)
+    pub fn append_host(self, based_on: &Log, observation: &HostObservation) -> Result<(), AppendError> {
+        self.write(based_on, Batch::of(based_on, &[], Some(observation))?, None)
     }
 
     /// [`LogStore::append_holding_embedded_read`] within this step.
@@ -609,35 +716,74 @@ impl Step<'_> {
         observation: Option<&HostObservation>,
         hold: &embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
-        let key = observation.and_then(HostObservation::key);
-        self.write(based_on, encode(facts, observation), key.as_deref(), Some(hold))
+        self.write(based_on, Batch::of(based_on, facts, observation)?, Some(hold))
     }
 
     fn write(
         self,
         based_on: &Log,
-        bytes: Vec<u8>,
-        key: Option<&str>,
+        batch: Batch<'_>,
         hold: Option<&embedded::EmbeddedAppendHold<'_>>,
     ) -> Result<(), AppendError> {
         assert_eq!(based_on.root, self.root, "a step appends only to the log it read");
         match self.backend {
             StepBackend::Sqlite(_) => match hold {
-                None => self.store.append_at(&based_on.root, based_on.basis, bytes, key),
+                None => self.store.append_at(&based_on.root, based_on.basis, batch),
                 Some(hold) => match &self.store.store {
                     Store::Sqlite(sqlite) => {
                         sqlite
                             .appender()
-                            .append_holding_read(&based_on.root, based_on.basis, &bytes, key, hold)
+                            .append_holding_read(&based_on.root, based_on.basis, &batch, hold)
                     }
                     #[cfg(feature = "postgres")]
                     Store::Postgres(_) => unreachable!("a SQLite step belongs to a SQLite store"),
                 },
             },
             #[cfg(feature = "postgres")]
-            StepBackend::Postgres(step) => step.append(based_on.basis, bytes, key, hold),
+            StepBackend::Postgres(step) => step.append(based_on.basis, batch, hold),
         }
     }
+}
+
+/// One batch on its way to the store: its encoded bytes, the key row beside it where its host
+/// record names one, and the fence a decided batch commits under.
+pub(crate) struct Batch<'a> {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) key: Option<String>,
+    pub(crate) fence: Option<Fence<'a>>,
+}
+
+/// The head a decided batch requires: its deployment must still stand at the revision that
+/// decided it when the batch commits.
+#[derive(Clone, Copy)]
+pub(crate) struct Fence<'a> {
+    pub(crate) deployment: &'a DeploymentName,
+    pub(crate) revision: PolicyRevision,
+}
+
+impl<'a> Batch<'a> {
+    /// `facts` and `observation` as one batch after `based_on`: fenced when the family follows a
+    /// deployment and the batch's first record carries a revision. A decided batch of a following
+    /// family must carry one.
+    fn of(based_on: &'a Log, facts: &[Fact], observation: Option<&HostObservation>) -> Result<Batch<'a>, AppendError> {
+        let stamp = encoding::stamp_of(facts);
+        if based_on.deployment.is_some() && !facts.is_empty() && stamp.is_none() {
+            return Err(AppendError::Unstamped);
+        }
+        Ok(Batch {
+            bytes: encode(facts, observation),
+            key: observation.and_then(HostObservation::key),
+            fence: fence_of(based_on.deployment.as_ref(), stamp),
+        })
+    }
+}
+
+/// The head a batch stamped at `revision` in a family following `deployment` requires.
+fn fence_of(deployment: Option<&DeploymentName>, revision: Option<PolicyRevision>) -> Option<Fence<'_>> {
+    Some(Fence {
+        deployment: deployment?,
+        revision: revision?,
+    })
 }
 
 impl LogStore {
@@ -725,18 +871,108 @@ impl LogStore {
         })
     }
 
+    /// Where `deployment`'s line stands, or `None` for a deployment that has published nothing.
+    pub fn head(&self, deployment: &DeploymentName) -> Result<Option<PolicyHead>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.head(deployment),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.head(deployment),
+        }
+    }
+
+    /// Publish `policy_file` as `deployment`'s next policy revision, only if its head still
+    /// stands at `expected` — `None` for a deployment's first revision. The file is stored
+    /// content addressed, and the new head names it. A publish orders against every decided
+    /// append of the deployment's families: each one that commits after this publish was decided
+    /// at the revision it returns.
+    pub fn publish(
+        &self,
+        deployment: &DeploymentName,
+        expected: Option<PolicyRevision>,
+        policy_file: &[u8],
+    ) -> Result<PolicyHead, PublishError> {
+        let head = PolicyHead {
+            revision: expected.map_or(PolicyRevision::FIRST, PolicyRevision::next),
+            key: PolicyFileKey::of(policy_file),
+        };
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.publish(deployment, expected, &head, policy_file)?,
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.publish(deployment, expected, &head, policy_file)?,
+        }
+        Ok(head)
+    }
+
+    /// The earliest revision as which `deployment` published the policy file `key`, or `None`
+    /// when it never published it.
+    pub fn published_as(&self, deployment: &DeploymentName, key: &str) -> Result<Option<PolicyRevision>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        let revision = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.published_as(deployment, key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.published_as(deployment, key),
+        }?;
+        Ok(revision.map(|revision| PolicyRevision::new(revision as u64)))
+    }
+
+    /// The content key of the policy file `deployment` published as `revision`.
+    pub fn policy_key(
+        &self,
+        deployment: &DeploymentName,
+        revision: PolicyRevision,
+    ) -> Result<PolicyFileKey, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        let key = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.policy_key(deployment, revision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.policy_key(deployment, revision),
+        }?;
+        serde_json::from_value(serde_json::Value::String(key.clone())).map_err(|error| ReadError::UndecodableKey {
+            key,
+            detail: error.to_string(),
+        })
+    }
+
+    /// The policy file `deployment` published as `revision`, byte for byte: refused unless the
+    /// stored bytes still hash to the key the revision names.
+    pub fn policy_file(&self, deployment: &DeploymentName, revision: PolicyRevision) -> Result<Vec<u8>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        let (key, bytes) = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.policy_file(deployment, revision),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.policy_file(deployment, revision),
+        }?;
+        if PolicyFileKey::of(&bytes).as_str() != key {
+            return Err(ReadError::PolicyFileMismatch { key });
+        }
+        Ok(bytes)
+    }
+
     /// Open a root's log with the opening batch the engine sealed, and store the policy file it
     /// opens under. One transaction, so the opening is durable before any other record of that
-    /// root or none is.
+    /// root or none is. An opening that follows a deployment is fenced like every stamped batch:
+    /// it commits only while the revision that decided it is the deployment's head.
     pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
-        let (root, key) = opened_by(&opening)?;
+        let (root, key, line) = opened_by(&opening)?;
         if PolicyFileKey::of(policy_file) != key {
             return Err(CreateError::PolicyFileMismatch);
         }
-        let bytes = encode(&opening, None);
+        let batch = Batch {
+            bytes: encode(&opening, None),
+            key: None,
+            fence: line.as_ref().map(|(deployment, revision)| Fence {
+                deployment,
+                revision: *revision,
+            }),
+        };
         match &self.store {
             Store::Sqlite(sqlite) => sqlite
-                .create(&root, &key, policy_file, &bytes, || {
+                .create(&root, &key, policy_file, &batch, || {
                     // A refusal here rolls the transaction back, exactly as a process kill before
                     // the commit would leave the file.
                     #[cfg(feature = "fault-injection")]
@@ -747,7 +983,7 @@ impl LogStore {
                 })
                 .map(|()| root),
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.create(&root, &key, policy_file, bytes),
+            Store::Postgres(pg) => pg.create(&root, &key, policy_file, batch),
         }
     }
 
@@ -775,7 +1011,7 @@ impl LogStore {
     }
 
     /// Open a canonical workspace's append-only file history. Concurrent creators may race;
-    /// the winning opening remains authoritative and callers validate its policy and Label.
+    /// the winning opening remains authoritative and callers validate its deployment and Label.
     pub(crate) fn open_workspace(
         &self,
         workspace: &str,
@@ -884,25 +1120,28 @@ impl LogStore {
         }
     }
 
-    /// Append records to the log `based_on` was read from, only if it still stands where that
-    /// read left it. A conflict writes nothing; the caller reads again and replays.
-    pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        self.append_at(&based_on.root, based_on.basis, encode(facts, None), None)
-    }
-
-    /// Append one host observation, and the engine facts it belongs with. The observation is
-    /// durable exactly when those facts are, and a stale read writes nothing, just as append.
-    pub fn append_host(
+    /// Append records, and the host observation that belongs with them, to the log `based_on`
+    /// was read from: only if it still stands where that read left it, and — for a batch stamped
+    /// with a policy revision in a family that follows a deployment — only while that revision is
+    /// still the deployment's head. A conflict writes nothing; the caller reads again and replays.
+    /// A moved head refuses as [`AppendError::PolicyMoved`] for the caller to decide again at the
+    /// new head. The observation is durable exactly when the records are.
+    pub fn append(
         &self,
         based_on: &Log,
         facts: &[Fact],
-        observation: &HostObservation,
+        observation: Option<&HostObservation>,
     ) -> Result<(), AppendError> {
+        self.append_at(&based_on.root, based_on.basis, Batch::of(based_on, facts, observation)?)
+    }
+
+    /// Append one host observation alone. It decides nothing, so no revision stamps it and a
+    /// published revision does not refuse it; a stale read writes nothing, just as append.
+    pub fn append_host(&self, based_on: &Log, observation: &HostObservation) -> Result<(), AppendError> {
         self.append_at(
             &based_on.root,
             based_on.basis,
-            encode(facts, Some(observation)),
-            observation.key().as_deref(),
+            Batch::of(based_on, &[], Some(observation))?,
         )
     }
 
@@ -925,7 +1164,7 @@ impl LogStore {
     }
 
     /// One batch at one position, and the key row beside it where the batch names a key.
-    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
+    fn append_at(&self, root: &TrajectoryId, basis: u64, batch: Batch<'_>) -> Result<(), AppendError> {
         match &self.store {
             Store::Sqlite(sqlite) => {
                 #[allow(unused_mut, reason = "only the fault-injection build races the append")]
@@ -934,7 +1173,7 @@ impl LogStore {
                 if self.contention_fires() {
                     self.contend(&mut appender, root)?;
                 }
-                appender.append(root, basis, &bytes, key, || {
+                appender.append(root, basis, &batch, || {
                     #[cfg(feature = "fault-injection")]
                     if self.failure_fires() {
                         return Err(AppendError::Injected);
@@ -943,7 +1182,7 @@ impl LogStore {
                 })
             }
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.append(root, basis, bytes, key),
+            Store::Postgres(pg) => pg.append(root, basis, batch),
         }
     }
 
@@ -1055,7 +1294,7 @@ impl LogStore {
         &self,
         receiver: &TrajectoryId,
         digest: PeerDigest,
-        label: &Label,
+        label: &StoredLabel,
         body: &str,
         now: SystemTime,
         ttl: Duration,
@@ -1079,7 +1318,7 @@ impl LogStore {
         pending_spawn: Option<&str>,
         dispatch: &str,
         digest: &PeerDigest,
-        label: &Label,
+        label: &StoredLabel,
         body: &str,
         now: SystemTime,
     ) -> Result<EmbeddedClaim, EmbeddedError> {
@@ -1211,9 +1450,10 @@ impl LogStore {
         }
     }
 
-    /// Append engine facts only while this read owns its ticket. A batch that opens a dispatch
-    /// or admits a value binds the ticket in the same transaction, so a release cannot put the
-    /// row back in the inbox after the log has consumed the message.
+    /// Append a batch only while this read owns its ticket. A batch that opens a dispatch or
+    /// admits a value binds the ticket in the same transaction, so a release cannot put the row
+    /// back in the inbox after the log has consumed the message. A stamped batch is fenced as
+    /// [`LogStore::append`] fences it.
     pub fn append_holding_embedded_read(
         &self,
         based_on: &Log,
@@ -1221,16 +1461,15 @@ impl LogStore {
         observation: Option<&HostObservation>,
         hold: &embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
-        let bytes = encode(facts, observation);
-        let key = observation.and_then(HostObservation::key);
+        let batch = Batch::of(based_on, facts, observation)?;
         match &self.store {
             Store::Sqlite(sqlite) => {
                 sqlite
                     .appender()
-                    .append_holding_read(&based_on.root, based_on.basis, &bytes, key.as_deref(), hold)
+                    .append_holding_read(&based_on.root, based_on.basis, &batch, hold)
             }
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, bytes, key.as_deref(), hold),
+            Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, batch, hold),
         }
     }
 
@@ -1458,13 +1697,31 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
         .ok()
 }
 
-fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateError> {
+/// The root an opening batch opens, the policy file key it names, and the deployment and revision
+/// it follows where it follows one.
+type Opened = (TrajectoryId, PolicyFileKey, Option<(DeploymentName, PolicyRevision)>);
+
+fn opened_by(opening: &[Fact]) -> Result<Opened, CreateError> {
     match opening.first() {
         Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
             trajectory,
             policy_file_key,
+            deployment,
+            revision,
             ..
-        })) => Ok((trajectory.clone(), policy_file_key.clone())),
+        })) => {
+            let line = match (deployment, revision) {
+                (Some(deployment), Some(revision)) => Some((deployment.clone(), *revision)),
+                (None, None) => None,
+                _ => {
+                    return Err(CreateError::Malformed {
+                        detail: "the opening names a deployment without a revision, or a revision without a deployment"
+                            .to_string(),
+                    });
+                }
+            };
+            Ok((trajectory.clone(), policy_file_key.clone(), line))
+        }
         Some(_) => Err(CreateError::Malformed {
             detail: "the first record is not a TrajectoryOpened".to_string(),
         }),
@@ -1477,6 +1734,7 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::label::Label;
     use rusqlite::params;
 
     /// The SQLite connection, for tests that reach under the log's API.
@@ -1505,11 +1763,57 @@ mod tests {
         TrajectoryId::new("cc:root")
     }
 
+    /// An opening that follows the test deployment, decided at its first revision.
     fn opening(id: &TrajectoryId) -> Vec<Fact> {
+        engine()
+            .at(deployment(), PolicyRevision::FIRST)
+            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
+            .expect("the opening seals")
+            .into_unsealed()
+    }
+
+    /// An opening pinned to the test policy: what the previous version records for every root.
+    fn pinned_opening(id: &TrajectoryId) -> Vec<Fact> {
         engine()
             .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
             .expect("the opening seals")
             .into_unsealed()
+    }
+
+    /// The deployment every following test family belongs to.
+    pub(crate) fn deployment() -> DeploymentName {
+        DeploymentName::new("default")
+    }
+
+    /// `facts` as a batch decided at `revision`: stamped on the `BasisAdvanced` record every
+    /// decided batch begins with.
+    pub(crate) fn decided_at(revision: PolicyRevision, facts: &[Fact]) -> Vec<Fact> {
+        let mut batch = vec![Fact::BasisAdvanced {
+            trajectory: root(),
+            act: appa_engine::basis::DecidedAct::Proposals(appa_engine::transition::ProposalBatchId::new("decided")),
+            advance: appa_engine::basis::BasisAdvance::default(),
+            revision: Some(revision),
+        }];
+        batch.extend_from_slice(facts);
+        batch
+    }
+
+    /// `facts` decided at the test deployment's first revision.
+    pub(crate) fn decided(facts: &[Fact]) -> Vec<Fact> {
+        decided_at(PolicyRevision::FIRST, facts)
+    }
+
+    /// Open `opening`'s root, publishing the test policy as the test deployment's first revision
+    /// when it has published nothing yet.
+    pub(crate) fn create(store: &LogStore, opening: Vec<Fact>) -> Result<TrajectoryId, CreateError> {
+        if store.head(&deployment()).expect("the head reads").is_none() {
+            match store.publish(&deployment(), None, POLICY.as_bytes()) {
+                // A concurrent test published it first.
+                Ok(_) | Err(PublishError::Moved { .. }) => {}
+                Err(error) => panic!("the test policy publishes: {error}"),
+            }
+        }
+        store.create_root(opening, POLICY.as_bytes())
     }
 
     pub(crate) fn punctuation() -> Vec<Fact> {
@@ -1519,18 +1823,19 @@ mod tests {
         }]
     }
 
-    /// A database file holding `root()`, rewritten to look as a build at `version` left it:
-    /// stamped `version`, without the tables and columns later versions added.
+    /// A database file holding `root()` as a pinned family, rewritten to look as a build at
+    /// `version` left it: stamped `version`, without the tables and columns later versions added.
     fn written_at(version: i64) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         LogStore::open(Backend::Sqlite { path: path.clone() })
             .expect("a fresh store opens")
-            .create_root(opening(&root()), POLICY.as_bytes())
+            .create_root(pinned_opening(&root()), POLICY.as_bytes())
             .expect("the root opens");
         let old = rusqlite::Connection::open(&path).expect("the file reopens");
         old.execute_batch(
-            "DROP TABLE held_peer_messages; DROP TABLE archived_roots;
+            "DROP TABLE deployments; DROP TABLE policy_revisions;
+             DROP TABLE held_peer_messages; DROP TABLE archived_roots;
              ALTER TABLE operations DROP COLUMN lease_owner;
              ALTER TABLE operations DROP COLUMN lease_expires_at;
              ALTER TABLE processed_results DROP COLUMN lease_owner;
@@ -1543,15 +1848,20 @@ mod tests {
         (dir, path)
     }
 
+    /// A database the previous version wrote upgrades in place: its pinned families read back
+    /// with their policy file, take new batches unfenced, and the deployment tables stand empty.
     #[test]
     fn the_oldest_upgradable_database_upgrades_in_place_and_keeps_its_logs() {
         let (_dir, path) = written_at(5);
         let (store, archive) = LogStore::open_archiving(&path).expect("the database upgrades");
         assert_eq!(archive, None);
-        assert_eq!(
-            store.log(&root()).expect("the old log reads").policy_file(),
-            POLICY.as_bytes()
-        );
+        let log = store.log(&root()).expect("the old log reads");
+        assert_eq!(log.policy_file(), POLICY.as_bytes());
+        assert_eq!(log.deployment(), None);
+        store
+            .append(&log, &punctuation(), None)
+            .expect("the pinned family continues");
+        assert_eq!(store.head(&deployment()).expect("the head reads"), None);
         drop(store);
         LogStore::open(Backend::Sqlite { path }).expect("the upgraded database is current");
     }
@@ -1565,13 +1875,14 @@ mod tests {
         drop(LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens"));
         let old = rusqlite::Connection::open(&path).expect("the file reopens");
         old.execute_batch(
-            "ALTER TABLE operations DROP COLUMN lease_owner;
+            "DROP TABLE deployments; DROP TABLE policy_revisions;
+             ALTER TABLE operations DROP COLUMN lease_owner;
              ALTER TABLE operations DROP COLUMN lease_expires_at;
              ALTER TABLE processed_results DROP COLUMN lease_owner;
              ALTER TABLE processed_results DROP COLUMN lease_expires_at;
              ALTER TABLE processed_results DROP COLUMN completed_at;",
         )
-        .expect("the lease columns drop");
+        .expect("the later tables and lease columns drop");
         old.execute(
             "INSERT INTO operations (organization_id, caller_id, session_id, operation_id, root, input, status)
              VALUES ('org', 'caller', 'session', 'op-1', 'root', ?1, 'pending')",
@@ -1606,22 +1917,20 @@ mod tests {
 
     #[test]
     fn a_database_too_old_to_upgrade_is_archived_and_its_roots_stay_closed() {
-        let (dir, path) = written_at(4);
+        let (dir, path) = written_at(sqlite::BASE_VERSION - 1);
         assert!(matches!(
             LogStore::open(Backend::Sqlite { path: path.clone() }).err(),
-            Some(OpenError::Incompatible { found: 4, .. })
+            Some(OpenError::Incompatible { found, .. }) if found == sqlite::BASE_VERSION - 1
         ));
 
         let (store, archive) = LogStore::open_archiving(&path).expect("the database is replaced");
         let archive = archive.expect("the old database is moved aside");
         assert!(matches!(
-            store.create_root(opening(&root()), POLICY.as_bytes()),
+            create(&store, opening(&root())),
             Err(CreateError::Archived { .. })
         ));
         let fresh = TrajectoryId::new("cc:fresh");
-        store
-            .create_root(opening(&fresh), POLICY.as_bytes())
-            .expect("a new session opens");
+        create(&store, opening(&fresh)).expect("a new session opens");
         let kept: i64 = rusqlite::Connection::open(&archive)
             .expect("the archive opens")
             .query_row(
@@ -1636,7 +1945,7 @@ mod tests {
         let (store, again) = LogStore::open_archiving(&path).expect("the replacement reopens");
         assert_eq!(again, None);
         assert!(matches!(
-            store.create_root(opening(&root()), POLICY.as_bytes()),
+            create(&store, opening(&root())),
             Err(CreateError::Archived { .. })
         ));
         assert!(store.has_root(&fresh).expect("the check runs"));
@@ -1666,7 +1975,7 @@ mod tests {
         assert_eq!(opened.iter().filter(|(_, archive)| archive.is_some()).count(), 1);
         for (store, _) in &opened {
             assert!(matches!(
-                store.create_root(opening(&root()), POLICY.as_bytes()),
+                create(store, opening(&root())),
                 Err(CreateError::Archived { .. })
             ));
         }
@@ -1701,27 +2010,88 @@ mod tests {
 
     fn opened() -> LogStore {
         let store = memory();
-        store
-            .create_root(opening(&root()), POLICY.as_bytes())
-            .expect("a fresh root opens");
+        create(&store, opening(&root())).expect("a fresh root opens");
         store
     }
 
     #[test]
-    fn an_opened_root_reads_back_with_its_records_and_its_policy_file() {
+    fn an_opened_root_reads_back_with_its_records_and_its_deployment() {
         let store = opened();
         let log = store.log(&root()).expect("the log reads");
         assert_eq!(log.root(), &root());
         assert_eq!(log.basis(), 1, "the opening batch is the log's first position");
         assert!(matches!(log.facts(), [Fact::TrajectoryOpened(_)]));
+        assert_eq!(log.deployment(), Some(&deployment()));
+        assert_eq!(log.stamp(), Some(PolicyRevision::FIRST));
+    }
+
+    /// A root the previous version opened is pinned to its policy file: it follows no deployment,
+    /// nothing stamps or fences its batches, and its rows are the bytes that version writes.
+    #[test]
+    fn a_pinned_family_is_stored_as_the_previous_version_stores_it() {
+        let store = memory();
+        store
+            .create_root(pinned_opening(&root()), POLICY.as_bytes())
+            .expect("a pinned root opens with no deployment published");
+        store
+            .publish(&deployment(), None, b"version = 2\n# next")
+            .expect("a head elsewhere publishes");
+        let log = store.log(&root()).unwrap();
+        assert_eq!(log.deployment(), None);
+        assert_eq!(log.stamp(), None);
         assert_eq!(log.policy_file(), POLICY.as_bytes());
+        store
+            .append(&log, &punctuation(), None)
+            .expect("a pinned family's batch is not fenced");
+        let row: Vec<u8> = store
+            .lock()
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 1",
+                params![root().as_str()],
+                |row| row.get(0),
+            )
+            .expect("the row reads");
+        assert_eq!(
+            row,
+            serde_json::to_vec(&punctuation()).unwrap(),
+            "a bare record array, as before"
+        );
+        assert!(matches!(
+            store.create_root(opening(&root()), b"other bytes"),
+            Err(CreateError::PolicyFileMismatch),
+        ));
+    }
+
+    /// Every decided batch of a following family names the revision that decided it: one without
+    /// is refused and writes nothing. A host observation alone decides nothing and names none.
+    #[test]
+    fn a_following_family_refuses_a_decided_batch_without_its_revision() {
+        let store = memory();
+        create(&store, opening(&root())).expect("the root opens");
+        let log = store.log(&root()).unwrap();
+        assert!(matches!(
+            store.append(&log, &punctuation(), None),
+            Err(AppendError::Unstamped)
+        ));
+        assert_eq!(store.log(&root()).unwrap().facts(), log.facts(), "nothing is written");
+        store
+            .append_host(
+                &log,
+                &HostObservation::PeerAdmitted {
+                    digest: PeerDigest::of_body("hello"),
+                },
+            )
+            .expect("a host observation names no revision");
+        store
+            .append(&store.log(&root()).unwrap(), &decided(&punctuation()), None)
+            .expect("a stamped batch commits at the head");
     }
 
     #[test]
     fn a_second_root_under_one_id_is_refused() {
         let store = opened();
         assert!(matches!(
-            store.create_root(opening(&root()), POLICY.as_bytes()),
+            create(&store, opening(&root())),
             Err(CreateError::AlreadyExists { .. }),
         ));
     }
@@ -1730,39 +2100,154 @@ mod tests {
     fn an_opening_that_does_not_lead_with_its_record_is_refused() {
         let store = memory();
         assert!(matches!(
-            store.create_root(punctuation(), POLICY.as_bytes()),
+            create(&store, punctuation()),
             Err(CreateError::Malformed { .. }),
         ));
-        assert!(matches!(
-            store.create_root(Vec::new(), POLICY.as_bytes()),
-            Err(CreateError::Malformed { .. }),
-        ));
+        assert!(matches!(create(&store, Vec::new()), Err(CreateError::Malformed { .. }),));
     }
 
+    /// An opening is a decided batch: it commits only at its deployment's head, and a
+    /// deployment that has published nothing has no head to open at.
     #[test]
-    fn a_policy_file_the_opening_does_not_name_is_refused() {
+    fn an_opening_decided_away_from_its_deployments_head_is_refused() {
         let store = memory();
         assert!(matches!(
-            store.create_root(opening(&root()), b"other bytes"),
-            Err(CreateError::PolicyFileMismatch),
+            store.create_root(opening(&root()), POLICY.as_bytes()),
+            Err(CreateError::PolicyMoved { head: None }),
+        ));
+        store.publish(&deployment(), None, POLICY.as_bytes()).unwrap();
+        store
+            .publish(&deployment(), Some(PolicyRevision::FIRST), b"version = 2\n# next")
+            .unwrap();
+        assert!(matches!(
+            store.create_root(opening(&root()), POLICY.as_bytes()),
+            Err(CreateError::PolicyMoved { head: Some(head) }) if head == PolicyRevision::new(2),
         ));
         assert!(matches!(store.log(&root()), Err(ReadError::UnknownRoot { .. })));
+    }
+
+    /// A publish moves the head only from the revision its publisher read, and every revision
+    /// keeps the file it named.
+    #[test]
+    fn a_publish_moves_the_head_only_from_the_revision_it_expected() {
+        let store = memory();
+        let next = b"version = 2\n# next".as_slice();
+        assert_eq!(store.head(&deployment()).unwrap(), None);
+        let first = store.publish(&deployment(), None, POLICY.as_bytes()).unwrap();
+        assert_eq!(first.revision, PolicyRevision::FIRST);
+        assert!(matches!(
+            store.publish(&deployment(), None, next),
+            Err(PublishError::Moved { head: Some(head) }) if head == PolicyRevision::FIRST,
+        ));
+        let second = store.publish(&deployment(), Some(PolicyRevision::FIRST), next).unwrap();
+        assert_eq!(second.revision, PolicyRevision::new(2));
+        assert_eq!(second.key, PolicyFileKey::of(next));
+        assert!(matches!(
+            store.publish(&deployment(), Some(PolicyRevision::FIRST), POLICY.as_bytes()),
+            Err(PublishError::Moved { head: Some(head) }) if head == PolicyRevision::new(2),
+        ));
+        assert_eq!(store.head(&deployment()).unwrap(), Some(second));
+        assert_eq!(
+            store.policy_file(&deployment(), PolicyRevision::FIRST).unwrap(),
+            POLICY.as_bytes()
+        );
+        assert_eq!(store.policy_file(&deployment(), PolicyRevision::new(2)).unwrap(), next);
+        assert_eq!(
+            store.policy_key(&deployment(), PolicyRevision::FIRST).unwrap(),
+            PolicyFileKey::of(POLICY.as_bytes())
+        );
+        assert!(matches!(
+            store.policy_file(&deployment(), PolicyRevision::new(3)),
+            Err(ReadError::UnknownRevision { .. })
+        ));
+        assert_eq!(
+            store.head(&DeploymentName::new("other")).unwrap(),
+            None,
+            "deployments are independent lines"
+        );
+    }
+
+    /// A decided batch commits only while the revision that decided it is its deployment's
+    /// head; a batch of host observations alone is not fenced and carries the stamp before it.
+    #[test]
+    fn a_decided_batch_commits_only_at_its_deployments_head() {
+        let store = opened();
+        let log = store.log(&root()).unwrap();
+        store
+            .publish(&deployment(), Some(PolicyRevision::FIRST), b"version = 2\n# next")
+            .unwrap();
+        assert!(matches!(
+            store.append(&log, &decided(&punctuation()), None),
+            Err(AppendError::PolicyMoved { head: Some(head) }) if head == PolicyRevision::new(2),
+        ));
+        assert_eq!(
+            store.log(&root()).unwrap().basis(),
+            1,
+            "the refused batch wrote nothing"
+        );
+        store
+            .append_host(&log, &observed(root().as_str(), "demo"))
+            .expect("a host observation is not fenced");
+        // The previous version, reading this family as pinned to its opening file, stamps
+        // nothing and fences nothing: its row lands as written, and the engine judges it by the
+        // opening revision.
+        store
+            .lock()
+            .execute(
+                "INSERT INTO logs (root, seq, facts) VALUES (?1, 2, ?2)",
+                params![root().as_str(), serde_json::to_vec(&punctuation()).unwrap()],
+            )
+            .expect("the previous version's row lands");
+        let log = store.log(&root()).unwrap();
+        let second = decided_at(PolicyRevision::new(2), &punctuation());
+        store
+            .append(&log, &second, None)
+            .expect("a batch decided at the head lands");
+
+        let log = store.log(&root()).unwrap();
+        let stamps: Vec<_> = log.stamped_batches().iter().map(|batch| batch.revision).collect();
+        assert_eq!(
+            stamps,
+            [Some(PolicyRevision::FIRST), None, None, Some(PolicyRevision::new(2))]
+        );
+        assert_eq!(log.stamp(), Some(PolicyRevision::new(2)));
+        assert_eq!(
+            log.revisions(),
+            std::collections::BTreeSet::from([PolicyRevision::FIRST, PolicyRevision::new(2)])
+        );
+        let after: Vec<_> = log
+            .stamped_after(1)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.revision)
+            .collect();
+        assert_eq!(after, [None, None, Some(PolicyRevision::new(2))]);
     }
 
     #[test]
     fn appends_advance_the_position_and_read_back_in_order() {
         let store = opened();
         let log = store.log(&root()).expect("the log reads");
-        store.append(&log, &punctuation()).expect("the append lands");
+        store
+            .append(&log, &decided(&punctuation()), None)
+            .expect("the append lands");
         let log = store.log(&root()).expect("the log reads");
         assert_eq!(log.basis(), 2);
-        store.append(&log, &punctuation()).expect("the second append lands");
+        store
+            .append(&log, &decided(&punctuation()), None)
+            .expect("the second append lands");
 
         let log = store.log(&root()).expect("the log reads");
         assert_eq!(log.basis(), 3);
         assert!(matches!(
             log.facts(),
-            [Fact::TrajectoryOpened(_), Fact::Boundary { .. }, Fact::Boundary { .. },],
+            [
+                Fact::TrajectoryOpened(_),
+                Fact::BasisAdvanced { .. },
+                Fact::Boundary { .. },
+                Fact::BasisAdvanced { .. },
+                Fact::Boundary { .. },
+            ],
         ));
     }
 
@@ -1770,9 +2255,11 @@ mod tests {
     fn an_append_on_a_stale_read_conflicts_and_writes_nothing() {
         let store = opened();
         let stale = store.log(&root()).expect("the log reads");
-        store.append(&stale, &punctuation()).expect("the first append lands");
+        store
+            .append(&stale, &decided(&punctuation()), None)
+            .expect("the first append lands");
 
-        match store.append(&stale, &punctuation()) {
+        match store.append(&stale, &decided(&punctuation()), None) {
             Err(AppendError::Conflict { current }) => assert_eq!(current, 2),
             other => panic!("expected a conflict, got {other:?}"),
         }
@@ -1836,13 +2323,13 @@ mod tests {
         let store = opened();
         let stale = store.log(&root()).unwrap();
         let observation = observed(root().as_str(), "demo");
-        store.append_host(&stale, &[], &observation).unwrap();
+        store.append_host(&stale, &observation).unwrap();
         assert!(matches!(
-            store.append(&stale, &punctuation()),
+            store.append(&stale, &decided(&punctuation()), None),
             Err(AppendError::Conflict { .. })
         ));
         assert!(matches!(
-            store.append_host(&stale, &[], &observation),
+            store.append_host(&stale, &observation),
             Err(AppendError::Conflict { .. })
         ));
         let seen = store.log(&root()).unwrap();
@@ -1853,10 +2340,10 @@ mod tests {
             "the record names the position it landed at"
         );
         assert_eq!(seen.facts(), stale.facts());
-        assert_eq!(seen.policy_file(), stale.policy_file());
-        store.append(&seen, &punctuation()).unwrap();
+        assert_eq!(seen.deployment(), stale.deployment());
+        store.append(&seen, &decided(&punctuation()), None).unwrap();
         assert!(matches!(
-            store.append_host(&seen, &[], &observed("child", "other")),
+            store.append_host(&seen, &observed("child", "other")),
             Err(AppendError::Conflict { .. })
         ));
         assert_eq!(store.log(&root()).unwrap().host_records().len(), 1);
@@ -1880,13 +2367,17 @@ mod tests {
             dispatch: dispatch.clone(),
             prompt: None,
         };
-        store.append_host(&log, &punctuation(), &bound).unwrap();
+        store.append(&log, &decided(&punctuation()), Some(&bound)).unwrap();
 
         let seen = store.log(&root()).unwrap();
         assert_eq!(seen.basis(), 2, "both streams took one position");
         assert!(matches!(
             seen.facts(),
-            [Fact::TrajectoryOpened(_), Fact::Boundary { .. }]
+            [
+                Fact::TrajectoryOpened(_),
+                Fact::BasisAdvanced { .. },
+                Fact::Boundary { .. }
+            ]
         ));
         let bindings: Vec<_> = seen.call_bindings().collect();
         assert_eq!(bindings.len(), 1);
@@ -1903,6 +2394,7 @@ mod tests {
             StoreErrorClass::AlreadyExists => "already_exists",
             StoreErrorClass::Archived => "archived",
             StoreErrorClass::PolicyUnavailable => "policy_unavailable",
+            StoreErrorClass::PolicyMoved => "policy_moved",
             StoreErrorClass::PolicyMismatch => "policy_mismatch",
             StoreErrorClass::Undecodable => "undecodable",
             StoreErrorClass::Malformed => "malformed",
@@ -1914,6 +2406,7 @@ mod tests {
             StoreErrorClass::AlreadyExists,
             StoreErrorClass::Archived,
             StoreErrorClass::PolicyUnavailable,
+            StoreErrorClass::PolicyMoved,
             StoreErrorClass::PolicyMismatch,
             StoreErrorClass::Undecodable,
             StoreErrorClass::Malformed,
@@ -1957,7 +2450,9 @@ mod tests {
         let store = opened();
         for _ in 0..2 {
             let log = store.log(&root()).expect("the log reads");
-            store.append(&log, &punctuation()).expect("the append lands");
+            store
+                .append(&log, &decided(&punctuation()), None)
+                .expect("the append lands");
         }
         store
             .lock()
@@ -1974,14 +2469,18 @@ mod tests {
         let store = opened();
         for _ in 0..2 {
             let log = store.log(&root()).expect("the log reads");
-            store.append(&log, &punctuation()).expect("the append lands");
+            store
+                .append(&log, &decided(&punctuation()), None)
+                .expect("the append lands");
         }
         let log = store.log(&root()).expect("the log reads");
         store
             .lock()
             .execute("DELETE FROM logs WHERE seq = 1", [])
             .expect("the middle row deletes");
-        store.append(&log, &punctuation()).expect("the append lands at seq 3");
+        store
+            .append(&log, &decided(&punctuation()), None)
+            .expect("the append lands at seq 3");
         let seqs = store
             .lock()
             .prepare("SELECT seq FROM logs ORDER BY seq")
@@ -2003,16 +2502,16 @@ mod tests {
         let child = observed("child", "other");
         {
             let store = LogStore::open(backend.clone()).unwrap();
-            store.create_root(opening(&root()), POLICY.as_bytes()).unwrap();
-            store.append_host(&store.log(&root()).unwrap(), &[], &parent).unwrap();
-            store.append_host(&store.log(&root()).unwrap(), &[], &child).unwrap();
+            create(&store, opening(&root())).unwrap();
+            store.append_host(&store.log(&root()).unwrap(), &parent).unwrap();
+            store.append_host(&store.log(&root()).unwrap(), &child).unwrap();
         }
         let store = LogStore::open(backend).unwrap();
         let log = store.log(&root()).unwrap();
         assert_eq!(observations(&log), vec![parent, child]);
         assert_eq!(log.basis(), 3);
         assert_eq!(log.facts(), opening(&root()));
-        assert_eq!(log.policy_file(), POLICY.as_bytes());
+        assert_eq!(log.deployment(), Some(&deployment()));
     }
 
     /// The query a reader uses when it knows the key but not the family that recorded it:
@@ -2021,7 +2520,7 @@ mod tests {
     fn a_key_finds_the_roots_that_named_it_and_no_others() {
         let store = opened();
         let second = TrajectoryId::new("cc:second");
-        store.create_root(opening(&second), POLICY.as_bytes()).unwrap();
+        create(&store, opening(&second)).unwrap();
         let vouched = |root: &TrajectoryId, key: &str| HostObservation::Vouched {
             actor: HostActor {
                 root: root.clone(),
@@ -2030,21 +2529,25 @@ mod tests {
             key: key.to_string(),
             ruling: None,
         };
-        store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
         store
-            .append_host(&store.log(&root()).unwrap(), &[], &vouched(&root(), "offer:one"))
+            .append(&store.log(&root()).unwrap(), &decided(&punctuation()), None)
             .unwrap();
         store
-            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .append_host(&store.log(&root()).unwrap(), &vouched(&root(), "offer:one"))
             .unwrap();
         store
-            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:two"))
+            .append_host(&store.log(&second).unwrap(), &vouched(&second, "offer:one"))
+            .unwrap();
+        store
+            .append_host(&store.log(&second).unwrap(), &vouched(&second, "offer:two"))
             .unwrap();
         // A second row naming the same key, so a root that recorded twice is named once.
         store
-            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .append_host(&store.log(&second).unwrap(), &vouched(&second, "offer:one"))
             .unwrap();
-        store.append(&store.log(&second).unwrap(), &punctuation()).unwrap();
+        store
+            .append(&store.log(&second).unwrap(), &decided(&punctuation()), None)
+            .unwrap();
 
         assert_eq!(
             store.roots_mentioning("offer:one").unwrap(),
@@ -2074,9 +2577,12 @@ mod tests {
             },
             HostObservation::PeerSent {
                 digest,
-                label: Label::new(
-                    appa_engine::label::Trust::new(1),
-                    appa_engine::label::Audience::public(),
+                label: StoredLabel::named(
+                    &Label::new(
+                        appa_engine::label::Trust::new(1),
+                        appa_engine::label::Audience::public(),
+                    ),
+                    &appa_engine::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
                 ),
                 dispatch: DispatchId::new(
                     root.clone(),
@@ -2115,9 +2621,7 @@ mod tests {
         );
 
         for observation in [&addressed, &titled, &sent, &admitted] {
-            store
-                .append_host(&store.log(&root()).unwrap(), &[], observation)
-                .unwrap();
+            store.append_host(&store.log(&root()).unwrap(), observation).unwrap();
         }
         for key in &keys {
             assert_eq!(store.roots_mentioning(key).unwrap(), vec![root()], "{key}");
@@ -2172,22 +2676,38 @@ mod tests {
     }
 
     #[test]
-    fn two_roots_under_one_policy_file_share_the_stored_row() {
+    fn two_revisions_of_one_policy_file_share_the_stored_row() {
         let store = opened();
-        let second = TrajectoryId::new("cc:second");
         store
-            .create_root(opening(&second), POLICY.as_bytes())
-            .expect("a second root opens under the same file");
-
+            .publish(&deployment(), Some(PolicyRevision::FIRST), POLICY.as_bytes())
+            .expect("the same file publishes again");
         assert_eq!(
-            store.log(&second).expect("the log reads").policy_file(),
+            store.policy_file(&deployment(), PolicyRevision::new(2)).unwrap(),
             POLICY.as_bytes()
         );
         let rows: i64 = store
             .lock()
             .query_row("SELECT COUNT(*) FROM policy_files", [], |row| row.get(0))
             .expect("the count runs");
-        assert_eq!(rows, 1, "the file is stored once, not once per root");
+        assert_eq!(rows, 1, "the file is stored once, not once per revision");
+    }
+
+    /// A revision names its file by the hash of the exact bytes: stored bytes that no longer
+    /// hash to that key are refused.
+    #[test]
+    fn a_stored_policy_file_that_is_not_its_keys_bytes_is_refused() {
+        let store = opened();
+        store
+            .lock()
+            .execute(
+                "UPDATE policy_files SET bytes = ?1",
+                params![b"version = 2\n# other".to_vec()],
+            )
+            .expect("the damage lands");
+        assert!(matches!(
+            store.policy_file(&deployment(), PolicyRevision::FIRST),
+            Err(ReadError::PolicyFileMismatch { .. })
+        ));
     }
 
     #[test]
@@ -2197,7 +2717,11 @@ mod tests {
             .lock()
             .execute("DELETE FROM policy_files", [])
             .expect("the deletion lands");
-        assert!(matches!(store.log(&root()), Err(ReadError::PolicyFileMissing { .. }),));
+        assert!(matches!(store.log(&root()), Err(ReadError::PolicyFileMissing { .. })));
+        assert!(matches!(
+            store.policy_file(&deployment(), PolicyRevision::FIRST),
+            Err(ReadError::PolicyFileMissing { .. })
+        ));
     }
 
     #[test]
@@ -2206,11 +2730,11 @@ mod tests {
         let path = dir.path().join("appa.db");
         {
             let store = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens");
-            store
-                .create_root(opening(&root()), POLICY.as_bytes())
-                .expect("a fresh root opens");
+            create(&store, opening(&root())).expect("a fresh root opens");
             let log = store.log(&root()).expect("the log reads");
-            store.append(&log, &punctuation()).expect("the append lands");
+            store
+                .append(&log, &decided(&punctuation()), None)
+                .expect("the append lands");
         }
         let store = LogStore::open(Backend::Sqlite { path }).expect("the store reopens");
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
@@ -2221,21 +2745,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         let first = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("the first connection opens");
-        first
-            .create_root(opening(&root()), POLICY.as_bytes())
-            .expect("a fresh root opens");
+        create(&first, opening(&root())).expect("a fresh root opens");
         let second = LogStore::open(Backend::Sqlite { path }).expect("the second connection opens");
 
         let seen_by_first = first.log(&root()).expect("the log reads");
         let seen_by_second = second.log(&root()).expect("the log reads");
-        first.append(&seen_by_first, &punctuation()).expect("the winner lands");
+        first
+            .append(&seen_by_first, &decided(&punctuation()), None)
+            .expect("the winner lands");
         assert!(matches!(
-            second.append(&seen_by_second, &punctuation()),
+            second.append(&seen_by_second, &decided(&punctuation()), None),
             Err(AppendError::Conflict { current: 2 }),
         ));
 
         let replayed = second.log(&root()).expect("the log reads");
-        second.append(&replayed, &punctuation()).expect("the replay lands");
+        second
+            .append(&replayed, &decided(&punctuation()), None)
+            .expect("the replay lands");
         assert_eq!(first.log(&root()).expect("the log reads").basis(), 3);
     }
 
@@ -2537,11 +3063,11 @@ mod tests {
             kind: appa_engine::fact::BoundaryKind::VoidReturn,
         }];
         let sqlite = memory();
-        first.create_root(opening(&id), POLICY.as_bytes()).unwrap();
-        sqlite.create_root(opening(&id), POLICY.as_bytes()).unwrap();
+        first.create_root(pinned_opening(&id), POLICY.as_bytes()).unwrap();
+        sqlite.create_root(pinned_opening(&id), POLICY.as_bytes()).unwrap();
         assert_eq!(first.log(&id).unwrap(), sqlite.log(&id).unwrap());
         assert!(matches!(
-            second.create_root(opening(&id), POLICY.as_bytes()),
+            second.create_root(pinned_opening(&id), POLICY.as_bytes()),
             Err(CreateError::AlreadyExists { .. })
         ));
         assert!(matches!(
@@ -2550,19 +3076,19 @@ mod tests {
         ));
 
         let before = first.log(&id).unwrap();
-        first.append(&before, &facts).unwrap();
+        first.append(&before, &decided(&facts), None).unwrap();
         assert!(matches!(
-            second.append(&before, &facts),
+            second.append(&before, &decided(&facts), None),
             Err(AppendError::Conflict { current: 2 })
         ));
-        sqlite.append(&sqlite.log(&id).unwrap(), &facts).unwrap();
+        sqlite
+            .append(&sqlite.log(&id).unwrap(), &decided(&facts), None)
+            .unwrap();
         assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
 
         let observation = observed(id.as_str(), "demo");
-        first.append_host(&first.log(&id).unwrap(), &[], &observation).unwrap();
-        sqlite
-            .append_host(&sqlite.log(&id).unwrap(), &[], &observation)
-            .unwrap();
+        first.append_host(&first.log(&id).unwrap(), &observation).unwrap();
+        sqlite.append_host(&sqlite.log(&id).unwrap(), &observation).unwrap();
         assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
         assert_eq!(
             first.log(&id).unwrap().host_records(),
@@ -2579,10 +3105,10 @@ mod tests {
             ruling: None,
         };
         let before_vouch = first.log(&id).unwrap();
-        first.append_host(&before_vouch, &[], &vouched).unwrap();
+        first.append_host(&before_vouch, &vouched).unwrap();
         assert!(
             matches!(
-                first.append_host(&before_vouch, &[], &vouched),
+                first.append_host(&before_vouch, &vouched),
                 Err(AppendError::Conflict { .. }),
             ),
             "a host observation is appended against its read position on this backend too"
@@ -2616,11 +3142,11 @@ mod tests {
         let outcomes = std::thread::scope(|scope| {
             let a = scope.spawn(|| {
                 barrier.wait();
-                first.append(&stale, &facts)
+                first.append(&stale, &decided(&facts), None)
             });
             let b = scope.spawn(|| {
                 barrier.wait();
-                second.append(&stale, &facts)
+                second.append(&stale, &decided(&facts), None)
             });
             [a.join().unwrap(), b.join().unwrap()]
         });
@@ -2656,12 +3182,12 @@ mod tests {
         };
         let expected = vec![(call_id.clone(), dispatch.clone())];
         let before = first.log(&id).unwrap();
-        first.append_host(&before, &facts, &bound).unwrap();
+        first.append(&before, &decided(&facts), Some(&bound)).unwrap();
         let restored = second.log(&id).unwrap();
         assert_eq!(bindings(&restored), expected);
-        assert_eq!(restored.facts().len(), before.facts().len() + facts.len());
+        assert_eq!(restored.facts().len(), before.facts().len() + decided(&facts).len());
         assert!(matches!(
-            second.append_host(&before, &facts, &bound),
+            second.append(&before, &decided(&facts), Some(&bound)),
             Err(AppendError::Conflict { current }) if current == before.basis() + 1
         ));
 
@@ -2845,7 +3371,7 @@ mod tests {
         let root = postgres_root(&store, "peer");
         let observations = peer_observations(&root);
         for observation in &observations {
-            store.append_host(&store.log(&root).unwrap(), &[], observation).unwrap();
+            store.append_host(&store.log(&root).unwrap(), observation).unwrap();
         }
         for key in observations.iter().filter_map(HostObservation::key) {
             assert!(store.roots_mentioning(&key).unwrap().contains(&root), "{key}");
@@ -2886,10 +3412,104 @@ mod tests {
     fn postgres_root(store: &LogStore, name: &str) -> TrajectoryId {
         let unique = tempfile::tempdir().expect("a unique root name exists");
         let id = TrajectoryId::new(format!("pg-test:{name}:{}", unique.path().display()));
+        // Pinned: these tests exercise the store's encoding and compare-and-swap, and a pinned
+        // family is fenced at no deployment's head the shared database's other tests move.
         store
-            .create_root(opening(&id), POLICY.as_bytes())
+            .create_root(pinned_opening(&id), POLICY.as_bytes())
             .expect("the root opens");
         id
+    }
+
+    /// A fresh database on the test server whose default isolation is REPEATABLE READ, with
+    /// the host schema installed, and its URL. A store that left its isolation to the host
+    /// default would read a stale head there or fail its locking read; this store's
+    /// transactions open at READ COMMITTED, so its fence reads the head a publish moved.
+    #[cfg(feature = "postgres")]
+    fn repeatable_read_database() -> (String, impl Drop) {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let unique = tempfile::tempdir().expect("a unique name exists");
+        let name = format!(
+            "appa_rr_{}",
+            unique
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        let (base, query) = match url.split_once('?') {
+            Some((base, query)) => (base.to_string(), format!("?{query}")),
+            None => (url.clone(), String::new()),
+        };
+        let server = base.rsplit_once('/').expect("the URL names a database").0.to_string();
+        let mut admin = ::postgres::Client::connect(&url, ::postgres::NoTls).expect("the server connects");
+        admin
+            .batch_execute(&format!("CREATE DATABASE {name}"))
+            .expect("the database is created");
+        admin
+            .batch_execute(&format!(
+                "ALTER DATABASE {name} SET default_transaction_isolation TO 'repeatable read'"
+            ))
+            .expect("the database defaults to repeatable read");
+        let database = format!("{server}/{name}{query}");
+        ::postgres::Client::connect(&database, ::postgres::NoTls)
+            .expect("the database connects")
+            .batch_execute(include_str!("../tests/fixtures/host_schema.sql"))
+            .expect("the host schema installs");
+        struct Dropped(String, String);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                if let Ok(mut admin) = ::postgres::Client::connect(&self.0, ::postgres::NoTls) {
+                    let _ = admin.batch_execute(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.1));
+                }
+            }
+        }
+        (database, Dropped(url, name))
+    }
+
+    /// The fence on PostgreSQL, on a database whose host default is REPEATABLE READ: a publish
+    /// that commits while a step holds its family and has decided at the previous head makes
+    /// that step's append refuse as a moved head — not a serialization failure, and not a
+    /// commit at the old revision. The next decision, at the new head, lands; a host
+    /// observation is never fenced.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_publish_fences_an_append_it_raced_under_a_repeatable_read_default() {
+        let (database, _dropped) = repeatable_read_database();
+        let open = || {
+            LogStore::open(Backend::Postgres {
+                url: database.clone(),
+                max_connections: std::num::NonZeroUsize::new(2).expect("a pool holds a connection"),
+            })
+            .expect("the PostgreSQL store opens")
+        };
+        let (store, publisher) = (open(), open());
+        create(&store, opening(&root())).expect("the following root opens at the first revision");
+
+        let step = store.step(&root()).expect("the step holds the family");
+        let read = step.log().expect("the step reads");
+        publisher
+            .publish(&deployment(), Some(PolicyRevision::FIRST), b"version = 2\n# next")
+            .expect("the publish commits while the step is open");
+        assert!(
+            matches!(
+                step.append(&read, &decided(&punctuation()), None),
+                Err(AppendError::PolicyMoved { head: Some(head) }) if head == PolicyRevision::new(2)
+            ),
+            "a decision made at the previous head does not commit after the publish"
+        );
+        let log = store.log(&root()).unwrap();
+        assert_eq!(log.basis(), 1, "the fenced step wrote nothing");
+        store
+            .append_host(&log, &observed(root().as_str(), "demo"))
+            .expect("a host observation is not fenced");
+        let log = store.log(&root()).unwrap();
+        store
+            .append(&log, &decided_at(PolicyRevision::new(2), &punctuation()), None)
+            .expect("a decision at the new head lands");
+        assert_eq!(store.log(&root()).unwrap().stamp(), Some(PolicyRevision::new(2)));
     }
 
     #[cfg(feature = "postgres")]
@@ -2952,7 +3572,7 @@ mod tests {
         let step = store.step(&root).expect("the step begins");
         let log = step.log().expect("the step reads");
         assert!(!postgres_root_is_free(&store, &root), "the step holds the family's row");
-        step.append(&log, &boundary).expect("the step appends");
+        step.append(&log, &decided(&boundary), None).expect("the step appends");
         assert!(postgres_root_is_free(&store, &root), "the append ends the step");
         assert_eq!(store.log(&root).expect("the log reads").basis(), 2);
 
@@ -2987,7 +3607,7 @@ mod tests {
                     barrier.wait();
                     let step = store.step(&root).expect("the step begins");
                     let log = step.log().expect("the step reads");
-                    step.append(&log, &boundary)
+                    step.append(&log, &decided(&boundary), None)
                 })
             })
             .collect();
@@ -3014,7 +3634,7 @@ mod tests {
         }];
         let first = reader.log(&root).expect("the log reads");
         writer
-            .append(&writer.log(&root).expect("the log reads"), &boundary)
+            .append(&writer.log(&root).expect("the log reads"), &decided(&boundary), None)
             .expect("another store appends");
         let second = reader.log(&root).expect("the log reads again");
         assert_eq!(second.basis(), first.basis() + 1, "the cached read sees the new batch");
@@ -3043,9 +3663,10 @@ mod tests {
         assert_eq!(reread.basis(), 2);
         assert!(
             reread
-                .batches_after(1)
+                .stamped_after(1)
                 .expect("the batch exists")
-                .all(<[Fact]>::is_empty),
+                .iter()
+                .all(|batch| batch.facts.is_empty()),
             "the reader drops its cached copy and reads the stored batch"
         );
         forget_postgres_roots(&writer, vec![root]);
@@ -3063,7 +3684,7 @@ mod tests {
         }];
         for _ in 0..2 {
             let log = store.log(&root).expect("the log reads");
-            store.append(&log, &boundary).expect("the append lands");
+            store.append(&log, &decided(&boundary), None).expect("the append lands");
         }
         let before = store.log(&root).expect("the log reads");
         let gapped = root.as_str().to_owned();
@@ -3079,7 +3700,9 @@ mod tests {
             .expect("the middle row deletes");
         let error = store.log(&root).expect_err("a gapped log does not read");
         assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
-        store.append(&before, &boundary).expect("the append lands at seq 3");
+        store
+            .append(&before, &decided(&boundary), None)
+            .expect("the append lands at seq 3");
         let listed = root.as_str().to_owned();
         let seqs: Vec<i64> = store
             .lease()
@@ -3880,7 +4503,10 @@ mod tests {
                             .hold_peer_message(
                                 receiver,
                                 PeerDigest::of_body(&body),
-                                &Label::top(),
+                                &crate::StoredLabel::named(
+                                    &Label::top(),
+                                    &appa_engine::registry::TrustChain::new(vec!["trusted".into()]),
+                                ),
                                 &body,
                                 now,
                                 Duration::from_secs(600),
@@ -3944,7 +4570,10 @@ mod tests {
                     None,
                     &dispatch,
                     &PeerDigest::of_body(&dispatch),
-                    &Label::top(),
+                    &crate::StoredLabel::named(
+                        &Label::top(),
+                        &appa_engine::registry::TrustChain::new(vec!["trusted".into()]),
+                    ),
                     &dispatch,
                     SystemTime::now(),
                 )

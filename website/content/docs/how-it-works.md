@@ -151,9 +151,27 @@ A `trajectory family` contains one root and its spawned subagents in the same ev
 | Run a `fan-out spawn`, such as Claude Code's `Workflow` tool | Each subagent the spawn starts binds its own fork under the spawn's one approval, starting at the parent's label at that moment. | The same as a single spawn, for each subagent: every answer crosses the checked return path on its own. |
 | Open an independent conversation from copied context | The embedding integration can open a new root family from an identified source trajectory. | Only the source state frozen at opening is inherited. There is no subagent return path or continuing synchronization. |
 
-A root fork keeps the source family's opening policy, the source trajectory's label and authority denials, and the family's committed effects and unsettled effect reservations. Parent and fork then evolve independently. A reservation inherited while a parent call was unfinished remains conservative in the fork; a later parent result does not settle it there. Active dispatches and remedy offers are not copied.
+A root fork belongs to the source family's `deployment`. It keeps the source trajectory's label and authority denials, and the family's committed effects and unsettled effect reservations. Parent and fork then evolve independently. A reservation inherited while a parent call was unfinished remains conservative in the fork; a later parent result does not settle it there. Active dispatches and remedy offers are not copied.
 
 An embedding opens a root fork explicitly with `Runtime::open_root_fork`. It must establish which trajectory supplied the copied context: a new session ID alone does not prove that it is a fork. The Claude Code integration establishes it from the protected launch. `clappa --resume <id> --fork-session` names the source, and the new root forks from it. A session ID change inside one launch continues the same family. See [Session ID changes](/claude-code#session-id-changes).
+
+## Every agent decides under its deployment's current policy
+
+A `deployment` is the line of policies that one runtime, or one organization in an embedding host, serves. Each published policy is a numbered `policy revision`. Every `trajectory family` belongs to one deployment. The next decision in every family, new or already running, is made under the deployment's current revision, its head.
+
+The family log records which revision decided each batch. Replay judges each batch under that revision, so a new policy never changes what an earlier record meant. An earlier revision only replays: it consults no annotator, authority, or audience source. A deployment can therefore remove a connection together with the policy rules that used it. No running agent is left asking a service that is gone.
+
+**A publish orders against every decision.** A decision commits only while the revision that made it is still the head. The store checks this in the same transaction that appends the decision. After a publish commits, every decision that commits was made under the published revision. A decision made under the previous revision is refused at commit. The runtime then makes it again under the new head, including any consult it needs, and the agent receives that answer. A publish is a compare-and-swap on the head the publisher read, so concurrent publishers cannot overwrite each other.
+
+**A tool call that is already running finishes.** Its release committed before the publish, so the call completes. A publish does not wait for running tool calls. The release recorded the call's terms: its `delta`, its tags, and the effects it reserved. The result's label is the meet of those terms and the head's declaration of the call, so a new revision can tighten a running call's result but never loosen it. If the release bound an output sanitizer that the head no longer declares, the result is withheld from the agent.
+
+**A pending remedy does not survive a publish.** An offer that the agent has not executed, and an approval that it has not spent, were planned under the previous revision. After a publish, neither one stands. Executing the offer consults no authority, and the runtime tells the agent to propose the call again. The head then decides the call and offers its own remedy plans, so the agent continues under the current policy.
+
+**Trust levels carry across by name.** A label records its trust as a rank in the policy's trust chain. When a revision renames or reorders the chain, every label a family holds moves to the rank with the same name. This includes labels stored for the family outside its log, such as a peer message held for it. A value at a rank the new chain drops falls to the lowest rank. A return floor at a dropped rank rises to the highest. A chain change never raises the trust of data or lowers a requirement. Audience atoms are names, so they carry across unchanged.
+
+**Effect kinds match by name.** A revision that renames an effect kind starts a new history for the new name. A `requires.effects` check on the new name does not see effects recorded under the old name.
+
+**A family opened before its runtime followed a deployment keeps its opening policy.** Such a family was opened by a runtime version that pinned every family to the policy file it opened under. It stays on that file until it ends, and a change to the deployment's policy does not reach it.
 
 ## Example: sharing information from a private customer ticket
 

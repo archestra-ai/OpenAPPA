@@ -1542,8 +1542,9 @@ impl Config {
         &self.policy
     }
 
-    /// Pin host observations beside the authored policy in the same stored snapshot.
-    /// No process-local alias map is needed to reopen or replay this session.
+    /// This configuration with `inventory` embedded in its policy file as `[appa_inventory]`: the
+    /// composed file a root that opens with an inventory is bound to, from which every revision
+    /// the family follows reads the inventory back.
     pub(crate) fn with_inventory(&self, inventory: appa_runtime_api::inventory::ToolInventory) -> Result<Self, String> {
         let mut document: toml::Value =
             toml::from_str(std::str::from_utf8(self.policy.bytes()).map_err(|error| error.to_string())?)

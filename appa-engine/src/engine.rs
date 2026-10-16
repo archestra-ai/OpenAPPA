@@ -14,7 +14,10 @@ use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom}
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
-use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentity};
+use crate::profile::{
+    self, DeploymentName, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentity,
+    PolicyRevision,
+};
 use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry, ToolKind};
@@ -65,7 +68,12 @@ pub enum ForkStatus {
 }
 
 /// The pure decision core, owning its static capability: the immutable registry (which carries
-/// the validated deployment profile) and the policy identity the durable opening binds.
+/// the validated deployment profile), the policy identity it derives, and where it decides.
+///
+/// An engine decides either under a **policy snapshot** — the policy as one stored file, which a
+/// family pinned to that file is judged by for its whole life — or **at a revision** of a
+/// deployment ([`Engine::at`]), stamping every batch it seals with that revision so a family that
+/// follows the deployment decides at its head.
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
@@ -74,6 +82,51 @@ pub struct Engine {
     /// recorded names it by.
     earlier_identities: Vec<PolicyIdentity>,
     dialect: PolicyDialectVersion,
+    /// The deployment and revision this engine decides at; `None` for a snapshot engine.
+    line: Option<Line>,
+}
+
+#[derive(Clone, Debug)]
+struct Line {
+    deployment: DeploymentName,
+    revision: PolicyRevision,
+}
+
+/// One batch of a family log as the store holds it: the policy revision that decided it, where
+/// its first record carries one, and its records.
+#[derive(Clone, Copy, Debug)]
+pub struct StampedBatch<'a> {
+    pub revision: Option<PolicyRevision>,
+    pub facts: &'a [Fact],
+}
+
+/// Why [`Engine::replay`] could not build a view of a family log.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ReplayRefusal {
+    #[error(transparent)]
+    Transition(#[from] TransitionRefusal),
+    #[error("batch {position} is stamped at policy revision {batch}, earlier than revision {before} before it")]
+    RevisionRegressed {
+        position: u64,
+        before: PolicyRevision,
+        batch: PolicyRevision,
+    },
+    #[error("batch {position} is stamped at policy revision {revision}, and no engine of that revision was supplied")]
+    PolicyUnavailable { position: u64, revision: PolicyRevision },
+    #[error(
+        "batch {position} is stamped at policy revision {batch}, later than revision {engine} the replay decides at"
+    )]
+    NewerRevision {
+        position: u64,
+        engine: PolicyRevision,
+        batch: PolicyRevision,
+    },
+    #[error("the family is pinned to a policy snapshot; an engine deciding at a revision does not judge it")]
+    PinnedFamily,
+    #[error("the family follows a deployment; a snapshot engine does not judge it")]
+    FollowingFamily,
+    #[error("batch {position} of a family pinned to a policy snapshot is stamped at policy revision {revision}")]
+    StampInPinnedFamily { position: u64, revision: PolicyRevision },
 }
 
 /// Where a stage is opened: the act that opens it, what that act moves, the nonce its offer ids
@@ -96,7 +149,8 @@ impl Engine {
     /// The one validated constructor: policy and declaration validate together in one
     /// load — the structural registry lints and provider-run split, the profile-exact planner-cap
     /// bound, and the pure policy × profile coverage matrix. No profile-blind path to
-    /// a check or a plan exists.
+    /// a check or a plan exists. The engine decides under the policy as a snapshot; [`Engine::at`]
+    /// makes it decide at a revision of a deployment.
     pub fn open(policy: DeploymentPolicy) -> Result<Engine, LoadError> {
         let DeploymentPolicy {
             registry: config,
@@ -114,7 +168,29 @@ impl Engine {
             identity,
             earlier_identities,
             dialect,
+            line: None,
         })
+    }
+
+    /// This engine deciding at `revision` of `deployment`. The policy is the same: a revision
+    /// names where in the deployment's line the policy stands, and the runtime that compiled it
+    /// knows that, the policy does not.
+    pub fn at(self, deployment: DeploymentName, revision: PolicyRevision) -> Engine {
+        Engine {
+            line: Some(Line { deployment, revision }),
+            ..self
+        }
+    }
+
+    /// The policy revision this engine decides at, and stamps every batch it seals with; `None`
+    /// for a snapshot engine, which stamps nothing.
+    pub fn revision(&self) -> Option<PolicyRevision> {
+        self.line.as_ref().map(|line| line.revision)
+    }
+
+    /// The deployment this engine decides for; `None` for a snapshot engine.
+    pub fn deployment(&self) -> Option<&DeploymentName> {
+        self.line.as_ref().map(|line| &line.deployment)
     }
 
     pub fn registry(&self) -> &Registry {
@@ -158,35 +234,232 @@ impl Engine {
         self.dialect
     }
 
-    /// Build the working view over a persisted family log: every record passes the one
-    /// transition validator before anything reads it, so no caller decides against an untrusted
-    /// stream. On cache loss the runtime rebuilds through this same call.
+    /// Build the working view over a family log whose every batch this engine's revision decided,
+    /// standing at `position` batches: every record passes the one transition validator before
+    /// anything reads it, so no caller decides against an untrusted stream. A log whose batches
+    /// carry other revisions is built by [`Engine::replay`].
     pub fn view(
         &self,
         family: &TrajectoryId,
         records: Vec<Fact>,
-        revision: u64,
+        position: u64,
     ) -> Result<EngineView, TransitionRefusal> {
-        let projection = self.replay(family, &records, revision)?;
-        Ok(EngineView::validated(projection, self.identity, family.clone()))
+        let mut sequence = Sequence::empty(self, family, position);
+        for fact in &records {
+            sequence.admit(fact)?;
+        }
+        Ok(EngineView::validated(sequence.finish()?, self, family.clone()))
     }
 
-    /// Advance `view` by one batch its log accepted after the position `view` stands at. The
-    /// batch's records pass the validator a sealed batch passes, resumed where `view` stands,
-    /// and fold forward through [`EngineView::advance`]; a view advanced batch by batch equals
-    /// the view [`Engine::view`] builds from the whole log. A runtime holding a view reads only
-    /// the batches after it this way; anything refused here it rebuilds through `view`.
+    /// Build the working view over a persisted family log, each batch judged under the engine
+    /// that decided it. A family pinned to a policy snapshot is judged by this engine throughout,
+    /// which must be a snapshot engine. A family that follows a deployment is judged batch by
+    /// batch: a batch stamped at this engine's revision by this engine, one stamped earlier by the
+    /// engine of its revision in `earlier`, and an unstamped batch — one an engine that read the
+    /// family as pinned to its opening file decided — by the opening revision's engine. An earlier
+    /// engine only validates: replay consults nothing, so it needs no externals. Where the stamp
+    /// changes, the labels folded so far cross into the next revision's trust chain, and the view
+    /// this returns stands in this engine's chain, ready for it to decide on. On cache loss the
+    /// runtime rebuilds through this same call.
+    pub fn replay(
+        &self,
+        family: &TrajectoryId,
+        batches: &[StampedBatch<'_>],
+        earlier: &[&Engine],
+    ) -> Result<EngineView, ReplayRefusal> {
+        self.replay_onto(family, None, batches, earlier)
+    }
+
+    /// [`Engine::replay`] resumed where `view` stands: `batches` are the batches its log accepted
+    /// after `view`'s position, and the view this returns equals a replay of the whole log. A
+    /// runtime holding a view reads only the batches after it this way.
+    pub fn extend(
+        &self,
+        view: EngineView,
+        batches: &[StampedBatch<'_>],
+        earlier: &[&Engine],
+    ) -> Result<EngineView, ReplayRefusal> {
+        let family = view.family().clone();
+        self.replay_onto(&family, Some(view), batches, earlier)
+    }
+
+    fn replay_onto(
+        &self,
+        family: &TrajectoryId,
+        mut view: Option<EngineView>,
+        batches: &[StampedBatch<'_>],
+        earlier: &[&Engine],
+    ) -> Result<EngineView, ReplayRefusal> {
+        let offset = view.as_ref().map_or(0, EngineView::position);
+        // The family's kind is settled by its opening: stamped, it follows a deployment and this
+        // engine decides at one; unstamped, it is pinned and this engine is its snapshot.
+        let opening_revision = match (&view, batches.first()) {
+            (Some(view), _) => view.opening_revision(),
+            (None, Some(first)) => first.revision,
+            (None, None) => return Err(TransitionRefusal::Unopened.into()),
+        };
+        match (opening_revision, self.revision()) {
+            (Some(_), None) => return Err(ReplayRefusal::FollowingFamily),
+            (None, Some(_)) => return Err(ReplayRefusal::PinnedFamily),
+            _ => {}
+        }
+        // A view an engine at a later revision crossed to stands where this engine never judged.
+        if let (Some(held), Some(deciding)) = (view.as_ref().and_then(EngineView::stamp), self.revision())
+            && held > deciding
+        {
+            return Err(ReplayRefusal::NewerRevision {
+                position: offset,
+                engine: deciding,
+                batch: held,
+            });
+        }
+        let mut start = 0;
+        while let Some(first) = batches.get(start) {
+            let end = start
+                + batches[start..]
+                    .iter()
+                    .take_while(|batch| batch.revision == first.revision)
+                    .count();
+            let position = offset + start as u64;
+            let ended = offset + end as u64;
+            let host_only = batches[start..end].iter().all(|batch| batch.facts.is_empty());
+            // Batches that hold no engine record — host observations alone — decide nothing and
+            // carry no stamp: no policy judges them, and the family's stamp stays where it was.
+            if first.revision.is_none()
+                && host_only
+                && let Some(held) = view.as_mut()
+            {
+                held.pass(None, ended);
+                start = end;
+                continue;
+            }
+            let revision = match (first.revision, opening_revision) {
+                (Some(revision), _) => Some(revision),
+                // Pinned family: the snapshot judges everything.
+                (None, None) => None,
+                // Following family, unstamped batch: decided under the opening file.
+                (None, Some(opening)) => Some(opening),
+            };
+            if let Some(revision) = revision {
+                if opening_revision.is_none() {
+                    return Err(ReplayRefusal::StampInPinnedFamily { position, revision });
+                }
+                if let Some(before) = view.as_ref().and_then(EngineView::stamp)
+                    && revision < before
+                {
+                    return Err(ReplayRefusal::RevisionRegressed {
+                        position,
+                        before,
+                        batch: revision,
+                    });
+                }
+                let deciding = self
+                    .revision()
+                    .expect("a following family is replayed by an engine deciding at a revision");
+                if revision > deciding {
+                    return Err(ReplayRefusal::NewerRevision {
+                        position,
+                        engine: deciding,
+                        batch: revision,
+                    });
+                }
+            }
+            if host_only && let Some(held) = view.as_mut() {
+                held.pass(first.revision, ended);
+                start = end;
+                continue;
+            }
+            let engine = match revision {
+                None => self,
+                Some(revision) if Some(revision) == self.revision() => self,
+                Some(revision) => earlier
+                    .iter()
+                    .copied()
+                    .find(|engine| engine.revision() == Some(revision))
+                    .ok_or(ReplayRefusal::PolicyUnavailable { position, revision })?,
+            };
+            let mut sequence = match &view {
+                None => Sequence::empty(engine, family, ended),
+                Some(view) => Sequence::resuming(engine, &view.crossed_to(engine)),
+            };
+            for batch in &batches[start..end] {
+                for fact in batch.facts {
+                    sequence.admit(fact)?;
+                }
+            }
+            let mut projection = sequence.finish()?;
+            projection.set_position(ended);
+            let mut next = EngineView::validated(projection, engine, family.clone());
+            // An unstamped batch of a following family leaves the stamp where it was: the
+            // opening revision decided it, and the family's stamps never move backwards.
+            if first.revision.is_none()
+                && let Some(before) = view.as_ref().and_then(EngineView::stamp)
+            {
+                next.pass(Some(before), ended);
+            }
+            view = Some(next);
+            start = end;
+        }
+        let view = view.ok_or(TransitionRefusal::Unopened)?;
+        Ok(view.crossed_to(self).into_owned())
+    }
+
+    /// Advance `view` by one batch its log accepted after the position `view` stands at, decided
+    /// by this engine. The batch's records pass the validator a sealed batch passes, resumed where
+    /// `view` stands, and fold forward through [`EngineView::advance`]; a view advanced batch by
+    /// batch equals the view [`Engine::replay`] builds from the whole log. A runtime holding a view
+    /// reads only the batches after it this way; anything refused here it rebuilds through `replay`.
     pub fn admit_batch(
         &self,
         view: &mut EngineView,
         records: Vec<Fact>,
     ) -> Result<(), crate::transition::BatchRefusal> {
-        if view.policy() != self.identity {
-            return Err(crate::transition::ViewMismatch::ForeignPolicy.into());
+        match self.judges(view) {
+            Ok(()) => {}
+            Err(TransitionError::NewerRevision { view, engine }) => {
+                return Err(crate::transition::ViewMismatch::RevisionRegressed { view, batch: engine }.into());
+            }
+            Err(_) => return Err(crate::transition::ViewMismatch::ForeignLine.into()),
         }
         let batch = self.seal(view, records)?;
         view.advance(&batch)?;
         Ok(())
+    }
+
+    /// Whether this engine decides on `view`: a snapshot engine decides a pinned family, an engine
+    /// at a revision decides a following family whose last batch is not stamped later than it.
+    fn judges(&self, view: &EngineView) -> Result<(), TransitionError> {
+        match (view.opening_revision(), self.revision()) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err(TransitionError::PinnedView),
+            (Some(_), None) => Err(TransitionError::FollowingView),
+            (Some(_), Some(engine)) => match view.stamp() {
+                Some(stamp) if stamp > engine => Err(TransitionError::NewerRevision { view: stamp, engine }),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// `view` as this engine decides on it: in this engine's trust chain. A view stamped at a
+    /// later revision than this engine's holds records this policy never judged, so no decision
+    /// is made on it; nor on a family of the other kind.
+    fn current<'v>(&self, view: &'v EngineView) -> Result<std::borrow::Cow<'v, EngineView>, TransitionError> {
+        self.judges(view)?;
+        Ok(view.crossed_to(self))
+    }
+
+    /// Freeze what an independent conversation-root fork of `trajectory` carries over from the
+    /// family `view` holds, in this engine's trust chain: the opening of the new root this engine
+    /// records. This opens no same-family child and creates no spawn or return contract. `None`
+    /// for a trajectory this family never opened or one that has ended.
+    pub fn root_fork_origin(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+    ) -> Option<crate::fact::RootForkOrigin> {
+        view.crossed_to(self)
+            .projection()
+            .root_fork_origin(view.family(), trajectory)
     }
 
     /// The validator over a bare record stream, for tests that pin a refusal without holding a
@@ -197,29 +470,22 @@ impl Engine {
             Some(fact) => fact.trajectory().clone(),
             None => return Err(TransitionRefusal::Unopened),
         };
-        self.replay(&family, facts, facts.len() as u64).map(|_| ())
-    }
-
-    fn replay(&self, family: &TrajectoryId, records: &[Fact], revision: u64) -> Result<Projection, TransitionRefusal> {
-        let mut sequence = Sequence::empty(self, family, revision);
-        for fact in records {
-            sequence.admit(fact)?;
-        }
-        sequence.finish()
+        self.view(&family, facts.to_vec(), facts.len() as u64).map(|_| ())
     }
 
     /// Seal a candidate batch: the facts an engine operation just built pass the same validator a
-    /// persisted log does, so the sealed batch is one no replay of it can refuse.
+    /// persisted log does, resumed where `view` stands in this engine's trust chain, so the sealed
+    /// batch is one no replay of it can refuse. The batch is stamped with this engine's revision.
     pub(crate) fn seal(&self, view: &EngineView, facts: Vec<Fact>) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        let mut sequence = Sequence::resuming(self, view);
+        let mut sequence = Sequence::resuming(self, &view.crossed_to(self));
         for fact in &facts {
             sequence.admit(fact)?;
         }
         sequence.finish()?;
         Ok(ValidatedFactBatch::seal(
             facts,
-            view.revision(),
-            self.identity,
+            view.position(),
+            self,
             view.family().clone(),
         ))
     }
@@ -233,12 +499,13 @@ impl Engine {
         facts: Vec<Fact>,
     ) -> Result<ValidatedFactBatch, TransitionError> {
         let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(act, advance, facts);
+        let batch = self.declaring(view.family(), act, advance, facts);
         Ok(self.seal(view, batch)?)
     }
 
     fn declaring(
         &self,
+        family: &TrajectoryId,
         act: crate::basis::DecidedAct,
         advance: crate::basis::BasisAdvance,
         facts: Vec<Fact>,
@@ -259,18 +526,23 @@ impl Engine {
                     }
             ) || fact.audience_evidence().is_some_and(|evidence| !evidence.is_empty())
         });
-        if advance.is_empty() && !bound {
+        // An engine deciding at a revision declares every act: the declaration carries the
+        // revision that decided the batch, which the store fences and a replay judges by.
+        if advance.is_empty() && !bound && self.revision().is_none() {
             return facts;
         }
-        let trajectory = facts
-            .first()
-            .expect("a batch that advances a basis carries the record that advanced it")
-            .trajectory()
-            .clone();
+        // A declaration that moves something names the trajectory its first record moves. One
+        // declared only to carry the revision names the family: its first record may open the
+        // trajectory it is about, as a fork binding opens the child.
+        let trajectory = match facts.first() {
+            Some(first) if !(advance.is_empty() && !bound) => first.trajectory().clone(),
+            _ => family.clone(),
+        };
         let mut declared = vec![Fact::BasisAdvanced {
             trajectory,
             act,
             advance,
+            revision: self.revision(),
         }];
         declared.extend(facts);
         declared
@@ -280,9 +552,7 @@ impl Engine {
     /// a sealed batch plus the typed follow-up. The engine owns semantic validation and constructs
     /// every fact; it owns no mutable state.
     pub fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, TransitionError> {
-        if view.policy() != self.identity {
-            return Err(TransitionError::ForeignView);
-        }
+        let view = &*self.current(view)?;
         let acting = match &event {
             EngineEvent::Proposals(batch) => Some(&batch.trajectory),
             EngineEvent::ExecuteOffer(execution) => Some(&execution.trajectory),
@@ -359,9 +629,10 @@ impl Engine {
         answers: &AudienceEvidence,
         depth: crate::route::RouteDepth,
     ) -> Result<Vec<crate::route::RecoveryRoute>, crate::route::RouteError> {
-        if view.policy() != self.identity {
-            return Err(crate::route::RouteError::ForeignView);
-        }
+        let view = &*self.current(view).map_err(|error| match error {
+            TransitionError::NewerRevision { view, engine } => crate::route::RouteError::NewerRevision { view, engine },
+            _ => crate::route::RouteError::ForeignLine,
+        })?;
         let crate::basis::SubjectKey::Call { trajectory, .. } = subject else {
             return Err(crate::route::RouteError::NotACallSubject);
         };
@@ -376,16 +647,14 @@ impl Engine {
         view: &EngineView,
         dispatch: &DispatchId,
     ) -> Result<Option<crate::label::Label>, TransitionError> {
-        if view.policy() != self.identity {
-            return Err(TransitionError::ForeignView);
-        }
+        let view = &*self.current(view)?;
         let views = view.projection().view(dispatch.trajectory());
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         let receiving = views
             .receiving_bound(dispatch)
             .ok_or(TransitionError::UnknownDispatch)?;
-        let contract = self.validated_contract(call)?;
-        Ok(call.file_output_label(&contract, receiving))
+        let contract = self.outcome_contract(&views, dispatch, call)?;
+        Ok(call.file_output_label_from(&contract.output_label(), receiving))
     }
 
     /// What the runtime must resolve before it can execute one live offer.
@@ -396,6 +665,7 @@ impl Engine {
         offer: &crate::value::OfferId,
     ) -> Result<crate::transition::OfferConsult, TransitionError> {
         use crate::transition::OfferConsult;
+        let view = &*self.current(view)?;
         let views = view.projection().view(trajectory);
         let recorded = views.offer(offer).ok_or(TransitionError::UnknownOffer)?;
         if recorded.trajectory != *trajectory {
@@ -500,7 +770,7 @@ impl Engine {
     /// The return policy the child's fork recorded — what its parent declared at the spawn —
     /// or `None` for a trajectory that never forked.
     pub fn return_policy_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ReturnPolicy> {
-        view.views(child)?.return_policy_of(child).cloned()
+        view.crossed_to(self).views(child)?.return_policy_of(child).cloned()
     }
 
     /// The lowest trust rank a return declaration made on this branch may set: its own floor's
@@ -518,7 +788,8 @@ impl Engine {
         parent: &TrajectoryId,
         fork: &crate::value::ForkId,
     ) -> Option<ReturnPolicy> {
-        view.views(parent)?
+        view.crossed_to(self)
+            .views(parent)?
             .prepared_fork(fork)
             .map(|prepared| prepared.return_policy.clone())
     }
@@ -604,7 +875,8 @@ impl Engine {
     }
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
-    /// record against the empty log. The runtime appends it before any other family event.
+    /// record against the empty log, naming the stored policy file the root opens under. The
+    /// runtime appends it before any other family event.
     pub fn open_trajectory(
         &self,
         trajectory: &TrajectoryId,
@@ -614,9 +886,9 @@ impl Engine {
         self.opening(trajectory, policy_file_key, None, principal)
     }
 
-    /// The opening batch of an independent conversation-root fork. `forked_from` came from the
-    /// parent family's validated view; this creates no same-family child, spawn, or return
-    /// contract.
+    /// The opening batch of an independent conversation-root fork. `forked_from` came from
+    /// [`Engine::root_fork_origin`] over the parent family's validated view; this creates no
+    /// same-family child, spawn, or return contract.
     pub fn open_root_fork(
         &self,
         trajectory: &TrajectoryId,
@@ -634,7 +906,7 @@ impl Engine {
         forked_from: Option<crate::fact::RootForkOrigin>,
         principal: Option<ReaderId>,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
+        let empty = EngineView::validated(Projection::empty(0), self, trajectory.clone());
         self.seal(
             &empty,
             vec![Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
@@ -644,6 +916,8 @@ impl Engine {
                 policy_digest: self.identity,
                 policy_file_key,
                 open_vectors: self.open_vectors(),
+                deployment: self.deployment().cloned(),
+                revision: self.revision(),
                 forked_from,
                 principal,
             })],
@@ -746,13 +1020,31 @@ impl Engine {
         })))
     }
 
+    /// The contract a dispatch's outcome is judged under: see [`admit::OutcomeContract`].
     fn dispatch_contract<'c>(
         &'c self,
         views: &'c Views<'c>,
         dispatch: &DispatchId,
-    ) -> Result<std::borrow::Cow<'c, ToolAnnotation>, TransitionError> {
+    ) -> Result<admit::OutcomeContract<'c>, TransitionError> {
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
-        self.validated_contract(call).map_err(TransitionError::Call)
+        self.outcome_contract(views, dispatch, call)
+    }
+
+    /// The contract `call`'s outcome is judged under. Its arguments are not checked again: the
+    /// release checked them, under the policy that released the call.
+    fn outcome_contract<'c>(
+        &'c self,
+        views: &Views<'_>,
+        dispatch: &DispatchId,
+        call: &'c ResolvedCall,
+    ) -> Result<admit::OutcomeContract<'c>, TransitionError> {
+        if self.registry.provider_run_annotation(call.tool()).is_some() {
+            return Err(TransitionError::Call(EngineError::ProviderRunTool(
+                call.tool().as_str().to_string(),
+            )));
+        }
+        admit::outcome_contract(&self.registry, call, views.release_terms(dispatch))
+            .ok_or_else(|| TransitionError::Call(EngineError::UnknownTool(call.tool().as_str().to_string())))
     }
 
     fn validated_contract<'c>(

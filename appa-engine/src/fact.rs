@@ -7,9 +7,11 @@ use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::{Label, ReaderId};
-use crate::names::{AuthorityName, SanitizerName};
+use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::plan::PlanId;
-use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity};
+use crate::profile::{
+    DeploymentName, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity, PolicyRevision,
+};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
     ValueId,
@@ -88,6 +90,14 @@ impl ReturnPolicy {
         match self {
             ReturnPolicy::Void => None,
             ReturnPolicy::Crossing(crossing) => Some(crossing),
+        }
+    }
+
+    /// The policy under the trust chain a policy crossing arrives at. A crossing return's floor
+    /// is a requirement, so a rank the arriving chain lacks rises rather than drops.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        if let ReturnPolicy::Crossing(returned) = self {
+            returned.floor.cross_floor(crossing);
         }
     }
 }
@@ -189,6 +199,12 @@ pub struct ForkSnapshot {
 }
 
 impl ForkSnapshot {
+    /// The snapshot under the trust chain a policy crossing arrives at.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        self.base.cross_value(crossing);
+        self.seed.cross_value(crossing);
+    }
+
     /// Freeze a basis: the base plus every contributing source with its label at this
     /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to
     /// walk ancestry to be understood.
@@ -230,8 +246,8 @@ impl ForkSnapshot {
 /// family of its own after that point: nothing either side admits, emits, settles or denies later
 /// reaches the other, so a reservation carried over never settles in the root fork.
 ///
-/// [`crate::transition::EngineView::root_fork_origin`] freezes one from the parent family's
-/// validated view, and the runtime records it on the new root's opening record. A root fork has
+/// [`crate::engine::Engine::root_fork_origin`] freezes one from the parent family's
+/// validated view, its label expressed in the freezing engine's trust chain, and the runtime records it on the new root's opening record. A root fork has
 /// no prepared spawn, child start, or return contract; those belong to the same-family
 /// [`ForkSnapshot`] flow. A replay of the root fork's log never reads the parent family's log, so
 /// it takes the recorded origin as trusted log content and refuses only an origin that forks the
@@ -310,7 +326,32 @@ impl CloseOutcome {
     }
 }
 
-/// The fields that open a root trajectory family.
+/// What released a call, pinned on its `DispatchOpened`: the call's resolved delta and tags under
+/// the policy revision that released it. The outcome reads them with the record's
+/// `proposed_effects`, so a result arriving after a later revision was published is labelled by
+/// the terms that released the call met with what the judging revision declares for it, and
+/// commits the effects the release reserved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTerms {
+    /// The call's delta, its placeholders bound to the call's arguments.
+    pub delta: crate::contract::Delta,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<TagName>,
+}
+
+impl ReleaseTerms {
+    /// The terms of `contract`, bound to the call it releases.
+    pub(crate) fn of(contract: &crate::contract::ToolAnnotation) -> ReleaseTerms {
+        ReleaseTerms {
+            delta: contract.delta.clone(),
+            tags: contract.tags.clone(),
+        }
+    }
+}
+
+/// The fields that open a root trajectory family. A family that follows a deployment names it and
+/// the revision it opened at, and decides at the deployment's head; a family whose opening names
+/// neither is pinned to the policy file its opening names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrajectoryOpening {
     pub trajectory: TrajectoryId,
@@ -319,6 +360,14 @@ pub struct TrajectoryOpening {
     pub policy_digest: PolicyIdentity,
     pub policy_file_key: PolicyFileKey,
     pub open_vectors: Vec<OpenVector>,
+    /// The deployment this family follows, and the policy revision that opened it. Both are set
+    /// together, by an engine deciding at a revision: the family then decides at that
+    /// deployment's head, and `policy_file_key` names the file of the revision that opened it.
+    /// Both absent, the family is pinned to `policy_file_key` for its whole life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<PolicyRevision>,
     /// Set when the root opened as a fork of another family's trajectory. Its label starts
     /// from the deployment's starting label folded with the origin's, and its effects,
     /// unsettled reservations and denials start as the origin's.
@@ -364,6 +413,10 @@ pub enum Fact {
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,
+        /// The terms that released the call. Absent on a record an engine that pinned no terms
+        /// wrote; its outcome is judged by the judging policy's declaration alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terms: Option<ReleaseTerms>,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,
@@ -531,6 +584,11 @@ pub enum Fact {
         trajectory: TrajectoryId,
         act: crate::basis::DecidedAct,
         advance: crate::basis::BasisAdvance,
+        /// The policy revision that decided this batch: the stamp of a family that follows a
+        /// deployment. Absent in a family pinned to a policy snapshot, and in a batch an engine
+        /// deciding under the snapshot of a following family's opening revision wrote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<PolicyRevision>,
     },
     ForkPrepared {
         trajectory: TrajectoryId,

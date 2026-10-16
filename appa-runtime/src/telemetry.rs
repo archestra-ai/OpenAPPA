@@ -139,7 +139,7 @@ pub(crate) fn runtime_event(root: Option<&appa_runtime_api::TrajectoryId>, event
                 "appa.trajectory.root" = root, "appa.hook.event" = spelling(event),
                 "appa.outcome" = spelling(outcome) }, "hook completed");
         }
-        RuntimeEvent::Reload { .. } => {}
+        RuntimeEvent::PolicyPublished { .. } => {}
     }
 }
 

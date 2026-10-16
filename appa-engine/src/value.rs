@@ -549,7 +549,13 @@ impl ResolvedCall {
 
     /// Label of the value returned by this call.
     pub fn output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Label {
-        let declared = contract.output_label();
+        self.output_label_from(&contract.output_label(), receiving)
+    }
+
+    /// [`ResolvedCall::output_label`] from a declared output label already resolved: the one an
+    /// outcome reads, which meets the terms that released the call with the judging policy's.
+    pub(crate) fn output_label_from(&self, declared: &Label, receiving: &Label) -> Label {
+        let declared = declared.clone();
         match &self.file_basis {
             None => declared,
             Some(FileBasis::Read(source)) => source.label.combine(&declared),
@@ -567,7 +573,12 @@ impl ResolvedCall {
 
     /// Label to publish on file content produced by this call.
     pub fn file_output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Option<Label> {
-        let declared = contract.output_label();
+        self.file_output_label_from(&contract.output_label(), receiving)
+    }
+
+    /// [`ResolvedCall::file_output_label`] from a declared output label already resolved.
+    pub(crate) fn file_output_label_from(&self, declared: &Label, receiving: &Label) -> Option<Label> {
+        let declared = declared.clone();
         match &self.file_basis {
             None | Some(FileBasis::Read(_)) => None,
             Some(FileBasis::Replace(_)) => Some(receiving.combine(&declared)),

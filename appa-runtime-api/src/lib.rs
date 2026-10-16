@@ -564,6 +564,9 @@ pub enum RefusalClass {
     Storage,
     UntrustedLog,
     PolicyUnavailable,
+    /// The deployment published a later revision while this event was being decided.
+    /// Nothing was committed; the same event decides at the head when the host retries it.
+    PolicyMoved,
     InventoryRefused,
     EngineInvariant,
     Contended,

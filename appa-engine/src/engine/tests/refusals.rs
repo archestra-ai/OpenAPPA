@@ -411,6 +411,7 @@ fn a_second_spend_of_one_approval_is_stale() {
                 subjects: vec![subject],
                 ..crate::basis::BasisAdvance::default()
             },
+            revision: None,
         },
         Fact::CallApprovalConsumed {
             trajectory: traj(),
@@ -453,6 +454,7 @@ fn a_second_take_of_one_candidate_is_stale() {
                 subjects: vec![subject.clone()],
                 ..crate::basis::BasisAdvance::default()
             },
+            revision: None,
         },
         Fact::CandidateConsumed {
             trajectory: traj(),
