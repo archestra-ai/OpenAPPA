@@ -160,27 +160,44 @@ impl Engine {
                 admitted: admitted.body.clone(),
             }),
         };
+        let above_floor = |label: &Label| match floor.holds(label) {
+            true => Ok(()),
+            false => Err(TransitionError::ReturnBelowFloor {
+                floor: floor.label().clone(),
+            }),
+        };
+        // An undecided mandate is the runtime's ask, never a refusal.
+        let sanitized = |registered: &crate::authority::Sanitizer| -> Result<Label, TransitionError> {
+            let label = registered
+                .derive_output(&fold, &[], &self.context(act))?
+                .ok_or(TransitionError::SanitizerUnapplicable)?;
+            above_floor(&label)?;
+            Ok(label)
+        };
+        let cross = |mut facts: Vec<Fact>,
+                     value: LabeledValue,
+                     derivation: ReturnDerivation|
+         -> Result<EngineDecision, TransitionError> {
+            let admitted = value.body.clone();
+            facts.extend(branch::crossing_facts(
+                &views,
+                child,
+                value,
+                derivation,
+                act.pinned().clone(),
+            ));
+            Ok(EngineDecision {
+                append: Some(self.decided(view, return_act(&views, child), facts)?),
+                follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
+            })
+        };
         match &policy.sanitizer {
             None => {
                 if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
                     return Ok(replay(latest));
                 }
-                if !floor.holds(&fold) {
-                    return Err(TransitionError::ReturnBelowFloor {
-                        floor: floor.label().clone(),
-                    });
-                }
-                let facts = branch::crossing_facts(
-                    &views,
-                    child,
-                    LabeledValue::new(body.clone(), fold),
-                    ReturnDerivation::Raw,
-                    act.pinned().clone(),
-                );
-                Ok(EngineDecision {
-                    append: Some(self.decided(view, return_act(&views, child), facts)?),
-                    follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
-                })
+                above_floor(&fold)?;
+                cross(Vec::new(), LabeledValue::new(body, fold), ReturnDerivation::Raw)
             }
             Some(ReturnSanitizer::Attest(shape)) => {
                 let canonical = ValueBody::new(
@@ -201,14 +218,7 @@ impl Engine {
                 if !views.fork_seed(child).is_some_and(|seed| seed.meets_floor(ceiling)) {
                     return Err(TransitionError::SanitizerUnapplicable);
                 }
-                let label = registered
-                    .derive_output(&fold, &[], &self.context(act))?
-                    .ok_or(TransitionError::SanitizerUnapplicable)?;
-                if !floor.holds(&label) {
-                    return Err(TransitionError::ReturnBelowFloor {
-                        floor: floor.label().clone(),
-                    });
-                }
+                let label = sanitized(registered)?;
                 let facts = branch::crossing_facts(
                     &views,
                     child,
@@ -261,15 +271,7 @@ impl Engine {
                     return Ok(replay(latest));
                 }
                 let digest = RawResultDigest::of(body.as_str().as_bytes());
-                let derived = report.evidence.iter().find_map(|item| match item {
-                    Evidence::Sanitizer {
-                        sanitizer,
-                        source,
-                        derived,
-                    } if sanitizer == name && source == &digest => Some(derived.clone()),
-                    _ => None,
-                });
-                let Some(derived) = derived else {
+                let Some(derived) = sanitizer_evidence(&report.evidence, name, digest) else {
                     return Ok(EngineDecision {
                         append: None,
                         follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {

@@ -700,6 +700,29 @@ impl Engine {
         .expect("engine test plans read no undecided symbolic audience"))
     }
 
+    /// The block a re-checked call subject stands under: its plans against current state, with
+    /// the offers already pending on the subject, or none under the block id `nonce` derives.
+    fn blocked_at(
+        &self,
+        views: &Views,
+        subject: &crate::basis::SubjectKey,
+        nonce: &crate::value::OfferNonce,
+        blocked: BlockedCall<'_>,
+        act: &ActEvidence,
+    ) -> Result<Blocked, TransitionError> {
+        require_atoms(act, plan::block_atoms(&self.registry, blocked.contract, blocked.raw))?;
+        let call = blocked.call;
+        let (block_id, offers) = views
+            .pending_block(subject)
+            .unwrap_or_else(|| (proposal_block(nonce, subject, call), Vec::new()));
+        Ok(Blocked {
+            block: plan::plan(&self.registry, views, blocked, &self.context(act))?,
+            call: call.clone(),
+            block_id,
+            offers,
+        })
+    }
+
     fn dispatch_contract<'c>(
         &'c self,
         views: &'c Views<'c>,
@@ -798,6 +821,43 @@ fn substituted_call(
     Ok(substituted)
 }
 
+/// The view's projection with `facts` folded in, for a decision that reads its own records.
+fn folded(view: &EngineView, facts: &[Fact]) -> Projection {
+    let mut after = view.projection().clone();
+    for fact in facts {
+        after.fold(fact);
+    }
+    after
+}
+
+fn proposal_block(
+    nonce: &crate::value::OfferNonce,
+    subject: &crate::basis::SubjectKey,
+    call: &ResolvedCall,
+) -> crate::value::BlockId {
+    let crate::basis::SubjectKey::Call {
+        trajectory,
+        batch,
+        position,
+    } = subject
+    else {
+        unreachable!("an opened offer's subject is a call candidate")
+    };
+    crate::value::BlockId::of_proposal(nonce, trajectory, batch, *position, &call.digest())
+}
+
+/// The derivation `evidence` carries from `sanitizer` over `source`, if any.
+fn sanitizer_evidence(evidence: &[Evidence], sanitizer: &SanitizerName, source: RawResultDigest) -> Option<ValueBody> {
+    evidence.iter().find_map(|item| match item {
+        Evidence::Sanitizer {
+            sanitizer: named,
+            source: from,
+            derived,
+        } if named == sanitizer && from == &source => Some(derived.clone()),
+        Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::File { .. } => None,
+    })
+}
+
 fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::projection::OfferEnd) -> OfferOutcome {
     use crate::projection::OfferEnd;
     match end {
@@ -880,6 +940,19 @@ impl ActEvidence {
     /// the operation-scope test excuses them.
     fn inherit(&self, pins: &AudienceEvidence) -> Result<(), crate::audience::EvidenceRefusal> {
         self.ledger.borrow_mut().inherit(pins)
+    }
+
+    /// The overlay context over this act's answers and `pins`, entries a record this act
+    /// continues already pinned: counted as inherited, merged, and validated.
+    fn overlay(
+        &self,
+        pins: &AudienceEvidence,
+        audience: &crate::audience::AudienceRegistry,
+    ) -> Result<ActEvidence, crate::audience::EvidenceRefusal> {
+        self.inherit(pins)?;
+        let merged = self.inheriting(pins)?;
+        let expansions = audience.expansions(&merged, self.principal.as_ref())?;
+        Ok(ActEvidence::validated(merged, expansions, self.principal.clone()))
     }
 
     /// Count an overlay context's asks as this act's: it read on the act's behalf.

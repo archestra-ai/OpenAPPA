@@ -68,12 +68,7 @@ impl Engine {
         if recorded.evidence != batch.audience {
             return Err(TransitionError::BatchIdentityConflict);
         }
-        act.inherit(&recorded.evidence)?;
-        let under = self.act_evidence(
-            act.inheriting(&recorded.evidence)?,
-            AudienceEvidence::default(),
-            act.principal.clone(),
-        )?;
+        let under = act.overlay(&recorded.evidence, self.registry.audience())?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
         act.absorb(&under);
         Ok(Some(EngineDecision {

@@ -122,16 +122,7 @@ impl Engine {
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
-        let mut facts = vec![Fact::OfferAccepted {
-            trajectory: recorded.trajectory.clone(),
-            offer: execution.offer,
-        }];
-        facts.extend(invalidated_siblings(
-            views,
-            &recorded.trajectory,
-            &subject,
-            execution.offer,
-        ));
+        let facts = accepted(views, &recorded.trajectory, &subject, execution.offer);
         match (&execution.outcome, recorded.plan.hop()) {
             (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_candidate(
                 view, views, execution, dispatch, &call, &receiving, &value, &lineage, sanitizer, evidence, facts, act,
@@ -251,13 +242,9 @@ impl Engine {
         // The successor owes nothing, so it crosses here. The admission re-derives from the record
         // just written, which is why the candidate is folded first: the one admission choke point
         // reads state, never a caller's claim.
-        let mut after = view.projection().clone();
-        for fact in &facts {
-            after.fold(fact);
-        }
         let admitted = admit::admit_result(
             &self.registry,
-            &after.view(views.trajectory()),
+            &folded(view, &facts).view(views.trajectory()),
             dispatch,
             call,
             ResultAdmission::CandidateAdmissible,
@@ -578,27 +565,19 @@ impl Engine {
         else {
             return Ok(None);
         };
-        require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
-        let (block_id, offers) = views
-            .pending_block(&recorded.subject)
-            .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
-        Ok(Some(Blocked {
-            block: plan::plan(
-                &self.registry,
-                views,
-                BlockedCall {
-                    call: &call,
-                    contract: &contract,
-                    raw: &raw,
-                    stage: &stage,
-                    role,
-                },
-                &self.context(act),
-            )?,
-            call,
-            block_id,
-            offers,
-        }))
+        Ok(Some(self.blocked_at(
+            views,
+            &recorded.subject,
+            &execution.offer_nonce,
+            BlockedCall {
+                call: &call,
+                contract: &contract,
+                raw: &raw,
+                stage: &stage,
+                role,
+            },
+            act,
+        )?))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -778,6 +757,21 @@ impl Engine {
     }
 }
 
+/// An offer's acceptance, ending every sibling offer pending on the same subject.
+fn accepted(
+    views: &Views,
+    trajectory: &TrajectoryId,
+    subject: &crate::basis::SubjectKey,
+    offer: crate::value::OfferId,
+) -> Vec<Fact> {
+    let mut facts = vec![Fact::OfferAccepted {
+        trajectory: trajectory.clone(),
+        offer,
+    }];
+    facts.extend(invalidated_siblings(views, trajectory, subject, offer));
+    facts
+}
+
 fn invalidated_siblings(
     views: &Views,
     trajectory: &TrajectoryId,
@@ -796,20 +790,4 @@ fn invalidated_siblings(
             offer,
         })
         .collect()
-}
-
-fn offer_block(
-    recorded: &crate::projection::RecordedOffer,
-    execution: &OfferExecution,
-    call: &ResolvedCall,
-) -> crate::value::BlockId {
-    let crate::basis::SubjectKey::Call {
-        trajectory,
-        batch,
-        position,
-    } = &recorded.subject
-    else {
-        unreachable!("an opened offer's subject is a call candidate")
-    };
-    crate::value::BlockId::of_proposal(&execution.offer_nonce, trajectory, batch, *position, &call.digest())
 }

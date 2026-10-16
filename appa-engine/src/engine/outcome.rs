@@ -36,6 +36,13 @@ impl Engine {
                 Some(ObservedResult::Available(RawResultDigest::of(body.as_str().as_bytes())))
             }
         };
+        let closed = || EngineDecision {
+            append: None,
+            follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: views.admitted_body(dispatch).cloned(),
+                withheld: withholds_output,
+            }),
+        };
         if let ToolOutcome::FailureWithBody { body } = &report.outcome
             && views.failed_with_body(dispatch)
         {
@@ -43,13 +50,7 @@ impl Engine {
             if views.failure_body_digest(dispatch) != Some(digest) {
                 return Err(TransitionError::ObservationMismatch);
             }
-            return Ok(EngineDecision {
-                append: None,
-                follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
-                    admitted: views.admitted_body(dispatch).cloned(),
-                    withheld: withholds_output,
-                }),
-            });
+            return Ok(closed());
         }
         if !views.is_open(dispatch) {
             match (views.closed_successfully(dispatch), &observed) {
@@ -215,13 +216,7 @@ impl Engine {
             &self.context(act),
             &act.pinned(),
         )
-        .map_err(|error| match error {
-            AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
-                TransitionError::SanitizerUnapplicable
-            }
-            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
-            other => unreachable!("the outcome path admits what the log already proved: {other}"),
-        })?;
+        .map_err(admission_refusal)?;
         let admitted = batch.iter().find_map(|fact| match fact {
             Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
             _ => None,
@@ -465,6 +460,16 @@ impl Engine {
                 offers,
             }))),
         })
+    }
+}
+
+fn admission_refusal(error: AdmitError) -> TransitionError {
+    match error {
+        AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
+            TransitionError::SanitizerUnapplicable
+        }
+        AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
+        other => unreachable!("the outcome path admits what the log already proved: {other}"),
     }
 }
 
