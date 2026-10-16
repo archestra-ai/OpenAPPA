@@ -10,7 +10,9 @@ use std::time::Duration;
 use appa_eventlog::{Backend, LogStore};
 use appa_runtime::api::{OpenError, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
-use appa_runtime::{hooks, replay};
+use appa_runtime::hooks;
+#[cfg(feature = "daemon")]
+use appa_runtime::replay;
 use appa_runtime_api::{
     Actor, Adapter, AdapterName, CanonicalTool, HookDecision, HookEvent, IdentifiedTool, ParseRefusal, ProposedCall,
     TrajectoryId,
@@ -400,6 +402,7 @@ async fn a_target_policy_variant_decides_before_the_base() {
 /// answered in process as `appa replay` answers it, so a step that expects `hitl` takes the
 /// offer and the trace goes on. A runtime opened for live calls asks `hitl` itself, which
 /// no person reaches from a replay.
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn a_host_replay_takes_an_authority_offer_as_approved() {
     const SIGNOFF: &str = r#"
