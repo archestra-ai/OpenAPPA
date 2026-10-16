@@ -56,10 +56,17 @@ Read the config file: every explanation must be grounded in what the
 policy actually declares for the tools involved (their `[[policy.tool]]`
 entries, `delta`, `requires`, and any annotators/authorities/sanitizers).
 
+A reload publishes the config as a new policy revision of the deployment,
+and every session decides its next call under it. The store keeps every
+revision the deployment published and the policy file each one named;
+find those tables through `.schema` (step 2) and read the file that
+decided a batch from there, since the config on disk may have changed
+since.
+
 The runtime always writes `runtime.stderr.log` and `runtime.stdout.log`
 beside the store in the data directory (`-v`/`-vv` only raise the level).
-The stderr log records one line per decision, in order, and is the
-quickest released/blocked timeline.
+The stderr log records one line per decision and one per published
+revision, in order, and is the quickest released/blocked timeline.
 
 ## 2. Explore the store
 
@@ -91,7 +98,12 @@ While decoding, build:
 - the ordered list of released calls and their outcomes;
 - every admitted value with its label, numbered in admission order, and
   the producing tool from its provenance;
-- any subagent starts and returns.
+- any subagent starts and returns;
+- the policy revision each decided batch names on its first fact (the
+  opening names the deployment and the revision it opened at; a batch of
+  host observations alone names none). Where the revision changes between
+  batches, a reload took effect for this session, and offers made before
+  it no longer stand.
 
 Compare against the harness's view (step 4): a proposed call that left
 no trace in the store was decided without appending — the runtime log
@@ -127,6 +139,11 @@ declarations in the policy. Distinguish at least:
 - **Requirement gap** — the session's accumulated label cannot satisfy
   the tool's `requires`; name the value that narrowed the mix and the
   policy line that demands more.
+- **Retired offer** — a remedy was declined with "re-propose the call"
+  because the session moved on after the offer was made: a value was
+  admitted, or a reload published a new policy revision. Compare the
+  revision on the batch that recorded the offer with the revisions after
+  it; the call is decided afresh under the current policy when re-proposed.
 
 A block can have several reasons at once while the error text surfaces
 only one — check for the others and explain all that hold.
@@ -170,9 +187,9 @@ Rules for the explanation:
   an admission number or id alone explains nothing.
 - Name the concrete change that would lift a liftable block (annotate
   the tool with `delta`, declare the tool, widen an audience). A policy
-  change takes effect after a runtime reload (`POST /reload`) and only
-  for sessions started afterwards; a running session keeps the policy it
-  started with.
+  change takes effect after a runtime reload (`POST /reload`), which
+  publishes a new policy revision; every session, running or new, decides
+  its next call under it.
 - Do not speculate beyond the log. If the db and transcript disagree or
   a row is missing, say so.
 - Plain language means literal language: no metaphors or imagery ("the

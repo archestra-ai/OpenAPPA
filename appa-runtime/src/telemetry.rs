@@ -139,7 +139,14 @@ pub(crate) fn runtime_event(root: Option<&appa_runtime_api::TrajectoryId>, event
                 "appa.trajectory.root" = root, "appa.hook.event" = spelling(event),
                 "appa.outcome" = spelling(outcome) }, "hook completed");
         }
-        RuntimeEvent::PolicyPublished { .. } => {}
+        RuntimeEvent::PolicyPublished {
+            deployment, revision, ..
+        } => {
+            let deployment = name(deployment);
+            tracing::info!(target: "appa_telemetry", { "appa.event.name" = "appa.policy.published",
+                "appa.policy.id" = format!("{deployment}@{revision}"), "appa.policy.deployment" = deployment,
+                "appa.policy.revision" = revision }, "policy revision published");
+        }
     }
 }
 

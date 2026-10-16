@@ -557,8 +557,9 @@ blocked action.
 - **An edited policy installs without a restart.** `curl -X POST
   http://127.0.0.1:8787/reload` re-reads the `--config` file. The
   runtime validates before it installs, so a bad file answers 422 and
-  changes nothing. Sessions started after the reload bind the new
-  policy; sessions already running keep the file they opened with.
+  changes nothing. Every protected session, running or new, decides its
+  next tool call under the reloaded policy; an offer the previous policy
+  made no longer stands, and the agent re-proposes the call.
 - **Stopping the process blocks protected sessions.** That is the
   design, not a fault. Start a plain `claude` if you want an
   unprotected session.
