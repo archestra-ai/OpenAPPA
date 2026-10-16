@@ -133,9 +133,10 @@ pub struct Projection {
     revision: u64,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
-    /// The meet of each trajectory's opened base and every label in `local`. The meet is
-    /// associative, commutative and idempotent, so this equals walking the list; seeding it
-    /// with the base keeps clauses the base subsumes from accumulating.
+    /// The meet of every label in `local`, met with only terms the trajectory's live fold also
+    /// holds: its opened base, the inherited sources that resolved, and its current resumed
+    /// seed. The meet is associative, commutative and idempotent, so the fold stays exact, and
+    /// the narrow terms keep clauses they subsume from accumulating.
     local_label: OrdMap<TrajectoryId, Label>,
     effects: Vector<EffectKind>,
     open: OrdSet<DispatchId>,
@@ -222,6 +223,28 @@ fn proposal_of<'a>(
     (&decided.trajectory == trajectory)
         .then(|| decided.proposals.get(*position as usize))
         .flatten()
+}
+
+/// A trajectory's cached local fold, rebuilt from its opened base, the inherited sources that
+/// resolve now (an admitted value never changes; a dangling one stays to the live walk), its
+/// resumed seed, and every local label.
+fn rebuilt_local_label(
+    base: Option<&Label>,
+    snapshot: Option<&ForkSnapshot>,
+    seed: Option<&Label>,
+    values: &Vector<AdmittedValue>,
+    local: Option<&Vector<ValueId>>,
+) -> Label {
+    let inherited = snapshot.into_iter().flat_map(|snapshot| snapshot.inherited().iter());
+    let resolved = inherited
+        .chain(local.into_iter().flatten())
+        .filter_map(|id| usize::try_from(id.index()).ok().and_then(|index| values.get(index)))
+        .map(|value| &value.label);
+    let mut fold = Label::top();
+    for term in base.into_iter().chain(seed).chain(resolved) {
+        fold.fold(term);
+    }
+    fold
 }
 
 fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &crate::value::OfferId, end: OfferEnd) {
@@ -355,10 +378,16 @@ impl Projection {
                     opening.is_none(),
                     "the validator admits one opening per family log, as its first record"
                 );
-                local_label
-                    .entry(trajectory.clone())
-                    .or_insert_with(Label::top)
-                    .fold(&starting);
+                local_label.insert(
+                    trajectory.clone(),
+                    rebuilt_local_label(
+                        Some(&starting),
+                        None,
+                        resumed.get(trajectory),
+                        values,
+                        local.get(trajectory),
+                    ),
+                );
                 *opening = Some((trajectory.clone(), starting));
                 *principal = opened_for.clone();
             }
@@ -595,10 +624,16 @@ impl Projection {
                 if let Some(preparation) = prepared.get(fork) {
                     bound.insert(fork.clone(), trajectory.clone());
                     fork_of.insert(trajectory.clone(), fork.clone());
-                    local_label
-                        .entry(trajectory.clone())
-                        .or_insert_with(Label::top)
-                        .fold(preparation.snapshot.base());
+                    local_label.insert(
+                        trajectory.clone(),
+                        rebuilt_local_label(
+                            Some(preparation.snapshot.base()),
+                            Some(&preparation.snapshot),
+                            resumed.get(trajectory),
+                            values,
+                            local.get(trajectory),
+                        ),
+                    );
                     if !preparation.denials.is_empty() {
                         denials.insert(trajectory.clone(), preparation.denials.clone());
                     }
@@ -620,6 +655,22 @@ impl Projection {
                 }
                 BoundaryKind::Resume { seed } => {
                     resumed.insert(trajectory.clone(), seed.clone());
+                    // The seed it replaces may be narrower, so the cache drops it with a rebuild.
+                    let snapshot = fork_of
+                        .get(trajectory)
+                        .and_then(|fork| prepared.get(fork))
+                        .map(|prepared| &prepared.snapshot);
+                    let base = match snapshot {
+                        Some(snapshot) => Some(snapshot.base()),
+                        None => opening
+                            .as_ref()
+                            .filter(|(root, _)| root == trajectory)
+                            .map(|(_, starting)| starting),
+                    };
+                    local_label.insert(
+                        trajectory.clone(),
+                        rebuilt_local_label(base, snapshot, Some(seed), values, local.get(trajectory)),
+                    );
                     resumed_since_return.insert(trajectory.clone());
                     let occurrence = returns_by.get(trajectory).copied().unwrap_or(0);
                     candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
@@ -1909,63 +1960,105 @@ mod tests {
         assert_cached_fold_matches_walk(&log);
     }
 
+    fn own_self() -> Audience {
+        use crate::label::{ChainAudience, Clause};
+        Audience::of_clauses([Clause::new([ChainAudience::Self_], [], []).unwrap()])
+    }
+
+    /// `self ∪ @group-<group>`: broader than `self`, and incomparable with every other group.
+    fn self_or_group(group: usize) -> Audience {
+        use crate::label::{ChainAudience, Clause, GroupRef};
+        Audience::of_clauses([Clause::new(
+            [ChainAudience::Self_],
+            [GroupRef::Named(crate::names::GroupName::new(format!("group-{group}")))],
+            [],
+        )
+        .unwrap()])
+    }
+
+    /// Admit 64 audiences broader than `self` on each of `trajectories` after `log`, hold the
+    /// cache to the walk after every record, and hold each cache to the one `self` clause the
+    /// narrow term of its fold keeps it at.
+    fn assert_broad_admissions_stay_one_clause(mut log: Vec<Fact>, trajectories: &[&str]) {
+        for group in 0..64 {
+            log.extend(trajectories.iter().map(|t| admit(t, labeled(3, self_or_group(group)))));
+        }
+        assert_cached_fold_matches_walk(&log);
+        let projection = build(&log);
+        for trajectory in trajectories {
+            let cached = &projection.local_label[&traj(trajectory)];
+            assert_eq!(cached, &Label::new(Trust::new(3), own_self()));
+            assert_eq!(cached.audience.clauses().count(), 1);
+        }
+    }
+
     /// A trajectory opened at `self` that admits many incomparable broader audiences: the base
     /// subsumes every one of them, so the cached fold stays the one `self` clause instead of
     /// growing a clause per admission.
     #[test]
     fn a_narrow_base_keeps_the_cached_fold_from_accumulating_subsumed_clauses() {
-        use crate::label::{ChainAudience, Clause, GroupRef};
-        let own = Audience::of_clauses([Clause::new([ChainAudience::Self_], [], []).unwrap()]);
-        let broader = |group: usize| {
-            Audience::of_clauses([Clause::new(
-                [ChainAudience::Self_],
-                [GroupRef::Named(crate::names::GroupName::new(format!("group-{group}")))],
-                [],
-            )
-            .unwrap()])
-        };
-        let mut log = vec![crate::profile::opening_at(
-            traj("a"),
-            Label::new(Trust::new(3), own.clone()),
-        )];
+        let narrow = Label::new(Trust::new(3), own_self());
+        let mut log = vec![crate::profile::opening_at(traj("a"), narrow.clone())];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(narrow, [])));
+        assert_broad_admissions_stay_one_clause(log, &["a", "b"]);
+    }
+
+    /// A child forked at a public base that inherits a `self` source: the inherited source
+    /// narrows its fold, and so its cache, from the fork on.
+    #[test]
+    fn a_narrow_inherited_source_keeps_the_cached_fold_from_accumulating_subsumed_clauses() {
+        let narrow = labeled(3, own_self());
+        let mut log = vec![opened("a"), admit("a", narrow.clone())];
         log.extend(fork_pair(
             "a",
             "b",
-            ForkSnapshot::freeze(Label::new(Trust::new(3), own.clone()), []),
+            ForkSnapshot::freeze(base(), [(ValueId::new(0), &narrow.label)]),
         ));
-        for group in 0..64 {
-            log.push(admit("a", labeled(3, broader(group))));
-            log.push(admit("b", labeled(3, broader(group))));
-        }
-        assert_cached_fold_matches_walk(&log);
-        let projection = build(&log);
-        for trajectory in [traj("a"), traj("b")] {
-            let cached = &projection.local_label[&trajectory];
-            assert_eq!(cached, &Label::new(Trust::new(3), own.clone()));
-            assert_eq!(cached.audience.clauses().count(), 1);
-        }
+        assert_broad_admissions_stay_one_clause(log, &["b"]);
+    }
+
+    /// A child forked at a public base and resumed with a `self` seed: the seed narrows its
+    /// fold, and so its cache, until the next resume replaces it.
+    #[test]
+    fn a_narrow_resumed_seed_keeps_the_cached_fold_from_accumulating_subsumed_clauses() {
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [])));
+        log.push(Fact::Boundary {
+            trajectory: traj("b"),
+            kind: BoundaryKind::Resume {
+                seed: Label::new(Trust::new(3), own_self()),
+            },
+        });
+        assert_broad_admissions_stay_one_clause(log, &["b"]);
     }
 
     proptest::proptest! {
+        /// Root admissions before the fork let inherited ids resolve at the fork, later, or
+        /// never; resumes replace the seed with one that may be broader than the last.
         #[test]
         fn the_cached_label_fold_equals_the_walk_on_generated_logs(
             // A root's opening is a policy profile, which cannot name an undeclared group.
             root_base in proptest::sample::select(vec![0usize, 1, 2, 3, 4, 6, 7]),
             child_base in 0usize..8,
+            before_fork in proptest::collection::vec((0u8..4, 0usize..8), 0..6),
+            inherited in proptest::collection::btree_set(0u64..10, 0..4),
             records in proptest::collection::vec((0u8..3, 0u8..4, 0usize..8), 0..40),
         ) {
-            let inherited = labeled(3, palette(1));
-            let mut log = vec![crate::profile::opening_at(traj("a"), Label::new(Trust::new(3), palette(root_base)))];
+            let generated = |trust: u8, audience: usize| Label::new(Trust::new(trust), palette(audience));
+            let mut log = vec![crate::profile::opening_at(traj("a"), generated(3, root_base))];
+            log.extend(
+                before_fork
+                    .into_iter()
+                    .map(|(trust, audience)| admit("a", LabeledValue::new(ValueBody::new("body"), generated(trust, audience)))),
+            );
+            let frozen = Label::top();
             log.extend(fork_pair(
                 "a",
                 "b",
-                ForkSnapshot::freeze(
-                    Label::new(Trust::new(3), palette(child_base)),
-                    [(ValueId::new(1), &inherited.label), (ValueId::new(4), &inherited.label)],
-                ),
+                ForkSnapshot::freeze(generated(3, child_base), inherited.into_iter().map(|id| (ValueId::new(id), &frozen))),
             ));
             log.extend(records.into_iter().map(|(kind, trust, audience)| {
-                let label = Label::new(Trust::new(trust), palette(audience));
+                let label = generated(trust, audience);
                 match kind {
                     0 => admit("a", LabeledValue::new(ValueBody::new("body"), label)),
                     1 => admit("b", LabeledValue::new(ValueBody::new("body"), label)),
