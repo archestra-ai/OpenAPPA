@@ -328,7 +328,8 @@ pub enum RemedyRefusal {
     Unvouched,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
-    /// The offer is expired, already terminal, or from another trajectory.
+    /// The offer no longer stands (expired, already terminal, or recorded under an earlier
+    /// policy revision), or is from another trajectory.
     UnknownOffer,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,

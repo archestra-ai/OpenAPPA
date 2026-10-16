@@ -10,6 +10,7 @@ use common::{last_offer, raw};
 use std::path::Path;
 use std::sync::Arc;
 
+use appa_eventlog::{Backend, DeploymentName, LogStore};
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
@@ -272,6 +273,58 @@ async fn a_publish_by_another_process_fences_until_this_one_serves_the_head() {
 
     stale.reload(write(dir.path(), &next)).expect("the head's bytes load");
     assert!(allowed(&propose(&stale, &id, call("notes", 3), "c3").await));
+}
+
+/// A host serving each tenant through a view pinned to its line's head, from two runtimes on one
+/// store: once the other runtime publishes past the pin, the pinned view refuses retryably and
+/// commits nothing. Publishing the head's bytes again publishes nothing, and the call retried
+/// through a view pinned to it decides at the head.
+#[tokio::test]
+async fn a_view_pinned_behind_its_lines_head_refuses_until_its_host_pins_the_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let base = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let pod = || {
+        Arc::new(
+            Runtime::open_with_store(write(dir.path(), &base), Arc::clone(&store), None)
+                .expect("the base deployment opens"),
+        )
+    };
+    let (one, other) = (pod(), pod());
+    let line = DeploymentName::new("tenant");
+    let pin = |runtime: &Arc<Runtime>, text: &str| {
+        let prepared = runtime
+            .prepare_deployment(write(dir.path(), text))
+            .expect("the tenant's policy loads");
+        let published = runtime.publish(&line, &prepared).expect("the policy publishes");
+        (published.revision(), Arc::new(runtime.pinned(&published)))
+    };
+
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let (revision, stale) = pin(&one, &first);
+    assert_eq!(revision, 1);
+    let id = root("tenant-conversation");
+    start(&stale, &id).await;
+    assert!(allowed(&propose(&stale, &id, call("notes", 1), "c1").await));
+    assert_eq!(report(&stale, &id, call("notes", 1), "c1").await, HookDecision::Ack);
+
+    let next = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    assert_eq!(pin(&other, &next).0, 2, "the other runtime publishes the next revision");
+
+    let before = store.log(&id).expect("the family reads");
+    let refused = propose(&stale, &id, call("notes", 2), "c2").await;
+    assert!(moved(&refused), "{refused:?}");
+    let after = store.log(&id).expect("the family reads");
+    assert_eq!(after.facts().len(), before.facts().len(), "nothing commits");
+    assert_eq!(after.host_records().len(), before.host_records().len());
+
+    let (revision, head) = pin(&one, &next);
+    assert_eq!(revision, 2, "the head's own bytes publish nothing");
+    assert!(allowed(&propose(&head, &id, call("notes", 2), "c2").await));
+    assert!(
+        allowed(&propose(&head, &id, call("fetch", 3), "c3").await),
+        "the family decides at the head"
+    );
 }
 
 /// A runtime restarted under a later policy replays a family across the revisions that decided
