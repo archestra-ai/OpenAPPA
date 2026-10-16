@@ -3277,7 +3277,7 @@ pub(crate) fn compose_batch<'a>(
             }
             // An approval declaring a child's return policy spends only at the marked spawn's
             // position, and one declaring none only at an ordinary one.
-            let marked = SpawnMark::marks(spawn, position);
+            let marked = matches!(CallRole::of(spawn, position), CallRole::MarkedSpawn(_));
             let spends = if singleton { approval(&views, call) } else { None }.filter(|offer| {
                 views
                     .approval(offer)

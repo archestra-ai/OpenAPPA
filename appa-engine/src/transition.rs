@@ -145,17 +145,10 @@ impl SpawnMark {
     pub const fn kind(self) -> SpawnKind {
         self.kind
     }
-
-    pub fn marks(mark: Option<SpawnMark>, position: usize) -> bool {
-        mark.is_some_and(|mark| mark.index == position)
-    }
 }
 
 /// One act the engine decides. A closed enum: an external operational failure is not an
 /// event, and neither is a request, user turn, transcript, or host run.
-///
-/// Tool outcome, offer execution, child return and fork binding join it as they move off the
-/// composed operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineEvent {
     Proposals(ProposalBatch),
@@ -1017,6 +1010,30 @@ struct Declaration {
     owed: crate::basis::BasisAdvance,
 }
 
+fn effect_advance(moved: bool) -> crate::basis::BasisAdvance {
+    match moved {
+        true => crate::basis::BasisAdvance::family(),
+        false => crate::basis::BasisAdvance::default(),
+    }
+}
+
+fn annotation_or_unknown<'r>(
+    registry: &'r crate::registry::Registry,
+    call: &'r ResolvedCall,
+) -> Result<std::borrow::Cow<'r, ToolAnnotation>, TransitionRefusal> {
+    registry
+        .annotation_of(call)
+        .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
+}
+
+fn sanitized_label(derived: Result<Option<Label>, crate::label::MembershipNeeded>) -> Result<Label, TransitionRefusal> {
+    match derived {
+        Ok(Some(label)) => Ok(label),
+        Ok(None) => Err(TransitionRefusal::SanitizerUnapplicable),
+        Err(needed) => Err(needed.into()),
+    }
+}
+
 fn settled(menu: Option<MenuDebt>) -> Result<(), TransitionRefusal> {
     match menu {
         Some(debt) if debt.offered.len() != debt.menu.len() => Err(TransitionRefusal::IncompleteMenu),
@@ -1175,9 +1192,7 @@ impl<'a> Sequence<'a> {
                 subject,
                 evidence,
             } => {
-                let call = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(annotation.clone())
-                    .with_file_basis(file_basis.clone());
+                let call = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
                 self.opened(trajectory, dispatch, &call, subject, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects)?;
             }
@@ -1228,7 +1243,10 @@ impl<'a> Sequence<'a> {
                 dispatch,
                 plan,
                 narrowing,
-            } => self.acceptance(trajectory, dispatch, plan, narrowing)?,
+            } => {
+                self.pending_dispatch(trajectory, dispatch)?;
+                self.land_remedy(dispatch, plan, None)?.acceptance = Some(narrowing.clone());
+            }
             Fact::OutputSanitizerBound {
                 trajectory,
                 dispatch,
@@ -1236,12 +1254,18 @@ impl<'a> Sequence<'a> {
                 sanitizer,
                 contribution,
                 evidence,
-            } => self.output_sanitizer_bound(trajectory, dispatch, plan, sanitizer, contribution, evidence)?,
+            } => {
+                self.pending_dispatch(trajectory, dispatch)?;
+                self.output_sanitizer_bound(dispatch, plan, sanitizer, contribution, evidence)?;
+            }
             Fact::OutputWithheld {
                 trajectory,
                 dispatch,
                 plan,
-            } => self.output_withheld(trajectory, dispatch, plan)?,
+            } => {
+                self.pending_dispatch(trajectory, dispatch)?;
+                self.land_remedy(dispatch, plan, None)?.output = Some(crate::plan::OutputRemedy::Withhold);
+            }
             Fact::Denial {
                 trajectory,
                 digest,
@@ -1430,6 +1454,31 @@ impl<'a> Sequence<'a> {
         }
     }
 
+    /// Lands one remedy record on its dispatch's pending remedy, pinning the evidence it carries.
+    fn land_remedy(
+        &mut self,
+        dispatch: &DispatchId,
+        plan: &crate::plan::PlanId,
+        evidence: Option<&AudienceEvidence>,
+    ) -> Result<&mut Remedy, TransitionRefusal> {
+        if let Some(evidence) = evidence {
+            self.recorded_expansions(evidence)?;
+        }
+        let remedy = self.remedies.entry(dispatch.clone()).or_default();
+        if let Some(evidence) = evidence {
+            remedy.pin_evidence(evidence)?;
+        }
+        remedy.plans.insert(*plan);
+        Ok(remedy)
+    }
+
+    fn known_authority(&self, authority: &AuthorityName) -> Result<(), TransitionRefusal> {
+        match self.engine.registry().authority(authority) {
+            Some(_) => Ok(()),
+            None => Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string())),
+        }
+    }
+
     fn ruling(
         &mut self,
         dispatch: &DispatchId,
@@ -1439,64 +1488,27 @@ impl<'a> Sequence<'a> {
         reviewed: &crate::execute::AuthorityReview,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
-        if self.engine.registry().authority(authority).is_none() {
-            return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
-        }
-        self.recorded_expansions(evidence)?;
-        let remedy = self.remedies.entry(dispatch.clone()).or_default();
-        remedy.pin_evidence(evidence)?;
+        self.known_authority(authority)?;
+        let remedy = self.land_remedy(dispatch, plan, Some(evidence))?;
         remedy.reviewed.push(reviewed.clone());
         remedy.rulings.push((authority.clone(), covers.to_vec()));
-        remedy.plans.insert(*plan);
-        Ok(())
-    }
-
-    fn acceptance(
-        &mut self,
-        trajectory: &TrajectoryId,
-        dispatch: &DispatchId,
-        plan: &crate::plan::PlanId,
-        narrowing: &Narrowing,
-    ) -> Result<(), TransitionRefusal> {
-        self.pending_dispatch(trajectory, dispatch)?;
-        let remedy = self.remedies.entry(dispatch.clone()).or_default();
-        remedy.acceptance = Some(narrowing.clone());
-        remedy.plans.insert(*plan);
         Ok(())
     }
 
     fn output_sanitizer_bound(
         &mut self,
-        trajectory: &TrajectoryId,
         dispatch: &DispatchId,
         plan: &crate::plan::PlanId,
         sanitizer: &SanitizerName,
         contribution: &Label,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
-        self.pending_dispatch(trajectory, dispatch)?;
         if self.engine.registry().sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
             return Err(TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()));
         }
-        self.recorded_expansions(evidence)?;
-        let remedy = self.remedies.entry(dispatch.clone()).or_default();
-        remedy.pin_evidence(evidence)?;
+        let remedy = self.land_remedy(dispatch, plan, Some(evidence))?;
         remedy.output = Some(crate::plan::OutputRemedy::Sanitize(sanitizer.clone()));
         remedy.contribution = Some(contribution.clone());
-        remedy.plans.insert(*plan);
-        Ok(())
-    }
-
-    fn output_withheld(
-        &mut self,
-        trajectory: &TrajectoryId,
-        dispatch: &DispatchId,
-        plan: &crate::plan::PlanId,
-    ) -> Result<(), TransitionRefusal> {
-        self.pending_dispatch(trajectory, dispatch)?;
-        let remedy = self.remedies.entry(dispatch.clone()).or_default();
-        remedy.output = Some(crate::plan::OutputRemedy::Withhold);
-        remedy.plans.insert(*plan);
         Ok(())
     }
 
@@ -1515,10 +1527,7 @@ impl<'a> Sequence<'a> {
                 return Err(TransitionRefusal::UnbackedDenial);
             }
         }
-        if self.engine.registry().authority(authority).is_none() {
-            return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
-        }
-        Ok(())
+        self.known_authority(authority)
     }
 
     fn fork_prepared(
@@ -1727,11 +1736,7 @@ impl<'a> Sequence<'a> {
                 if candidate.digest() != *call {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
-                let contract = self
-                    .engine
-                    .registry()
-                    .annotation_of(candidate)
-                    .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
+                let contract = annotation_or_unknown(self.engine.registry(), candidate)?;
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
                 let context = self.context(expansions);
@@ -1801,8 +1806,9 @@ impl<'a> Sequence<'a> {
                 .map_err(TransitionRefusal::from)
             }
             // A child return is never planned: it crosses at the child's stop or is refused there.
-            crate::basis::SubjectKey::Return(_) => Err(TransitionRefusal::ForeignOffer),
-            crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
+            crate::basis::SubjectKey::Return(_) | crate::basis::SubjectKey::Approval(_) => {
+                Err(TransitionRefusal::ForeignOffer)
+            }
         }
     }
 
@@ -1907,11 +1913,7 @@ impl<'a> Sequence<'a> {
             }
             _ => return Err(TransitionRefusal::UnbackedReturnPolicy),
         }
-        let contract = self
-            .engine
-            .registry()
-            .annotation_of(call)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+        let contract = annotation_or_unknown(self.engine.registry(), call)?;
         let live = views.current_label();
         if rulings
             .iter()
@@ -2135,24 +2137,24 @@ impl<'a> Sequence<'a> {
         match fact {
             // A release moves no label: its result is unseen until it is admitted. The
             // reservation moves the family.
-            Fact::DispatchOpened { proposed_effects, .. } => self.effect_advance(!proposed_effects.is_empty()),
+            Fact::DispatchOpened { proposed_effects, .. } => effect_advance(!proposed_effects.is_empty()),
             // The reservation settles into committed effects.
-            Fact::DispatchSucceeded { effects, .. } => self.effect_advance(!effects.is_empty()),
+            Fact::DispatchSucceeded { effects, .. } => effect_advance(!effects.is_empty()),
             Fact::DispatchClosed {
                 trajectory,
                 dispatch,
                 outcome,
             } => match outcome {
-                CloseOutcome::Success { effects } => self.effect_advance(!effects.is_empty()),
+                CloseOutcome::Success { effects } => effect_advance(!effects.is_empty()),
                 CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => {
-                    self.effect_advance(self.projection.view(trajectory).reserves(dispatch))
+                    effect_advance(self.projection.view(trajectory).reserves(dispatch))
                 }
                 CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
             },
             Fact::ValueAdmitted {
                 provenance: Provenance::ProviderRun { effects, .. },
                 ..
-            } => self.effect_advance(!effects.is_empty()),
+            } => effect_advance(!effects.is_empty()),
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
             Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
@@ -2171,14 +2173,6 @@ impl<'a> Sequence<'a> {
                 ..BasisAdvance::default()
             },
             _ => BasisAdvance::default(),
-        }
-    }
-
-    fn effect_advance(&self, moved: bool) -> crate::basis::BasisAdvance {
-        if moved {
-            crate::basis::BasisAdvance::family()
-        } else {
-            crate::basis::BasisAdvance::default()
         }
     }
 
@@ -2273,9 +2267,7 @@ impl<'a> Sequence<'a> {
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(annotation.clone())
-                    .with_file_basis(file_basis.clone());
+                let opened = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2550,11 +2542,7 @@ impl<'a> Sequence<'a> {
         if self.projection.view(trajectory).dispatch_tool(dispatch).is_some() {
             return Err(TransitionRefusal::DispatchReopened);
         }
-        let contract = self
-            .engine
-            .registry()
-            .annotation_of(call)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+        let contract = annotation_or_unknown(self.engine.registry(), call)?;
         contract
             .parameters
             .validate(call.arguments())
@@ -2711,11 +2699,7 @@ impl<'a> Sequence<'a> {
                     .projection
                     .dispatch_call_of(dispatch)
                     .ok_or(TransitionRefusal::UnknownDispatch)?;
-                let contract = self
-                    .engine
-                    .registry()
-                    .annotation_of(call)
-                    .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+                let contract = annotation_or_unknown(self.engine.registry(), call)?;
                 let views = self.projection.view(trajectory);
                 // Admission lands with the close, and only a success admits anything.
                 if !views.closed_successfully(dispatch) && !views.failed_with_body(dispatch) {
@@ -2813,17 +2797,7 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
-        if views.has_ended(child) {
-            return Err(TransitionRefusal::BranchEnded);
-        }
-        if id.child() != child || id.occurrence() != views.returns_by(child) {
-            return Err(TransitionRefusal::WrongReturnIdentity);
-        }
-        let ReturnPolicy::Crossing(policy) = views
-            .return_policy_of(child)
-            .ok_or(TransitionRefusal::NotForked)?
-            .clone()
-        else {
+        let ReturnPolicy::Crossing(policy) = standing_return(&views, child, id)?.clone() else {
             return Err(TransitionRefusal::ReturnVoid);
         };
         let fold = views.branch_label(child);
@@ -2855,11 +2829,7 @@ impl<'a> Sequence<'a> {
                         if !views.fork_seed(child).is_some_and(|seed| seed.meets_floor(ceiling)) {
                             return Err(TransitionRefusal::SanitizerUnapplicable);
                         }
-                        match registered.derive_output(&fold, &[], &self.context(&expansions)) {
-                            Ok(Some(label)) => label,
-                            Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-                            Err(needed) => return Err(needed.into()),
-                        }
+                        sanitized_label(registered.derive_output(&fold, &[], &self.context(&expansions)))?
                     }
                     // The staging act derived and validated the label with its own pinned
                     // reads; the crossing reads nothing again.
@@ -2881,13 +2851,18 @@ impl<'a> Sequence<'a> {
         if value.label != expected {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        let floor = crate::plan::floor_of(self.engine.registry(), &self.projection.view(child))
-            .expect("a forked child stands under its fork's floor");
-        if !floor.holds(&value.label) {
-            return Err(TransitionRefusal::ReturnBelowFloor);
-        }
+        self.holds_child_floor(child, &value.label)?;
         self.audit_reads(&expansions);
         Ok(())
+    }
+
+    fn holds_child_floor(&self, child: &TrajectoryId, label: &Label) -> Result<(), TransitionRefusal> {
+        let floor = crate::plan::floor_of(self.engine.registry(), &self.projection.view(child))
+            .expect("a forked child stands under its fork's floor");
+        match floor.holds(label) {
+            true => Ok(()),
+            false => Err(TransitionRefusal::ReturnBelowFloor),
+        }
     }
 
     fn boundary(&mut self, trajectory: &TrajectoryId, kind: &BoundaryKind) -> Result<(), TransitionRefusal> {
@@ -3014,10 +2989,7 @@ impl<'a> Sequence<'a> {
             .projection
             .dispatch_call_of(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
-        self.engine
-            .registry()
-            .annotation_of(call)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
+        annotation_or_unknown(self.engine.registry(), call)
     }
 
     fn open_dispatch_contract(
@@ -3099,10 +3071,7 @@ impl<'a> Sequence<'a> {
                 None
             }
             ConfinedFrom::Offer(offer) => {
-                let recorded = taken_offer(&views, offer)?;
-                if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
-                    return Err(TransitionRefusal::UnbackedOffer);
-                }
+                let recorded = hop_offer(&views, offer, sanitizer, subject)?;
                 self.audit_inherit(&recorded.evidence)?;
                 let current = views.candidate(subject).ok_or(TransitionRefusal::UnknownOffer)?;
                 let DerivedCandidate::Result {
@@ -3113,10 +3082,7 @@ impl<'a> Sequence<'a> {
                 else {
                     return Err(TransitionRefusal::ForgedLabel);
                 };
-                let expected = views.lineage(subject).extend(sanitizer.clone());
-                if expected.as_ref() != Some(lineage) {
-                    return Err(TransitionRefusal::SanitizerUnapplicable);
-                }
+                extends_lineage(&views, subject, sanitizer, lineage)?;
                 Some((predecessor.clone(), owed.clone()))
             }
         };
@@ -3134,11 +3100,7 @@ impl<'a> Sequence<'a> {
                 .output_label(&contract, &receiving),
             Some((body, _)) => body.label.clone(),
         };
-        let label = match registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)) {
-            Ok(Some(label)) => label,
-            Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(needed) => return Err(needed.into()),
-        };
+        let label = sanitized_label(registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)))?;
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
         }
@@ -3184,13 +3146,7 @@ impl<'a> Sequence<'a> {
         if views.parent_of(child) != Some(trajectory) {
             return Err(TransitionRefusal::ForeignTrajectory);
         }
-        if views.has_ended(child) {
-            return Err(TransitionRefusal::BranchEnded);
-        }
-        if id.occurrence() != views.returns_by(child) {
-            return Err(TransitionRefusal::WrongReturnIdentity);
-        }
-        let policy = views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)?;
+        let policy = standing_return(&views, child, id)?;
         match policy.crossing().and_then(|crossing| crossing.sanitizer.as_ref()) {
             Some(ReturnSanitizer::Named(bound)) if bound == sanitizer => {}
             _ => return Err(TransitionRefusal::SanitizerUnapplicable),
@@ -3199,19 +3155,11 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         let fold = views.branch_label(child);
-        let label = match registered.derive_output(&fold, &[], &self.context(expansions)) {
-            Ok(Some(label)) => label,
-            Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(needed) => return Err(needed.into()),
-        };
+        let label = sanitized_label(registered.derive_output(&fold, &[], &self.context(expansions)))?;
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        let floor = crate::plan::floor_of(self.engine.registry(), &self.projection.view(child))
-            .expect("a forked child stands under its fork's floor");
-        if !floor.holds(&label) {
-            return Err(TransitionRefusal::ReturnBelowFloor);
-        }
+        self.holds_child_floor(child, &label)?;
         self.audit_reads(expansions);
         Ok(())
     }
@@ -3238,10 +3186,7 @@ impl<'a> Sequence<'a> {
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
         let views = self.projection.view(trajectory);
-        let recorded = taken_offer(&views, from)?;
-        if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
-            return Err(TransitionRefusal::UnbackedOffer);
-        }
+        let recorded = hop_offer(&views, from, sanitizer, subject)?;
         let predecessor = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
         if predecessor.digest() != recorded.call {
             return Err(TransitionRefusal::UnbackedOffer);
@@ -3250,18 +3195,12 @@ impl<'a> Sequence<'a> {
         if source != &RawResultDigest::of(predecessor.canonical_arguments().canonical_bytes()) {
             return Err(TransitionRefusal::ObservationMismatch);
         }
-        // One name per lineage, and the chain this record claims is the chain that ran.
-        let expected = views.lineage(subject).extend(sanitizer.clone());
-        if expected.as_ref() != Some(lineage) {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
-        }
+        extends_lineage(&views, subject, sanitizer, lineage)?;
         // The contract the offer was planned on judges the sanitizer's scope and the block the
         // hop improves; the contract the rewritten arguments select judges the rewrite. The
         // persisted ordinal is checked against a fresh selection, never taken on the record's word.
         let registry = self.engine.registry();
-        let before_contract = registry
-            .annotation_of(predecessor)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
+        let before_contract = annotation_or_unknown(registry, predecessor)?;
         // A sanitizer rewrites arguments; the tool is never replaced.
         if call.tool() != predecessor.tool() {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3277,9 +3216,7 @@ impl<'a> Sequence<'a> {
         if crate::check::validate_annotation(registry, declaration, call).is_err() {
             return Err(TransitionRefusal::ForgedEvidence);
         }
-        let contract = registry
-            .annotation_of(call)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+        let contract = annotation_or_unknown(registry, call)?;
         contract
             .parameters
             .validate(call.arguments())
@@ -3301,12 +3238,11 @@ impl<'a> Sequence<'a> {
         }
         let stage = views.call_stage(subject);
         let context = self.context(expansions);
-        let derived =
-            match registered.derive_input(&stage.released(&views.current_label()), &before_contract.tags, &context) {
-                Ok(Some(derived)) => derived,
-                Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-                Err(needed) => return Err(needed.into()),
-            };
+        let derived = sanitized_label(registered.derive_input(
+            &stage.released(&views.current_label()),
+            &before_contract.tags,
+            &context,
+        ))?;
         if label != &derived {
             return Err(TransitionRefusal::ForgedLabel);
         }
@@ -3414,6 +3350,49 @@ fn taken_offer<'v>(
         return Err(TransitionRefusal::OfferEnded);
     }
     Ok(recorded)
+}
+
+/// The offer an accepted hop record names: taken, planned as this sanitizer's hop, and standing
+/// on this record's subject.
+fn hop_offer<'v>(
+    views: &'v Views<'_>,
+    offer: &crate::value::OfferId,
+    sanitizer: &SanitizerName,
+    subject: &crate::basis::SubjectKey,
+) -> Result<&'v crate::projection::RecordedOffer, TransitionRefusal> {
+    let recorded = taken_offer(views, offer)?;
+    if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
+        return Err(TransitionRefusal::UnbackedOffer);
+    }
+    Ok(recorded)
+}
+
+/// One name per lineage, and the chain a record claims is the chain that ran.
+fn extends_lineage(
+    views: &Views<'_>,
+    subject: &crate::basis::SubjectKey,
+    sanitizer: &SanitizerName,
+    lineage: &SanitizerLineage,
+) -> Result<(), TransitionRefusal> {
+    match views.lineage(subject).extend(sanitizer.clone()) {
+        Some(expected) if &expected == lineage => Ok(()),
+        _ => Err(TransitionRefusal::SanitizerUnapplicable),
+    }
+}
+
+/// The return policy of a live child's next return occurrence, which `id` must name.
+fn standing_return<'v>(
+    views: &'v Views<'_>,
+    child: &TrajectoryId,
+    id: &ChildReturnId,
+) -> Result<&'v ReturnPolicy, TransitionRefusal> {
+    if views.has_ended(child) {
+        return Err(TransitionRefusal::BranchEnded);
+    }
+    if id.child() != child || id.occurrence() != views.returns_by(child) {
+        return Err(TransitionRefusal::WrongReturnIdentity);
+    }
+    views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {

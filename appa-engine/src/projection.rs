@@ -183,6 +183,19 @@ pub struct Projection {
     versions: crate::basis::Versions,
 }
 
+/// The call a [`Fact::DispatchOpened`] record dispatched, rebuilt from its fields.
+pub(crate) fn opened_call(
+    tool: &ToolName,
+    declaration: crate::value::ToolDeclarationId,
+    arguments: &crate::params::CanonicalArguments,
+    annotation: &Option<PinnedAnnotation>,
+    file_basis: &Option<crate::value::FileBasis>,
+) -> ResolvedCall {
+    ResolvedCall::new_keyed(tool.clone(), declaration, arguments.clone())
+        .with_annotation(annotation.clone())
+        .with_file_basis(file_basis.clone())
+}
+
 /// The proposal a call subject names in the batches a trajectory decided: the batch it names,
 /// decided by the subject's own trajectory, at the position it names.
 fn proposal_of<'a>(
@@ -461,9 +474,7 @@ impl Projection {
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
-                        ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                            .with_annotation(annotation.clone())
-                            .with_file_basis(file_basis.clone()),
+                        opened_call(tool, *declaration, arguments, annotation, file_basis),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
                     dispatch_evidence.insert(dispatch.clone(), evidence.clone());
