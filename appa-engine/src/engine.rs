@@ -1057,6 +1057,7 @@ impl Engine {
                             &self.registry,
                             &views,
                             dispatch,
+                            &call,
                             &contract,
                             &sanitizer,
                             raw_digest,
@@ -1576,7 +1577,7 @@ impl Engine {
                 release.as_ref().map(|release| Released {
                     dispatch: release.dispatch.clone(),
                     call: call.clone(),
-                    fork: release.prepares_fork.clone(),
+                    fork: release.prepares_fork.map(|_| ForkId::of(&release.dispatch)),
                 })
             })
             .collect();
@@ -2949,6 +2950,7 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
 fn approved_release(
     registry: &Registry,
     contract: &ToolAnnotation,
+    output: &Label,
     trajectory: &TrajectoryId,
     dispatch: &DispatchId,
     approval: &crate::projection::PreparedApproval,
@@ -2985,7 +2987,7 @@ fn approved_release(
                 dispatch: dispatch.clone(),
                 plan: approval.plan,
                 sanitizer: sanitizer.clone(),
-                contribution: crate::plan::bound_contribution(registry, contract, sanitizer, &context)
+                contribution: crate::plan::bound_contribution(registry, contract, output, sanitizer, &context)
                     .expect("the compose gate answers a spent approval's sanitizer atoms")
                     .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
                 evidence: act.pinned().clone(),
@@ -3105,7 +3107,8 @@ pub(crate) struct SiblingRelease {
     pub(crate) consumes: Option<crate::value::OfferId>,
     /// The staged derivation this release took, by the subject that staged it.
     pub(crate) takes: Option<crate::basis::SubjectKey>,
-    pub(crate) prepares_fork: Option<ForkId>,
+    /// The kind of fork a marked spawn's release prepares, at `ForkId::of(&dispatch)`.
+    pub(crate) prepares_fork: Option<crate::transition::SpawnKind>,
     pub(crate) facts: Vec<Fact>,
     /// The pinned audience evidence this release's check read under: the act's, behind the
     /// spent approval's where one is consumed.
@@ -3409,7 +3412,13 @@ pub(crate) fn compose_batch<'a>(
                     dispatch: dispatch.clone(),
                 });
                 facts.extend(approved_release(
-                    registry, &contract, trajectory, &dispatch, &prepared, under,
+                    registry,
+                    &contract,
+                    &call.output_label(&contract, &views.current_label()),
+                    trajectory,
+                    &dispatch,
+                    &prepared,
+                    under,
                 ));
             }
             facts.push(opening);
@@ -3423,15 +3432,14 @@ pub(crate) fn compose_batch<'a>(
                 let kind = spawn
                     .map(SpawnMark::kind)
                     .expect("a marked spawn's role comes from the batch's spawn mark");
-                let fork = ForkId::of(&dispatch);
                 facts.push(Fact::ForkPrepared {
                     trajectory: trajectory.clone(),
-                    fork: fork.clone(),
+                    fork: ForkId::of(&dispatch),
                     snapshot: views.freeze_basis(),
                     return_policy,
                     kind,
                 });
-                Some(fork)
+                Some(kind)
             } else {
                 None
             };
@@ -5002,6 +5010,260 @@ mod tests {
         );
     }
 
+    /// `fetch` lowers trust and confines its result; `redactor` raises trust only. `taint` is a
+    /// provider-run result that narrows the audience. The trajectory starts trusted and public.
+    fn file_redacting_engine() -> Engine {
+        let cfg = RegistryConfig {
+            annotators: vec![],
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: declared(vec![
+                read_tool(
+                    "fetch",
+                    Delta {
+                        trust: Some(SUSPICIOUS),
+                        audience: None,
+                    },
+                ),
+                restrictable_tool("taint"),
+            ]),
+            authorities: vec![],
+            sanitizers: vec![crate::authority::Sanitizer {
+                name: crate::names::SanitizerName::new("redactor"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::DeclaredTransition::Trust {
+                    from_floor: SUSPICIOUS,
+                    to: TRUSTED,
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }],
+            audience: crate::audience::AudienceConfig::default(),
+        };
+        let mut profile = crate::profile::ProfileDeclaration {
+            starting_label: known(TRUSTED, Audience::public()),
+            ..crate::profile::covering_declaration(&cfg)
+        };
+        profile
+            .executor_exceptions
+            .insert(ToolName::new("taint"), crate::profile::ExecutorClass::ProviderRun);
+        profile.confined_results.remove(&ToolName::new("taint"));
+        Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: PolicyDialectVersion::new(1),
+            profile,
+        })
+        .unwrap()
+    }
+
+    fn insider_file() -> crate::value::FileSource {
+        crate::value::FileSource {
+            version: "v1".into(),
+            digest: "content".into(),
+            label: known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        }
+    }
+
+    /// `fetch` over `basis` blocks, the agent binds `redactor` to its result, and the approved
+    /// call releases: the log, and the released dispatch.
+    fn released_file_fetch(e: &Engine, basis: &crate::value::FileBasis) -> (Vec<Fact>, DispatchId) {
+        let fetch = call("fetch", json!({}));
+        let proposed = |log: &[Fact], id: &str| {
+            appended_facts(
+                e.handle(
+                    &viewing(e, log),
+                    EngineEvent::Proposals(ProposalBatch {
+                        id: crate::transition::ProposalBatchId::new(id),
+                        trajectory: traj(),
+                        provider_results: Vec::new(),
+                        proposals: vec![raw(&fetch)],
+                        spawn: None,
+                        offer_nonce: nonce(),
+                        evidence: vec![Evidence::File {
+                            position: 0,
+                            basis: basis.clone(),
+                        }],
+                        audience: crate::audience::AudienceEvidence::default(),
+                    }),
+                )
+                .expect("the batch decides"),
+            )
+        };
+        let mut log = vec![opened(e)];
+        let blocked = proposed(&log, "b1");
+        let (offer, _) = opened_offers(&blocked)
+            .into_iter()
+            .find(|(_, plan)| plan.sanitizer().is_some())
+            .expect("the confined result offers its output sanitizer");
+        log.extend(blocked);
+        log.extend(appended_facts(
+            execute_offer(e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("the offer executes"),
+        ));
+        let released = proposed(&log, "b2");
+        let dispatch = released
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("the approved call releases");
+        log.extend(released);
+        (log, dispatch)
+    }
+
+    /// The result's raw bytes checkpoint, then `redactor`'s derivation of them is reported: the
+    /// log through the checkpoint, and the derivation's decision.
+    fn redacted_result(e: &Engine, mut log: Vec<Fact>, dispatch: &DispatchId) -> (Vec<Fact>, EngineDecision) {
+        let raw = ValueBody::new("file bytes");
+        let report = |evidence: Vec<Evidence>| {
+            EngineEvent::Outcome(ToolReport {
+                dispatch: dispatch.clone(),
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(raw.clone()),
+                },
+                evidence,
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            })
+        };
+        log.extend(appended_facts(
+            e.handle(&viewing(e, &log), report(Vec::new()))
+                .expect("the bound result asks for its derivation"),
+        ));
+        let derived = e
+            .handle(
+                &viewing(e, &log),
+                report(vec![Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("redactor"),
+                    source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                    derived: ValueBody::new("file bytes, redacted"),
+                }]),
+            )
+            .expect("the derivation decides");
+        (log, derived)
+    }
+
+    fn derived_result_label(facts: &[Fact]) -> Label {
+        facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::CandidateDerived {
+                    derived: DerivedCandidate::Result { value, .. },
+                    ..
+                } => Some(value.label.clone()),
+                _ => None,
+            })
+            .expect("the derivation records its candidate")
+    }
+
+    /// A trust-only output sanitizer on a file read derives from what the read returns, file
+    /// label included: the file's audience survives the derivation, and the result reaches the
+    /// trajectory only through an acceptance of exactly that audience.
+    #[test]
+    fn a_sanitized_file_read_keeps_the_files_audience() {
+        let e = file_redacting_engine();
+        let insider = known(TRUSTED, Audience::restricted([ReaderId::new("insider")]));
+        let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+        assert!(log.iter().any(|fact| matches!(
+            fact,
+            Fact::OutputSanitizerBound { contribution, .. } if contribution == &insider
+        )));
+
+        let (log, derived) = redacted_result(&e, log, &dispatch);
+        let confined = confined_of(&derived.follow_up).clone();
+        let facts = appended_facts(derived);
+        assert_eq!(derived_result_label(&facts), insider);
+        assert_eq!(confined.residual.to, insider);
+        assert!(!facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+        let log = [log, facts].concat();
+
+        let accept = confined.offers.last().expect("the stage offers its acceptance").0;
+        let log = [
+            log.clone(),
+            appended_facts(execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("it crosses")),
+        ]
+        .concat();
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&traj())
+                .expect("the trajectory is opened")
+                .current_label(),
+            insider
+        );
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    /// An edit's result label reads the label its dispatch received. An admission between the
+    /// release and the result moves the trajectory, not that bound, so the live derivation and
+    /// its replay both read the bound.
+    #[test]
+    fn a_sanitized_file_edit_derives_from_the_bound_its_dispatch_received() {
+        let e = file_redacting_engine();
+        let (mut log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Edit(insider_file()));
+        log.extend(appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch("b3", vec![exposed("taint", "news")], Vec::new()),
+            )
+            .expect("the provider-run result admits"),
+        ));
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&traj())
+                .expect("the trajectory is opened")
+                .current_label()
+                .audience,
+            Audience::restricted([ReaderId::new("reviewer")])
+        );
+
+        let (log, derived) = redacted_result(&e, log, &dispatch);
+        let facts = appended_facts(derived);
+        assert_eq!(
+            derived_result_label(&facts),
+            known(TRUSTED, Audience::restricted([ReaderId::new("insider")]))
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    /// A log that bound a file read's sanitizer, or derived its first hop, from the tool's
+    /// declared output alone dropped the file's audience; replay refuses both records.
+    #[test]
+    fn a_file_derivation_recorded_without_the_files_label_is_refused() {
+        let e = file_redacting_engine();
+        let declared_only = known(TRUSTED, Audience::public());
+        let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+        let mut forged = log.clone();
+        for fact in forged.iter_mut() {
+            if let Fact::OutputSanitizerBound { contribution, .. } = fact {
+                *contribution = declared_only.clone();
+            }
+        }
+        assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::UnbackedApproval));
+
+        let (log, derived) = redacted_result(&e, log, &dispatch);
+        let mut facts = appended_facts(derived);
+        let at = facts
+            .iter()
+            .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
+            .expect("the derivation records its candidate");
+        facts.truncate(at + 1);
+        if let Some(Fact::CandidateDerived {
+            derived: DerivedCandidate::Result { value, residual, .. },
+            ..
+        }) = facts.last_mut()
+        {
+            value.label = declared_only.clone();
+            *residual = None;
+        }
+        assert_eq!(
+            e.validate_replay(&[log, facts].concat()),
+            Err(TransitionRefusal::ForgedLabel)
+        );
+    }
+
     fn staged_engine() -> Engine {
         let sanitizer = |name: &str, from_floor: Trust, to: Trust| crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new(name),
@@ -6155,6 +6417,46 @@ mod tests {
         }
     }
 
+    /// An approval is admitted only as what an accepted offer owes. A hop offer owes its
+    /// derivation, so an approval appended for it — here over a rewrite that kept the original
+    /// bytes, which the hop's empty rulings would otherwise release despite the trust gap — is
+    /// refused.
+    #[test]
+    fn an_approval_no_accepted_offer_owes_is_refused_on_replay() {
+        let e = substituting_engine(SUSPICIOUS);
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(&e);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let (hop, plan) = opened_offers(&facts)[0].clone();
+        assert!(plan.hop().is_some());
+        let log = [log, facts].concat();
+        let same_bytes = proposal.canonical_arguments().canonical_text().to_string();
+        let hopped =
+            appended_facts(execute_offer(&e, &log, hop, substitution(&proposal, &same_bytes)).expect("the hop runs"));
+        let log = [log, hopped].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let basis = Projection::build(&log, log.len() as u64)
+            .view(&traj())
+            .basis_for(&crate::basis::SubjectKey::Approval(hop));
+        let forged = Fact::CallApproved {
+            trajectory: traj(),
+            offer: hop,
+            call: proposal,
+            plan: plan.id,
+            acceptance: None,
+            rulings: Vec::new(),
+            output: None,
+            return_policy: None,
+            basis,
+            evidence: crate::audience::AudienceEvidence::default(),
+        };
+        assert_eq!(
+            e.validate_replay(&[log, vec![forged]].concat()),
+            Err(TransitionRefusal::UnbackedApproval)
+        );
+    }
+
     #[test]
     fn a_replacement_the_engine_cannot_bind_leaves_the_hop_unspent() {
         let e = substituting_engine(TRUSTED);
@@ -6529,6 +6831,45 @@ mod tests {
             }]
         ));
         assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    /// A spawn's fork is prepared as the kind its release's spawn mark named: a log that flips
+    /// the kind stands on no release.
+    #[test]
+    fn a_spawn_fork_prepared_as_another_kind_than_its_release_named_is_refused() {
+        let flipped = |log: &[Fact], to: crate::transition::SpawnKind| {
+            let prepared = log
+                .iter()
+                .position(|fact| {
+                    matches!(
+                        fact,
+                        Fact::ForkPrepared {
+                            fork: crate::value::ForkId::Spawn(_),
+                            ..
+                        }
+                    )
+                })
+                .expect("the release prepares the spawn's fork");
+            let honest = log[..=prepared].to_vec();
+            let mut forged = honest.clone();
+            if let Some(Fact::ForkPrepared { kind, .. }) = forged.last_mut() {
+                *kind = to;
+            }
+            (honest, forged)
+        };
+
+        let e = engine(vec![plain_tool("spawn")]);
+        let (single, forged) = flipped(
+            &spawn_family(&e, &TrajectoryId::new("child")),
+            crate::transition::SpawnKind::FanOut,
+        );
+        assert_eq!(e.validate_replay(&single), Ok(()));
+        assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::UnbackedDecision));
+
+        let (fan_out, _) = fan_out_family(&e, partial(TRUSTED, Audience::public()));
+        let (fan_out, forged) = flipped(&fan_out, crate::transition::SpawnKind::Single);
+        assert_eq!(e.validate_replay(&fan_out), Ok(()));
+        assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::UnbackedDecision));
     }
 
     #[test]

@@ -389,7 +389,14 @@ pub(crate) fn plan(
                 Some(_) => FloorStanding::Below,
             },
             sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
-            preserving_output: preserving_output_offered(registry, contract, &current, &plans, context),
+            preserving_output: preserving_output_offered(
+                registry,
+                contract,
+                &call.output_label(contract, &current),
+                &current,
+                &plans,
+                context,
+            ),
         }),
     };
     let narrowing_impact = raw.narrowing.as_ref().and_then(|narrowing| {
@@ -442,6 +449,7 @@ fn narrowing_impact(
             registry,
             label,
             annotation,
+            &annotation.output_label(),
             block.narrowing.as_ref(),
             floor,
             &context,
@@ -589,6 +597,7 @@ pub(crate) fn enumerate_plans(
             registry,
             current,
             contract,
+            &call.output_label(contract, current),
             block.narrowing.as_ref(),
             floor,
             context,
@@ -969,11 +978,13 @@ pub(crate) enum NarrowingSettlement {
 /// output sanitizer in registry name order. A block with no narrowing yields one empty settlement,
 /// so the caller's cross product still produces the plain authority plans. A narrowing below the
 /// floor keeps every other plan and loses only the acceptance: the child cannot take what its
-/// parent will not receive.
+/// parent will not receive. `output` is the label the call returns, which a sanitizer derives from.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolAnnotation,
+    output: &Label,
     narrowing: Option<&Narrowing>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
@@ -992,9 +1003,8 @@ pub(crate) fn narrowing_remedies(
     if !contract.emits.is_empty() {
         settlements.push(NarrowingSettlement::Withhold);
     }
-    let output = contract.output_label();
-    for sanitizer in applicable_output_sanitizers(registry, contract, &output, context, needs) {
-        if sanitized_commit(current, &output, sanitizer).is_none() {
+    for sanitizer in applicable_output_sanitizers(registry, contract, output, context, needs) {
+        if sanitized_commit(current, output, sanitizer).is_none() {
             continue;
         }
         settlements.push(NarrowingSettlement::Sanitize(sanitizer.name.clone()));
@@ -1256,13 +1266,13 @@ pub(crate) fn return_options(
 fn preserving_output_offered(
     registry: &Registry,
     contract: &ToolAnnotation,
+    output: &Label,
     current: &Label,
     plans: &[RemedyPlan],
     context: &MembershipContext<'_>,
 ) -> bool {
     let unanswered = Expansions::default();
     let context = MembershipContext::new(context.within, context.providers, &unanswered);
-    let output = contract.output_label();
     plans
         .iter()
         .filter_map(RemedyPlan::executable)
@@ -1272,7 +1282,7 @@ fn preserving_output_offered(
         })
         .any(|sanitizer| {
             sanitizer
-                .derive_output(&output, &contract.tags, &context)
+                .derive_output(output, &contract.tags, &context)
                 .is_ok_and(|derived| derived.is_some_and(|derived| current.combine(&derived) == *current))
         })
 }
@@ -1388,20 +1398,22 @@ pub(crate) fn attest_ceiling(transition: &DeclaredTransition) -> Option<crate::l
     }
 }
 
-/// The established contribution a bound output sanitizer's first derivation would make, resolved
-/// here at dispatch. `None` where the sanitizer is unregistered or does not apply to
-/// this output at all. Resolved rather than left to a later registry read because a mandate group
-/// resolves at application time, so what the binding promised is fixed now and recorded.
+/// The established contribution a bound output sanitizer's first derivation would make from the
+/// released call's `output` label, resolved here at dispatch. `None` where the sanitizer is
+/// unregistered or does not apply to this output at all. Resolved rather than left to a later
+/// registry read because a mandate group resolves at application time, so what the binding
+/// promised is fixed now and recorded.
 pub(crate) fn bound_contribution(
     registry: &Registry,
     contract: &ToolAnnotation,
+    output: &Label,
     sanitizer: &SanitizerName,
     context: &MembershipContext<'_>,
 ) -> Result<Option<Label>, MembershipNeeded> {
     let Some(sanitizer) = registry.sanitizer(sanitizer) else {
         return Ok(None);
     };
-    sanitizer.derive_output(&contract.output_label(), &contract.tags, context)
+    sanitizer.derive_output(output, &contract.tags, context)
 }
 
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the

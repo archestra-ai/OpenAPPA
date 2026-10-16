@@ -114,6 +114,7 @@ pub(crate) fn bound_candidate(
     registry: &Registry,
     views: &Views,
     dispatch: &DispatchId,
+    call: &ResolvedCall,
     contract: &crate::contract::ToolAnnotation,
     sanitizer: &SanitizerName,
     raw_digest: RawResultDigest,
@@ -126,12 +127,11 @@ pub(crate) fn bound_candidate(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-    let raw_label = contract.output_label();
+    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let derived = registered
-        .derive_output(&raw_label, &contract.tags, context)
+        .derive_output(&call.output_label(contract, receiving), &contract.tags, context)
         .map_err(AdmitError::MembershipNeeded)?
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
-    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let residual = confined_residual(receiving, &derived);
     Ok((
         DerivedCandidate::Result {
@@ -263,7 +263,7 @@ pub(crate) fn admit_result(
             raw_digest,
         } => {
             let (derived, lineage) = bound_candidate(
-                registry, views, dispatch, &contract, &sanitizer, raw_digest, body, context,
+                registry, views, dispatch, call, &contract, &sanitizer, raw_digest, body, context,
             )?;
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
                 unreachable!("a bound output sanitizer derives a confined result")
@@ -499,6 +499,18 @@ mod tests {
 
     fn views_of(log: &[Fact]) -> Projection {
         Projection::build(log, log.len() as u64)
+    }
+
+    /// The label `call` returns at the bound its open dispatch received.
+    fn released_output(reg: &Registry, log: &[Fact], dispatch: &DispatchId, call: &ResolvedCall) -> Label {
+        let contract = reg.annotation_of(call).expect("the fixture registers the tool");
+        let views = views_of(log);
+        let receiving = views
+            .view(&traj())
+            .receiving_bound(dispatch)
+            .expect("the fixture opened the dispatch")
+            .clone();
+        call.output_label(&contract, &receiving)
     }
 
     fn offer() -> crate::value::OfferId {
@@ -791,6 +803,7 @@ mod tests {
             contribution: crate::plan::bound_contribution(
                 &reg,
                 &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &released_output(&reg, &log, &dispatch, &call),
                 &crate::names::SanitizerName::new("declassify"),
                 &parts.context(),
             )
@@ -925,6 +938,7 @@ mod tests {
             contribution: crate::plan::bound_contribution(
                 &reg,
                 &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &released_output(&reg, &log, &dispatch, &call),
                 &declassify,
                 &answered.context(),
             )
