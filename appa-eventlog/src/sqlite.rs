@@ -64,7 +64,8 @@ const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
      ALTER TABLE processed_results ADD COLUMN lease_expires_at INTEGER;
      ALTER TABLE processed_results ADD COLUMN completed_at INTEGER;",
     // Deployments and the policy revisions each has published. Logs written before this step
-    // belong to families pinned to the policy file their opening names, and stay so.
+    // belong to families pinned to the policy file their opening names, and stay so. The index
+    // serves `published_as`: the first revision a deployment published a key as.
     "CREATE TABLE deployments (
          name TEXT PRIMARY KEY,
          head INTEGER NOT NULL
@@ -74,7 +75,8 @@ const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
          revision   INTEGER NOT NULL,
          key        TEXT NOT NULL,
          PRIMARY KEY (deployment, revision)
-     );",
+     );
+     CREATE INDEX policy_revisions_key ON policy_revisions (deployment, key, revision);",
 ];
 
 const BASE_SCHEMA: &str = "CREATE TABLE logs (
@@ -1853,6 +1855,7 @@ mod tests {
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
             ("policy_revisions", Some("CREATE TABLE policy_revisions ( deployment TEXT NOT NULL, revision INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY (deployment, revision) )")),
+            ("policy_revisions_key", Some("CREATE INDEX policy_revisions_key ON policy_revisions (deployment, key, revision)")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, completed_at INTEGER, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_archived_roots_1", None),
             ("sqlite_autoindex_deployments_1", None),

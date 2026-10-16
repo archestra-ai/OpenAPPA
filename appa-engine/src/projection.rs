@@ -255,7 +255,9 @@ fn rebuilt_local_label(
     fold
 }
 
-/// Apply `change` to every value of `map` in place.
+/// Apply `change` to every value of `map` in place. `OrdMap` has no mutable iterator, so the keys
+/// are collected first and each value is reached through `get_mut`: O(n log n), paid once per
+/// trust chain crossing of a family, never on the decision path.
 fn each_mut<K: Ord + Clone, V: Clone>(map: &mut OrdMap<K, V>, mut change: impl FnMut(&mut V)) {
     let keys: Vec<K> = map.keys().cloned().collect();
     for key in keys {
