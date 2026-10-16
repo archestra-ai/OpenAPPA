@@ -79,11 +79,11 @@ writes adds the wildcard fallback for tools no rule names.
 
 The other built-in tools get static rules:
 
-- **Tools that stay inside the session** — `Agent`, `Task`, `Workflow`,
-  `Glob`, `Skill`, `ToolSearch`, `TodoWrite`, the plan, worktree, task, cron
-  and artifact tools, and the other session-local tools take the session's
-  label as it is. `Agent`, `Task` and `Workflow` start subagents, which run
-  as child trajectories when the root sets `context_control`.
+- **Tools that stay inside the session** — `Glob`, `Skill`, `ToolSearch`,
+  `TodoWrite`, the plan, worktree, task, cron and artifact tools, and the
+  other session-local tools take the session's label as it is. The subagent
+  tools `Agent`, `Task` and `Workflow` are the root's to declare: their rules
+  rely on the deployment controlling a subagent's context.
 - **WebFetch, WebSearch** — A page or search result is a `suspicious` source,
   and the URL or query is a `public` sink. A fetch from a listed
   documentation host keeps the session's label. A Google search URL requires
@@ -92,8 +92,9 @@ The other built-in tools get static rules:
   `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
   `suspicious` content. Starting a remote routine is a `public` sink;
   `DesignSync` requires `internal`.
-- **SendMessage** — A message to a protected session's socket or pipe address
-  carries the session's label. A send by name is a `public` sink.
+- **SendMessage** — A send is a `public` sink. The default root precedes this
+  rule with exceptions for protected sessions' socket and pipe addresses,
+  which the runtime verifies.
 
 ## Add it to a deployment
 

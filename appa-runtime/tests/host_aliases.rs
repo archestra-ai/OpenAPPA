@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appa_eventlog::{Backend, LogStore};
-use appa_runtime::api::Runtime;
+use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{
@@ -99,27 +99,35 @@ async fn session(aliases: &str) -> (Runtime, Actor) {
     (runtime, actor)
 }
 
-async fn read(runtime: &Runtime, actor: &Actor, path: &str) -> HookDecision {
-    let identified = identify_tool("Read").expect("Read is in the host's domain");
+fn proposed(tool: &str, arguments: serde_json::Value) -> ProposedCall {
+    ProposedCall {
+        tool: identify_tool(tool)
+            .expect("the tool is in the host's domain")
+            .canonical
+            .into_string(),
+        arguments: serde_json::value::RawValue::from_string(arguments.to_string()).expect("an object"),
+        cwd: None,
+    }
+}
+
+async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall, id: &str) -> HookDecision {
     hooks::handle(
         runtime,
         HookEvent::ToolCall {
-            call_id: Some(format!("read {path}")),
+            call_id: Some(id.to_string()),
             actor: actor.clone(),
-            call: ProposedCall {
-                tool: identified.canonical.into_string(),
-                arguments: serde_json::value::RawValue::from_string(
-                    serde_json::json!({ "file_path": path }).to_string(),
-                )
-                .expect("an object"),
-                cwd: None,
-            },
+            call,
             spawn: None,
             prompt: None,
             ruling: None,
         },
     )
     .await
+}
+
+async fn read(runtime: &Runtime, actor: &Actor, path: &str) -> HookDecision {
+    let call = proposed("Read", serde_json::json!({ "file_path": path }));
+    propose(runtime, actor, call, &format!("read {path}")).await
 }
 
 #[tokio::test]
@@ -164,5 +172,64 @@ async fn without_the_alias_no_battery_rule_names_the_hosts_tools() {
         read(&runtime, &actor, ".env.example").await,
         HookDecision::AllowCall { spawn: None },
         "the root's own rule on the host's id applies without any alias"
+    );
+}
+
+/// A host alias rebinds only what the battery declares. The protected-peer exceptions for
+/// `SendMessage` belong to a root whose runtime verifies peer addresses, so under the alias
+/// every send is the battery's public sink.
+#[tokio::test]
+async fn an_aliased_send_to_a_socket_address_is_a_public_sink() {
+    let (runtime, actor) = session("[aliases]\nhost = { claude-code = [\"archestra\"] }\n").await;
+    let send = || {
+        proposed(
+            "SendMessage",
+            serde_json::json!({ "to": "uds:/tmp/peer.sock", "message": "hi" }),
+        )
+    };
+    assert_eq!(
+        propose(&runtime, &actor, send(), "send while public").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+
+    let HookDecision::DenyCall { offers, .. } = read(&runtime, &actor, ".env").await else {
+        panic!("the .env read narrows the session");
+    };
+    let plan = serde_json::json!({ "offer_id": offers[0].id });
+    let control = ProposedCall {
+        tool: appa_runtime_api::CONTROL_TOOL.into(),
+        arguments: serde_json::value::RawValue::from_string(plan.to_string()).expect("an object"),
+        cwd: None,
+    };
+    assert_eq!(
+        propose(&runtime, &actor, control, "accept").await,
+        HookDecision::PassControl
+    );
+    let accepted = runtime
+        .execute_embedded_remedy(&actor, serde_json::from_value(plan).expect("a plan"))
+        .await;
+    assert!(!matches!(accepted, RemedyOutcome::Refused { .. }), "{accepted:?}");
+    let read_env = proposed("Read", serde_json::json!({ "file_path": ".env" }));
+    assert_eq!(
+        propose(&runtime, &actor, read_env.clone(), "read .env accepted").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    hooks::handle(
+        &runtime,
+        HookEvent::ToolResult {
+            actor: actor.clone(),
+            call: read_env,
+            call_id: Some("read .env accepted".into()),
+            outcome: appa_runtime_api::ToolOutcome::Success {
+                body: appa_runtime_api::OutcomeBody::Available("TOKEN=secret".into()),
+            },
+        },
+    )
+    .await;
+
+    let narrowed = propose(&runtime, &actor, send(), "send while self").await;
+    assert!(
+        matches!(narrowed, HookDecision::DenyCall { .. }),
+        "a self-narrowed session cannot send to an unverified socket: {narrowed:?}"
     );
 }

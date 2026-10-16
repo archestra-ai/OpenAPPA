@@ -30,6 +30,45 @@
 [policy]
 version = 2
 
+# Subagents and peer messages rely on this runtime: the deployment controls a
+# subagent's context (`[policy.deployment]` below), and the runtime checks
+# each peer address. These rules precede the battery's.
+
+# Starting a subagent is this harness's spawn: the deployment controls the
+# child's context, so the subagent runs as a child trajectory. The spawn is
+# held until the session declares what the subagent's final message may
+# carry — as it is, floored at a label, or through a registered sanitizer such
+# as `attest-schema` below — and that message is checked when the subagent
+# stops: one that may not cross keeps the subagent running, with the reason or
+# the exact text to return, until it stops with one that may.
+[[policy.tool]]
+name = "host/claude-code/Agent"
+delta = {}
+
+# A workflow is a fan-out spawn: its script starts any number of subagents
+# under the one return declaration made at the `Workflow` call, which offers
+# every route above except `attest-schema`. Each subagent's return is checked
+# on its own, whether it arrives in its `StructuredOutput` call or at its stop.
+[[policy.tool]]
+name = "host/claude-code/Workflow"
+delta = {}
+
+# `Task` is the earlier name of `Agent`: the same spawn, the same contract.
+[[policy.tool]]
+name = "host/claude-code/Task"
+delta = {}
+
+# A socket address reaches only a live protected session under this policy:
+# the runtime refuses any other, and the message arrives carrying this
+# session's label. A send by name falls through to the battery's public sink.
+[[policy.tool]]
+name = "host/claude-code/SendMessage(to:uds:*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/SendMessage(to:pipe:*)"
+delta = {}
+
 # A peer message the runtime held. Its content carries the label the runtime
 # holds it at, which this result takes on.
 [[policy.tool]]

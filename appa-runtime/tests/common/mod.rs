@@ -206,16 +206,39 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `root` including the shipped Claude Code battery, as `appa plugin install
-/// claude-code` composes them: the battery is copied beside `dir`'s root.
-pub fn including_claude_code_battery(dir: &Path, root: &str) -> String {
+/// `root` including the shipped battery's rules for the harness's session tools
+/// only: these suites replace the model-backed Bash and Read rules and the
+/// Bash masker with deterministic ones of their own.
+pub fn including_session_tool_rules(dir: &Path, root: &str) -> String {
+    let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/claude-code/appa.toml"))
+        .expect("the shipped battery is readable");
+    let shipped: toml::Value = toml::from_str(&shipped).expect("the shipped battery parses");
+    let selected = ["Bash", "Monitor", "PowerShell", "Read", "Grep", "Write", "Edit"];
+    let tools: Vec<toml::Value> = shipped["policy"]["tool"]
+        .as_array()
+        .expect("the battery declares tools")
+        .iter()
+        .filter(|rule| {
+            let name = rule["name"].as_str().expect("every rule is named");
+            let tool = name.split('(').next().expect("split yields a first part");
+            !selected.iter().any(|seven| tool == format!("host/claude-code/{seven}"))
+        })
+        .cloned()
+        .collect();
+    let mut policy = toml::Table::new();
+    policy.insert("version".into(), shipped["policy"]["version"].clone());
+    policy.insert("tool".into(), toml::Value::Array(tools));
     let battery = dir.join("batteries/claude-code");
     std::fs::create_dir_all(&battery).expect("the battery directory is created");
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/claude-code/appa.toml"),
+    std::fs::write(
         battery.join("appa.toml"),
+        toml::to_string(&toml::Table::from_iter([(
+            "policy".to_string(),
+            toml::Value::Table(policy),
+        )]))
+        .unwrap(),
     )
-    .expect("the battery file is copied");
+    .expect("the battery writes");
     format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{root}")
 }
 

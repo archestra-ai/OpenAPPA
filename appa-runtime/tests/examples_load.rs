@@ -181,10 +181,10 @@ fn compiled(dir: &Path, root: &str, battery: &str) -> appa_policy::Config {
         .expect("the composed policy compiles")
 }
 
-/// The Claude Code battery carries the rules for the harness's other built-in tools
+/// The Claude Code battery carries the rules for the harness's session and web tools
 /// that the default once declared at the root. Composed with the default, each of
-/// those tools resolves every call to the same declaration as when the root declared
-/// them ahead of the battery's rules.
+/// those tools, the root's remaining SendMessage exceptions included, resolves every
+/// call to the same declaration as when the root declared them all.
 #[cfg(unix)]
 #[test]
 fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
@@ -204,13 +204,13 @@ fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
         .partition(session_tool);
     assert!(!moved.is_empty(), "the battery carries the session tool rules");
     let mut root: toml::Value = toml::from_str(&default).unwrap();
+    let root_rules = root["policy"]["tool"].as_array().unwrap().clone();
     assert!(
-        !root["policy"]["tool"].as_array().unwrap().iter().any(session_tool),
+        !root_rules.iter().any(|rule| moved.contains(rule)),
         "the default no longer declares them"
     );
     battery["policy"]["tool"] = toml::Value::Array(kept);
-    let root_rules = root["policy"]["tool"].as_array().unwrap().clone();
-    root["policy"]["tool"] = toml::Value::Array(moved.iter().cloned().chain(root_rules).collect());
+    root["policy"]["tool"] = toml::Value::Array(root_rules.iter().cloned().chain(moved.iter().cloned()).collect());
 
     let before_dir = tempfile::tempdir().unwrap();
     let after_dir = tempfile::tempdir().unwrap();
@@ -221,10 +221,20 @@ fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
     );
     let after = compiled(after_dir.path(), &format!("{include}{default}"), &shipped);
 
+    let tool_of = |rule: &toml::Value| {
+        let name = rule["name"].as_str().unwrap().to_owned();
+        let tool = name.split('(').next().unwrap().to_owned();
+        (name, tool)
+    };
+    let moved_tools: Vec<String> = moved.iter().map(|rule| tool_of(rule).1).collect();
     let mut probes = Vec::new();
-    for rule in &moved {
-        let name = rule["name"].as_str().unwrap();
-        let (tool, selector) = name.split_once('(').unwrap_or((name, ""));
+    for (name, _) in moved
+        .iter()
+        .chain(&root_rules)
+        .map(tool_of)
+        .filter(|(_, tool)| moved_tools.contains(tool))
+    {
+        let (tool, selector) = name.split_once('(').unwrap_or((&name, ""));
         probes.push((tool.to_owned(), serde_json::json!({})));
         if let Some((key, pattern)) = selector.trim_end_matches(')').split_once(':') {
             probes.push((
