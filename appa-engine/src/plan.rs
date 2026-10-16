@@ -5,7 +5,7 @@
 //! recommendations** (`Redispatch` — call another tool first, then re-propose; `Fork` — advisory
 //! only). The security claim lives here: an **empty** set of executable plans *and* direct
 //! redispatches is a *proof* that the block is unliftable — relative to the implemented remedy
-//! subset, read at the current stage against registered configuration and recorded denials
+//! subset, read at the current stage against registered configuration and recorded denials.
 //! An empty list is a proof, not a shrug.
 //!
 //! **A redispatch clears its gap directly or is not offered**. A plan for a failed
@@ -191,10 +191,20 @@ impl ExecutableRemedyPlan {
     /// gap and settles no narrowing, so a plan pairing it with anything is not one this engine
     /// enumerates.
     pub fn hop(&self) -> Option<&SanitizerName> {
-        match self.steps.as_slice() {
-            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
-            _ => None,
-        }
+        hop_of(&self.steps, &self.required)
+    }
+
+    /// Does executing this plan consult `authority`? The one home of the predicate: a
+    /// denial consumes every offered plan naming the denying authority for this rendered call.
+    pub fn names_authority(&self, authority: &AuthorityName) -> bool {
+        self.required.iter().any(|required| &required.authority == authority)
+    }
+}
+
+fn hop_of<'a>(steps: &'a [RemedyStep], required: &[RequiredRuling]) -> Option<&'a SanitizerName> {
+    match steps {
+        [RemedyStep::Derive(sanitizer)] if required.is_empty() => Some(sanitizer),
+        _ => None,
     }
 }
 
@@ -239,14 +249,6 @@ impl RemedyPlan {
             RemedyPlan::Executable(plan) => Some(plan),
             RemedyPlan::Redispatch(_) => None,
         }
-    }
-}
-
-impl ExecutableRemedyPlan {
-    /// Does executing this plan consult `authority`? The one home of the predicate: a
-    /// denial consumes every offered plan naming the denying authority for this rendered call.
-    pub fn names_authority(&self, authority: &AuthorityName) -> bool {
-        self.required.iter().any(|required| &required.authority == authority)
     }
 }
 
@@ -318,10 +320,6 @@ impl PlannedBlock {
     }
 }
 
-/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
-/// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
-/// the one `plans` list; fork advice is separate and never a remedy.
-/// See the module docs for the direct-clearing model.
 /// One refused call as planning receives it: the call, the contract its check resolved,
 /// the block that check found, and the stage and role it was found at. The contract is
 /// carried rather than looked up again — an empty plan set is read as a proof that the
@@ -334,6 +332,10 @@ pub(crate) struct BlockedCall<'a> {
     pub(crate) role: CallRole,
 }
 
+/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
+/// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
+/// the one `plans` list; fork advice is separate and never a remedy.
+/// See the module docs for the direct-clearing model.
 pub(crate) fn plan(
     registry: &Registry,
     views: &Views,
@@ -460,14 +462,7 @@ fn narrowing_impact(
             // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
             gaps.iter().fold(true, |all, gap| {
                 let held = registry.authorities().iter().fold(false, |held, authority| {
-                    match gap_cover(authority, gap, &annotation.tags, &context) {
-                        Evaluation::Holds => true,
-                        Evaluation::Fails => held,
-                        Evaluation::Needs(needed) => {
-                            needs.absorb(needed);
-                            held
-                        }
-                    }
+                    held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
                 });
                 all && held
             })
@@ -661,6 +656,26 @@ impl NeededAtoms {
         self.0.extend(needed.needed);
     }
 
+    /// Does the read hold? An undecided read is absorbed and counts as not holding.
+    fn holds(&mut self, evaluation: Evaluation) -> bool {
+        match evaluation {
+            Evaluation::Holds => true,
+            Evaluation::Fails => false,
+            Evaluation::Needs(needed) => {
+                self.absorb(needed);
+                false
+            }
+        }
+    }
+
+    /// The read's answer. An undecided read is absorbed and answers nothing.
+    fn take<T>(&mut self, read: Result<Option<T>, MembershipNeeded>) -> Option<T> {
+        read.unwrap_or_else(|needed| {
+            self.absorb(needed);
+            None
+        })
+    }
+
     pub(crate) fn refuse_if_any(self) -> Result<(), MembershipNeeded> {
         if self.0.is_empty() {
             Ok(())
@@ -679,10 +694,7 @@ struct PlanCandidate {
 
 impl PlanCandidate {
     fn hop(&self) -> Option<&SanitizerName> {
-        match self.steps.as_slice() {
-            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
-            _ => None,
-        }
+        hop_of(&self.steps, &self.required)
     }
 }
 
@@ -911,14 +923,7 @@ fn enumerate_assignments(
         let competent: Vec<&AuthorityName> = registry
             .authorities()
             .iter()
-            .filter(|authority| match gap_cover(authority, gap, tags, context) {
-                Evaluation::Holds => true,
-                Evaluation::Fails => false,
-                Evaluation::Needs(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            })
+            .filter(|authority| needs.holds(gap_cover(authority, gap, tags, context)))
             .map(|authority| &authority.name)
             .collect();
         if competent.is_empty() {
@@ -966,7 +971,7 @@ fn enumerate_assignments(
 /// residual its relabel cannot shed. These choices are mutually exclusive. A block with no
 /// narrowing settles nothing. The settlement carries *what* is settled; [`enumerate_plans`]
 /// composes it into the canonical step order.
-pub(crate) enum NarrowingSettlement {
+enum NarrowingSettlement {
     Nothing,
     Accept(Narrowing),
     Withhold,
@@ -980,7 +985,7 @@ pub(crate) enum NarrowingSettlement {
 /// floor keeps every other plan and loses only the acceptance: the child cannot take what its
 /// parent will not receive. `output` is the label the call returns, which a sanitizer derives from.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn narrowing_remedies(
+fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolAnnotation,
@@ -1003,7 +1008,7 @@ pub(crate) fn narrowing_remedies(
     if !contract.emits.is_empty() {
         settlements.push(NarrowingSettlement::Withhold);
     }
-    for sanitizer in applicable_output_sanitizers(registry, contract, output, context, needs) {
+    for (sanitizer, _) in output_derivations(registry.sanitizers(), &contract.tags, output, context, needs) {
         if sanitized_commit(current, output, sanitizer).is_none() {
             continue;
         }
@@ -1016,7 +1021,7 @@ pub(crate) fn narrowing_remedies(
 /// substitution replaces the arguments only, so a hop is offered where its derived label, met
 /// with what the call forwards, clears a recipient — exactly as the check reads it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn input_hops(
+fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
     reads: check::CallReads<'_>,
@@ -1041,14 +1046,9 @@ pub(crate) fn input_hops(
         .filter(|sanitizer| {
             // An undecided admission or clearing joins the aggregate refusal instead of
             // shrinking the menu.
-            match sanitizer.derive_input(&released, &contract.tags, context) {
-                Ok(Some(derived)) => clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs),
-                Ok(None) => false,
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            }
+            needs
+                .take(sanitizer.derive_input(&released, &contract.tags, context))
+                .is_some_and(|derived| clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs))
         })
         .map(|sanitizer| sanitizer.name.clone())
         .collect()
@@ -1069,38 +1069,27 @@ pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome)
 
 fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>, needs: &mut NeededAtoms) -> bool {
     gaps.iter().any(|gap| match gap {
-        Gap::Includes { recipients } => match derived.covers(recipients, context) {
-            Evaluation::Holds => true,
-            Evaluation::Fails => false,
-            Evaluation::Needs(needed) => {
-                needs.absorb(needed);
-                false
-            }
-        },
+        Gap::Includes { recipients } => needs.holds(derived.covers(recipients, context)),
         _ => false,
     })
 }
 
-fn applicable_output_sanitizers<'r>(
-    registry: &'r Registry,
-    contract: &ToolAnnotation,
-    output: &Label,
+/// Each of `sanitizers` other than the reserved attestation that derives an output from
+/// `label`, with that derivation. An undecided derivation is absorbed into `needs`.
+fn output_derivations<'r>(
+    sanitizers: impl Iterator<Item = &'r Sanitizer>,
+    tags: &[TagName],
+    label: &Label,
     context: &MembershipContext<'_>,
     needs: &mut NeededAtoms,
-) -> Vec<&'r Sanitizer> {
-    registry
-        .sanitizers()
+) -> impl Iterator<Item = (&'r Sanitizer, Label)> {
+    sanitizers
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(
-            |sanitizer| match sanitizer.derive_output(output, &contract.tags, context) {
-                Ok(derived) => derived.is_some(),
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            },
-        )
-        .collect()
+        .filter_map(move |sanitizer| {
+            needs
+                .take(sanitizer.derive_output(label, tags, context))
+                .map(|derived| (sanitizer, derived))
+        })
 }
 
 /// The established bound a sanitized dispatch of `contract` would commit at `current`, when such
@@ -1142,25 +1131,17 @@ pub(crate) fn confined_stage(
     candidate: &Label,
     residual: &Narrowing,
     lineage: &SanitizerLineage,
-    floor: Option<&Floor>,
+    views: &Views,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
     let mut needs = NeededAtoms::default();
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    let hops = registry
+    let unspent = registry
         .sanitizers()
-        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(
-            |sanitizer| match sanitizer.derive_output(candidate, &contract.tags, context) {
-                Ok(derived) => derived.is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived)),
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            },
-        );
-    for sanitizer in hops {
+        .filter(|sanitizer| !lineage.contains(&sanitizer.name));
+    let hops = output_derivations(unspent, &contract.tags, candidate, context, &mut needs)
+        .filter(|(_, derived)| confined_hop_helps(receiving, candidate, derived));
+    for (sanitizer, _) in hops {
         plans.push(ExecutableRemedyPlan {
             id: PlanId(plans.len() as u32),
             steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
@@ -1168,7 +1149,7 @@ pub(crate) fn confined_stage(
         });
     }
     needs.refuse_if_any()?;
-    if floor.is_none_or(|floor| floor.holds(&residual.to)) {
+    if floor_of(registry, views).is_none_or(|floor| floor.holds(&residual.to)) {
         plans.push(ExecutableRemedyPlan {
             id: PlanId(plans.len() as u32),
             steps: vec![RemedyStep::Accept(residual.clone())],
@@ -1238,11 +1219,7 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// grandchild's return could never cross the child. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
 /// declaration checks once and a fan-out's later children need not meet.
-pub(crate) fn return_options(
-    registry: &Registry,
-    floor: Option<&Floor>,
-    kind: crate::transition::SpawnKind,
-) -> Vec<ReturnRoute> {
+fn return_options(registry: &Registry, floor: Option<&Floor>, kind: crate::transition::SpawnKind) -> Vec<ReturnRoute> {
     let mut options = vec![ReturnRoute::Raw];
     options.extend(
         registry
@@ -1308,10 +1285,7 @@ fn preserving_return_exists(
             ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
             ReturnRoute::Raw | ReturnRoute::Void => None,
         })
-        .filter(|sanitizer| {
-            !sanitizer.name.is_attest_schema()
-                || attest_ceiling(&sanitizer.transition).is_some_and(|ceiling| current.meets_floor(ceiling))
-        })
+        .filter(|sanitizer| !sanitizer.name.is_attest_schema() || attest_fits(&sanitizer.transition, current))
         .any(|sanitizer| {
             sanitizer
                 .derive_output(&narrowing.to, &[], context)
@@ -1367,16 +1341,11 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     }
     match &policy.sanitizer {
         None => Ok(()),
-        Some(ReturnSanitizer::Attest(_)) => {
-            let registered = registry
-                .sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
-                .ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
-            let ceiling = attest_ceiling(&registered.transition).ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
-            match current.meets_floor(ceiling) {
-                true => Ok(()),
-                false => Err(ReturnPolicyRefusal::AttestUnavailable),
-            }
-        }
+        Some(ReturnSanitizer::Attest(_)) => match registry.sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
+        {
+            Some(registered) if attest_fits(&registered.transition, &current) => Ok(()),
+            _ => Err(ReturnPolicyRefusal::AttestUnavailable),
+        },
         // The reserved route attests a shape: naming it without one would take the
         // generic sanitizer path, which validates nothing.
         Some(ReturnSanitizer::Named(name)) if name.is_attest_schema() => Err(ReturnPolicyRefusal::RouteMismatch),
@@ -1387,14 +1356,15 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     }
 }
 
-/// The trust rank the reserved `attest-schema` builtin raises a return to. Its precondition is
-/// a fork-time fact: the parent's label at the fork covers this rank, because the answer cannot
-/// come back cleaner than the context that asked. Load validation refuses an audience mandate on
-/// the reserved name, so an audience transition here attests nothing.
-pub(crate) fn attest_ceiling(transition: &DeclaredTransition) -> Option<crate::label::Trust> {
+/// Does `label` cover the trust rank the reserved `attest-schema` builtin, registered with
+/// `transition`, raises a return to? Its precondition is a fork-time fact: the parent's label at
+/// the fork covers this rank, because the answer cannot come back cleaner than the context that
+/// asked. Load validation refuses an audience mandate on the reserved name, so an audience
+/// transition here attests nothing.
+pub(crate) fn attest_fits(transition: &DeclaredTransition, label: &Label) -> bool {
     match transition {
-        DeclaredTransition::Trust { to, .. } => Some(*to),
-        DeclaredTransition::Audience { .. } => None,
+        DeclaredTransition::Trust { to, .. } => label.meets_floor(*to),
+        DeclaredTransition::Audience { .. } => false,
     }
 }
 

@@ -1790,7 +1790,6 @@ impl<'a> Sequence<'a> {
                 };
                 let lineage = views.lineage(subject);
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
-                let floor = crate::plan::floor_of(self.engine.registry(), views);
                 crate::plan::confined_stage(
                     self.engine.registry(),
                     &contract,
@@ -1798,7 +1797,7 @@ impl<'a> Sequence<'a> {
                     &value.label,
                     residual,
                     &lineage,
-                    floor.as_ref(),
+                    views,
                     &self.context(expansions),
                 )
                 .map_err(TransitionRefusal::from)
@@ -2822,9 +2821,10 @@ impl<'a> Sequence<'a> {
                             Ok(canonical) if canonical == value.body.as_str() => {}
                             _ => return Err(TransitionRefusal::ReturnShapeViolation),
                         }
-                        let ceiling = crate::plan::attest_ceiling(&registered.transition)
-                            .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
-                        if !views.fork_seed(child).is_some_and(|seed| seed.meets_floor(ceiling)) {
+                        if !views
+                            .fork_seed(child)
+                            .is_some_and(|seed| crate::plan::attest_fits(&registered.transition, seed))
+                        {
                             return Err(TransitionRefusal::SanitizerUnapplicable);
                         }
                         sanitized_label(registered.derive_output(&fold, &[], &self.context(&expansions)))?

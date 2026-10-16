@@ -222,7 +222,6 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
         let contract = self.dispatch_contract(views, dispatch)?;
-        let floor = plan::floor_of(&self.registry, views);
         Ok(plan::confined_stage(
             &self.registry,
             &contract,
@@ -230,7 +229,7 @@ impl Engine {
             label,
             residual,
             lineage,
-            floor.as_ref(),
+            views,
             &self.context(act),
         )?)
     }

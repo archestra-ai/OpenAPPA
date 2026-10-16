@@ -213,9 +213,10 @@ impl Engine {
                     .registry
                     .sanitizer(&name)
                     .ok_or(TransitionError::SanitizerUnapplicable)?;
-                let ceiling =
-                    plan::attest_ceiling(&registered.transition).ok_or(TransitionError::SanitizerUnapplicable)?;
-                if !views.fork_seed(child).is_some_and(|seed| seed.meets_floor(ceiling)) {
+                if !views
+                    .fork_seed(child)
+                    .is_some_and(|seed| plan::attest_fits(&registered.transition, seed))
+                {
                     return Err(TransitionError::SanitizerUnapplicable);
                 }
                 let label = sanitized(registered)?;
