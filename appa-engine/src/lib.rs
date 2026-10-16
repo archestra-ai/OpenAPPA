@@ -90,7 +90,8 @@
 //! replaces only the arguments, replaces only the current label in the `contains` check. A
 //! file call that fails admits its error text at the same value Label a success would have
 //! used ([`transition::ToolOutcome::FailureWithBody`]), so an error can never say more than
-//! the call it came from.
+//! the call it came from. Where the call's output is withheld or bound to an output
+//! sanitizer, the error text is withheld: a sanitizer derives only from a success's bytes.
 //!
 pub mod admit;
 pub mod audience;

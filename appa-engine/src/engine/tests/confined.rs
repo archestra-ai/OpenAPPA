@@ -862,3 +862,42 @@ fn stray_evidence(offer: crate::value::OfferId) -> crate::execute::AuthorityEvid
         },
     }
 }
+
+/// A bound output sanitizer derives from a success's bytes; a failure's body has no
+/// derivation to cross through, so it closes the dispatch without entering the trajectory.
+#[test]
+fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
+    let e = file_redacting_engine();
+    let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+    let body = ValueBody::new("ENOENT");
+    let report = || {
+        EngineEvent::Outcome(ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: ToolOutcome::FailureWithBody { body: body.clone() },
+            evidence: Vec::new(),
+            offer_nonce: nonce(),
+            audience: crate::audience::AudienceEvidence::default(),
+        })
+    };
+    let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
+        admitted: None,
+        withheld: true,
+    });
+
+    let closed = e.handle(&viewing(&e, &log), report()).expect("the failure closes");
+    assert_eq!(closed.follow_up, withheld);
+    let facts = appended_facts(closed);
+    assert!(facts.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: crate::fact::CloseOutcome::FailureWithBody { observed },
+            ..
+        } if observed == &crate::value::RawResultDigest::of(body.as_str().as_bytes())
+    )));
+    assert!(!facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+    let log = [log, facts].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+
+    let again = e.handle(&viewing(&e, &log), report()).expect("the repeat answers");
+    assert_eq!((again.append, again.follow_up), (None, withheld));
+}

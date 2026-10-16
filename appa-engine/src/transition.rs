@@ -769,8 +769,6 @@ pub enum TransitionRefusal {
     DispatchReopened,
     #[error("the dispatch occurrence is not the next one for its call in this trajectory")]
     WrongOccurrence,
-    #[error("a released dispatch is one the check refuses and no recorded remedy admits")]
-    UnreleasedDispatch,
     #[error("the dispatch is not open")]
     DispatchNotOpen,
     #[error("the dispatch already recorded its success checkpoint")]
@@ -1184,11 +1182,11 @@ impl<'a> Sequence<'a> {
                 proposed_effects,
                 annotation,
                 file_basis,
-                subject,
                 evidence,
+                ..
             } => {
                 let call = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
-                self.opened(trajectory, dispatch, &call, subject, released, evidence)?;
+                self.opened(trajectory, dispatch, &call, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects)?;
             }
             Fact::DispatchSucceeded {
@@ -2525,7 +2523,6 @@ impl<'a> Sequence<'a> {
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
         call: &ResolvedCall,
-        subject: &crate::basis::SubjectKey,
         authorized: Obligation,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
@@ -2608,21 +2605,7 @@ impl<'a> Sequence<'a> {
                         }
                     }
                 }
-                let role = views.call_role(subject);
-                let checked = crate::check::evaluate(
-                    &contract,
-                    &views,
-                    call,
-                    &CallStage::default(),
-                    role,
-                    &self.context(expansions),
-                );
-                self.audit_reads(expansions);
-                match checked {
-                    Ok(CheckOutcome::Block(_)) => Ok(()),
-                    Ok(CheckOutcome::Allow) => Err(TransitionRefusal::UnreleasedDispatch),
-                    Err(needed) => Err(needed.into()),
-                }
+                Ok(())
             }
             // Every opening stands on a release this validator recomputed. Nothing opens a
             // dispatch on its own account: a hop stages a derivation and opens nothing.

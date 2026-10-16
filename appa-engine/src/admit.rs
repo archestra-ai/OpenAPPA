@@ -213,7 +213,12 @@ pub(crate) fn admit_result(
     let admit_value = |label: Label, body: ValueBody| admit_derived(LabeledValue::new(body, label));
 
     let bound = views.bound_sanitizer(dispatch);
-    if bound.is_some() && matches!(admission, ResultAdmission::SuccessRaw { .. }) {
+    if bound.is_some()
+        && matches!(
+            admission,
+            ResultAdmission::SuccessRaw { .. } | ResultAdmission::FailureWithBody { .. }
+        )
+    {
         return Err(AdmitError::OutputSanitizerBound);
     }
 
@@ -854,6 +859,45 @@ mod tests {
                 },
             ),
             Err(AdmitError::ConfinedResidual)
+        );
+    }
+
+    #[test]
+    fn a_bound_dispatch_admits_no_raw_failure_body() {
+        let reg = registry();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let t = traj();
+        let parts = crate::label::TestContext::default();
+        log.push(Fact::OutputSanitizerBound {
+            trajectory: t.clone(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            sanitizer: crate::names::SanitizerName::new("declassify"),
+            contribution: crate::plan::bound_contribution(
+                &reg,
+                &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &released_output(&reg, &log, &dispatch, &call),
+                &crate::names::SanitizerName::new("declassify"),
+                &parts.context(),
+            )
+            .expect("the fixture's audiences are literal")
+            .expect("declassify applies to this output"),
+            evidence: crate::audience::AudienceEvidence::default(),
+        });
+        let p = views_of(&log);
+
+        assert_eq!(
+            admit(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::FailureWithBody {
+                    body: ValueBody::new("ENOENT"),
+                },
+            ),
+            Err(AdmitError::OutputSanitizerBound)
         );
     }
 

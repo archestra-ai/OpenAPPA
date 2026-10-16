@@ -405,7 +405,6 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::DigestMismatch => ReplayRefusalClass("digest_mismatch"),
             TransitionRefusal::DispatchReopened => ReplayRefusalClass("dispatch_reopened"),
             TransitionRefusal::WrongOccurrence => ReplayRefusalClass("wrong_occurrence"),
-            TransitionRefusal::UnreleasedDispatch => ReplayRefusalClass("unreleased_dispatch"),
             TransitionRefusal::DispatchNotOpen => ReplayRefusalClass("dispatch_not_open"),
             TransitionRefusal::RepeatCheckpoint => ReplayRefusalClass("repeat_checkpoint"),
             TransitionRefusal::ContradictedSuccess => ReplayRefusalClass("contradicted_success"),

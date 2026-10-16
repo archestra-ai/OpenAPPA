@@ -16,8 +16,10 @@ impl Engine {
         if matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && call.file_basis().is_none() {
             return Err(TransitionError::FailureBodyOutsideFile);
         }
-        let withholds_output = views.withholds_output(dispatch);
-        let observed = match (&report.outcome, withholds_output) {
+        let withheld = views.withholds_output(dispatch)
+            || matches!(report.outcome, ToolOutcome::FailureWithBody { .. })
+                && views.bound_sanitizer(dispatch).is_some();
+        let observed = match (&report.outcome, withheld) {
             (ToolOutcome::Success { .. }, true) => Some(ObservedResult::Unavailable),
             (
                 ToolOutcome::Success {
@@ -40,7 +42,7 @@ impl Engine {
             append: None,
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
                 admitted: views.admitted_body(dispatch).cloned(),
-                withheld: withholds_output,
+                withheld,
             }),
         };
         if let ToolOutcome::FailureWithBody { body } = &report.outcome
@@ -84,7 +86,7 @@ impl Engine {
             return self.restage(view, &views, dispatch, report.offer_nonce, act);
         }
 
-        let admission = match (&report.outcome, withholds_output) {
+        let admission = match (&report.outcome, withheld) {
             (ToolOutcome::Success { .. }, true) => ResultAdmission::SuccessNoValue,
             (ToolOutcome::Failure, _) => ResultAdmission::Failure,
             (ToolOutcome::FailureWithBody { .. }, true) => {
@@ -187,6 +189,7 @@ impl Engine {
         admission: ResultAdmission,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
+        let withheld = views.withholds_output(dispatch) || matches!(admission, ResultAdmission::FailureNoValue { .. });
         let batch = admit::admit_result(
             &self.registry,
             views,
@@ -201,7 +204,6 @@ impl Engine {
             Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
             _ => None,
         });
-        let withheld = views.withholds_output(dispatch);
         Ok(EngineDecision {
             append: Some(self.decided(view, crate::basis::DecidedAct::Outcome(dispatch.clone()), batch)?),
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }),
