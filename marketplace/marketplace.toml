@@ -92,4 +92,4 @@ digest = "sha256:d45f1756b51d1a64156de0bcd9d7900a6006a473e3c71f147f1e61523c78368
 
 [packages.plugin.opencode]
 path = "plugins/opencode"
-digest = "sha256:56cc0399cce1c35d87b3bd41a4f89fd0911b3b601794dc300609046431659dd2"
+digest = "sha256:ca5b1a4e3882a5e2779fcb085fcf9e336b78736abcfff96ff52d8bf5ece6836e"
