@@ -244,6 +244,8 @@ pub(super) const RESOLUTION_ROUNDS: u32 = 8;
 
 /// How many publishes one event follows before it refuses. Each one means the head moved
 /// while the event was decided; a run this long is a publisher looping, not a policy change.
+/// Exceeding it surfaces [`EventError::PolicyMoved`], an operational refusal the harness
+/// retries: the next attempt decides at the head.
 const PUBLISHES_FOLLOWED: u32 = 4;
 
 /// The event a drive runs for, as far as its consults' records join it: the host's call
