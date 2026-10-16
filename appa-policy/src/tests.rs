@@ -1632,3 +1632,50 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
         assert!(load(&tool(refused)).is_err(), "forwards = {refused} must be refused");
     }
 }
+
+#[test]
+fn requires_read_from_json_matches_the_same_table_in_a_contract() {
+    let config = load(
+        r#"
+version = 2
+
+[[tool]]
+name = "post"
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { trust = "trusted", audience = { contains = ["$to"] }, effects = { contains = ["reviewed"], excludes = ["revoked"] }, attention = ["legal-review"] }
+delta = {}
+"#,
+    )
+    .expect("the policy loads");
+    let declared = config
+        .engine()
+        .registry()
+        .variants(&ToolName::new("post"))
+        .next()
+        .and_then(ToolDeclaration::declared)
+        .cloned()
+        .expect("the tool is declared");
+    let chain = &config.registry_config().trust_chain;
+    let parsed = crate::parse_requires(
+        &serde_json::json!({
+            "trust": "trusted",
+            "audience": { "contains": ["$to"] },
+            "effects": { "contains": ["reviewed"], "excludes": ["revoked"] },
+            "attention": ["legal-review"]
+        }),
+        chain,
+        "post",
+    )
+    .expect("the same table reads from JSON");
+    assert_eq!(parsed, declared.requires);
+
+    let refused = |value: serde_json::Value| crate::parse_requires(&value, chain, "probe").map(|_| ());
+    assert!(matches!(
+        refused(serde_json::json!({ "audiences": { "contains": ["public"] } })),
+        Err(ConfigError::BadRequires { reason, .. }) if reason.contains("unknown field `audiences`")
+    ));
+    assert!(matches!(
+        refused(serde_json::json!({ "trust": "vetted" })),
+        Err(ConfigError::UnknownTrustRank { name, .. }) if name == "vetted"
+    ));
+}

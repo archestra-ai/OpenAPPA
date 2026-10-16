@@ -102,6 +102,57 @@ ok    policy-tests/hr-email.appa
 
 If a change permits the outside recipient or blocks HR, this test fails. It checks both confidentiality and permitted work.
 
+## Expected decisions
+
+Each call in a test file is followed by one `expect` line:
+
+| Line | The call passes when |
+|---|---|
+| `expect allow` | The call runs. A plain narrowing acceptance is taken as the model would take it. |
+| `expect deny` | The call is blocked and no remedy is offered. |
+| `expect withhold` | The call is blocked with an offer to run it without returning its result. Replay takes the offer. |
+| `expect authority [name]` | The call is blocked with an offer to ask an authority. Replay takes the offer, and a stand-in approves. |
+| `expect sanitizer [name]` | The call is blocked with an offer to apply a sanitizer. Replay takes the offer, and the stand-in returns the value unchanged. |
+
+With a name, the offer must involve that authority or sanitizer. Without a name, any authority or sanitizer passes. After a taken offer, the trajectory continues from the remedied call.
+
+## Check a restriction without naming a tool
+
+Some requirements name the data but no tool that could leak it, such as "Slack data stays private". Use the call `appa/do_something` to check them. Only `appa replay` serves it. Every other deployment refuses it, and a policy cannot declare it.
+
+Its one argument, `requires`, takes the same fields as a tool contract's `requires`, written as JSON. Replay checks the call against those requirements only. The call has no `delta` and no `effects`, so it never changes the trajectory. When the call is blocked with an offer that the `expect` line names, the step passes and replay does not take the offer.
+
+```toml
+[[policy.tool]]
+name = "mcp/slack/read_channel"
+delta = { audience = ["@slack:channel/$channel_id"] }
+```
+
+```text
+# A fresh trajectory is public.
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
+}
+expect allow
+
+mcp/slack/read_channel {
+  channel_id: "C0123456789"
+}
+expect allow
+
+# Channel content cannot reach the public.
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
+}
+expect deny
+```
+
+The same form checks trust. `requires: {"trust": "trusted"}` is denied once the trajectory has read `suspicious` content.
+
+`requires` can name `public`, `self`, `internal`, and the audiences, attention marks, effects, and trust ranks that the policy names. It cannot read a call argument such as `$to`. A requirement outside these limits makes the step report `could not run`, never `deny`.
+
+`appa/do_something` checks what the trajectory allows at that step. It does not check that a real tool enforces the restriction: a tool without `requires` still sends the content anywhere. Prefer a real tool from your policy when the requirement names one.
+
 ## What to test
 
 Start by checking your configuration and listing the tools named in your policy:

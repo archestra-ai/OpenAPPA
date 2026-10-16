@@ -44,6 +44,7 @@ pub enum StatusReadError {
 }
 
 use crate::config::Config;
+use crate::do_something::DoSomething;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
@@ -433,6 +434,8 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
+    #[error("policy declares reserved annotator name {0}")]
+    ReservedAnnotator(String),
     #[error("the adapter spells no name for the control tool, which every remedy tells the model to call")]
     UnspelledControlTool,
     #[error("the configuration was parsed without its keys: it validates and never serves")]
@@ -652,6 +655,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
             EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
+            EngineRefusal::Annotation { annotator, reason } => EventError::annotation_refused(annotator, reason),
         }
     }
 }
@@ -742,6 +746,15 @@ impl Deployment {
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config, naming)?;
         validate_deployment(&policy, &config.externals)?;
+        let policy = match config.do_something {
+            DoSomething::Refused => policy,
+            DoSomething::Served => {
+                let (tool, annotator) = crate::do_something::declarations();
+                policy
+                    .with_annotated_tool(tool, annotator)
+                    .map_err(|error| OpenError::Policy(Box::new(error)))?
+            }
+        };
         let annotator_builtins = policy
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
@@ -3219,10 +3232,22 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // deployment refuses the alias earlier, for not being canonical at all.
     let rc = policy.registry_config();
     let contracts = rc.tools.iter().map(|tool| tool.name().as_str());
+    //
+    // `appa/do_something` and its Annotator are the runtime's own too, declared only by a
+    // replay's deployment beside the authored policy. A policy naming either would decide
+    // calls by a pin the runtime reads from their arguments.
     for name in contracts.chain(policy.deployment_tool_names().map(|(_, name)| name)) {
-        if appa_runtime_api::is_reserved_tool_name(bare_tool_name(name)) {
+        let bare = bare_tool_name(name);
+        if appa_runtime_api::is_reserved_tool_name(bare) || bare == crate::do_something::NAME {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
+    }
+    if let Some(annotator) = rc
+        .annotators
+        .iter()
+        .find(|annotator| crate::do_something::is_annotator(&annotator.name))
+    {
+        return Err(OpenError::ReservedAnnotator(annotator.name.as_str().to_string()));
     }
 
     // Each binding names a registered component: a binding nothing registers would never

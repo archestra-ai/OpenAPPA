@@ -513,15 +513,15 @@ impl AnnotatorMandate {
         self.trust.contains(&trust)
     }
 
-    pub(crate) fn permits_clause(&self, clause: &Clause) -> bool {
+    pub fn permits_clause(&self, clause: &Clause) -> bool {
         self.audiences.permits_clause(clause)
     }
 
-    pub(crate) fn permits_mark(&self, mark: &MarkName) -> bool {
+    pub fn permits_mark(&self, mark: &MarkName) -> bool {
         self.marks.contains(mark)
     }
 
-    pub(crate) fn permits_effect(&self, effect: &EffectKind) -> bool {
+    pub fn permits_effect(&self, effect: &EffectKind) -> bool {
         self.effects.contains(effect)
     }
 }

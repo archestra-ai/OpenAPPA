@@ -576,6 +576,10 @@ pub enum EngineRefusal {
     /// policy cannot read. Nothing is appended; the offer stands.
     #[error("{detail}")]
     Arguments { detail: String },
+    /// The runtime could not read the annotation a call carries from its own arguments, as it
+    /// does for `appa/do_something`. Nothing is judged and nothing is appended.
+    #[error("annotator={annotator} error={reason}")]
+    Annotation { annotator: String, reason: String },
 }
 
 impl EngineRefusal {
@@ -597,6 +601,7 @@ impl EngineRefusal {
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
             EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
             EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
+            EngineRefusal::Annotation { .. } => ReplayRefusalClass("annotation"),
         }
     }
 }
@@ -1449,6 +1454,13 @@ impl RuntimeEngine {
         if let Some(batch) = replay {
             return self.replay_response(view, trajectory, call, &batch, spawn, entropy, presentation);
         }
+        // `appa/do_something` is decided only by the deployment that declares it: a wildcard
+        // never covers it, so a deployment that does not serve it refuses the name.
+        if call.tool == crate::do_something::NAME && !crate::do_something::is_served(self.engine.registry()) {
+            return Err(EngineRefusal::UndeclaredTool {
+                tool: call.tool.clone(),
+            });
+        }
         let resolved = match self
             .engine
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
@@ -1464,9 +1476,12 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
-            Ok(answers) => answers,
-            Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+        let CallAnswers { annotation } = match self.do_something_pin(&resolved) {
+            Some(pin) => CallAnswers { annotation: Some(pin?) },
+            None => match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
+                Ok(answers) => answers,
+                Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+            },
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
@@ -1985,8 +2000,12 @@ impl RuntimeEngine {
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
-                    Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
-                        Some(declaration @ ToolDeclaration::Annotated { .. }) => {
+                    Ok(rewritten) => match (
+                        self.engine.registry().declaration(&rewritten),
+                        self.do_something_pin(&rewritten),
+                    ) {
+                        (_, Some(pin)) => Some(pin?),
+                        (Some(declaration @ ToolDeclaration::Annotated { .. }), None) => {
                             match self.annotation_for(&views, declaration, &rewritten, cwd, evidence) {
                                 Ok(annotation) => Some(annotation),
                                 Err(Resolution(requests)) => {
@@ -2479,6 +2498,19 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    /// The annotation an `appa/do_something` call carries, read from its own arguments; `None`
+    /// for any other call. A requirement it cannot read refuses the call outright.
+    fn do_something_pin(&self, resolved: &ResolvedCall) -> Option<Result<PinnedAnnotation, EngineRefusal>> {
+        let registry = self.engine.registry();
+        let annotator = registry.declaration(resolved)?.annotator()?;
+        crate::do_something::is_annotator(annotator).then(|| {
+            crate::do_something::pin(registry, resolved).map_err(|reason| EngineRefusal::Annotation {
+                annotator: annotator.as_str().to_string(),
+                reason,
+            })
+        })
+    }
+
     /// Every answer a call must carry before it is proposed, from the evidence gathered so
     /// far, or the consult still owed: the produced annotation for an Annotated declaration.
     /// A declared call owes nothing here — the symbolic audiences its contract reads
@@ -2592,6 +2624,7 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         Ok(declaration
             .annotator()
+            .filter(|annotator| !crate::do_something::is_annotator(annotator))
             .map(|annotator| self.annotation_request(annotator, declaration, &resolved, cwd)))
     }
 

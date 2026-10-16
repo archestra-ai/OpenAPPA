@@ -359,6 +359,18 @@ pub fn parse_delta(
     .convert(chain, context)
 }
 
+/// One `requires` table in the spelling a tool contract takes, read from JSON rather than
+/// TOML — for requirements a runtime reads at its own boundary, such as the argument of
+/// `appa replay`'s `appa/do_something`. The same keys and conversions apply as in a contract.
+pub fn parse_requires(value: &serde_json::Value, chain: &TrustChain, context: &str) -> Result<Requires, ConfigError> {
+    serde_json::from_value::<RawRequires>(value.clone())
+        .map_err(|error| ConfigError::BadRequires {
+            context: context.to_string(),
+            reason: error.to_string(),
+        })?
+        .convert(chain, context)
+}
+
 pub(crate) fn refuse_inline_binding(
     kind: &'static str,
     name: &str,

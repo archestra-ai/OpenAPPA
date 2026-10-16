@@ -15,6 +15,13 @@
 //! and nothing is offered. Taking an offer goes through the runtime's own remedy path, so the
 //! records read as if the party had answered, and the trace continues from there.
 //!
+//! A step may propose `appa/do_something` instead of a tool. Its one argument, `requires`, is
+//! a tool contract's `requires` table written as JSON, and the call is judged against that
+//! table alone: it asks what the trajectory allows at this step without naming a tool that
+//! could act on it. The runner never takes an offer such a step gets. A matching offer
+//! passes the step, and the trajectory goes on as if the call had not been proposed: no
+//! approval is spent, no derivation is staged, and nothing the call could commit lands.
+//!
 //! Files run at once, each in its own trajectory. Steps inside a file run in order. A step
 //! that mismatches or cannot run ends its file; the other files keep running. The exit code
 //! is 0 when every step passed, 1 when any step mismatched, and 2 when any step could not run
@@ -27,13 +34,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId,
+    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall,
+    ToolOutcome, TrajectoryId,
 };
 use serde_json::value::RawValue;
 
 use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime};
 use crate::config::Config;
-use crate::hooks;
+use crate::{do_something, hooks};
 
 /// The decision a step must get. `Authority` and `Sanitizer` may name the party the offer
 /// must involve; unnamed, any party of that kind passes.
@@ -75,13 +83,39 @@ impl Expect {
     }
 }
 
+/// What a step proposes: a tool by its canonical id, or `appa/do_something`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepTool {
+    Canonical(CanonicalTool),
+    DoSomething,
+}
+
+impl StepTool {
+    /// The tool a host would dispatch, if the step names one.
+    pub fn canonical(&self) -> Option<&CanonicalTool> {
+        match self {
+            StepTool::Canonical(tool) => Some(tool),
+            StepTool::DoSomething => None,
+        }
+    }
+}
+
+impl fmt::Display for StepTool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StepTool::Canonical(tool) => write!(f, "{tool}"),
+            StepTool::DoSomething => f.write_str(do_something::NAME),
+        }
+    }
+}
+
 /// One proposed call and the decision it must get. The arguments are the JSON object the
 /// block spells, values byte-for-byte as written: the engine canonicalizes them, the runner
 /// never does.
 #[derive(Debug, Clone)]
 pub struct Step {
     pub line: usize,
-    pub tool: CanonicalTool,
+    pub tool: StepTool,
     pub arguments: Box<RawValue>,
     pub expect: Expect,
 }
@@ -108,9 +142,9 @@ pub struct SyntaxError {
 }
 
 /// Parse one trace file. The grammar is strict and line-oriented: a step is a canonical tool id
-/// and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`, `expect withhold`, `expect deny`,
-/// `expect authority [name]`, or `expect sanitizer [name]`. Blank lines and lines whose first
-/// character is `#` are skipped anywhere.
+/// or `appa/do_something` and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`,
+/// `expect withhold`, `expect deny`, `expect authority [name]`, or `expect sanitizer [name]`.
+/// Blank lines and lines whose first character is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
     let mut parser = Parser {
         path,
@@ -133,12 +167,12 @@ enum State {
     Outside,
     InBlock {
         line: usize,
-        tool: CanonicalTool,
+        tool: StepTool,
         fields: Vec<(String, String)>,
     },
     AfterBlock {
         line: usize,
-        tool: CanonicalTool,
+        tool: StepTool,
         arguments: Box<RawValue>,
     },
 }
@@ -180,6 +214,16 @@ impl Parser<'_> {
         };
         let name = name.trim();
         let tool = match CanonicalTool::parse(name) {
+            Err(_) if name == do_something::NAME => StepTool::DoSomething,
+            Err(CanonicalToolError::Control { .. }) => {
+                return Err(self.error(
+                    number,
+                    format!(
+                        "`{name}` is not a tool; the one `appa/` call a trace proposes is `{}`",
+                        do_something::NAME
+                    ),
+                ));
+            }
             // A trace holds only the calls the model proposes. The runtime's control tool is
             // how the model takes an offer, which is `expect`'s job here.
             Ok(tool) if tool.is_control() => {
@@ -188,7 +232,7 @@ impl Parser<'_> {
                     format!("`{name}` is the runtime's control tool; taking an offer is what `expect` does"),
                 ));
             }
-            Ok(tool) => tool,
+            Ok(tool) => StepTool::Canonical(tool),
             Err(error) => return Err(self.error(number, error.to_string())),
         };
         self.state = match rest.trim() {
@@ -199,8 +243,8 @@ impl Parser<'_> {
             },
             "}" => State::AfterBlock {
                 line: number,
+                arguments: self.arguments(number, &tool, &[])?,
                 tool,
-                arguments: arguments_of(&[]),
             },
             _ => return Err(self.error(number, "each argument goes on its own line after `{`")),
         };
@@ -212,14 +256,14 @@ impl Parser<'_> {
         number: usize,
         line: &str,
         at: usize,
-        tool: CanonicalTool,
+        tool: StepTool,
         mut fields: Vec<(String, String)>,
     ) -> Result<(), SyntaxError> {
         if line == "}" {
             self.state = State::AfterBlock {
                 line: at,
+                arguments: self.arguments(at, &tool, &fields)?,
                 tool,
-                arguments: arguments_of(&fields),
             };
             return Ok(());
         }
@@ -247,7 +291,7 @@ impl Parser<'_> {
         number: usize,
         line: &str,
         at: usize,
-        tool: CanonicalTool,
+        tool: StepTool,
         arguments: Box<RawValue>,
     ) -> Result<(), SyntaxError> {
         let expect = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -272,6 +316,31 @@ impl Parser<'_> {
             expect,
         });
         Ok(())
+    }
+
+    /// The call's argument object. `appa/do_something` takes exactly one argument,
+    /// `requires`, holding a JSON object; what the object may say is the policy's to judge.
+    fn arguments(&self, at: usize, tool: &StepTool, fields: &[(String, String)]) -> Result<Box<RawValue>, SyntaxError> {
+        if *tool == StepTool::DoSomething {
+            let takes = format!("`{tool}` takes one argument, `requires`, holding a JSON object");
+            match fields {
+                [(key, value)] if key == "requires" => {
+                    if !value.trim_start().starts_with('{') {
+                        return Err(self.error(at, format!("{takes}; `requires` is not an object")));
+                    }
+                }
+                [] => return Err(self.error(at, takes)),
+                _ => {
+                    let other = fields
+                        .iter()
+                        .map(|(key, _)| key.as_str())
+                        .find(|key| *key != "requires")
+                        .unwrap_or("requires");
+                    return Err(self.error(at, format!("{takes}; found `{other}`")));
+                }
+            }
+        }
+        Ok(arguments_of(fields))
     }
 
     fn finish(self) -> Result<Trace, SyntaxError> {
@@ -362,7 +431,7 @@ impl StepOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepReport {
     pub line: usize,
-    pub tool: CanonicalTool,
+    pub tool: StepTool,
     pub expect: Expect,
     pub outcome: StepOutcome,
 }
@@ -472,6 +541,12 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
     match (&got, &step.expect) {
         (Got::Allowed, Expect::Allow) => StepOutcome::Passed { taken: None },
         (Got::Blocked(kinds), Expect::Deny) if kinds.is_empty() => StepOutcome::Passed { taken: None },
+        // `appa/do_something` asks what the trajectory allows; taking the offer would change it.
+        (Got::Blocked(kinds), expect)
+            if step.tool == StepTool::DoSomething && kinds.iter().any(|kind| expect.takes(kind)) =>
+        {
+            StepOutcome::Passed { taken: None }
+        }
         (Got::Blocked(kinds), expect) if kinds.iter().any(|kind| expect.takes(kind)) => {
             let (kind, offer) = offers
                 .into_iter()
@@ -746,7 +821,7 @@ pub fn main(config: &Path, modules: Option<PathBuf>, verbose: bool, paths: &[Pat
         return ExitCode::from(2);
     }
     let config = match Config::load(config) {
-        Ok(config) => config,
+        Ok(config) => config.with_do_something(),
         Err(error) => {
             eprintln!("appa replay: {error}");
             return ExitCode::from(2);
@@ -785,8 +860,28 @@ mod tests {
         parse(Path::new("t.appa"), text)
     }
 
-    fn canonical(name: &str) -> CanonicalTool {
-        CanonicalTool::parse(name).expect("a canonical tool id")
+    fn canonical(name: &str) -> StepTool {
+        StepTool::Canonical(CanonicalTool::parse(name).expect("a canonical tool id"))
+    }
+
+    #[test]
+    fn do_something_parses_with_its_requires_verbatim() {
+        let trace =
+            parsed("appa/do_something {\n  requires: {\"audience\": {\"contains\": [\"public\"]}}\n}\nexpect deny\n")
+                .expect("the trace parses");
+        let [step] = trace.steps.as_slice() else {
+            panic!("one step: {:?}", trace.steps);
+        };
+        assert_eq!(
+            (step.line, &step.tool, &step.expect),
+            (1, &StepTool::DoSomething, &Expect::Deny)
+        );
+        assert_eq!(step.tool.to_string(), "appa/do_something");
+        assert_eq!(step.tool.canonical(), None);
+        assert_eq!(
+            step.arguments.get(),
+            r#"{"requires":{"audience": {"contains": ["public"]}}}"#
+        );
     }
 
     #[test]
@@ -798,14 +893,18 @@ mod tests {
         assert_eq!(trace.steps.len(), 5);
         let read = &trace.steps[0];
         assert_eq!(
-            (read.line, read.tool.as_str(), &read.expect),
-            (3, "mcp/files/read", &Expect::Allow)
+            (read.line, read.tool.to_string(), &read.expect),
+            (3, "mcp/files/read".to_string(), &Expect::Allow)
         );
         assert_eq!(read.arguments.get(), r#"{"path":"/etc/secrets"}"#);
         let email = &trace.steps[1];
         assert_eq!(
-            (email.line, email.tool.as_str(), &email.expect),
-            (8, "mcp/mail/send", &Expect::Sanitizer(Some("redactor".into())))
+            (email.line, email.tool.to_string(), &email.expect),
+            (
+                8,
+                "mcp/mail/send".to_string(),
+                &Expect::Sanitizer(Some("redactor".into()))
+            )
         );
         assert_eq!(
             email.arguments.get(),
@@ -863,7 +962,31 @@ mod tests {
                 1,
                 "is the runtime's control tool",
             ),
-            ("appa/other {}\nexpect allow\n", 1, "the appa family has one member"),
+            (
+                "appa/other {}\nexpect allow\n",
+                1,
+                "the one `appa/` call a trace proposes is `appa/do_something`",
+            ),
+            (
+                "appa/do_something {}\nexpect deny\n",
+                1,
+                "takes one argument, `requires`",
+            ),
+            (
+                "appa/do_something {\n}\nexpect deny\n",
+                1,
+                "takes one argument, `requires`",
+            ),
+            (
+                "appa/do_something {\n  requires: [\"public\"]\n}\nexpect deny\n",
+                1,
+                "`requires` is not an object",
+            ),
+            (
+                "appa/do_something {\n  requires: {}\n  to: \"x\"\n}\nexpect deny\n",
+                1,
+                "found `to`",
+            ),
             (
                 "Read {}\nexpect allow\n",
                 1,

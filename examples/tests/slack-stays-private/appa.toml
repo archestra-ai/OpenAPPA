@@ -1,0 +1,19 @@
+# Reading a Slack channel limits the content to the channel's members. This policy
+# names no tool that sends anything, so the trace checks the restriction with
+# `appa/do_something`.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/slack/read_channel"
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+# This fixed roster is only a replay fixture, never a Slack membership resolver.
+[externals.audience.slack]
+command = ["python3", "-c", 'import json, sys; json.load(sys.stdin); print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example", "bob@corp.example"]}}))']
+selectors = [{ template = "channel/<id>" }]

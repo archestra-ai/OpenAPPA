@@ -65,6 +65,9 @@ pub struct Config {
     /// ledger per root trajectory; it is not part of the stored policy bytes.
     pub file_tracking: Option<FileTrackingConfig>,
     included_batteries: Vec<String>,
+    /// Whether the deployment serves `appa/do_something`. Never read from the document: a
+    /// replay opts in with [`Config::with_do_something`], so no policy file can serve it.
+    pub(crate) do_something: crate::do_something::DoSomething,
 }
 
 /// What this deployment reports about itself, and to whom.
@@ -1560,6 +1563,16 @@ impl Config {
         Ok(config)
     }
 
+    /// This configuration serving `appa/do_something`, the call a replay trace proposes to ask
+    /// what the trajectory allows without naming a tool. Only a replay opts in: a deployment
+    /// that serves agents never does.
+    pub fn with_do_something(self) -> Config {
+        Config {
+            do_something: crate::do_something::DoSomething::Served,
+            ..self
+        }
+    }
+
     pub fn included_batteries(&self) -> &[String] {
         &self.included_batteries
     }
@@ -1666,6 +1679,7 @@ impl Config {
             reporting,
             file_tracking,
             included_batteries,
+            do_something: crate::do_something::DoSomething::Refused,
             externals: Externals {
                 timeout: Duration::from_millis(timeout_ms),
                 review_timeout: Duration::from_millis(review_timeout_ms),
