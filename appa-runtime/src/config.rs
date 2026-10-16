@@ -2351,7 +2351,9 @@ fn resolve_audience_bindings(
         }
     }
     // A roster exists for the providers that send it their lookups, and every key belongs
-    // to one of them: a key under any other prefix could never be asked.
+    // to one of them: a key under any other prefix could never be asked. An empty roster
+    // maps nobody and holds no such key, so it may stand ready in a root one target names it
+    // from (a battery's multi-user target) and another does not.
     for (name, binding) in &bindings {
         let AudienceImplementation::Readers(readers) = &binding.implementation else {
             continue;
@@ -2361,7 +2363,7 @@ fn resolve_audience_bindings(
             .filter(|(_, other)| other.lookup.as_deref() == Some(name))
             .map(|(provider, _)| provider.as_str())
             .collect();
-        if routed.is_empty() {
+        if routed.is_empty() && !readers.is_empty() {
             return Err(ConfigError::ReadersWithoutLookup { name: name.clone() });
         }
         if let Some(member) = readers.keys().find(|member| {
@@ -3110,6 +3112,8 @@ mod tests {
             parse(&with(roster)),
             Err(ConfigError::ReadersWithoutLookup { .. })
         ));
+        parse(&with("[externals.audience.people]\nreaders = {}\n"))
+            .expect("an empty roster no lookup names maps nobody and stands ready");
         let chained = format!(
             "{source}[externals.audience.people]\ncommand = [\"python3\", \"people.py\"]\nlookup = \"github\"\n"
         );
