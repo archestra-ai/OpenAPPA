@@ -559,7 +559,8 @@ pub struct EngineDecision {
 /// by reading the facts.
 ///
 /// The batch is stamped with the policy revision that decided it, and carries that revision's
-/// trust chain: the ranks its labels index.
+/// trust chain: the ranks its labels index. A batch holding no record decides nothing, and
+/// carries no stamp, as the store derives none for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedFactBatch {
     facts: Vec<Fact>,
@@ -574,10 +575,10 @@ impl ValidatedFactBatch {
     /// that has already run the facts through the [`Sequence`] validator.
     pub(crate) fn seal(facts: Vec<Fact>, basis: u64, engine: &Engine, family: TrajectoryId) -> ValidatedFactBatch {
         ValidatedFactBatch {
-            facts,
             basis,
-            revision: engine.revision(),
+            revision: engine.revision().filter(|_| !facts.is_empty()),
             chain: engine.registry().trust_chain().clone(),
+            facts,
             family,
         }
     }
@@ -589,7 +590,7 @@ impl ValidatedFactBatch {
     }
 
     /// The policy revision that decided this batch, and that a replay judges it under; `None`
-    /// for a batch a snapshot engine decided.
+    /// for a batch a snapshot engine decided, or one holding no record.
     pub fn revision(&self) -> Option<PolicyRevision> {
         self.revision
     }
@@ -764,7 +765,8 @@ impl EngineView {
     /// conditional append already proved before accepting it. A batch computed against
     /// any other position belongs to another view, and applying it would leave records and
     /// position describing different logs. Its revision may not be earlier than the view's stamp:
-    /// a family's stamps never decrease.
+    /// a family's stamps never decrease. A batch holding no record decides nothing: the view's
+    /// chain and stamp stay where they were, as a replay leaves them.
     pub fn advance(&mut self, batch: &ValidatedFactBatch) -> Result<(), ViewMismatch> {
         if batch.family() != &self.family {
             return Err(ViewMismatch::ForeignFamily);
@@ -774,6 +776,10 @@ impl EngineView {
                 view: self.position(),
                 batch: batch.basis(),
             });
+        }
+        if batch.facts().is_empty() {
+            self.pass(None, batch.basis() + 1);
+            return Ok(());
         }
         if let (Some(batch_revision), Some(view_revision)) = (batch.revision, self.stamp)
             && batch_revision < view_revision
@@ -3693,6 +3699,32 @@ mod tests {
             .remove(0)
     }
 
+    /// One `note` call proposed on `view`'s family and decided by `engine`.
+    fn noted(engine: &Engine, view: &EngineView, id: &str) -> EngineDecision {
+        let call = engine
+            .resolve_call(ToolName::new("note"), b"{}")
+            .expect("the call resolves");
+        engine
+            .handle(
+                view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: ProposalBatchId::new(id),
+                    trajectory: view.family().clone(),
+                    provider_results: Vec::new(),
+                    proposals: vec![ProposedCall {
+                        tool: call.tool().clone(),
+                        arguments: call.canonical_arguments().canonical_bytes().to_vec(),
+                        annotation: None,
+                    }],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the batch decides")
+    }
+
     fn nonce() -> OfferNonce {
         OfferNonce::new([7u8; 32])
     }
@@ -3805,19 +3837,22 @@ mod tests {
 
     #[test]
     fn a_view_takes_no_batch_from_another_family_or_an_earlier_revision() {
+        let earlier = engine().at(line(), PolicyRevision::FIRST);
         let engine = engine().at(line(), PolicyRevision::new(2));
-        let mut view = engine
-            .view(&traj(), vec![opening(&engine, &traj())], 1)
+        let opened = earlier
+            .view(&traj(), vec![opening(&earlier, &traj())], 1)
             .expect("the log validates");
         let other_family = TrajectoryId::new("other");
         let elsewhere = engine
             .view(&other_family, vec![opening(&engine, &other_family)], 1)
             .expect("the log validates");
-        let foreign = engine.seal(&elsewhere, vec![]).expect("the candidate validates");
+        let foreign = noted(&engine, &elsewhere, "f").append.expect("a release appends");
+        // The view stands at the later revision, as the engine deciding there reads it; a batch the
+        // earlier revision decided at the same position is a regression.
+        let mut view = opened.crossed_to(&engine).into_owned();
         assert_eq!(view.advance(&foreign), Err(ViewMismatch::ForeignFamily));
 
-        let earlier = engine.clone().at(line(), PolicyRevision::FIRST);
-        let regressed = earlier.seal(&view, vec![]).expect("the candidate validates");
+        let regressed = noted(&earlier, &opened, "r").append.expect("a release appends");
         assert_eq!(
             view.advance(&regressed),
             Err(ViewMismatch::RevisionRegressed {
@@ -3846,7 +3881,7 @@ mod tests {
         let trust = |view: &EngineView| view.views(&traj()).expect("the root is opened").current_label().trust;
         assert_eq!(trust(&held), Trust::new(1), "trusted is the first chain's top");
 
-        let later = second.seal(&held, vec![]).expect("the candidate validates");
+        let later = noted(&second, &held, "later").append.expect("a release appends");
         assert_eq!(later.revision(), Some(PolicyRevision::new(2)));
         held.advance(&later).expect("a later revision follows an earlier one");
         assert_eq!(held.stamp(), Some(PolicyRevision::new(2)));
@@ -4011,28 +4046,7 @@ mod tests {
         let mut held = first
             .view(&traj(), vec![opening(first, &traj())], 1)
             .expect("the log validates");
-        let call = first
-            .resolve_call(ToolName::new("note"), b"{}")
-            .expect("the call resolves");
-        let decision = first
-            .handle(
-                &held,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: ProposalBatchId::new("b1"),
-                    trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![ProposedCall {
-                        tool: call.tool().clone(),
-                        arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-                        annotation: None,
-                    }],
-                    spawn: None,
-                    offer_nonce: nonce(),
-                    evidence: Vec::new(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
-            .expect("the batch decides");
+        let decision = noted(first, &held, "b1");
         let dispatch = match &decision.follow_up {
             FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
             other => panic!("expected a release, got {other:?}"),
