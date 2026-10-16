@@ -1090,40 +1090,7 @@ impl<'a> Sequence<'a> {
 
     pub(crate) fn admit(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
         self.member(fact)?;
-        let discharges_approval = matches!(
-            (self.owing, fact),
-            (Some(Owed::Approval(owed)), Fact::CallApproved { offer, .. }) if offer == &owed
-        );
-        if let Some(owed) = self.owing {
-            match (owed, fact) {
-                (_, Fact::OfferInvalidated { trajectory, offer }) => {
-                    let views = self.projection.view(trajectory);
-                    if let Some(ending) = views.offer(offer) {
-                        let spent = views
-                            .offer(&owed.offer())
-                            .map(|recorded| (&recorded.subject, recorded.basis));
-                        if Some((&ending.subject, ending.basis)) != spent {
-                            return Err(TransitionRefusal::UndischargedAcceptance);
-                        }
-                    }
-                }
-                (Owed::Approval(owed), Fact::CallApproved { offer, .. }) if offer == &owed => self.owing = None,
-                (
-                    Owed::Derived(owed),
-                    Fact::CandidateDerived {
-                        derived:
-                            DerivedCandidate::Result {
-                                from: ConfinedFrom::Offer(offer),
-                                ..
-                            }
-                            | DerivedCandidate::Call { from: offer, .. },
-                        ..
-                    },
-                ) if offer == &owed => self.owing = None,
-                (Owed::Accepted(owed), Fact::CandidateAccepted { offer, .. }) if offer == &owed => self.owing = None,
-                _ => return Err(TransitionRefusal::UndischargedAcceptance),
-            }
-        }
+        let discharges_approval = self.discharge_owed(fact)?;
         let released = self.obliged(fact)?;
         if !matches!(fact, Fact::OfferOpened { .. }) {
             settled(self.menu.take())?;
@@ -1145,23 +1112,10 @@ impl<'a> Sequence<'a> {
                 evidence,
             } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?,
             Fact::OfferAccepted { trajectory, offer } => self.offer_accepted(trajectory, offer)?,
-            Fact::CallApprovalConsumed { trajectory, offer, .. } => {
-                let views = self.projection.view(trajectory);
-                let approval = views.approval(offer).ok_or(TransitionRefusal::UnknownApproval)?;
-                let (recorded, subject) = (approval.basis, crate::basis::SubjectKey::Approval(*offer));
-                self.may_spend(trajectory, &subject, &recorded)?;
-            }
+            Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
             Fact::CandidateConsumed {
                 trajectory, subject, ..
-            } => {
-                let recorded = self
-                    .projection
-                    .view(trajectory)
-                    .recorded_candidate(subject)
-                    .ok_or(TransitionRefusal::UnknownCandidate)?
-                    .generation;
-                self.may_take(trajectory, subject, recorded)?;
-            }
+            } => self.candidate_consumed(trajectory, subject)?,
             Fact::OfferDenied {
                 trajectory,
                 offer,
@@ -1225,88 +1179,19 @@ impl<'a> Sequence<'a> {
                     .with_annotation(annotation.clone())
                     .with_file_basis(file_basis.clone());
                 self.opened(trajectory, dispatch, &call, subject, released, evidence)?;
-                let entry = self
-                    .engine
-                    .registry()
-                    .keyed_tool(tool, *declaration)
-                    .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
-                // The record stores a pin only where an Annotator produced one; a static
-                // declaration's annotation is the registry's own, so a record that carries
-                // a pin for it — or none for an Annotator-routed tool — is forged. The
-                // pin's own binding — its annotator, and the digest of the exact call it
-                // judged — is validate_annotation's to hold.
-                let checked: std::borrow::Cow<'_, crate::contract::ToolAnnotation> =
-                    match (annotation, entry.declared()) {
-                        (None, Some(compiled)) => std::borrow::Cow::Borrowed(compiled),
-                        (Some(pinned), None) if Some(pinned.annotator()) == entry.annotator() => {
-                            std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool))
-                        }
-                        _ => return Err(TransitionRefusal::ForgedEvidence),
-                    };
-                if crate::check::validate_annotation(self.engine.registry(), entry, &call).is_err() {
-                    return Err(TransitionRefusal::ForgedEvidence);
-                }
-                let checked = match checked.bound_to(call.arguments()) {
-                    Ok(Some(bound)) => std::borrow::Cow::Owned(bound),
-                    Ok(None) => checked,
-                    Err(_) => return Err(TransitionRefusal::ForgedLabel),
-                };
-                let views = self.projection.view(trajectory);
-                if proposed_effects != &checked.emits {
-                    return Err(TransitionRefusal::EffectsMismatch);
-                }
-                let current = views.current_label();
-                if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
-                    return Err(TransitionRefusal::ForgedLabel);
-                }
+                self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects)?;
             }
             Fact::DispatchSucceeded {
                 trajectory,
                 dispatch,
                 effects,
                 observed: _,
-            } => {
-                self.declaring(&crate::basis::DecidedAct::Outcome(dispatch.clone()))?;
-                let contract = self.open_dispatch_contract(trajectory, dispatch)?;
-                if self.projection.view(trajectory).is_succeeded(dispatch) {
-                    return Err(TransitionRefusal::RepeatCheckpoint);
-                }
-                if effects != &contract.emits {
-                    return Err(TransitionRefusal::EffectsMismatch);
-                }
-            }
+            } => self.dispatch_succeeded(trajectory, dispatch, effects)?,
             Fact::DispatchClosed {
                 trajectory,
                 dispatch,
                 outcome,
-            } => {
-                self.closing_act(dispatch)?;
-                let contract = self.open_dispatch_contract(trajectory, dispatch)?;
-                let views = self.projection.view(trajectory);
-                let checkpointed = views.is_succeeded(dispatch);
-                match (outcome, checkpointed) {
-                    (
-                        CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } | CloseOutcome::Indeterminate,
-                        true,
-                    ) => {
-                        return Err(TransitionRefusal::ContradictedSuccess);
-                    }
-                    (CloseOutcome::FailureWithBody { .. }, false)
-                        if views
-                            .dispatch_call(dispatch)
-                            .is_none_or(|call| call.file_basis().is_none()) =>
-                    {
-                        return Err(TransitionRefusal::ForgedEvidence);
-                    }
-                    (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
-                        return Err(TransitionRefusal::EffectsMismatch);
-                    }
-                    (CloseOutcome::Success { effects }, false) if effects != &contract.emits => {
-                        return Err(TransitionRefusal::EffectsMismatch);
-                    }
-                    _ => {}
-                }
-            }
+            } => self.dispatch_closed(trajectory, dispatch, outcome)?,
             Fact::ValueAdmitted {
                 trajectory,
                 value,
@@ -1336,27 +1221,14 @@ impl<'a> Sequence<'a> {
                 evidence,
             } => {
                 self.pending_dispatch(trajectory, dispatch)?;
-                if self.engine.registry().authority(authority).is_none() {
-                    return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
-                }
-                self.recorded_expansions(evidence)?;
-                let remedy = self.remedies.entry(dispatch.clone()).or_default();
-                remedy.pin_evidence(evidence)?;
-                remedy.reviewed.push(reviewed.clone());
-                remedy.rulings.push((authority.clone(), covers.clone()));
-                remedy.plans.insert(*plan);
+                self.ruling(dispatch, plan, authority, covers, reviewed, evidence)?;
             }
             Fact::Acceptance {
                 trajectory,
                 dispatch,
                 plan,
                 narrowing,
-            } => {
-                self.pending_dispatch(trajectory, dispatch)?;
-                let remedy = self.remedies.entry(dispatch.clone()).or_default();
-                remedy.acceptance = Some(narrowing.clone());
-                remedy.plans.insert(*plan);
-            }
+            } => self.acceptance(trajectory, dispatch, plan, narrowing)?,
             Fact::OutputSanitizerBound {
                 trajectory,
                 dispatch,
@@ -1364,46 +1236,17 @@ impl<'a> Sequence<'a> {
                 sanitizer,
                 contribution,
                 evidence,
-            } => {
-                self.pending_dispatch(trajectory, dispatch)?;
-                if self.engine.registry().sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
-                    return Err(TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()));
-                }
-                self.recorded_expansions(evidence)?;
-                let remedy = self.remedies.entry(dispatch.clone()).or_default();
-                remedy.pin_evidence(evidence)?;
-                remedy.output = Some(crate::plan::OutputRemedy::Sanitize(sanitizer.clone()));
-                remedy.contribution = Some(contribution.clone());
-                remedy.plans.insert(*plan);
-            }
+            } => self.output_sanitizer_bound(trajectory, dispatch, plan, sanitizer, contribution, evidence)?,
             Fact::OutputWithheld {
                 trajectory,
                 dispatch,
                 plan,
-            } => {
-                self.pending_dispatch(trajectory, dispatch)?;
-                let remedy = self.remedies.entry(dispatch.clone()).or_default();
-                remedy.output = Some(crate::plan::OutputRemedy::Withhold);
-                remedy.plans.insert(*plan);
-            }
+            } => self.output_withheld(trajectory, dispatch, plan)?,
             Fact::Denial {
                 trajectory,
                 digest,
                 authority,
-            } => {
-                if let Some(open) = &self.declared
-                    && let crate::basis::DecidedAct::Offer(offer) = &open.act
-                {
-                    let views = self.projection.view(trajectory);
-                    let selected = views.offer(offer).ok_or(TransitionRefusal::UnknownOffer)?;
-                    if &selected.call != digest || !selected.plan.names_authority(authority) {
-                        return Err(TransitionRefusal::UnbackedDenial);
-                    }
-                }
-                if self.engine.registry().authority(authority).is_none() {
-                    return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
-                }
-            }
+            } => self.denial(trajectory, digest, authority)?,
             Fact::ChildReturn {
                 trajectory,
                 id,
@@ -1420,88 +1263,351 @@ impl<'a> Sequence<'a> {
                 snapshot,
                 return_policy,
                 kind,
-            } => {
-                // A member is backed by the fan-out fork its spawn's release prepared, not by a
-                // release of its own: it is prepared when its child starts.
-                if released == Obligation::Free && matches!(fork, ForkId::Spawn(_)) {
-                    return Err(TransitionRefusal::UnbackedDecision);
-                }
-                if !self.engine.registry().profile().context_control() {
-                    return Err(TransitionRefusal::ContextUncontrolled);
-                }
-                let views = self.projection.view(trajectory);
-                if fork.dispatch().trajectory() != trajectory || views.dispatch_call(fork.dispatch()).is_none() {
-                    return Err(TransitionRefusal::UnknownDispatch);
-                }
-                if self.projection.prepared_fork(fork).is_some() {
-                    return Err(TransitionRefusal::ForkReprepared);
-                }
-                if views.has_ended(trajectory) {
-                    return Err(TransitionRefusal::BranchEnded);
-                }
-                if &views.freeze_basis() != snapshot {
-                    return Err(TransitionRefusal::ForkBasisMismatch);
-                }
-                match fork {
-                    // The policy is the one the release's spent approval declared, and nothing else.
-                    ForkId::Spawn(dispatch) => {
-                        if self.spawn_policies.remove(dispatch).as_ref() != Some(return_policy) {
-                            return Err(TransitionRefusal::UnbackedReturnPolicy);
-                        }
-                    }
-                    ForkId::Member { spawn, .. } => {
-                        let backed = self
-                            .projection
-                            .prepared_fork(&ForkId::of(spawn))
-                            .is_some_and(|fan_out| {
-                                fan_out.kind == SpawnKind::FanOut
-                                    && &fan_out.parent == trajectory
-                                    && &fan_out.return_policy == return_policy
-                            });
-                        if !backed || *kind != SpawnKind::Single {
-                            return Err(TransitionRefusal::UnbackedReturnPolicy);
-                        }
-                    }
-                }
-            }
-            Fact::ForkOpened { trajectory, fork } => {
-                let preparation = self
-                    .projection
-                    .prepared_fork(fork)
-                    .ok_or(TransitionRefusal::UnknownFork)?;
-                // A fan-out fork binds no child itself, and a member binds only the child it names.
-                let binds = match fork {
-                    ForkId::Spawn(_) => preparation.kind == SpawnKind::Single,
-                    ForkId::Member { child, .. } => child == trajectory,
-                };
-                if !binds {
-                    return Err(TransitionRefusal::UnknownFork);
-                }
-                let views = self.projection.view(trajectory);
-                if self.projection.bound_child(fork).is_some() {
-                    return Err(TransitionRefusal::ForkAlreadyBound);
-                }
-                if self.projection.is_opened(trajectory) {
-                    return Err(TransitionRefusal::ChildActiveBeforeFork);
-                }
-                if views.has_ended(&preparation.parent) {
-                    return Err(TransitionRefusal::BranchEnded);
-                }
-                if views.dispatch_failed(fork.dispatch()) {
-                    return Err(TransitionRefusal::SpawnFailed);
-                }
-                // A member is seeded at the parent's label as the child starts, so nothing may
-                // cross into the parent between its preparation and its binding.
-                if matches!(fork, ForkId::Member { .. })
-                    && self.projection.view(&preparation.parent).freeze_basis() != preparation.snapshot
-                {
-                    return Err(TransitionRefusal::ForkBasisMismatch);
-                }
-            }
+            } => self.fork_prepared(trajectory, fork, snapshot, return_policy, kind, released)?,
+            Fact::ForkOpened { trajectory, fork } => self.fork_opened(trajectory, fork)?,
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
+        Ok(())
+    }
+
+    /// Discharges what an accepted offer owes, refusing any other record while it is owed.
+    /// Returns whether this record is the approval the offer owed.
+    fn discharge_owed(&mut self, fact: &Fact) -> Result<bool, TransitionRefusal> {
+        let discharges_approval = matches!(
+            (self.owing, fact),
+            (Some(Owed::Approval(owed)), Fact::CallApproved { offer, .. }) if offer == &owed
+        );
+        if let Some(owed) = self.owing {
+            match (owed, fact) {
+                (_, Fact::OfferInvalidated { trajectory, offer }) => {
+                    let views = self.projection.view(trajectory);
+                    if let Some(ending) = views.offer(offer) {
+                        let spent = views
+                            .offer(&owed.offer())
+                            .map(|recorded| (&recorded.subject, recorded.basis));
+                        if Some((&ending.subject, ending.basis)) != spent {
+                            return Err(TransitionRefusal::UndischargedAcceptance);
+                        }
+                    }
+                }
+                (Owed::Approval(owed), Fact::CallApproved { offer, .. }) if offer == &owed => self.owing = None,
+                (
+                    Owed::Derived(owed),
+                    Fact::CandidateDerived {
+                        derived:
+                            DerivedCandidate::Result {
+                                from: ConfinedFrom::Offer(offer),
+                                ..
+                            }
+                            | DerivedCandidate::Call { from: offer, .. },
+                        ..
+                    },
+                ) if offer == &owed => self.owing = None,
+                (Owed::Accepted(owed), Fact::CandidateAccepted { offer, .. }) if offer == &owed => self.owing = None,
+                _ => return Err(TransitionRefusal::UndischargedAcceptance),
+            }
+        }
+        Ok(discharges_approval)
+    }
+
+    fn approval_consumed(
+        &self,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Result<(), TransitionRefusal> {
+        let views = self.projection.view(trajectory);
+        let approval = views.approval(offer).ok_or(TransitionRefusal::UnknownApproval)?;
+        let (recorded, subject) = (approval.basis, crate::basis::SubjectKey::Approval(*offer));
+        self.may_spend(trajectory, &subject, &recorded)
+    }
+
+    fn candidate_consumed(
+        &self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+    ) -> Result<(), TransitionRefusal> {
+        let recorded = self
+            .projection
+            .view(trajectory)
+            .recorded_candidate(subject)
+            .ok_or(TransitionRefusal::UnknownCandidate)?
+            .generation;
+        self.may_take(trajectory, subject, recorded)
+    }
+
+    fn dispatch_opened_contract(
+        &self,
+        trajectory: &TrajectoryId,
+        call: &ResolvedCall,
+        proposed_label: &Label,
+        receiving: &Label,
+        proposed_effects: &EffectSet,
+    ) -> Result<(), TransitionRefusal> {
+        let tool = call.tool();
+        let entry = self
+            .engine
+            .registry()
+            .keyed_tool(tool, call.declaration_id())
+            .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
+        // The record stores a pin only where an Annotator produced one; a static
+        // declaration's annotation is the registry's own, so a record that carries
+        // a pin for it — or none for an Annotator-routed tool — is forged. The
+        // pin's own binding — its annotator, and the digest of the exact call it
+        // judged — is validate_annotation's to hold.
+        let checked: std::borrow::Cow<'_, ToolAnnotation> = match (call.annotation(), entry.declared()) {
+            (None, Some(compiled)) => std::borrow::Cow::Borrowed(compiled),
+            (Some(pinned), None) if Some(pinned.annotator()) == entry.annotator() => {
+                std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool))
+            }
+            _ => return Err(TransitionRefusal::ForgedEvidence),
+        };
+        if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err() {
+            return Err(TransitionRefusal::ForgedEvidence);
+        }
+        let checked = match checked.bound_to(call.arguments()) {
+            Ok(Some(bound)) => std::borrow::Cow::Owned(bound),
+            Ok(None) => checked,
+            Err(_) => return Err(TransitionRefusal::ForgedLabel),
+        };
+        let views = self.projection.view(trajectory);
+        if proposed_effects != &checked.emits {
+            return Err(TransitionRefusal::EffectsMismatch);
+        }
+        let current = views.current_label();
+        if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        Ok(())
+    }
+
+    fn dispatch_succeeded(
+        &self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        effects: &EffectSet,
+    ) -> Result<(), TransitionRefusal> {
+        self.declaring(&crate::basis::DecidedAct::Outcome(dispatch.clone()))?;
+        let contract = self.open_dispatch_contract(trajectory, dispatch)?;
+        if self.projection.view(trajectory).is_succeeded(dispatch) {
+            return Err(TransitionRefusal::RepeatCheckpoint);
+        }
+        if effects != &contract.emits {
+            return Err(TransitionRefusal::EffectsMismatch);
+        }
+        Ok(())
+    }
+
+    fn dispatch_closed(
+        &self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        outcome: &CloseOutcome,
+    ) -> Result<(), TransitionRefusal> {
+        self.closing_act(dispatch)?;
+        let contract = self.open_dispatch_contract(trajectory, dispatch)?;
+        let views = self.projection.view(trajectory);
+        let checkpointed = views.is_succeeded(dispatch);
+        match (outcome, checkpointed) {
+            (CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } | CloseOutcome::Indeterminate, true) => {
+                Err(TransitionRefusal::ContradictedSuccess)
+            }
+            (CloseOutcome::FailureWithBody { .. }, false)
+                if views
+                    .dispatch_call(dispatch)
+                    .is_none_or(|call| call.file_basis().is_none()) =>
+            {
+                Err(TransitionRefusal::ForgedEvidence)
+            }
+            (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
+                Err(TransitionRefusal::EffectsMismatch)
+            }
+            (CloseOutcome::Success { effects }, false) if effects != &contract.emits => {
+                Err(TransitionRefusal::EffectsMismatch)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn ruling(
+        &mut self,
+        dispatch: &DispatchId,
+        plan: &crate::plan::PlanId,
+        authority: &AuthorityName,
+        covers: &[Gap],
+        reviewed: &crate::execute::AuthorityReview,
+        evidence: &AudienceEvidence,
+    ) -> Result<(), TransitionRefusal> {
+        if self.engine.registry().authority(authority).is_none() {
+            return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
+        }
+        self.recorded_expansions(evidence)?;
+        let remedy = self.remedies.entry(dispatch.clone()).or_default();
+        remedy.pin_evidence(evidence)?;
+        remedy.reviewed.push(reviewed.clone());
+        remedy.rulings.push((authority.clone(), covers.to_vec()));
+        remedy.plans.insert(*plan);
+        Ok(())
+    }
+
+    fn acceptance(
+        &mut self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        plan: &crate::plan::PlanId,
+        narrowing: &Narrowing,
+    ) -> Result<(), TransitionRefusal> {
+        self.pending_dispatch(trajectory, dispatch)?;
+        let remedy = self.remedies.entry(dispatch.clone()).or_default();
+        remedy.acceptance = Some(narrowing.clone());
+        remedy.plans.insert(*plan);
+        Ok(())
+    }
+
+    fn output_sanitizer_bound(
+        &mut self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        plan: &crate::plan::PlanId,
+        sanitizer: &SanitizerName,
+        contribution: &Label,
+        evidence: &AudienceEvidence,
+    ) -> Result<(), TransitionRefusal> {
+        self.pending_dispatch(trajectory, dispatch)?;
+        if self.engine.registry().sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
+            return Err(TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()));
+        }
+        self.recorded_expansions(evidence)?;
+        let remedy = self.remedies.entry(dispatch.clone()).or_default();
+        remedy.pin_evidence(evidence)?;
+        remedy.output = Some(crate::plan::OutputRemedy::Sanitize(sanitizer.clone()));
+        remedy.contribution = Some(contribution.clone());
+        remedy.plans.insert(*plan);
+        Ok(())
+    }
+
+    fn output_withheld(
+        &mut self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        plan: &crate::plan::PlanId,
+    ) -> Result<(), TransitionRefusal> {
+        self.pending_dispatch(trajectory, dispatch)?;
+        let remedy = self.remedies.entry(dispatch.clone()).or_default();
+        remedy.output = Some(crate::plan::OutputRemedy::Withhold);
+        remedy.plans.insert(*plan);
+        Ok(())
+    }
+
+    fn denial(
+        &self,
+        trajectory: &TrajectoryId,
+        digest: &crate::value::CanonicalDigest,
+        authority: &AuthorityName,
+    ) -> Result<(), TransitionRefusal> {
+        if let Some(open) = &self.declared
+            && let crate::basis::DecidedAct::Offer(offer) = &open.act
+        {
+            let views = self.projection.view(trajectory);
+            let selected = views.offer(offer).ok_or(TransitionRefusal::UnknownOffer)?;
+            if &selected.call != digest || !selected.plan.names_authority(authority) {
+                return Err(TransitionRefusal::UnbackedDenial);
+            }
+        }
+        if self.engine.registry().authority(authority).is_none() {
+            return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
+        }
+        Ok(())
+    }
+
+    fn fork_prepared(
+        &mut self,
+        trajectory: &TrajectoryId,
+        fork: &ForkId,
+        snapshot: &crate::fact::ForkSnapshot,
+        return_policy: &ReturnPolicy,
+        kind: &SpawnKind,
+        released: Obligation,
+    ) -> Result<(), TransitionRefusal> {
+        // A member is backed by the fan-out fork its spawn's release prepared, not by a
+        // release of its own: it is prepared when its child starts.
+        if released == Obligation::Free && matches!(fork, ForkId::Spawn(_)) {
+            return Err(TransitionRefusal::UnbackedDecision);
+        }
+        if !self.engine.registry().profile().context_control() {
+            return Err(TransitionRefusal::ContextUncontrolled);
+        }
+        let views = self.projection.view(trajectory);
+        if fork.dispatch().trajectory() != trajectory || views.dispatch_call(fork.dispatch()).is_none() {
+            return Err(TransitionRefusal::UnknownDispatch);
+        }
+        if self.projection.prepared_fork(fork).is_some() {
+            return Err(TransitionRefusal::ForkReprepared);
+        }
+        if views.has_ended(trajectory) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        if &views.freeze_basis() != snapshot {
+            return Err(TransitionRefusal::ForkBasisMismatch);
+        }
+        match fork {
+            // The policy is the one the release's spent approval declared, and nothing else.
+            ForkId::Spawn(dispatch) => {
+                if self.spawn_policies.remove(dispatch).as_ref() != Some(return_policy) {
+                    return Err(TransitionRefusal::UnbackedReturnPolicy);
+                }
+            }
+            ForkId::Member { spawn, .. } => {
+                let backed = self
+                    .projection
+                    .prepared_fork(&ForkId::of(spawn))
+                    .is_some_and(|fan_out| {
+                        fan_out.kind == SpawnKind::FanOut
+                            && &fan_out.parent == trajectory
+                            && &fan_out.return_policy == return_policy
+                    });
+                if !backed || *kind != SpawnKind::Single {
+                    return Err(TransitionRefusal::UnbackedReturnPolicy);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn fork_opened(&self, trajectory: &TrajectoryId, fork: &ForkId) -> Result<(), TransitionRefusal> {
+        let preparation = self
+            .projection
+            .prepared_fork(fork)
+            .ok_or(TransitionRefusal::UnknownFork)?;
+        // A fan-out fork binds no child itself, and a member binds only the child it names.
+        let binds = match fork {
+            ForkId::Spawn(_) => preparation.kind == SpawnKind::Single,
+            ForkId::Member { child, .. } => child == trajectory,
+        };
+        if !binds {
+            return Err(TransitionRefusal::UnknownFork);
+        }
+        let views = self.projection.view(trajectory);
+        if self.projection.bound_child(fork).is_some() {
+            return Err(TransitionRefusal::ForkAlreadyBound);
+        }
+        if self.projection.is_opened(trajectory) {
+            return Err(TransitionRefusal::ChildActiveBeforeFork);
+        }
+        if views.has_ended(&preparation.parent) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        if views.dispatch_failed(fork.dispatch()) {
+            return Err(TransitionRefusal::SpawnFailed);
+        }
+        // A member is seeded at the parent's label as the child starts, so nothing may
+        // cross into the parent between its preparation and its binding.
+        if matches!(fork, ForkId::Member { .. })
+            && self.projection.view(&preparation.parent).freeze_basis() != preparation.snapshot
+        {
+            return Err(TransitionRefusal::ForkBasisMismatch);
+        }
         Ok(())
     }
 
