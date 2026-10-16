@@ -574,6 +574,8 @@ impl ValidatedFactBatch {
     /// Seal a validated batch. Crate-private on purpose: every call site is an engine transition
     /// that has already run the facts through the [`Sequence`] validator.
     pub(crate) fn seal(facts: Vec<Fact>, basis: u64, engine: &Engine, family: TrajectoryId) -> ValidatedFactBatch {
+        // A batch holding no record carries no engine decision, so no revision judged it: the
+        // store derives its stamp from its first record and a replay passes it unjudged.
         ValidatedFactBatch {
             basis,
             revision: engine.revision().filter(|_| !facts.is_empty()),
