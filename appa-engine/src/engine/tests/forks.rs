@@ -67,65 +67,6 @@ fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
     );
 }
 
-/// A parent that declared `floor` for a fan-out spawn and released it: the log and the
-/// fan-out fork.
-fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::value::ForkId) {
-    let mut log = vec![opened(e)];
-    let blocked = e
-        .handle(
-            &viewing(e, &log),
-            spawn_batch("fan-out", Some(crate::transition::SpawnMark::fan_out(0))),
-        )
-        .expect("a fan-out spawn blocks with its return declarations");
-    log.extend(appended_facts(blocked));
-    let (offer, _) = opened_offers(&log)
-        .into_iter()
-        .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
-        .expect("the bare declaration is offered");
-    let approved = e
-        .handle(
-            &viewing(e, &log),
-            EngineEvent::ExecuteOffer(OfferExecution {
-                trajectory: traj(),
-                offer,
-                outcome: OfferOutcome::Approved(Vec::new()),
-                return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
-                    floor,
-                    sanitizer: None,
-                })),
-                offer_nonce: nonce(),
-                audience: crate::audience::AudienceEvidence::default(),
-            }),
-        )
-        .expect("the declaration approves the fan-out spawn");
-    log.extend(appended_facts(approved));
-    let released = e
-        .handle(
-            &viewing(e, &log),
-            spawn_batch("fan-out-approved", Some(crate::transition::SpawnMark::fan_out(0))),
-        )
-        .expect("the approved fan-out spawn releases");
-    let fork = match answered(&released) {
-        ([release], []) => release.fork.clone().expect("the fan-out spawn carries its fork"),
-        other => panic!("the approved fan-out spawn releases alone, got {other:?}"),
-    };
-    log.extend(appended_facts(released));
-    (log, fork)
-}
-
-fn member_started(e: &Engine, log: &mut Vec<Fact>, fan_out: &crate::value::ForkId, child: &TrajectoryId) {
-    let bound = e
-        .handle(
-            &viewing(e, log),
-            EngineEvent::BindFork(crate::transition::ForkBinding {
-                fork: fan_out.clone(),
-                child: child.clone(),
-            }),
-        )
-        .expect("a fan-out child starts its member fork");
-    log.extend(appended_facts(bound));
-}
-
 #[test]
 fn a_fan_out_child_starts_at_the_parents_label_including_earlier_siblings_returns() {
     let internal = Audience::restricted([ReaderId::new("insider")]);

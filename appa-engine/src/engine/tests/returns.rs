@@ -1,21 +1,5 @@
 use super::*;
 
-fn lifting_sanitizer(name: &str) -> crate::authority::Sanitizer {
-    crate::authority::Sanitizer {
-        name: SanitizerName::new(name),
-        on: crate::authority::SanitizerPoints {
-            input: false,
-            output: true,
-        },
-        transition: crate::authority::DeclaredTransition::Trust {
-            from_floor: SUSPICIOUS,
-            to: TRUSTED,
-        },
-        scope: crate::authority::Scope::default(),
-        hint: None,
-    }
-}
-
 fn return_steps(facts: &[Fact]) -> Vec<crate::fact::ReturnRoute> {
     opened_offers(facts)
         .iter()
@@ -29,18 +13,6 @@ fn return_steps(facts: &[Fact]) -> Vec<crate::fact::ReturnRoute> {
 
 fn named(sanitizer: &str) -> Option<ReturnSanitizer> {
     Some(ReturnSanitizer::Named(SanitizerName::new(sanitizer)))
-}
-
-fn attest_shape() -> crate::shape::ReturnShape {
-    crate::shape::ReturnShape::compile(&json!({
-        "type": "object",
-        "properties": {
-            "verdict": { "type": "string", "enum": ["allow", "deny"] },
-            "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
-        },
-        "required": ["verdict", "confidence"],
-    }))
-    .expect("the fixture shape compiles")
 }
 
 fn report_with(log: &[Fact], child: &TrajectoryId, body: &str, evidence: Vec<Evidence>) -> EngineEvent {

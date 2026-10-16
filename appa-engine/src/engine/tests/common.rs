@@ -1191,3 +1191,187 @@ pub(super) fn spawn_batch(id: &str, spawn: Option<crate::transition::SpawnMark>)
         audience: crate::audience::AudienceEvidence::default(),
     })
 }
+
+pub(super) fn lifting_sanitizer(name: &str) -> crate::authority::Sanitizer {
+    crate::authority::Sanitizer {
+        name: SanitizerName::new(name),
+        on: crate::authority::SanitizerPoints {
+            input: false,
+            output: true,
+        },
+        transition: crate::authority::DeclaredTransition::Trust {
+            from_floor: SUSPICIOUS,
+            to: TRUSTED,
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    }
+}
+
+pub(super) fn attest_shape() -> crate::shape::ReturnShape {
+    crate::shape::ReturnShape::compile(&json!({
+        "type": "object",
+        "properties": {
+            "verdict": { "type": "string", "enum": ["allow", "deny"] },
+            "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+        },
+        "required": ["verdict", "confidence"],
+    }))
+    .expect("the fixture shape compiles")
+}
+
+/// A parent that declared `floor` for a fan-out spawn and released it: the log and the
+/// fan-out fork.
+pub(super) fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::value::ForkId) {
+    let mut log = vec![opened(e)];
+    let blocked = e
+        .handle(
+            &viewing(e, &log),
+            spawn_batch("fan-out", Some(crate::transition::SpawnMark::fan_out(0))),
+        )
+        .expect("a fan-out spawn blocks with its return declarations");
+    log.extend(appended_facts(blocked));
+    let (offer, _) = opened_offers(&log)
+        .into_iter()
+        .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
+        .expect("the bare declaration is offered");
+    let approved = e
+        .handle(
+            &viewing(e, &log),
+            EngineEvent::ExecuteOffer(OfferExecution {
+                trajectory: traj(),
+                offer,
+                outcome: OfferOutcome::Approved(Vec::new()),
+                return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    floor,
+                    sanitizer: None,
+                })),
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        )
+        .expect("the declaration approves the fan-out spawn");
+    log.extend(appended_facts(approved));
+    let released = e
+        .handle(
+            &viewing(e, &log),
+            spawn_batch("fan-out-approved", Some(crate::transition::SpawnMark::fan_out(0))),
+        )
+        .expect("the approved fan-out spawn releases");
+    let fork = match answered(&released) {
+        ([release], []) => release.fork.clone().expect("the fan-out spawn carries its fork"),
+        other => panic!("the approved fan-out spawn releases alone, got {other:?}"),
+    };
+    log.extend(appended_facts(released));
+    (log, fork)
+}
+
+pub(super) fn member_started(e: &Engine, log: &mut Vec<Fact>, fan_out: &crate::value::ForkId, child: &TrajectoryId) {
+    let bound = e
+        .handle(
+            &viewing(e, log),
+            EngineEvent::BindFork(crate::transition::ForkBinding {
+                fork: fan_out.clone(),
+                child: child.clone(),
+            }),
+        )
+        .expect("a fan-out child starts its member fork");
+    log.extend(appended_facts(bound));
+}
+
+pub(super) fn staged_engine() -> Engine {
+    let sanitizer = |name: &str, from_floor: Trust, to: Trust| crate::authority::Sanitizer {
+        name: crate::names::SanitizerName::new(name),
+        on: crate::authority::SanitizerPoints {
+            input: false,
+            output: true,
+        },
+        transition: crate::authority::DeclaredTransition::Trust { from_floor, to },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    open_engine(RegistryConfig {
+        annotators: vec![],
+        trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
+        tools: declared(vec![
+            ToolAnnotation {
+                description: Some("A test tool.".to_string()),
+                name: ToolName::new("fetch"),
+                tags: vec![],
+                delta: Delta {
+                    trust: Some(Trust::new(0)),
+                    audience: None,
+                },
+                parameters: crate::params::ToolParameters::open(),
+                forwards: Delta::NONE,
+                emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
+                requires: Requires::default(),
+            },
+            restrictable_tool("ping"),
+        ]),
+        authorities: vec![],
+        sanitizers: vec![
+            sanitizer("redactor", Trust::new(0), Trust::new(1)),
+            sanitizer("scrubber", Trust::new(1), Trust::new(2)),
+        ],
+        audience: crate::audience::AudienceConfig::default(),
+    })
+}
+
+pub(super) fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody, EngineDecision) {
+    let call = call("fetch", json!({}));
+    let mut log = vec![opened(e)];
+    let blocked = proposed(e, &log, "b1", nonce(), call.clone()).expect("the batch decides");
+    let bound = opened_offers(&appended_facts(blocked))
+        .into_iter()
+        .find(|(_, plan)| plan.sanitizer() == Some(&crate::names::SanitizerName::new("redactor")))
+        .expect("a narrowing block offers the applicable output sanitizer's dispatch path")
+        .0;
+    log = [
+        log.clone(),
+        appended_facts(proposed(e, &log, "b1", nonce(), call.clone()).expect("the batch decides")),
+    ]
+    .concat();
+    log = [
+        log.clone(),
+        appended_facts(execute_offer(e, &log, bound, OfferOutcome::Approved(Vec::new())).expect("the offer runs")),
+    ]
+    .concat();
+    let released = proposed(e, &log, "b2", nonce(), call).expect("the approved call releases");
+    let dispatch = match &released.follow_up {
+        FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+        other => panic!("the approved proposal releases, got {other:?}"),
+    };
+    log = [log, appended_facts(released)].concat();
+
+    let raw = ValueBody::new("page bytes");
+    let derived = ValueBody::new("page bytes, redacted");
+    let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
+        dispatch: dispatch.clone(),
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Available(raw.clone()),
+        },
+        evidence,
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    };
+    let view = |log: &[Fact]| {
+        e.view(&traj(), log.to_vec(), log.len() as u64)
+            .expect("the log replays")
+    };
+    let asked = e
+        .handle(&view(&log), EngineEvent::Outcome(report(Vec::new())))
+        .expect("the confined result asks for its derivation");
+    log = [log, appended_facts(asked)].concat();
+    let staged = e
+        .handle(
+            &view(&log),
+            EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
+                sanitizer: crate::names::SanitizerName::new("redactor"),
+                source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                derived: derived.clone(),
+            }])),
+        )
+        .expect("the derivation stages");
+    (log, dispatch, derived, staged)
+}

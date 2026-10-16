@@ -27,6 +27,7 @@ mod laws;
 mod offers;
 mod openings;
 mod outcomes;
+mod refusals;
 mod replay;
 mod reservations;
 mod returns;
