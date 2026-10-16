@@ -3847,14 +3847,6 @@ fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Co
     .map_err(|error| OpenError::Policy(Box::new(error)))
 }
 
-/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
-///
-/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
-/// trajectory: the log pins its policy file, so a reload since the session opened does not
-/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
-/// its fingerprint are one snapshot.
-#[cfg(feature = "daemon")]
-/// The content digest of one inventory, naming the engine compiled with it.
 /// The inventory a stored composed policy file embeds as `[appa_inventory]`, or `None` for a file
 /// that embeds none: the family opened without an inventory and follows its deployment's files
 /// as published.
@@ -3870,11 +3862,19 @@ fn stored_inventory(bytes: &[u8]) -> Result<Option<appa_runtime_api::inventory::
     Ok(stored.appa_inventory)
 }
 
+/// The content digest of one inventory, naming the engine compiled with it.
 fn inventory_digest(inventory: &appa_runtime_api::inventory::ToolInventory) -> String {
     let bytes = serde_json::to_vec(inventory).expect("an inventory serializes: every field is a serde type");
     crate::engine::policy_file_key(&bytes)
 }
 
+/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+///
+/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
+/// trajectory: the log pins its policy file, so a reload since the session opened does not
+/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
+/// its fingerprint are one snapshot.
+#[cfg(feature = "daemon")]
 fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     let text = std::str::from_utf8(bytes).ok()?;
     let composed: toml::Value = toml::from_str(text).ok()?;
