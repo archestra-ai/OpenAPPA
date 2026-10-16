@@ -43,7 +43,7 @@ and [transparent caching](https://www.ubicloud.com/docs/github-actions-integrati
 ## Shared Docker cache
 
 Docker setup is pinned to the organization's shared
-[`setup-docker-builder`](https://github.com/archestra-ai/.github/tree/49f7467c09064f44fc4ab1cf6b78e8855aacccb1/actions/setup-docker-builder)
+[`setup-docker-builder`](https://github.com/archestra-ai/.github/tree/13f35fa7ee72120bcebe2ad663da42260e629818/actions/setup-docker-builder)
 action. CI's designated image job warms its existing per-image scopes on main;
 PR consumers restore them without repeating cache uploads. Release publishers
 keep their existing architecture-specific scopes and writer behavior. The action

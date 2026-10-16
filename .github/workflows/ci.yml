@@ -1066,7 +1066,7 @@ jobs:
 
       - name: Setup Docker Buildx
         id: docker
-        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
+        uses: archestra-ai/.github/actions/setup-docker-builder@13f35fa7ee72120bcebe2ad663da42260e629818 # zizmor: ignore[stale-action-refs]
 
       # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
@@ -1202,7 +1202,7 @@ jobs:
         run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
       - name: Setup Docker Buildx
         id: docker
-        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
+        uses: archestra-ai/.github/actions/setup-docker-builder@13f35fa7ee72120bcebe2ad663da42260e629818 # zizmor: ignore[stale-action-refs]
       - name: Build runtime
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -1268,7 +1268,7 @@ jobs:
 
       - name: Setup Docker Buildx
         id: docker
-        uses: archestra-ai/.github/actions/setup-docker-builder@49f7467c09064f44fc4ab1cf6b78e8855aacccb1 # zizmor: ignore[stale-action-refs]
+        uses: archestra-ai/.github/actions/setup-docker-builder@13f35fa7ee72120bcebe2ad663da42260e629818 # zizmor: ignore[stale-action-refs]
 
       - name: Build the shared runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
