@@ -219,20 +219,14 @@ impl Engine {
                     return Err(TransitionError::SanitizerUnapplicable);
                 }
                 let label = sanitized(registered)?;
-                let facts = branch::crossing_facts(
-                    &views,
-                    child,
-                    LabeledValue::new(canonical.clone(), label),
+                cross(
+                    Vec::new(),
+                    LabeledValue::new(canonical, label),
                     ReturnDerivation::Sanitized {
                         sanitizer: name,
                         raw_digest: RawResultDigest::of(body.as_str().as_bytes()),
                     },
-                    act.pinned().clone(),
-                );
-                Ok(EngineDecision {
-                    append: Some(self.decided(view, return_act(&views, child), facts)?),
-                    follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: canonical }),
-                })
+                )
             }
             Some(ReturnSanitizer::Named(name)) => {
                 let registered = self
@@ -252,20 +246,14 @@ impl Engine {
                             }),
                         });
                     }
-                    let facts = branch::crossing_facts(
-                        &views,
-                        child,
+                    return cross(
+                        Vec::new(),
                         value.clone(),
                         ReturnDerivation::Sanitized {
                             sanitizer: name.clone(),
                             raw_digest: *source,
                         },
-                        act.pinned().clone(),
                     );
-                    return Ok(EngineDecision {
-                        append: Some(self.decided(view, return_act(&views, child), facts)?),
-                        follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
-                    });
                 }
                 if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
                     return Ok(replay(latest));
@@ -281,17 +269,8 @@ impl Engine {
                         })),
                     });
                 };
-                // An undecided mandate is the runtime's ask, never a refusal.
-                let label = registered
-                    .derive_output(&fold, &[], &self.context(act))?
-                    .ok_or(TransitionError::SanitizerUnapplicable)?;
-                if !floor.holds(&label) {
-                    return Err(TransitionError::ReturnBelowFloor {
-                        floor: floor.label().clone(),
-                    });
-                }
-                let value = LabeledValue::new(derived.clone(), label);
-                let mut facts = vec![Fact::CandidateDerived {
+                let value = LabeledValue::new(derived.clone(), sanitized(registered)?);
+                let facts = vec![Fact::CandidateDerived {
                     trajectory: parent.clone(),
                     subject,
                     sanitizer: name.clone(),
@@ -306,20 +285,14 @@ impl Engine {
                 }];
                 // A derivation equal to the submission needs no echo: it crosses now.
                 if derived == body {
-                    facts.extend(branch::crossing_facts(
-                        &views,
-                        child,
+                    return cross(
+                        facts,
                         value,
                         ReturnDerivation::Sanitized {
                             sanitizer: name.clone(),
                             raw_digest: digest,
                         },
-                        act.pinned().clone(),
-                    ));
-                    return Ok(EngineDecision {
-                        append: Some(self.decided(view, return_act(&views, child), facts)?),
-                        follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
-                    });
+                    );
                 }
                 Ok(EngineDecision {
                     append: Some(self.decided(view, return_act(&views, child), facts)?),

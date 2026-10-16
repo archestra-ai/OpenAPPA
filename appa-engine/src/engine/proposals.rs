@@ -153,13 +153,14 @@ impl Engine {
             working.to_mut().fold(fact);
         }
         let admissions = Sequence::advance_of(self, view, &facts);
+        let composing = ComposingBatch {
+            trajectory: &batch.trajectory,
+            id: &batch.id,
+        };
         let composed = compose_batch(
             &self.registry,
             &mut working,
-            ComposingBatch {
-                trajectory: &batch.trajectory,
-                id: &batch.id,
-            },
+            composing,
             &proposals,
             batch.spawn,
             &|views, call| {
@@ -247,11 +248,7 @@ impl Engine {
         require_atoms(act, block_stage)?;
         let mut blocked = Vec::new();
         for (position, call, contract, raw, role) in refused {
-            let subject = crate::basis::SubjectKey::Call {
-                trajectory: batch.trajectory.clone(),
-                batch: batch.id.clone(),
-                position: position as u32,
-            };
+            let subject = composing.subject(position);
             let (block, opened_offers) = self.surface_call_block(
                 &final_views,
                 Opening {
@@ -430,10 +427,9 @@ impl Engine {
         recorded: &[DispatchId],
         act: &ActEvidence,
     ) -> Result<FollowUp, TransitionError> {
-        let subject_at = |position: usize| crate::basis::SubjectKey::Call {
-            trajectory: batch.trajectory.clone(),
-            batch: batch.id.clone(),
-            position: position as u32,
+        let composing = ComposingBatch {
+            trajectory: &batch.trajectory,
+            id: &batch.id,
         };
         // The call each position is about now: the candidate an input hop derived, under the
         // contract its own arguments select and with the pinned evidence that hop consumed,
@@ -442,14 +438,8 @@ impl Engine {
             .iter()
             .enumerate()
             .map(|(position, call)| {
-                let subject = subject_at(position);
-                let pinned = views.candidate_evidence(&subject);
-                act.inherit(pinned)?;
-                let under = self.act_evidence(
-                    act.inheriting(pinned)?,
-                    AudienceEvidence::default(),
-                    act.principal.clone(),
-                )?;
+                let subject = composing.subject(position);
+                let under = act.overlay(views.candidate_evidence(&subject), self.registry.audience())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -474,7 +464,7 @@ impl Engine {
                     });
                 }
                 None => {
-                    let subject = subject_at(position);
+                    let subject = composing.subject(position);
                     // An input hop the agent has since run replaced this proposal, so the call
                     // this position is about now is the candidate, and the check reads its
                     // substitution. Its offers are the ones already pending on
@@ -485,36 +475,19 @@ impl Engine {
                     let stage = views.call_stage(&subject);
                     let role = views.call_role(&subject);
                     match check::evaluate(&contract, views, &candidate, &stage, role, &self.context(under))? {
-                        CheckOutcome::Block(raw) => {
-                            require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw))?;
-                            let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
-                                let block_id = crate::value::BlockId::of_proposal(
-                                    &batch.offer_nonce,
-                                    &batch.trajectory,
-                                    &batch.id,
-                                    position as u32,
-                                    &candidate.digest(),
-                                );
-                                (block_id, Vec::new())
-                            });
-                            blocked.push(Blocked {
-                                block: plan::plan(
-                                    &self.registry,
-                                    views,
-                                    BlockedCall {
-                                        call: &candidate,
-                                        contract: &contract,
-                                        raw: &raw,
-                                        stage: &stage,
-                                        role,
-                                    },
-                                    &self.context(under),
-                                )?,
-                                call: candidate,
-                                block_id,
-                                offers,
-                            });
-                        }
+                        CheckOutcome::Block(raw) => blocked.push(self.blocked_at(
+                            views,
+                            &subject,
+                            &batch.offer_nonce,
+                            BlockedCall {
+                                call: &candidate,
+                                contract: &contract,
+                                raw: &raw,
+                                stage: &stage,
+                                role,
+                            },
+                            under,
+                        )?),
                         CheckOutcome::Allow => match views.subject_dispatch(&subject).cloned() {
                             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                                 released.push(Released {

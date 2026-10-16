@@ -66,13 +66,7 @@ impl Engine {
             {
                 return Err(TransitionError::ObservationMismatch);
             }
-            return Ok(EngineDecision {
-                append: None,
-                follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
-                    admitted: views.admitted_body(dispatch).cloned(),
-                    withheld: withholds_output,
-                }),
-            });
+            return Ok(closed());
         }
         let checkpointed = views.observed_result(dispatch).cloned();
         match (&checkpointed, &observed) {
@@ -123,15 +117,7 @@ impl Engine {
                     }
                     Some(sanitizer) => {
                         let sanitizer = sanitizer.clone();
-                        let derived = report.evidence.iter().find_map(|evidence| match evidence {
-                            Evidence::Sanitizer {
-                                sanitizer: named,
-                                source,
-                                derived,
-                            } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
-                            Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::File { .. } => None,
-                        });
-                        let Some(derived) = derived else {
+                        let Some(derived) = sanitizer_evidence(&report.evidence, &sanitizer, raw_digest) else {
                             let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
                             return Ok(EngineDecision {
                                 append,
@@ -154,13 +140,7 @@ impl Engine {
                             derived.clone(),
                             &self.context(act),
                         )
-                        .map_err(|error| match error {
-                            AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
-                                TransitionError::SanitizerUnapplicable
-                            }
-                            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
-                            other => unreachable!("the outcome path derives what the log already proved: {other}"),
-                        })?;
+                        .map_err(admission_refusal)?;
                         let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
                             return self.admitting_outcome(
                                 view,
@@ -228,23 +208,24 @@ impl Engine {
         })
     }
 
-    /// The remedy menu a confined result's stage offers, with the group requirement raised before
-    /// the menu reads anything.
+    /// The remedy menu a confined result's stage offers under its dispatch's contract, with the
+    /// group requirement raised before the menu reads anything.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn confined_menu(
         &self,
         views: &Views,
-        contract: &ToolAnnotation,
+        dispatch: &DispatchId,
         receiving: &Label,
         label: &Label,
         residual: &Narrowing,
         lineage: &SanitizerLineage,
         act: &ActEvidence,
     ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
+        let contract = self.dispatch_contract(views, dispatch)?;
         let floor = plan::floor_of(&self.registry, views);
         Ok(plan::confined_stage(
             &self.registry,
-            contract,
+            &contract,
             receiving,
             label,
             residual,
@@ -357,16 +338,7 @@ impl Engine {
             .receiving_bound(dispatch)
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
-        let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(
-            views,
-            &contract,
-            &receiving,
-            &value.label,
-            &residual,
-            &lineage,
-            evidence,
-        )?;
+        let stage = self.confined_menu(views, dispatch, &receiving, &value.label, &residual, &lineage, evidence)?;
         let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(
             views,
@@ -426,16 +398,7 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
         let lineage = views.lineage(&subject);
-        let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(
-            views,
-            &contract,
-            &receiving,
-            &value.label,
-            &residual,
-            &lineage,
-            evidence,
-        )?;
+        let stage = self.confined_menu(views, dispatch, &receiving, &value.label, &residual, &lineage, evidence)?;
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(

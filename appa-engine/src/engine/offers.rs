@@ -117,8 +117,7 @@ impl Engine {
             return self.invalidated(view, execution, recorded);
         };
         let lineage = views.lineage(&subject);
-        let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(views, &contract, &receiving, &value.label, &residual, &lineage, act)?;
+        let stage = self.confined_menu(views, dispatch, &receiving, &value.label, &residual, &lineage, act)?;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -343,16 +342,7 @@ impl Engine {
             label,
         };
         let trajectory = &recorded.trajectory;
-        let mut facts = vec![Fact::OfferAccepted {
-            trajectory: trajectory.clone(),
-            offer: execution.offer,
-        }];
-        facts.extend(invalidated_siblings(
-            views,
-            trajectory,
-            &recorded.subject,
-            execution.offer,
-        ));
+        let mut facts = accepted(views, trajectory, &recorded.subject, execution.offer);
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
@@ -416,12 +406,7 @@ impl Engine {
             // The candidate may stand under another contract than the offer was planned on; the
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
-            act.inherit(pinned)?;
-            let under = self.act_evidence(
-                act.inheriting(pinned)?,
-                AudienceEvidence::default(),
-                act.principal.clone(),
-            )?;
+            let under = act.overlay(pinned, self.registry.audience())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.absorb(&under);
             return Ok(match reblocked {
@@ -644,16 +629,7 @@ impl Engine {
             _ => return Err(TransitionError::PlanOutcomeMismatch),
         };
         let trajectory = &recorded.trajectory;
-        let mut facts = vec![Fact::OfferAccepted {
-            trajectory: trajectory.clone(),
-            offer: execution.offer,
-        }];
-        facts.extend(invalidated_siblings(
-            views,
-            trajectory,
-            &recorded.subject,
-            execution.offer,
-        ));
+        let mut facts = accepted(views, trajectory, &recorded.subject, execution.offer);
         let advance = Sequence::advance_of(self, view, &facts);
         let subject = crate::basis::SubjectKey::Approval(execution.offer);
         facts.push(Fact::CallApproved {
@@ -724,10 +700,7 @@ impl Engine {
                     authority: authority.clone(),
                 }),
         );
-        let mut after = view.projection().clone();
-        for fact in &facts {
-            after.fold(fact);
-        }
+        let after = folded(view, &facts);
         let after = after.view(trajectory);
         let advance = Sequence::advance_of(self, view, &facts);
         let role = after.call_role(&recorded.subject);
@@ -768,26 +741,18 @@ fn accepted(
         trajectory: trajectory.clone(),
         offer,
     }];
-    facts.extend(invalidated_siblings(views, trajectory, subject, offer));
+    facts.extend(
+        views
+            .pending_block(subject)
+            .map(|(_, offers)| offers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(sibling, _)| sibling)
+            .filter(|sibling| sibling != &offer)
+            .map(|sibling| Fact::OfferInvalidated {
+                trajectory: trajectory.clone(),
+                offer: sibling,
+            }),
+    );
     facts
-}
-
-fn invalidated_siblings(
-    views: &Views,
-    trajectory: &TrajectoryId,
-    subject: &crate::basis::SubjectKey,
-    spent: crate::value::OfferId,
-) -> Vec<Fact> {
-    views
-        .pending_block(subject)
-        .map(|(_, offers)| offers)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(offer, _)| offer)
-        .filter(|offer| offer != &spent)
-        .map(|offer| Fact::OfferInvalidated {
-            trajectory: trajectory.clone(),
-            offer,
-        })
-        .collect()
 }

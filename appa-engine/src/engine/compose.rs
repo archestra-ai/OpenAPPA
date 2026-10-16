@@ -177,18 +177,10 @@ pub(crate) fn compose_batch<'a>(
                     .is_some_and(|prepared| prepared.return_policy.is_some() == marked)
             });
             let under = match spends.and_then(|offer| views.approval(&offer)) {
-                Some(prepared) => {
-                    act.inherit(&prepared.evidence).map_err(ComposeRefusal::Evidence)?;
-                    let merged = act
-                        .pinned()
-                        .inheriting(&prepared.evidence)
-                        .map_err(ComposeRefusal::Evidence)?;
-                    let expansions = registry
-                        .audience()
-                        .expansions(&merged, act.principal.as_ref())
-                        .map_err(ComposeRefusal::Evidence)?;
-                    std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions, act.principal.clone()))
-                }
+                Some(prepared) => std::borrow::Cow::Owned(
+                    act.overlay(&prepared.evidence, registry.audience())
+                        .map_err(ComposeRefusal::Evidence)?,
+                ),
                 None => std::borrow::Cow::Borrowed(act),
             };
             // The check's own reads surface from its three-valued evaluation below — asking

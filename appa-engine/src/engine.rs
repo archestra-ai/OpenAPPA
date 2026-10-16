@@ -479,15 +479,11 @@ impl Engine {
             return false;
         };
         let views = view.projection().view(&decided.trajectory);
-        (0..decided.proposals.len() as u32).any(|position| {
-            views
-                .pending_block(&crate::basis::SubjectKey::Call {
-                    trajectory: decided.trajectory.clone(),
-                    batch: batch.clone(),
-                    position,
-                })
-                .is_some()
-        })
+        let composing = ComposingBatch {
+            trajectory: &decided.trajectory,
+            id: batch,
+        };
+        (0..decided.proposals.len()).any(|position| views.pending_block(&composing.subject(position)).is_some())
     }
 
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
