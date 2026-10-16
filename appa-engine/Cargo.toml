@@ -14,7 +14,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = "1"
+
+[[bench]]
+name = "decisions"
+harness = false
 
 [lints]
 workspace = true
