@@ -555,6 +555,35 @@ pub enum HookEvent {
     },
 }
 
+/// Which operational fault a [`HookDecision::Refuse`] names: a closed
+/// class a host can route on without reading `detail`. The serde name is
+/// its one spelling, on the wire and in telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalClass {
+    Storage,
+    UntrustedLog,
+    PolicyUnavailable,
+    InventoryRefused,
+    EngineInvariant,
+    Contended,
+    ResolutionDiverged,
+    AnnotationRefused,
+    UndeclaredTool,
+    UndeclaredSpawn,
+    PeerMessage,
+    Principal,
+    OutstandingCall,
+    CallIdReused,
+    TrajectoryEnded,
+    Trajectory,
+    Dispatch,
+    Remedy,
+    /// No prepared fork opens this child: the spawn never took.
+    SpawnNotTaken,
+    Spawn,
+}
+
 /// The runtime's answer to one hook event. The adapter renders each
 /// variant into its harness's wire; it interprets nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -615,14 +644,16 @@ pub enum HookDecision {
         text: String,
     },
     /// The runtime judged nothing for this event because of an
-    /// operational fault it names in `detail`: an annotator or store
-    /// that did not answer, a policy that would not load. Fail the one
+    /// operational fault it classes in `class` and names in `detail`: an
+    /// annotator or store that did not answer, a policy that would not
+    /// load. A host routes on `class`, never on `detail`. Fail the one
     /// event closed — the call does not run, the result is not admitted
     /// — and hand the model `detail` as the runtime's words, never as
     /// policy feedback: nothing was decided and no remedy is offered.
     /// The trajectory stays open; a harness ends it only when a
     /// lifecycle event is refused.
     Refuse {
+        class: RefusalClass,
         detail: String,
     },
 }

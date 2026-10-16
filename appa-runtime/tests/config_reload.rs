@@ -136,7 +136,7 @@ fn allowed(decision: &HookDecision) -> bool {
 /// After a swap removes the declaration, nothing covers `notes`: the refusal is
 /// typed and names the tool.
 fn refused_undeclared(decision: &HookDecision) -> bool {
-    matches!(decision, HookDecision::Refuse { detail } if detail.contains("notes"))
+    matches!(decision, HookDecision::Refuse { detail, .. } if detail.contains("notes"))
 }
 
 #[tokio::test]

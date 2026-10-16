@@ -50,8 +50,9 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
-    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, Review,
-    ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall,
+    RefusalClass, Review, ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind,
+    ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -1239,6 +1240,8 @@ pub struct WireDecision {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<RefusalClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -1255,6 +1258,7 @@ impl WireDecision {
             output: None,
             value: None,
             text: None,
+            class: None,
             detail: None,
         }
     }
@@ -1324,7 +1328,8 @@ impl WireDecision {
                 text: Some(text.clone()),
                 ..Self::bare(DecisionName::Context)
             },
-            HookDecision::Refuse { detail } => Self {
+            HookDecision::Refuse { class, detail } => Self {
+                class: Some(*class),
                 detail: Some(detail.clone()),
                 ..Self::bare(DecisionName::Refuse)
             },
@@ -1341,9 +1346,8 @@ impl WireDecision {
             )));
         }
         let name = self.decision;
-        let required = |field: &str, value: Option<String>| {
-            value.ok_or_else(|| malformed(format!("{name:?} without its {field}")))
-        };
+        let missing = |field: &str| malformed(format!("{name:?} without its {field}"));
+        let required = |field: &str, value: Option<String>| value.ok_or_else(|| missing(field));
         Ok(match name {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
@@ -1396,6 +1400,7 @@ impl WireDecision {
                 text: required("text", self.text)?,
             },
             DecisionName::Refuse => HookDecision::Refuse {
+                class: self.class.ok_or_else(|| missing("class"))?,
                 detail: required("detail", self.detail)?,
             },
         })
@@ -2556,6 +2561,11 @@ mod tests {
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
+                class: RefusalClass::UntrustedLog,
+                detail: "d".to_string(),
+            },
+            HookDecision::Refuse {
+                class: RefusalClass::SpawnNotTaken,
                 detail: "d".to_string(),
             },
         ];
@@ -2581,6 +2591,15 @@ mod tests {
         let valueless: WireDecision =
             serde_json::from_str(r#"{"protocol":1,"decision":"deliver_value"}"#).expect("reads");
         assert!(matches!(valueless.into_decision(), Err(ParseRefusal::Malformed { .. })));
+        let classless: WireDecision =
+            serde_json::from_str(r#"{"protocol":1,"decision":"refuse","detail":"d"}"#).expect("reads");
+        assert!(matches!(classless.into_decision(), Err(ParseRefusal::Malformed { .. })));
+        let classed = serde_json::to_value(WireDecision::of(&HookDecision::Refuse {
+            class: RefusalClass::PolicyUnavailable,
+            detail: "d".to_string(),
+        }))
+        .expect("serializes");
+        assert_eq!(classed["class"], "policy_unavailable");
         let foreign: WireDecision = serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
         assert!(matches!(foreign.into_decision(), Err(ParseRefusal::Malformed { .. })));
     }

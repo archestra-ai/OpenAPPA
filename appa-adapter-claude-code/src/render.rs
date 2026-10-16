@@ -149,7 +149,7 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             }),
             _ => serde_json::json!({}),
         },
-        HookDecision::Refuse { detail } => match replacement(event, &withheld(detail)) {
+        HookDecision::Refuse { detail, .. } => match replacement(event, &withheld(detail)) {
             Some(replacement) => {
                 let mut body = replaced(replacement, None);
                 body["error"] = serde_json::Value::String(detail.clone());
@@ -285,6 +285,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
             ),
@@ -388,6 +389,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
             ),
@@ -602,6 +604,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
             ),
@@ -694,6 +697,7 @@ mod tests {
                 text: "advice".to_string(),
             },
             HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::Storage,
                 detail: "refused".to_string(),
             },
         ];

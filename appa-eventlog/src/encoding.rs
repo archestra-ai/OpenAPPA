@@ -40,10 +40,13 @@ pub(crate) fn encode(facts: &[Fact], host: Option<&HostObservation>) -> Vec<u8> 
     }
 }
 
-/// Which of the two shapes a stored row is, from its first token. A row that is neither —
-/// an older encoding, or bytes this build cannot read — refuses the whole log.
-fn decode(bytes: &[u8]) -> Result<Record, ReadError> {
-    let undecodable = |error: serde_json::Error| ReadError::Undecodable(error.to_string());
+/// Which of the two shapes the stored row at `seq` is, from its first token. A row that is
+/// neither — an older encoding, or bytes this build cannot read — refuses the whole log.
+fn decode(seq: u64, bytes: &[u8]) -> Result<Record, ReadError> {
+    let undecodable = |error: serde_json::Error| ReadError::Undecodable {
+        seq,
+        detail: error.to_string(),
+    };
     match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
         Some(b'[') => serde_json::from_slice(bytes)
             .map(|facts| Record { facts, host: None })
@@ -54,9 +57,10 @@ fn decode(bytes: &[u8]) -> Result<Record, ReadError> {
                 host: Some(row.host),
             })
             .map_err(undecodable),
-        _ => Err(ReadError::Undecodable(
-            "a stored batch is neither an engine batch nor a host record".to_string(),
-        )),
+        _ => Err(ReadError::Undecodable {
+            seq,
+            detail: "it is neither an engine batch nor a host record".to_string(),
+        }),
     }
 }
 
@@ -93,11 +97,12 @@ pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Po
             root: root.as_str().to_string(),
         });
     };
-    match decode(first)?.facts.into_iter().next() {
+    match decode(0, first)?.facts.into_iter().next() {
         Some(Fact::TrajectoryOpened(TrajectoryOpening { policy_file_key, .. })) => Ok(policy_file_key),
-        _ => Err(ReadError::Undecodable(
-            "the log does not open with a TrajectoryOpened record".to_string(),
-        )),
+        _ => Err(ReadError::Undecodable {
+            seq: 0,
+            detail: "the log does not open with a TrajectoryOpened record".to_string(),
+        }),
     }
 }
 
@@ -118,7 +123,7 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
 /// batches are decoded: a batch never changes once it is accepted.
 pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
     for batch in batches {
-        let record = decode(&batch)?;
+        let record = decode(log.basis, &batch)?;
         log.facts.extend(record.facts);
         log.batch_ends.push(log.facts.len());
         if let Some(observation) = record.host {
@@ -217,7 +222,7 @@ mod tests {
 
         let bare = encode(&punctuation(), None);
         assert_eq!(String::from_utf8(bare.clone()).unwrap(), facts);
-        assert!(matches!(decode(&bare), Ok(Record { facts, host: None }) if facts == punctuation()));
+        assert!(matches!(decode(0, &bare), Ok(Record { facts, host: None }) if facts == punctuation()));
 
         for (observation, host) in observations.iter().zip(hosts) {
             let with_facts = encode(&punctuation(), Some(observation));
@@ -226,7 +231,7 @@ mod tests {
                 format!(r#"{{"facts":{facts},"host":{host}}}"#)
             );
             assert!(matches!(
-                decode(&with_facts),
+                decode(0, &with_facts),
                 Ok(Record { facts, host: Some(decoded) }) if facts == punctuation() && &decoded == observation
             ));
             let alone = encode(&[], Some(observation));
@@ -235,7 +240,7 @@ mod tests {
                 format!(r#"{{"facts":[],"host":{host}}}"#)
             );
             assert!(matches!(
-                decode(&alone),
+                decode(0, &alone),
                 Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && &decoded == observation
             ));
         }
@@ -254,19 +259,30 @@ mod tests {
             },
         };
         assert!(matches!(
-            decode(format!(" \n\t{facts}").as_bytes()),
+            decode(0, format!(" \n\t{facts}").as_bytes()),
             Ok(Record { facts, host: None }) if facts == punctuation()
         ));
         assert!(matches!(
-            decode(format!("\r\n {{\"host\":{host}}}").as_bytes()),
+            decode(0, format!("\r\n {{\"host\":{host}}}").as_bytes()),
             Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && decoded == seen
         ));
         for row in [b"".as_slice(), b"   ", br#""text""#, b"42", b"null"] {
             assert!(
-                matches!(decode(row), Err(ReadError::Undecodable(_))),
+                matches!(decode(3, row), Err(ReadError::Undecodable { seq: 3, .. })),
                 "{}",
                 String::from_utf8_lossy(row)
             );
         }
+    }
+
+    /// A batch that does not decode is refused under its own position in the root's log.
+    #[test]
+    fn an_undecodable_batch_is_refused_at_its_position() {
+        let good = encode(&punctuation(), None);
+        let batches = vec![good.clone(), good, b"not json at all".to_vec()];
+        assert!(matches!(
+            decoded(&root(), batches, Vec::new()),
+            Err(ReadError::Undecodable { seq: 2, .. })
+        ));
     }
 }

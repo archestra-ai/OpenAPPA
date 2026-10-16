@@ -456,7 +456,7 @@ impl From<&ReadError> for StoreErrorClass {
         match error {
             ReadError::UnknownRoot { .. } => StoreErrorClass::UnknownRoot,
             ReadError::PolicyFileMissing { .. } => StoreErrorClass::PolicyUnavailable,
-            ReadError::Undecodable(_) => StoreErrorClass::Undecodable,
+            ReadError::Undecodable { .. } => StoreErrorClass::Undecodable,
             ReadError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             ReadError::Postgres(_) => StoreErrorClass::Storage,
@@ -532,8 +532,8 @@ pub enum ReadError {
     UnknownRoot { root: String },
     #[error("the stored policy file {key} is missing")]
     PolicyFileMissing { key: String },
-    #[error("a stored batch does not decode: {0}")]
-    Undecodable(String),
+    #[error("stored batch {seq} does not decode: {detail}")]
+    Undecodable { seq: u64, detail: String },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -1945,7 +1945,7 @@ mod tests {
                 )
                 .expect("the row lands");
             assert!(
-                matches!(store.log(&root()), Err(ReadError::Undecodable(_))),
+                matches!(store.log(&root()), Err(ReadError::Undecodable { seq: 1, .. })),
                 "{}",
                 String::from_utf8_lossy(row)
             );

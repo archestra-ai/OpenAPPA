@@ -595,6 +595,41 @@ impl EventError {
         }
     }
 
+    /// The closed class a host routes this failure on, and the one telemetry counts it under.
+    pub(crate) fn class(&self) -> appa_runtime_api::RefusalClass {
+        use appa_runtime_api::RefusalClass;
+        match self {
+            EventError::Storage(_) => RefusalClass::Storage,
+            EventError::UntrustedLog(_) => RefusalClass::UntrustedLog,
+            EventError::PolicyUnavailable(_) => RefusalClass::PolicyUnavailable,
+            EventError::InventoryRefused(_) => RefusalClass::InventoryRefused,
+            EventError::EngineInvariant(_) | EventError::UnexpectedDecision => RefusalClass::EngineInvariant,
+            EventError::Contended { .. } => RefusalClass::Contended,
+            EventError::ResolutionDiverged { .. } => RefusalClass::ResolutionDiverged,
+            EventError::AnnotationRefused { .. } => RefusalClass::AnnotationRefused,
+            EventError::UndeclaredTool { .. } => RefusalClass::UndeclaredTool,
+            EventError::UndeclaredSpawn { .. } => RefusalClass::UndeclaredSpawn,
+            EventError::PeerMessageTooLarge { .. } => RefusalClass::PeerMessage,
+            EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => RefusalClass::Principal,
+            EventError::CallOutstanding
+            | EventError::SpawnOutstanding
+            | EventError::FanOutOutstanding
+            | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
+            EventError::CallIdReused => RefusalClass::CallIdReused,
+            EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
+            EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => {
+                RefusalClass::Trajectory
+            }
+            EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
+            EventError::UnknownOffer | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
+            EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
+            EventError::NotAChild
+            | EventError::FanOutUnkeyed
+            | EventError::SpawnAmbiguous
+            | EventError::BindingMismatch => RefusalClass::Spawn,
+        }
+    }
+
     /// Whether this failure is the deployment's problem rather than
     /// something the model or the harness can act on. An operational
     /// failure refuses wherever it happens, so the harness fails closed
@@ -1480,7 +1515,7 @@ pub enum RootForkRefusal {
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
-        appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
+        error @ appa_eventlog::ReadError::Undecodable { .. } => EventError::UntrustedLog(error.to_string()),
         error @ appa_eventlog::ReadError::PolicyFileMissing { .. } => EventError::PolicyUnavailable(error.to_string()),
         error => EventError::Storage(error.to_string()),
     }

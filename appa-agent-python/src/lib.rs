@@ -296,7 +296,7 @@ impl SessionInner {
 
     fn event(&self, event: HookEvent) -> Result<HookDecision, String> {
         match self.tokio.block_on(hooks::handle(&self.runtime, event)) {
-            HookDecision::Refuse { detail } => Err(detail),
+            HookDecision::Refuse { detail, .. } => Err(detail),
             decision => Ok(decision),
         }
     }

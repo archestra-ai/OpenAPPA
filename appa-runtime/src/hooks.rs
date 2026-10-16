@@ -44,7 +44,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         Err(error) => {
             let (kind, tool) = hook_shape(&event);
             runtime.record(None, bare_hook(kind, crate::events::HookOutcome::Refused, tool));
-            return (409, wire(&refuse(error.to_string())));
+            return (409, wire(&refuse(error)));
         }
     };
     let root = hook_root(&event).clone();
@@ -298,7 +298,7 @@ fn observed(
 fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
     let (kind, tool) = hook_shape(event);
     runtime.record(Some(root), bare_hook(kind, crate::events::HookOutcome::Refused, tool));
-    (409, wire(&refuse(error.to_string())))
+    (409, wire(&refuse(error)))
 }
 
 /// A call whose arguments name a child of this family is refused before it runs: a
@@ -318,7 +318,7 @@ fn names_a_childs_transcript(
             (200, deny(NAMED_TRANSCRIPT.to_string()))
         }
         Ok(None) => return None,
-        Err(error) => (409, refuse(error.to_string())),
+        Err(error) => (409, refuse(error)),
     };
     let (outcome, offers) = hook_result(&decision);
     runtime.record(
@@ -638,7 +638,7 @@ impl Dispatcher<'_> {
         };
         let launched = match launched {
             Ok(launched) => launched,
-            Err(error) => return refuse(error.to_string()),
+            Err(error) => return refuse(error),
         };
         let root = launched.root().clone();
         let opened = session_principal(principal.as_deref())
@@ -660,7 +660,7 @@ impl Dispatcher<'_> {
             Ok(()) => HookDecision::Context {
                 text: context.join("\n\n"),
             },
-            Err(error) => refuse(error.to_string()),
+            Err(error) => refuse(error),
         }
     }
 
@@ -701,7 +701,7 @@ impl Dispatcher<'_> {
                 )),
                 Err(error) => {
                     tracing::warn!(root = %actor.root.0, %error, "the peer message was neither admitted nor held");
-                    return refuse(error.to_string());
+                    return refuse(error);
                 }
             },
             None => {
@@ -803,7 +803,7 @@ impl Dispatcher<'_> {
                 if let Some(digest) = sent
                     && let Err(error) = self.runtime.record_peer_sent(&actor, digest, opened.clone())
                 {
-                    return refuse(error.to_string());
+                    return refuse(error);
                 }
                 *self.dispatch = Some(opened);
                 vouch_call(self.runtime, &actor, &call);
@@ -931,12 +931,12 @@ impl Dispatcher<'_> {
             .session_with_presentation(&root, &root, self.options.clone())
         {
             Ok(session) => session,
-            Err(error) => return refuse(error.to_string()),
+            Err(error) => return refuse(error),
         };
         match root.start_child(child, spawn) {
             Ok((_, Some(text))) => HookDecision::Context { text },
             Ok((_, None)) => HookDecision::Ack,
-            Err(error) => refuse(error.to_string()),
+            Err(error) => refuse(error),
         }
     }
 
@@ -973,7 +973,7 @@ impl Dispatcher<'_> {
                 }
                 return_decision(said, decision)
             }
-            Err(error) if error.is_operational() => refuse(error.to_string()),
+            Err(error) if error.is_operational() => refuse(error),
             Err(_) if is_withheld_return(said.as_deref()) => HookDecision::Ack,
             Err(error) => block(withheld_return_instruction(&error.to_string())),
         }
@@ -1215,7 +1215,7 @@ enum Refusal {
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.is_operational(), refusal) {
-        (true, _) => refuse(error.to_string()),
+        (true, _) => refuse(error),
         (false, Refusal::Deny) => deny(error.to_string()),
         (false, Refusal::Block) => block(error.to_string()),
     }
@@ -1252,8 +1252,11 @@ fn with_peer_notices(runtime: &Runtime, actor: &Actor, decision: HookDecision) -
     }
 }
 
-fn refuse(detail: String) -> HookDecision {
-    HookDecision::Refuse { detail }
+fn refuse(error: EventError) -> HookDecision {
+    HookDecision::Refuse {
+        class: error.class(),
+        detail: error.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2572,6 +2575,60 @@ mod tests {
             answer.get("error").is_some(),
             "an operational failure renders as a refusal, never as model-facing feedback: {answer}",
         );
+    }
+
+    /// A refusal carries the class of the fault that caused it, so a host routes on the
+    /// class and never on the detail's wording.
+    #[tokio::test]
+    async fn a_refusal_names_the_class_of_its_fault() {
+        use appa_runtime_api::RefusalClass;
+
+        let root = TrajectoryId("cc:s1".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let ls = || HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: crate::api::ProposedCall {
+                tool: "host/claude-code/Bash".to_string(),
+                arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                cwd: None,
+            },
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+        };
+        let started = |runtime: &Runtime| {
+            runtime.create_session(root.clone(), None).expect("a fresh id opens");
+        };
+        let class = |decision: HookDecision| match decision {
+            HookDecision::Refuse { class, .. } => class,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        started(&runtime);
+        runtime.store().corrupt_batch(&root, 0, b"not json at all");
+        assert_eq!(class(handle(&runtime, ls()).await), RefusalClass::UntrustedLog);
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        started(&runtime);
+        runtime.store().forget_policy_files();
+        assert_eq!(class(handle(&runtime, ls()).await), RefusalClass::PolicyUnavailable);
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        started(&runtime);
+        let unprepared = HookEvent::ChildStart {
+            root: root.clone(),
+            child: TrajectoryId("cc:s1:a1".to_string()),
+            spawn: SpawnRef::Binding(appa_runtime_api::SpawnBinding("no-such-fork".to_string())),
+        };
+        assert_eq!(class(handle(&runtime, unprepared).await), RefusalClass::SpawnNotTaken);
     }
 
     #[tokio::test]

@@ -495,7 +495,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
     .await
     {
         HookDecision::Ack => {}
-        HookDecision::Refuse { detail } => {
+        HookDecision::Refuse { detail, .. } => {
             report.unopened = Some(detail);
             return report;
         }
@@ -586,7 +586,7 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
         HookDecision::DenyCall { feedback, offers, .. } => Proposed::Denied { feedback, offers },
-        HookDecision::Refuse { detail } => Proposed::CannotRun(detail),
+        HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }
 }
@@ -604,7 +604,7 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
     };
     match hooks::handle(runtime, event).await {
         HookDecision::Ack | HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => Ok(()),
-        HookDecision::Refuse { detail } => Err(detail),
+        HookDecision::Refuse { detail, .. } => Err(detail),
         HookDecision::Block { reason } => Err(reason),
         other => Err(format!("the result answered {other:?}")),
     }

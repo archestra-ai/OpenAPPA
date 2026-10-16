@@ -564,7 +564,7 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
     ] {
         annotator.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;
-        let HookDecision::Refuse { detail } = decision else {
+        let HookDecision::Refuse { detail, .. } = decision else {
             panic!("an annotation failure is an operational refusal, got {decision:?}");
         };
         assert!(
@@ -1169,7 +1169,7 @@ async fn a_tool_nothing_covers_refuses_the_hook_and_appends_nothing() {
 
     let decision = propose(&runtime, call("wrench", serde_json::json!({}))).await;
     match decision {
-        HookDecision::Refuse { detail } => {
+        HookDecision::Refuse { detail, .. } => {
             assert!(detail.contains("wrench"), "the refusal names the tool: {detail}");
         }
         other => panic!("expected a typed refusal, got {other:?}"),
@@ -1339,7 +1339,7 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
         ),
     );
     let refused = propose(&runtime, fetch("https://d.example")).await;
-    let HookDecision::Refuse { detail } = refused else {
+    let HookDecision::Refuse { detail, .. } = refused else {
         panic!("an out-of-mandate audience is an operational refusal, got {refused:?}");
     };
     assert!(
