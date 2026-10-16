@@ -921,7 +921,7 @@ struct PendingRelease {
     dispatch: DispatchId,
     subject: crate::basis::SubjectKey,
     call: ResolvedCall,
-    prepares_fork: bool,
+    prepares_fork: Option<SpawnKind>,
     evidence: AudienceEvidence,
     next: ReleasePart,
     /// Where the sequence goes once a taken candidate is recorded.
@@ -1094,6 +1094,10 @@ impl<'a> Sequence<'a> {
 
     pub(crate) fn admit(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
         self.member(fact)?;
+        let discharges_approval = matches!(
+            (self.owing, fact),
+            (Some(Owed::Approval(owed)), Fact::CallApproved { offer, .. }) if offer == &owed
+        );
         if let Some(owed) = self.owing {
             match (owed, fact) {
                 (_, Fact::OfferInvalidated { trajectory, offer }) => {
@@ -1181,18 +1185,24 @@ impl<'a> Sequence<'a> {
                 return_policy,
                 basis,
                 evidence,
-            } => self.call_approved(
-                trajectory,
-                offer,
-                call,
-                plan,
-                acceptance,
-                rulings,
-                output,
-                return_policy,
-                basis,
-                evidence,
-            )?,
+            } => {
+                self.call_approved(
+                    trajectory,
+                    offer,
+                    call,
+                    plan,
+                    acceptance,
+                    rulings,
+                    output,
+                    return_policy,
+                    basis,
+                    evidence,
+                )?;
+                // An approval stands only as what its accepted offer owes.
+                if !discharges_approval {
+                    return Err(TransitionRefusal::UnbackedApproval);
+                }
+            }
             Fact::ProposalBatchDecided {
                 trajectory,
                 batch,
@@ -2133,7 +2143,7 @@ impl<'a> Sequence<'a> {
                     .ok_or(TransitionRefusal::UnknownApproval)?
                     .return_policy
                     .clone();
-                match (declared, prepares_fork) {
+                match (declared, prepares_fork.is_some()) {
                     (Some(policy), true) => {
                         self.spawn_policies.insert(dispatch.clone(), policy);
                     }
@@ -2179,14 +2189,16 @@ impl<'a> Sequence<'a> {
                     _ => Obligation::Decided,
                 };
                 // The marked spawn's preparation is the next record; any other release is done.
-                if next.prepares_fork {
+                if next.prepares_fork.is_some() {
                     self.pending.front_mut().expect("the front was read above").next = ReleasePart::Fork;
                 } else {
                     self.pending.pop_front();
                 }
                 Ok(authorized)
             }
-            (ReleasePart::Fork, Fact::ForkPrepared { fork, .. }) if fork == &ForkId::of(&next.dispatch) => {
+            (ReleasePart::Fork, Fact::ForkPrepared { fork, kind, .. })
+                if fork == &ForkId::of(&next.dispatch) && Some(*kind) == next.prepares_fork =>
+            {
                 self.pending.pop_front();
                 Ok(Obligation::Decided)
             }
@@ -2409,7 +2421,7 @@ impl<'a> Sequence<'a> {
                                 dispatch: release.dispatch,
                                 subject: crate::engine::ComposingBatch { trajectory, id: batch }.subject(position),
                                 call: call.clone(),
-                                prepares_fork: release.prepares_fork.is_some(),
+                                prepares_fork: release.prepares_fork,
                                 evidence: release.evidence,
                                 next: match &release.takes {
                                     Some(subject) => ReleasePart::Take(subject.clone()),
@@ -2499,6 +2511,7 @@ impl<'a> Sequence<'a> {
                                 Some(crate::plan::OutputRemedy::Sanitize(name)) => crate::plan::bound_contribution(
                                     self.engine.registry(),
                                     &contract,
+                                    &call.output_label(&contract, &views.current_label()),
                                     name,
                                     &self.context(expansions),
                                 )
@@ -3015,7 +3028,11 @@ impl<'a> Sequence<'a> {
             Some(_) => return Err(TransitionRefusal::ObservationMismatch),
         }
         let from_label = match &predecessor {
-            None => contract.output_label(),
+            None => self
+                .projection
+                .dispatch_call_of(dispatch)
+                .expect("dispatch_contract resolved this dispatch's recorded call")
+                .output_label(&contract, &receiving),
             Some((body, _)) => body.label.clone(),
         };
         let label = match registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)) {
