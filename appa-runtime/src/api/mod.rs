@@ -4632,6 +4632,122 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         claude_config("[policy]\nversion = 2\n")
     }
 
+    /// A proposal of `tool` by `id`, numbered `n` so repeats are distinct calls, answered with its
+    /// result when released. Returns whether it was released.
+    async fn released_call(runtime: &Runtime, id: &TrajectoryId, tool: &str, n: u32) -> bool {
+        let call = ProposedCall {
+            tool: tool.into(),
+            arguments: session::raw(serde_json::json!({ "n": n })),
+            cwd: None,
+        };
+        let session = runtime.session(id, id).unwrap();
+        let decision = session.on_tool_call(call.clone(), false).await;
+        let released = matches!(decision, Ok(ToolCallDecision::Allow { .. }));
+        if released {
+            session
+                .on_tool_result(
+                    call,
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("done".into()),
+                    },
+                )
+                .await
+                .expect("the result is admitted");
+        }
+        released
+    }
+
+    fn notes_policy() -> Config {
+        claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"notes\"\ndelta = {}\n")
+    }
+
+    /// A family the previous version opened keeps its opening policy across a restart under an
+    /// edited policy, while a family that follows the deployment moves to the edit.
+    #[tokio::test]
+    async fn a_pinned_family_keeps_its_opening_policy_across_a_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let pinned = TrajectoryId("opened-by-the-previous-version".into());
+        let following = TrajectoryId("following".into());
+        {
+            let runtime = Runtime::open(notes_policy(), dir.path().join("appa.db"), None).expect("opens");
+            runtime
+                .create_pinned_session(pinned.clone())
+                .expect("the pinned root opens");
+            runtime.create_session(following.clone(), None).expect("the root opens");
+            assert!(released_call(&runtime, &pinned, "notes", 1).await);
+            assert!(released_call(&runtime, &following, "notes", 1).await);
+        }
+        let runtime = Runtime::open(minimal_policy(), dir.path().join("appa.db"), None).expect("reopens");
+        assert!(
+            released_call(&runtime, &pinned, "notes", 2).await,
+            "the pinned family is judged by its opening file"
+        );
+        assert!(
+            !released_call(&runtime, &following, "notes", 2).await,
+            "the following family decides at the head"
+        );
+    }
+
+    /// An independent root fork of a pinned family is pinned to the same file; one of a following
+    /// family follows the deployment.
+    #[tokio::test]
+    async fn a_root_fork_keeps_its_parent_familys_kind() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(notes_policy(), dir.path().join("appa.db"), None).expect("opens");
+        let pinned = TrajectoryId("pinned".into());
+        let following = TrajectoryId("following".into());
+        runtime
+            .create_pinned_session(pinned.clone())
+            .expect("the pinned root opens");
+        runtime.create_session(following.clone(), None).expect("the root opens");
+        let (pinned_fork, following_fork) = (
+            TrajectoryId("pinned-fork".into()),
+            TrajectoryId("following-fork".into()),
+        );
+        runtime
+            .open_root_fork(&pinned, &pinned, &pinned_fork)
+            .expect("the pinned family forks");
+        runtime
+            .open_root_fork(&following, &following, &following_fork)
+            .expect("the following family forks");
+
+        assert!(runtime.reload(minimal_policy()).expect("the edit publishes").changed);
+        assert!(released_call(&runtime, &pinned_fork, "notes", 1).await);
+        assert!(!released_call(&runtime, &following_fork, "notes", 1).await);
+    }
+
+    /// A database the previous version wrote — schema 8, without the deployment tables — with a
+    /// live family upgrades in place when this version opens it: the family continues on its
+    /// opening file, and a new family follows the deployment.
+    #[tokio::test]
+    async fn a_live_family_in_a_database_the_previous_version_wrote_continues() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let pinned = TrajectoryId("opened-by-the-previous-version".into());
+        {
+            let runtime = Runtime::open(notes_policy(), db.clone(), None).expect("opens");
+            runtime
+                .create_pinned_session(pinned.clone())
+                .expect("the pinned root opens");
+            assert!(released_call(&runtime, &pinned, "notes", 1).await);
+        }
+        {
+            let old = rusqlite::Connection::open(&db).expect("the database reopens");
+            old.execute_batch("DROP TABLE deployments; DROP TABLE policy_revisions;")
+                .expect("the tables the previous version lacks drop");
+            old.pragma_update(None, "user_version", 8)
+                .expect("the version moves back");
+        }
+
+        let runtime = Runtime::open(minimal_policy(), db, None).expect("the database upgrades");
+        assert!(released_call(&runtime, &pinned, "notes", 2).await);
+        let following = TrajectoryId("following".into());
+        runtime
+            .create_session(following.clone(), None)
+            .expect("a new root opens");
+        assert!(!released_call(&runtime, &following, "notes", 1).await);
+    }
+
     /// A family the previous version opened stays on the policy file it opened under: a reload
     /// that drops a tool refuses it to every family that follows the deployment, and the pinned
     /// family keeps it, decided as the previous version decides it.

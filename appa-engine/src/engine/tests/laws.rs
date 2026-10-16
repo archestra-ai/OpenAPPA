@@ -128,6 +128,9 @@ mod held_view_law {
             value: bool,
         },
         HostOnly,
+        /// The deployment publishes its next revision: a walk that follows it decides there
+        /// from then on. A walk pinned to a snapshot ignores it.
+        Publish,
     }
 
     fn step() -> impl Strategy<Value = Step> {
@@ -145,6 +148,7 @@ mod held_view_law {
             2 => index().prop_map(|pick| Step::Bind { pick }),
             2 => (index(), any::<bool>()).prop_map(|(pick, value)| Step::Return { pick, value }),
             1 => Just(Step::HostOnly),
+            1 => Just(Step::Publish),
         ]
     }
 
@@ -209,7 +213,11 @@ mod held_view_law {
     /// identities the log's facts surfaced for later steps to pick from.
     struct Walk {
         engine: Engine,
+        /// The engines of the revisions the walk decided at before `engine`'s.
+        earlier: Vec<Engine>,
         log: Vec<Fact>,
+        /// Every batch with the revision that sealed it, as the store holds the log.
+        stamped: Vec<(Option<crate::profile::PolicyRevision>, Vec<Fact>)>,
         batches: u64,
         held: EngineView,
         trajectories: Vec<TrajectoryId>,
@@ -223,14 +231,24 @@ mod held_view_law {
 
     impl Walk {
         fn open() -> Walk {
-            let engine = law_engine();
+            Walk::opened(law_engine())
+        }
+
+        /// A walk whose family follows a deployment, starting at its first revision.
+        fn following() -> Walk {
+            Walk::opened(law_engine().at(DeploymentName::new("law"), PolicyRevision::FIRST))
+        }
+
+        fn opened(engine: Engine) -> Walk {
             let opening = engine
                 .open_trajectory(&traj(), crate::profile::PolicyFileKey::of(b"law"), None)
                 .expect("the opening validates against the empty log");
             let log = opening.into_unsealed();
             let held = engine.view(&traj(), log.clone(), 1).expect("the opening replays");
             Walk {
+                stamped: vec![(engine.revision(), log.clone())],
                 engine,
+                earlier: Vec::new(),
                 log,
                 batches: 1,
                 held,
@@ -245,9 +263,46 @@ mod held_view_law {
         }
 
         fn cold(&self) -> EngineView {
+            if self.engine.revision().is_none() {
+                return self
+                    .engine
+                    .view(&traj(), self.log.clone(), self.batches)
+                    .expect("every prefix the engine sealed replays");
+            }
+            let batches: Vec<StampedBatch<'_>> = self
+                .stamped
+                .iter()
+                .map(|(revision, facts)| StampedBatch {
+                    revision: *revision,
+                    facts,
+                })
+                .collect();
+            let earlier: Vec<&Engine> = self.earlier.iter().collect();
             self.engine
-                .view(&traj(), self.log.clone(), self.batches)
-                .expect("every prefix the engine sealed replays")
+                .replay(&traj(), &batches, &earlier)
+                .expect("every prefix the engines sealed replays across its revisions")
+        }
+
+        /// Move a following walk to its deployment's next revision. No offer opened before the
+        /// publish is current after it: executing one consults nothing.
+        fn publish(&mut self) -> Result<(), TestCaseError> {
+            let Some(revision) = self.engine.revision() else {
+                return Ok(());
+            };
+            let next = law_engine().at(DeploymentName::new("law"), PolicyRevision::new(revision.value() + 1));
+            self.earlier.push(std::mem::replace(&mut self.engine, next));
+            for (trajectory, offer) in &self.offers {
+                let consult = self.engine.offer_consults(&self.held, trajectory, offer);
+                prop_assert!(
+                    matches!(
+                        consult,
+                        Ok(crate::transition::OfferConsult::Stale | crate::transition::OfferConsult::Replay(_))
+                            | Err(_)
+                    ),
+                    "an offer opened before the publish is current after it: {consult:?}"
+                );
+            }
+            Ok(())
         }
 
         fn next_id(&mut self) -> String {
@@ -373,7 +428,7 @@ mod held_view_law {
                         audience: crate::audience::AudienceEvidence::default(),
                     }))
                 }
-                Step::HostOnly => None,
+                Step::HostOnly | Step::Publish => None,
             }
         }
 
@@ -384,6 +439,7 @@ mod held_view_law {
                 .advance(batch)
                 .expect("the batch was sealed at the held view's position");
             self.log.extend(batch.facts().iter().cloned());
+            self.stamped.push((batch.revision(), batch.facts().to_vec()));
             self.batches += 1;
             prop_assert_eq!(&self.held, &self.cold());
             for trajectory in &self.trajectories {
@@ -414,6 +470,9 @@ mod held_view_law {
         }
 
         fn take(&mut self, step: &Step) -> Result<(), TestCaseError> {
+            if let Step::Publish = step {
+                return self.publish();
+            }
             if let Step::HostOnly = step {
                 let before = self.held.position();
                 let empty = self
@@ -444,6 +503,20 @@ mod held_view_law {
             steps in prop::collection::vec(step(), 1..48),
         ) {
             let mut walk = Walk::open();
+            for step in &steps {
+                walk.take(step)?;
+            }
+        }
+
+        /// The same law for a family that follows its deployment while revisions are published:
+        /// the held view, advanced by each batch at the revision that sealed it, equals the cold
+        /// replay that judges every batch under its own revision; and a publish leaves no offer
+        /// current that an earlier revision opened.
+        #[test]
+        fn a_view_advanced_across_published_revisions_is_the_cold_replay_at_every_prefix(
+            steps in prop::collection::vec(step(), 1..48),
+        ) {
+            let mut walk = Walk::following();
             for step in &steps {
                 walk.take(step)?;
             }

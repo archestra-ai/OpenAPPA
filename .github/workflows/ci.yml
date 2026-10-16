@@ -582,6 +582,13 @@ jobs:
           --features appa-eventlog/postgres,appa-eventlog/fault-injection,appa/postgres --locked
           -- --ignored postgres_ a_view_on_a_lease
 
+      # The deployed OpenAPPA revision (the one Archestra pins) and this checkout share one
+      # store, as old and new pods do during a rolling release and after a rollback. Each
+      # version must read, continue and replay what the other wrote; the run exits non-zero on
+      # the first case that does not hold.
+      - name: Mixed-version proof (PostgreSQL)
+        run: cargo run --locked --manifest-path scripts/mixed-version/Cargo.toml
+
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths
   # did not change.
