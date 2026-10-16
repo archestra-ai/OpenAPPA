@@ -133,6 +133,9 @@ pub struct Projection {
     revision: u64,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
+    /// The meet of every label in `local`, per trajectory: the fold is associative,
+    /// commutative and has `top` as identity, so this equals walking the list.
+    local_label: OrdMap<TrajectoryId, Label>,
     effects: Vector<EffectKind>,
     open: OrdSet<DispatchId>,
     reservations: OrdMap<DispatchId, EffectSet>,
@@ -232,6 +235,7 @@ impl Projection {
             revision,
             values: Default::default(),
             local: Default::default(),
+            local_label: Default::default(),
             effects: Default::default(),
             open: Default::default(),
             reservations: Default::default(),
@@ -291,6 +295,7 @@ impl Projection {
             revision: _,
             values,
             local,
+            local_label,
             effects,
             open,
             reservations,
@@ -438,6 +443,10 @@ impl Projection {
             } => {
                 let id = ValueId::new(values.len() as u64);
                 local.entry(trajectory.clone()).or_default().push_back(id);
+                local_label
+                    .entry(trajectory.clone())
+                    .or_insert_with(Label::top)
+                    .fold(&value.label);
                 if let Provenance::ProviderRun {
                     batch,
                     effects: observed,
@@ -630,14 +639,30 @@ impl Projection {
         self.prepared_of(trajectory).map(|prepared| &prepared.snapshot)
     }
 
-    fn basis_sources<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
-        let inherited = self
-            .snapshot_of(trajectory)
-            .map_or(&NO_INHERITED, ForkSnapshot::inherited);
-        inherited
+    fn source(&self, id: ValueId) -> (ValueId, &Label) {
+        (id, self.value_label(id).unwrap_or(&MISSING_SOURCE))
+    }
+
+    /// The ancestor values a fork snapshot froze for this trajectory. Read at every fold rather
+    /// than cached: an id the snapshot names may resolve to no admitted value.
+    fn inherited_sources<'a>(
+        &'a self,
+        trajectory: &'a TrajectoryId,
+    ) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
+        self.snapshot_of(trajectory)
+            .map_or(&NO_INHERITED, ForkSnapshot::inherited)
             .iter()
-            .chain(self.local.get(trajectory).into_iter().flatten())
-            .map(|id| (*id, self.value_label(*id).unwrap_or(&MISSING_SOURCE)))
+            .map(|id| self.source(*id))
+    }
+
+    fn basis_sources<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
+        self.inherited_sources(trajectory).chain(
+            self.local
+                .get(trajectory)
+                .into_iter()
+                .flatten()
+                .map(|id| self.source(*id)),
+        )
     }
 
     fn base_of(&self, trajectory: &TrajectoryId) -> Option<Label> {
@@ -669,6 +694,23 @@ impl Projection {
     }
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
+        let mut fold = self.opened_base(trajectory);
+        if let Some(seed) = self.resumed.get(trajectory) {
+            fold.fold(seed);
+        }
+        for (_, label) in self.inherited_sources(trajectory) {
+            fold.fold(label);
+        }
+        if let Some(local) = self.local_label.get(trajectory) {
+            fold.fold(local);
+        }
+        fold
+    }
+
+    /// The fold by its definition: every basis source walked in order. The reference the cached
+    /// `fold_for` is checked against.
+    #[cfg(test)]
+    fn fold_by_walk(&self, trajectory: &TrajectoryId) -> Label {
         let mut fold = self.opened_base(trajectory);
         if let Some(seed) = self.resumed.get(trajectory) {
             fold.fold(seed);
@@ -1769,5 +1811,118 @@ mod tests {
         assert_eq!(p.value_label(ValueId::new(0)).unwrap().trust, Trust::new(3));
         assert_eq!(p.value_label(ValueId::new(1)).unwrap().trust, Trust::new(1));
         assert!(p.value_label(ValueId::new(2)).is_none());
+    }
+
+    /// Audiences whose meets exercise every canonicalization rule: stable readers merging and
+    /// emptying to nobody, a chain clause a narrower clause drops, a group clause, and a clause
+    /// holding a provider-qualified reader that never merges.
+    fn palette(index: usize) -> Audience {
+        use crate::label::{ChainAudience, Clause, GroupRef};
+        let clause = |chain: Option<ChainAudience>, groups: &[&str], readers: &[&str]| {
+            Clause::new(
+                chain,
+                groups
+                    .iter()
+                    .map(|group| GroupRef::Named(crate::names::GroupName::new(*group))),
+                readers.iter().map(|reader| ReaderId::new(*reader)),
+            )
+            .expect("palette readers are literal")
+        };
+        match index % 7 {
+            0 => Audience::public(),
+            1 => Audience::restricted([ReaderId::new("emp"), ReaderId::new("boss")]),
+            2 => Audience::restricted([ReaderId::new("emp")]),
+            3 => Audience::restricted([ReaderId::new("other")]),
+            4 => Audience::of_clauses([clause(Some(ChainAudience::Internal), &[], &["emp"])]),
+            5 => Audience::of_clauses([clause(Some(ChainAudience::Self_), &["finance"], &[])]),
+            _ => Audience::of_clauses([clause(None, &[], &["slack:U1", "emp"])]),
+        }
+    }
+
+    /// Fold `log` record by record and, after each, hold the cached fold of every opened
+    /// trajectory to the walk over its sources.
+    fn assert_cached_fold_matches_walk(log: &[Fact]) {
+        let mut projection = Projection::empty(0);
+        for (position, fact) in log.iter().enumerate() {
+            projection.fold(fact);
+            for trajectory in [traj("a"), traj("b")] {
+                if projection.is_opened(&trajectory) {
+                    assert_eq!(
+                        projection.fold_for(&trajectory),
+                        projection.fold_by_walk(&trajectory),
+                        "{trajectory:?} after record {position}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A root and a child, each admitting labels that merge, collapse to nobody and drop
+    /// clauses; the child resumed with a seed, and inheriting a source that dangles until the log
+    /// grows past it.
+    #[test]
+    fn the_cached_label_fold_equals_the_walk_over_every_source() {
+        let first = labeled(3, palette(1));
+        let ghost = labeled(2, palette(5));
+        let mut log = vec![
+            opened("a"),
+            admit("a", first.clone()),
+            admit("a", labeled(2, palette(4))),
+        ];
+        log.extend(fork_pair(
+            "a",
+            "b",
+            ForkSnapshot::freeze(
+                base(),
+                [(ValueId::new(0), &first.label), (ValueId::new(9), &ghost.label)],
+            ),
+        ));
+        log.extend([
+            admit("b", labeled(3, palette(2))),
+            admit("b", labeled(1, palette(6))),
+            Fact::Boundary {
+                trajectory: traj("b"),
+                kind: BoundaryKind::Resume {
+                    seed: Label::new(Trust::new(2), palette(5)),
+                },
+            },
+            admit("a", labeled(3, palette(3))),
+            admit("b", labeled(2, palette(1))),
+            Fact::Boundary {
+                trajectory: traj("b"),
+                kind: BoundaryKind::Resume {
+                    seed: Label::new(Trust::new(3), palette(0)),
+                },
+            },
+        ]);
+        log.extend((0..6).map(|index| admit("a", labeled(3, palette(index)))));
+        assert_cached_fold_matches_walk(&log);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_cached_label_fold_equals_the_walk_on_generated_logs(
+            records in proptest::collection::vec((0u8..3, 0u8..4, 0usize..7), 0..40),
+        ) {
+            let inherited = labeled(3, palette(1));
+            let mut log = vec![opened("a")];
+            log.extend(fork_pair(
+                "a",
+                "b",
+                ForkSnapshot::freeze(base(), [(ValueId::new(1), &inherited.label), (ValueId::new(4), &inherited.label)]),
+            ));
+            log.extend(records.into_iter().map(|(kind, trust, audience)| {
+                let label = Label::new(Trust::new(trust), palette(audience));
+                match kind {
+                    0 => admit("a", LabeledValue::new(ValueBody::new("body"), label)),
+                    1 => admit("b", LabeledValue::new(ValueBody::new("body"), label)),
+                    _ => Fact::Boundary {
+                        trajectory: traj("b"),
+                        kind: BoundaryKind::Resume { seed: label },
+                    },
+                }
+            }));
+            assert_cached_fold_matches_walk(&log);
+        }
     }
 }
