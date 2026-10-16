@@ -142,8 +142,6 @@ pub struct Projection {
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
     receiving_bounds: BTreeMap<DispatchId, Label>,
-    /// The narrowing accepted at the check of each dispatch released under an acceptance.
-    accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
     dispatch_evidence: BTreeMap<DispatchId, AudienceEvidence>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
@@ -219,7 +217,6 @@ impl Projection {
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
-            accepted_narrowings: BTreeMap::new(),
             dispatch_evidence: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
@@ -274,7 +271,6 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
-            accepted_narrowings,
             dispatch_evidence,
             subject_dispatches,
             observations,
@@ -511,12 +507,7 @@ impl Projection {
                         CloseOutcome::Indeterminate => {}
                     }
                 }
-                Fact::Acceptance {
-                    dispatch, narrowing, ..
-                } => {
-                    accepted_narrowings.insert(dispatch.clone(), narrowing.clone());
-                }
-                Fact::Ruling { .. } => {}
+                Fact::Acceptance { .. } | Fact::Ruling { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -891,15 +882,6 @@ impl Views<'_> {
             Provenance::ToolResult { dispatch: opened } if opened == dispatch => value.body.as_ref(),
             _ => None,
         })
-    }
-
-    /// Does this value belong to the scoped trajectory? Read by the block feedback that names a
-    /// value's producing tool: a value this branch did not admit itself stays id-only.
-    pub fn owns_value(&self, id: ValueId) -> bool {
-        usize::try_from(id.index())
-            .ok()
-            .and_then(|i| self.projection.values.get(i))
-            .is_some_and(|value| &value.trajectory == self.trajectory)
     }
 
     pub(crate) fn bound_child_of(&self, fork: &ForkId) -> Option<&TrajectoryId> {

@@ -977,7 +977,7 @@ pub(crate) struct Sequence<'a> {
     projection: Projection,
     pending: std::collections::VecDeque<PendingRelease>,
     remedies: BTreeMap<DispatchId, Remedy>,
-    derived: BTreeMap<DispatchId, Derived>,
+    derived: BTreeMap<DispatchId, crate::value::LabeledValue>,
     candidate_accepted: BTreeMap<DispatchId, Narrowing>,
     admitted: BTreeSet<DispatchId>,
     /// Crossings recorded and not yet admitted into the parent, and merges not yet made: a
@@ -1031,10 +1031,6 @@ struct MenuDebt {
     menu: Vec<crate::plan::ExecutableRemedyPlan>,
     offered: BTreeSet<crate::plan::PlanId>,
     evidence: AudienceEvidence,
-}
-
-enum Derived {
-    Sanitized(crate::value::LabeledValue),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1872,14 +1868,11 @@ impl<'a> Sequence<'a> {
             return Ok(());
         }
         let own_act = self.settles_its_own_declaration(fact, obligation);
-        if !self
+        let belongs = self
             .declared
             .as_ref()
-            .is_some_and(|open| belongs_to(self, &open.act, fact))
-        {
-            return Ok(());
-        }
-        let Some(declaration) = self.declared.as_mut() else {
+            .is_some_and(|open| belongs_to(self, &open.act, fact));
+        let Some(declaration) = self.declared.as_mut().filter(|_| belongs) else {
             return Ok(());
         };
         if implied.family {
@@ -2626,7 +2619,7 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
                 let expected = match self.derived.remove(dispatch) {
-                    Some(Derived::Sanitized(candidate)) => {
+                    Some(candidate) => {
                         if value != &candidate {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
@@ -3053,7 +3046,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         if residual.is_none() {
-            self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
+            self.derived.insert(dispatch.clone(), value.clone());
         }
         if let Some(pinned) = views.dispatch_evidence(dispatch) {
             self.audit_inherit(pinned)?;
