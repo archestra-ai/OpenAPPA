@@ -512,7 +512,9 @@ impl Engine {
         parent: &TrajectoryId,
         fork: &crate::value::ForkId,
     ) -> Option<ReturnPolicy> {
-        view.views(parent)?.prepared_return_policy(fork).cloned()
+        view.views(parent)?
+            .prepared_fork(fork)
+            .map(|prepared| prepared.return_policy.clone())
     }
 
     /// The value `child` crossed most recently: a stop or a spawn result repeating it replays
@@ -582,13 +584,14 @@ impl Engine {
                         .prepared_fork(fork)
                         .is_some_and(|prepared| prepared.kind == crate::transition::SpawnKind::Single)
             })
-            .filter(|fork| projection.bound_child(fork).is_none() && projection.is_dispatch_open(fork.dispatch()))
+            .filter(|fork| projection.bound_child(fork).is_none())
             .filter(|fork| {
                 let parent = &projection
                     .prepared_fork(fork)
                     .expect("prepared_forks enumerates only prepared forks")
                     .parent;
-                !projection.view(parent).has_ended(parent)
+                let views = projection.view(parent);
+                views.is_open(fork.dispatch()) && !views.has_ended(parent)
             })
             .cloned()
             .collect()
@@ -820,9 +823,7 @@ fn substituted_call(
 /// The view's projection with `facts` folded in, for a decision that reads its own records.
 fn folded(view: &EngineView, facts: &[Fact]) -> Projection {
     let mut after = view.projection().clone();
-    for fact in facts {
-        after.fold(fact);
-    }
+    after.fold_all(facts);
     after
 }
 

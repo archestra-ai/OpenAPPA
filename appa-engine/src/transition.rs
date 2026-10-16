@@ -714,9 +714,7 @@ impl EngineView {
                 batch: batch.basis(),
             });
         }
-        for fact in batch.facts() {
-            self.projection.fold(fact);
-        }
+        self.projection.fold_all(batch.facts());
         self.projection.set_revision(batch.basis() + 1);
         Ok(())
     }
@@ -2403,6 +2401,7 @@ impl<'a> Sequence<'a> {
         // a decision elsewhere would be a second act under one identity.
         if self
             .projection
+            .view(trajectory)
             .provider_admissions(batch)
             .next()
             .is_some_and(|(admitted, ..)| admitted != trajectory)

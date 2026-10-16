@@ -341,9 +341,7 @@ pub(crate) fn compose_batch<'a>(
             }
         };
         if position + 1 < proposals.len() || refused {
-            for fact in &release.facts {
-                working.to_mut().fold(fact);
-            }
+            working.to_mut().fold_all(&release.facts);
         }
         composed.push(Some(release));
     }

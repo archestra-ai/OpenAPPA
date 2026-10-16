@@ -545,6 +545,6 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
 
 fn prepared_fork(views: &Views, dispatch: &DispatchId) -> Option<ForkId> {
     let fork = ForkId::of(dispatch);
-    (views.is_prepared(&fork) && views.bound_child_of(&fork).is_none() && !views.dispatch_failed(dispatch))
+    (views.prepared_fork(&fork).is_some() && views.bound_child(&fork).is_none() && !views.dispatch_failed(dispatch))
         .then_some(fork)
 }

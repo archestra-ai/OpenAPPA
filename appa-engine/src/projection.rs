@@ -216,6 +216,16 @@ fn proposal_of<'a>(
         .flatten()
 }
 
+fn end_offer(
+    offers: &mut BTreeMap<crate::value::OfferId, RecordedOffer>,
+    offer: &crate::value::OfferId,
+    end: OfferEnd,
+) {
+    if let Some(open) = offers.get_mut(offer) {
+        open.end = Some(end);
+    }
+}
+
 impl Projection {
     pub(crate) fn empty(revision: u64) -> Self {
         Projection {
@@ -259,10 +269,14 @@ impl Projection {
     #[cfg(test)]
     pub(crate) fn build(log: &[Fact], revision: u64) -> Self {
         let mut projection = Projection::empty(revision);
-        for fact in log {
-            projection.fold(fact);
-        }
+        projection.fold_all(log);
         projection
+    }
+
+    pub(crate) fn fold_all(&mut self, facts: &[Fact]) {
+        for fact in facts {
+            self.fold(fact);
+        }
     }
 
     pub(crate) fn set_revision(&mut self, revision: u64) {
@@ -307,313 +321,289 @@ impl Projection {
             approvals,
             versions,
         } = self;
-        {
-            match fact {
-                Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
-                    trajectory,
-                    profile,
-                    forked_from,
-                    principal: opened_for,
-                    ..
-                }) => {
-                    let mut starting = profile.starting_label().clone();
-                    // A root opened as a fork starts where its parent stood: the parent's label
-                    // folds into the base every later admission folds onto, and the parent
-                    // family's effects and the parent's denials hold here from the first record.
-                    // So do the parent family's unsettled reservations, which nothing here can
-                    // settle.
-                    if let Some(origin) = forked_from {
-                        starting.fold(&origin.label);
-                        effects.extend(origin.effects.iter().cloned());
-                        *origin_reservations = origin.reservations.clone();
-                        if !origin.denials.is_empty() {
-                            denials.insert(trajectory.clone(), origin.denials.clone());
-                        }
-                    }
-                    assert!(
-                        opening.is_none(),
-                        "the validator admits one opening per family log, as its first record"
-                    );
-                    *opening = Some((trajectory.clone(), starting));
-                    *principal = opened_for.clone();
-                }
-                Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
-                Fact::OfferOpened {
-                    trajectory,
-                    offer,
-                    block,
-                    call,
-                    subject,
-                    plan,
-                    basis,
-                    evidence,
-                    ..
-                } => {
-                    offers.insert(
-                        *offer,
-                        RecordedOffer {
-                            trajectory: trajectory.clone(),
-                            block: *block,
-                            call: *call,
-                            subject: subject.clone(),
-                            plan: plan.clone(),
-                            basis: *basis,
-                            evidence: evidence.clone(),
-                            end: None,
-                        },
-                    );
-                }
-                Fact::OfferAccepted { offer, .. } => {
-                    if let Some(open) = offers.get_mut(offer) {
-                        open.end = Some(OfferEnd::Accepted);
+        match fact {
+            Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
+                trajectory,
+                profile,
+                forked_from,
+                principal: opened_for,
+                ..
+            }) => {
+                let mut starting = profile.starting_label().clone();
+                // A root opened as a fork starts where its parent stood: the parent's label
+                // folds into the base every later admission folds onto, and the parent
+                // family's effects and the parent's denials hold here from the first record.
+                // So do the parent family's unsettled reservations, which nothing here can
+                // settle.
+                if let Some(origin) = forked_from {
+                    starting.fold(&origin.label);
+                    effects.extend(origin.effects.iter().cloned());
+                    *origin_reservations = origin.reservations.clone();
+                    if !origin.denials.is_empty() {
+                        denials.insert(trajectory.clone(), origin.denials.clone());
                     }
                 }
-                Fact::OfferDenied { offer, authority, .. } => {
-                    if let Some(open) = offers.get_mut(offer) {
-                        open.end = Some(OfferEnd::Denied(authority.clone()));
-                    }
-                }
-                Fact::OfferInvalidated { offer, .. } => {
-                    if let Some(open) = offers.get_mut(offer) {
-                        open.end = Some(OfferEnd::Invalidated);
-                    }
-                }
-                // Both only advance their subject, which the prepended `BasisAdvanced` applies:
-                // the record they spend falls out of "current" by that alone.
-                Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {
-                }
-                Fact::CallApproved {
-                    trajectory,
-                    offer,
-                    call,
-                    plan,
-                    acceptance,
-                    rulings,
-                    output,
-                    return_policy,
-                    basis,
-                    evidence,
-                } => {
-                    approvals.insert(
-                        *offer,
-                        PreparedApproval {
-                            trajectory: trajectory.clone(),
-                            call: call.clone(),
-                            plan: *plan,
-                            acceptance: acceptance.clone(),
-                            rulings: rulings.clone(),
-                            output: output.clone(),
-                            return_policy: return_policy.clone(),
-                            basis: *basis,
-                            evidence: evidence.clone(),
-                        },
-                    );
-                }
-                Fact::ProposalBatchDecided {
-                    trajectory,
-                    batch,
-                    proposals,
-                    spawn,
-                    released,
-                    evidence,
-                } => {
-                    decided.insert(
-                        batch.clone(),
-                        DecidedBatch {
-                            trajectory: trajectory.clone(),
-                            payload: CanonicalDigest::of_batch(proposals, *spawn),
-                            proposals: proposals.clone(),
-                            spawn: *spawn,
-                            released: released.clone(),
-                            evidence: evidence.clone(),
-                        },
-                    );
-                }
-                Fact::ValueAdmitted {
-                    trajectory,
-                    value,
-                    provenance,
-                } => {
-                    let id = ValueId::new(values.len() as u64);
-                    local.entry(trajectory.clone()).or_default().push(id);
-                    if let Provenance::ProviderRun {
-                        batch,
-                        effects: observed,
-                        ..
-                    } = provenance
-                    {
-                        admissions.entry(batch.clone()).or_default().push(id);
-                        effects.extend(observed.iter().cloned());
-                    }
-                    values.push(AdmittedValue {
-                        trajectory: trajectory.clone(),
-                        label: value.label.clone(),
-                        provenance: provenance.clone(),
-                        body: match provenance {
-                            Provenance::ToolResult { .. } | Provenance::ProviderRun { .. } => Some(value.body.clone()),
-                            Provenance::ChildReturn { .. } => None,
-                        },
-                    });
-                    if let Provenance::ToolResult { dispatch } = provenance {
-                        candidates.remove(&SubjectKey::ConfinedResult(dispatch.clone()));
-                    }
-                }
-                Fact::DispatchOpened {
-                    trajectory,
-                    dispatch,
-                    tool,
-                    declaration,
-                    arguments,
-                    receiving,
-                    proposed_effects,
-                    annotation,
-                    file_basis,
-                    subject,
-                    evidence,
-                    proposed_label: _,
-                } => {
-                    dispatch_calls.insert(
-                        dispatch.clone(),
-                        opened_call(tool, *declaration, arguments, annotation, file_basis),
-                    );
-                    receiving_bounds.insert(dispatch.clone(), receiving.clone());
-                    dispatch_evidence.insert(dispatch.clone(), evidence.clone());
-                    subject_dispatches.insert(subject.clone(), dispatch.clone());
-                    open.insert(dispatch.clone());
-                    reservations.insert(dispatch.clone(), proposed_effects.clone());
-                    *occurrences.entry((trajectory.clone(), *dispatch.digest())).or_insert(0) += 1;
-                }
-                Fact::DispatchSucceeded {
-                    dispatch,
-                    effects: committed,
-                    observed,
-                    ..
-                } => {
-                    observations.insert(dispatch.clone(), observed.clone());
-                    reservations.remove(dispatch);
-                    effects.extend(committed.iter().cloned());
-                }
-                Fact::DispatchClosed { dispatch, outcome, .. } => {
-                    open.remove(dispatch);
-                    closed.insert(
-                        dispatch.clone(),
-                        match outcome {
-                            CloseOutcome::Success { .. } => CloseKind::Success,
-                            CloseOutcome::Failure => CloseKind::Failure,
-                            CloseOutcome::FailureWithBody { observed } => CloseKind::FailureWithBody(*observed),
-                            CloseOutcome::Indeterminate => CloseKind::Indeterminate,
-                        },
-                    );
-                    match outcome {
-                        CloseOutcome::Success { effects: committed } => {
-                            reservations.remove(dispatch);
-                            effects.extend(committed.iter().cloned());
-                        }
-                        CloseOutcome::Failure => {
-                            reservations.remove(dispatch);
-                        }
-                        CloseOutcome::FailureWithBody { .. } => {
-                            reservations.remove(dispatch);
-                        }
-                        CloseOutcome::Indeterminate => {}
-                    }
-                }
-                Fact::Acceptance { .. } | Fact::Ruling { .. } => {}
-                Fact::Denial {
-                    trajectory,
-                    digest,
-                    authority,
-                } => {
-                    denials
-                        .entry(trajectory.clone())
-                        .or_default()
-                        .entry(*digest)
-                        .or_default()
-                        .insert(authority.clone());
-                }
-                Fact::OutputSanitizerBound {
-                    dispatch, sanitizer, ..
-                } => {
-                    bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
-                }
-                Fact::OutputWithheld { dispatch, .. } => {
-                    withheld_outputs.insert(dispatch.clone());
-                }
-                Fact::CandidateDerived {
-                    trajectory,
-                    subject,
-                    derived,
-                    lineage,
-                    evidence,
-                    ..
-                } => {
-                    candidates.insert(
-                        subject.clone(),
-                        RecordedCandidate {
-                            derived: derived.clone(),
-                            lineage: lineage.clone(),
-                            evidence: match derived {
-                                DerivedCandidate::Call { .. } => evidence.clone(),
-                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => {
-                                    AudienceEvidence::default()
-                                }
-                            },
-                            // The derivation's own advance is prepended, so this reads the
-                            // generation the subject stands at once the derivation has landed.
-                            generation: versions.basis_for(trajectory, subject).subject,
-                        },
-                    );
-                }
-                // The spawn's release prepared this fork; the child that binds it comes later.
-                Fact::ForkPrepared {
-                    trajectory,
-                    fork,
-                    snapshot,
-                    return_policy,
-                    kind,
-                } => {
-                    prepared.insert(
-                        fork.clone(),
-                        PreparedFork {
-                            parent: trajectory.clone(),
-                            snapshot: snapshot.clone(),
-                            return_policy: return_policy.clone(),
-                            kind: *kind,
-                            denials: denials.get(trajectory).cloned().unwrap_or_default(),
-                        },
-                    );
-                }
-                Fact::ForkOpened { trajectory, fork } => {
-                    if let Some(preparation) = prepared.get(fork) {
-                        bound.insert(fork.clone(), trajectory.clone());
-                        fork_of.insert(trajectory.clone(), fork.clone());
-                        if !preparation.denials.is_empty() {
-                            denials.insert(trajectory.clone(), preparation.denials.clone());
-                        }
-                    }
-                }
-                Fact::ChildReturn { id, value, .. } => {
-                    child_returns.push(ReturnedChild {
-                        id: id.clone(),
-                        value: value.clone(),
-                    });
-                    *returns_by.entry(id.child().clone()).or_insert(0) += 1;
-                    resumed_since_return.remove(id.child());
-                    candidates.remove(&SubjectKey::Return(id.clone()));
-                }
-                Fact::Boundary { trajectory, kind } => match kind {
-                    BoundaryKind::Merge { .. } => {}
-                    BoundaryKind::VoidReturn => {
-                        ended.insert(trajectory.clone());
-                    }
-                    BoundaryKind::Resume { seed } => {
-                        resumed.insert(trajectory.clone(), seed.clone());
-                        resumed_since_return.insert(trajectory.clone());
-                        let occurrence = returns_by.get(trajectory).copied().unwrap_or(0);
-                        candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
-                    }
-                },
+                assert!(
+                    opening.is_none(),
+                    "the validator admits one opening per family log, as its first record"
+                );
+                *opening = Some((trajectory.clone(), starting));
+                *principal = opened_for.clone();
             }
+            Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
+            Fact::OfferOpened {
+                trajectory,
+                offer,
+                block,
+                call,
+                subject,
+                plan,
+                basis,
+                evidence,
+                ..
+            } => {
+                offers.insert(
+                    *offer,
+                    RecordedOffer {
+                        trajectory: trajectory.clone(),
+                        block: *block,
+                        call: *call,
+                        subject: subject.clone(),
+                        plan: plan.clone(),
+                        basis: *basis,
+                        evidence: evidence.clone(),
+                        end: None,
+                    },
+                );
+            }
+            Fact::OfferAccepted { offer, .. } => end_offer(offers, offer, OfferEnd::Accepted),
+            Fact::OfferDenied { offer, authority, .. } => end_offer(offers, offer, OfferEnd::Denied(authority.clone())),
+            Fact::OfferInvalidated { offer, .. } => end_offer(offers, offer, OfferEnd::Invalidated),
+            // Both only advance their subject, which the prepended `BasisAdvanced` applies:
+            // the record they spend falls out of "current" by that alone.
+            Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
+            Fact::CallApproved {
+                trajectory,
+                offer,
+                call,
+                plan,
+                acceptance,
+                rulings,
+                output,
+                return_policy,
+                basis,
+                evidence,
+            } => {
+                approvals.insert(
+                    *offer,
+                    PreparedApproval {
+                        trajectory: trajectory.clone(),
+                        call: call.clone(),
+                        plan: *plan,
+                        acceptance: acceptance.clone(),
+                        rulings: rulings.clone(),
+                        output: output.clone(),
+                        return_policy: return_policy.clone(),
+                        basis: *basis,
+                        evidence: evidence.clone(),
+                    },
+                );
+            }
+            Fact::ProposalBatchDecided {
+                trajectory,
+                batch,
+                proposals,
+                spawn,
+                released,
+                evidence,
+            } => {
+                decided.insert(
+                    batch.clone(),
+                    DecidedBatch {
+                        trajectory: trajectory.clone(),
+                        payload: CanonicalDigest::of_batch(proposals, *spawn),
+                        proposals: proposals.clone(),
+                        spawn: *spawn,
+                        released: released.clone(),
+                        evidence: evidence.clone(),
+                    },
+                );
+            }
+            Fact::ValueAdmitted {
+                trajectory,
+                value,
+                provenance,
+            } => {
+                let id = ValueId::new(values.len() as u64);
+                local.entry(trajectory.clone()).or_default().push(id);
+                if let Provenance::ProviderRun {
+                    batch,
+                    effects: observed,
+                    ..
+                } = provenance
+                {
+                    admissions.entry(batch.clone()).or_default().push(id);
+                    effects.extend(observed.iter().cloned());
+                }
+                values.push(AdmittedValue {
+                    trajectory: trajectory.clone(),
+                    label: value.label.clone(),
+                    provenance: provenance.clone(),
+                    body: match provenance {
+                        Provenance::ToolResult { .. } | Provenance::ProviderRun { .. } => Some(value.body.clone()),
+                        Provenance::ChildReturn { .. } => None,
+                    },
+                });
+                if let Provenance::ToolResult { dispatch } = provenance {
+                    candidates.remove(&SubjectKey::ConfinedResult(dispatch.clone()));
+                }
+            }
+            Fact::DispatchOpened {
+                trajectory,
+                dispatch,
+                tool,
+                declaration,
+                arguments,
+                receiving,
+                proposed_effects,
+                annotation,
+                file_basis,
+                subject,
+                evidence,
+                proposed_label: _,
+            } => {
+                dispatch_calls.insert(
+                    dispatch.clone(),
+                    opened_call(tool, *declaration, arguments, annotation, file_basis),
+                );
+                receiving_bounds.insert(dispatch.clone(), receiving.clone());
+                dispatch_evidence.insert(dispatch.clone(), evidence.clone());
+                subject_dispatches.insert(subject.clone(), dispatch.clone());
+                open.insert(dispatch.clone());
+                reservations.insert(dispatch.clone(), proposed_effects.clone());
+                *occurrences.entry((trajectory.clone(), *dispatch.digest())).or_insert(0) += 1;
+            }
+            Fact::DispatchSucceeded {
+                dispatch,
+                effects: committed,
+                observed,
+                ..
+            } => {
+                observations.insert(dispatch.clone(), observed.clone());
+                reservations.remove(dispatch);
+                effects.extend(committed.iter().cloned());
+            }
+            Fact::DispatchClosed { dispatch, outcome, .. } => {
+                open.remove(dispatch);
+                if outcome.settles_reservation() {
+                    reservations.remove(dispatch);
+                }
+                let kind = match outcome {
+                    CloseOutcome::Success { effects: committed } => {
+                        effects.extend(committed.iter().cloned());
+                        CloseKind::Success
+                    }
+                    CloseOutcome::Failure => CloseKind::Failure,
+                    CloseOutcome::FailureWithBody { observed } => CloseKind::FailureWithBody(*observed),
+                    CloseOutcome::Indeterminate => CloseKind::Indeterminate,
+                };
+                closed.insert(dispatch.clone(), kind);
+            }
+            Fact::Acceptance { .. } | Fact::Ruling { .. } => {}
+            Fact::Denial {
+                trajectory,
+                digest,
+                authority,
+            } => {
+                denials
+                    .entry(trajectory.clone())
+                    .or_default()
+                    .entry(*digest)
+                    .or_default()
+                    .insert(authority.clone());
+            }
+            Fact::OutputSanitizerBound {
+                dispatch, sanitizer, ..
+            } => {
+                bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
+            }
+            Fact::OutputWithheld { dispatch, .. } => {
+                withheld_outputs.insert(dispatch.clone());
+            }
+            Fact::CandidateDerived {
+                trajectory,
+                subject,
+                derived,
+                lineage,
+                evidence,
+                ..
+            } => {
+                candidates.insert(
+                    subject.clone(),
+                    RecordedCandidate {
+                        derived: derived.clone(),
+                        lineage: lineage.clone(),
+                        evidence: match derived {
+                            DerivedCandidate::Call { .. } => evidence.clone(),
+                            DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => {
+                                AudienceEvidence::default()
+                            }
+                        },
+                        // The derivation's own advance is prepended, so this reads the
+                        // generation the subject stands at once the derivation has landed.
+                        generation: versions.basis_for(trajectory, subject).subject,
+                    },
+                );
+            }
+            // The spawn's release prepared this fork; the child that binds it comes later.
+            Fact::ForkPrepared {
+                trajectory,
+                fork,
+                snapshot,
+                return_policy,
+                kind,
+            } => {
+                prepared.insert(
+                    fork.clone(),
+                    PreparedFork {
+                        parent: trajectory.clone(),
+                        snapshot: snapshot.clone(),
+                        return_policy: return_policy.clone(),
+                        kind: *kind,
+                        denials: denials.get(trajectory).cloned().unwrap_or_default(),
+                    },
+                );
+            }
+            Fact::ForkOpened { trajectory, fork } => {
+                if let Some(preparation) = prepared.get(fork) {
+                    bound.insert(fork.clone(), trajectory.clone());
+                    fork_of.insert(trajectory.clone(), fork.clone());
+                    if !preparation.denials.is_empty() {
+                        denials.insert(trajectory.clone(), preparation.denials.clone());
+                    }
+                }
+            }
+            Fact::ChildReturn { id, value, .. } => {
+                child_returns.push(ReturnedChild {
+                    id: id.clone(),
+                    value: value.clone(),
+                });
+                *returns_by.entry(id.child().clone()).or_insert(0) += 1;
+                resumed_since_return.remove(id.child());
+                candidates.remove(&SubjectKey::Return(id.clone()));
+            }
+            Fact::Boundary { trajectory, kind } => match kind {
+                BoundaryKind::Merge { .. } => {}
+                BoundaryKind::VoidReturn => {
+                    ended.insert(trajectory.clone());
+                }
+                BoundaryKind::Resume { seed } => {
+                    resumed.insert(trajectory.clone(), seed.clone());
+                    resumed_since_return.insert(trajectory.clone());
+                    let occurrence = returns_by.get(trajectory).copied().unwrap_or(0);
+                    candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
+                }
+            },
         }
     }
 
@@ -621,18 +611,20 @@ impl Projection {
         self.revision
     }
 
+    fn value(&self, id: ValueId) -> Option<&AdmittedValue> {
+        usize::try_from(id.index()).ok().and_then(|i| self.values.get(i))
+    }
+
     pub(crate) fn value_label(&self, id: ValueId) -> Option<&Label> {
-        usize::try_from(id.index())
-            .ok()
-            .and_then(|i| self.values.get(i))
-            .map(|v| &v.label)
+        self.value(id).map(|v| &v.label)
+    }
+
+    fn prepared_of(&self, child: &TrajectoryId) -> Option<&PreparedFork> {
+        self.fork_of.get(child).and_then(|fork| self.prepared.get(fork))
     }
 
     fn snapshot_of(&self, trajectory: &TrajectoryId) -> Option<&ForkSnapshot> {
-        self.fork_of
-            .get(trajectory)
-            .and_then(|fork| self.prepared.get(fork))
-            .map(|prepared| &prepared.snapshot)
+        self.prepared_of(trajectory).map(|prepared| &prepared.snapshot)
     }
 
     fn basis_sources<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
@@ -693,10 +685,6 @@ impl Projection {
         before.combine(label) != before
     }
 
-    fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
-        ForkSnapshot::freeze(self.opened_base(trajectory), self.basis_sources(trajectory))
-    }
-
     /// What an independent conversation-root fork of this trajectory carries over, at this
     /// revision: the trajectory's current label, the family's committed effects, the kinds the
     /// family's unsettled reservations hold (those its own origin carried among them), and the
@@ -727,29 +715,6 @@ impl Projection {
         self.principal.as_ref()
     }
 
-    /// The exposed provider-run results one batch identity admitted, in order: the
-    /// trajectory, tool and body of each. See [`Views::provider_admissions`].
-    pub(crate) fn provider_admissions(
-        &self,
-        batch: &crate::transition::ProposalBatchId,
-    ) -> impl ExactSizeIterator<Item = (&TrajectoryId, &crate::value::ToolName, &crate::value::ValueBody)> {
-        self.admissions
-            .get(batch)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|id| {
-                let value = &self.values[id.index() as usize];
-                let Provenance::ProviderRun { tool, .. } = &value.provenance else {
-                    unreachable!("the admissions index holds only provider-run admissions")
-                };
-                let body = value
-                    .body
-                    .as_ref()
-                    .expect("a provider-run admission retains the body a repeat is compared against");
-                (&value.trajectory, tool, body)
-            })
-    }
-
     pub(crate) fn admitted_dispatches(&self) -> BTreeSet<DispatchId> {
         self.values
             .iter()
@@ -772,10 +737,6 @@ impl Projection {
 
     pub(crate) fn prepared_forks(&self) -> impl Iterator<Item = &ForkId> {
         self.prepared.keys()
-    }
-
-    pub(crate) fn is_dispatch_open(&self, dispatch: &DispatchId) -> bool {
-        self.open.contains(dispatch)
     }
 
     /// Nothing the family started is still in flight or owed: no open dispatch (a spawn in
@@ -832,9 +793,7 @@ impl Views<'_> {
             .projection
             .offers
             .values()
-            .filter(|open| {
-                &open.trajectory == self.trajectory && open.end.is_none() && open.basis == self.basis_for(&open.subject)
-            })
+            .filter(|open| &open.trajectory == self.trajectory && self.is_pending(open))
             .filter_map(|open| self.proposed_call(&open.subject));
         let approved = self
             .projection
@@ -861,10 +820,7 @@ impl Views<'_> {
     /// The provenance of an admitted value by id — what an Authority reviews for a referenced
     /// argument. Read-only audit context; the fold never consumes it.
     pub fn value_provenance(&self, id: ValueId) -> Option<&Provenance> {
-        usize::try_from(id.index())
-            .ok()
-            .and_then(|i| self.projection.values.get(i))
-            .map(|value| &value.provenance)
+        self.projection.value(id).map(|value| &value.provenance)
     }
 
     /// The tool an opened dispatch called — the originating tool behind a
@@ -895,14 +851,14 @@ impl Views<'_> {
         })
     }
 
-    pub(crate) fn bound_child_of(&self, fork: &ForkId) -> Option<&TrajectoryId> {
+    pub(crate) fn bound_child(&self, fork: &ForkId) -> Option<&TrajectoryId> {
         self.projection.bound_child(fork)
     }
 
-    /// Was this fork prepared by a release in this family? Family-global, like the fork
-    /// itself; the scoping trajectory plays no part.
-    pub(crate) fn is_prepared(&self, fork: &ForkId) -> bool {
-        self.projection.prepared_fork(fork).is_some()
+    /// The fork a release in this family prepared, before or after a child is bound to it.
+    /// Family-global, like the fork itself; the scoping trajectory plays no part.
+    pub(crate) fn prepared_fork(&self, fork: &ForkId) -> Option<&PreparedFork> {
+        self.projection.prepared_fork(fork)
     }
 
     /// What this batch identity is already bound to, family-wide: the trajectory that decided it
@@ -930,7 +886,25 @@ impl Views<'_> {
         &self,
         batch: &crate::transition::ProposalBatchId,
     ) -> impl ExactSizeIterator<Item = (&TrajectoryId, &crate::value::ToolName, &crate::value::ValueBody)> {
-        self.projection.provider_admissions(batch)
+        self.projection
+            .admissions
+            .get(batch)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(|id| {
+                let value = self
+                    .projection
+                    .value(*id)
+                    .expect("the admissions index holds only admitted values");
+                let Provenance::ProviderRun { tool, .. } = &value.provenance else {
+                    unreachable!("the admissions index holds only provider-run admissions")
+                };
+                let body = value
+                    .body
+                    .as_ref()
+                    .expect("a provider-run admission retains the body a repeat is compared against");
+                (&value.trajectory, tool, body)
+            })
     }
 
     /// The offers of one subject that are still **pending**: opened, and recording the basis that
@@ -941,12 +915,11 @@ impl Views<'_> {
         &self,
         subject: &crate::basis::SubjectKey,
     ) -> Option<(crate::value::BlockId, Vec<(crate::value::OfferId, crate::plan::PlanId)>)> {
-        let current = self.basis_for(subject);
         let pending: Vec<_> = self
             .projection
             .offers
             .iter()
-            .filter(|(_, open)| &open.subject == subject && open.basis == current && open.end.is_none())
+            .filter(|(_, open)| &open.subject == subject && self.is_pending(open))
             .collect();
         let block = pending.first().map(|(_, open)| open.block)?;
         let mut offers: Vec<_> = pending.into_iter().map(|(id, open)| (*id, open.plan.id)).collect();
@@ -967,12 +940,17 @@ impl Views<'_> {
             .filter(|(_, open)| {
                 &open.trajectory == self.trajectory
                     && &open.call == call
-                    && open.end.is_none()
-                    && open.basis == self.basis_for(&open.subject)
+                    && self.is_pending(open)
                     && open.plan.names_authority(authority)
             })
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Is this offer still pending: opened, not ended, and recording the basis its subject stands
+    /// at now?
+    fn is_pending(&self, open: &RecordedOffer) -> bool {
+        open.end.is_none() && open.basis == self.basis_for(&open.subject)
     }
 
     pub(crate) fn approval(&self, offer: &crate::value::OfferId) -> Option<&PreparedApproval> {
@@ -1057,7 +1035,10 @@ impl Views<'_> {
     /// The snapshot a fork of this branch freezes — the parent-side basis the spawn
     /// release pins.
     pub(crate) fn freeze_basis(&self) -> ForkSnapshot {
-        self.projection.freeze_basis(self.trajectory)
+        ForkSnapshot::freeze(
+            self.projection.opened_base(self.trajectory),
+            self.projection.basis_sources(self.trajectory),
+        )
     }
 
     /// The branch's current label: the fold of every value admitted to this
@@ -1074,20 +1055,14 @@ impl Views<'_> {
     }
 
     pub fn parent_of(&self, child: &TrajectoryId) -> Option<&TrajectoryId> {
-        self.projection
-            .fork_of
-            .get(child)
-            .and_then(|fork| self.projection.prepared.get(fork))
-            .map(|prepared| &prepared.parent)
+        self.projection.prepared_of(child).map(|prepared| &prepared.parent)
     }
 
     /// The child's immutable fork return policy — the binding every `submit_result` crossing is
     /// derived from. `None` for a trajectory that was never forked.
     pub(crate) fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
         self.projection
-            .fork_of
-            .get(child)
-            .and_then(|fork| self.projection.prepared.get(fork))
+            .prepared_of(child)
             .map(|prepared| &prepared.return_policy)
     }
 
@@ -1117,14 +1092,6 @@ impl Views<'_> {
     /// How many values `child` has already returned — the occurrence its next crossing mints.
     pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
         self.projection.returns_by.get(child).copied().unwrap_or(0)
-    }
-
-    /// The return policy a fork this trajectory prepared carries, before a child is bound to it.
-    pub(crate) fn prepared_return_policy(&self, fork: &ForkId) -> Option<&ReturnPolicy> {
-        self.projection
-            .prepared
-            .get(fork)
-            .map(|prepared| &prepared.return_policy)
     }
 
     /// Has this branch ended its errand by its void terminal? A value crossing ends nothing:

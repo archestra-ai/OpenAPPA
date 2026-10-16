@@ -299,6 +299,17 @@ pub enum CloseOutcome {
     Indeterminate,
 }
 
+impl CloseOutcome {
+    /// Does this close release the dispatch's effect reservation? Only an indeterminate close
+    /// keeps it: the call may have executed.
+    pub(crate) fn settles_reservation(&self) -> bool {
+        match self {
+            CloseOutcome::Success { .. } | CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => true,
+            CloseOutcome::Indeterminate => false,
+        }
+    }
+}
+
 /// The fields that open a root trajectory family.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrajectoryOpening {
