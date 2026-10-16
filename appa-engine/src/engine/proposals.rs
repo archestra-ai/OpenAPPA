@@ -470,38 +470,22 @@ impl Engine {
                     // substitution. Its offers are the ones already pending on
                     // the same subject, which is why the two must be reported together.
                     let (candidate, under) = &standing[position];
-                    let candidate = (*candidate).clone();
-                    let contract = self.validated_contract(&candidate)?;
-                    let stage = views.call_stage(&subject);
-                    let role = views.call_role(&subject);
-                    match check::evaluate(&contract, views, &candidate, &stage, role, &self.context(under))? {
-                        CheckOutcome::Block(raw) => blocked.push(self.blocked_at(
-                            views,
-                            &subject,
-                            &batch.offer_nonce,
-                            BlockedCall {
-                                call: &candidate,
-                                contract: &contract,
-                                raw: &raw,
-                                stage: &stage,
-                                role,
-                            },
-                            under,
-                        )?),
-                        CheckOutcome::Allow => match views.subject_dispatch(&subject).cloned() {
+                    match self.recheck(views, &subject, &batch.offer_nonce, (*candidate).clone(), under)? {
+                        Recheck::Blocked(block) => blocked.push(*block),
+                        Recheck::Clear(candidate) => match views.subject_dispatch(&subject).cloned() {
                             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                                 released.push(Released {
                                     dispatch,
-                                    call: candidate,
+                                    call: *candidate,
                                     fork: None,
                                 });
                             }
                             Some(dispatch) => settled.push(Settled {
                                 outcome: settled_outcome(views, &dispatch),
                                 dispatch,
-                                call: candidate,
+                                call: *candidate,
                             }),
-                            None => spent.push(candidate),
+                            None => spent.push(*candidate),
                         },
                     }
                 }

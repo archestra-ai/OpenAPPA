@@ -86,6 +86,12 @@ struct Opening<'a> {
     subject: &'a crate::basis::SubjectKey,
 }
 
+/// What a re-checked call subject stands at now: blocked, or clear with the call it is about.
+enum Recheck {
+    Blocked(Box<Blocked>),
+    Clear(Box<ResolvedCall>),
+}
+
 impl Engine {
     /// The one validated constructor: policy and declaration validate together in one
     /// load — the structural registry lints and provider-run split, the profile-exact planner-cap
@@ -699,27 +705,45 @@ impl Engine {
         .expect("engine test plans read no undecided symbolic audience"))
     }
 
-    /// The block a re-checked call subject stands under: its plans against current state, with
-    /// the offers already pending on the subject, or none under the block id `nonce` derives.
-    fn blocked_at(
+    /// Re-check the call a subject is about against current state, at the subject's stage and
+    /// role. A block answers with its plans and the offers already pending on the subject, or
+    /// none under the block id `nonce` derives.
+    fn recheck(
         &self,
         views: &Views,
         subject: &crate::basis::SubjectKey,
         nonce: &crate::value::OfferNonce,
-        blocked: BlockedCall<'_>,
+        call: ResolvedCall,
         act: &ActEvidence,
-    ) -> Result<Blocked, TransitionError> {
-        require_atoms(act, plan::block_atoms(&self.registry, blocked.contract, blocked.raw))?;
-        let call = blocked.call;
+    ) -> Result<Recheck, TransitionError> {
+        let contract = self.validated_contract(&call)?;
+        let stage = views.call_stage(subject);
+        let role = views.call_role(subject);
+        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, role, &self.context(act))?
+        else {
+            return Ok(Recheck::Clear(Box::new(call)));
+        };
+        require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
         let (block_id, offers) = views
             .pending_block(subject)
-            .unwrap_or_else(|| (proposal_block(nonce, subject, call), Vec::new()));
-        Ok(Blocked {
-            block: plan::plan(&self.registry, views, blocked, &self.context(act))?,
-            call: call.clone(),
+            .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        Ok(Recheck::Blocked(Box::new(Blocked {
+            block: plan::plan(
+                &self.registry,
+                views,
+                BlockedCall {
+                    call: &call,
+                    contract: &contract,
+                    raw: &raw,
+                    stage: &stage,
+                    role,
+                },
+                &self.context(act),
+            )?,
+            call,
             block_id,
             offers,
-        })
+        })))
     }
 
     fn dispatch_contract<'c>(

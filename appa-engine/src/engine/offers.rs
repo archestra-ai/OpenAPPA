@@ -410,7 +410,7 @@ impl Engine {
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.absorb(&under);
             return Ok(match reblocked {
-                Some(block) => OfferFollowUp::Substituted { block: Box::new(block) },
+                Some(block) => OfferFollowUp::Substituted { block },
                 None => OfferFollowUp::Invalidated,
             });
         }
@@ -497,7 +497,7 @@ impl Engine {
                 if recorded_authority == authority =>
             {
                 match self.reblocked(views, recorded, execution, act)? {
-                    Some(block) => OfferFollowUp::Denied { block: Box::new(block) },
+                    Some(block) => OfferFollowUp::Denied { block },
                     None => OfferFollowUp::Invalidated,
                 }
             }
@@ -541,28 +541,14 @@ impl Engine {
         recorded: &crate::projection::RecordedOffer,
         execution: &OfferExecution,
         act: &ActEvidence,
-    ) -> Result<Option<Blocked>, TransitionError> {
+    ) -> Result<Option<Box<Blocked>>, TransitionError> {
         let call = self.offer_call(views, recorded);
-        let contract = self.validated_contract(&call)?;
-        let stage = views.call_stage(&recorded.subject);
-        let role = views.call_role(&recorded.subject);
-        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, role, &self.context(act))?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(self.blocked_at(
-            views,
-            &recorded.subject,
-            &execution.offer_nonce,
-            BlockedCall {
-                call: &call,
-                contract: &contract,
-                raw: &raw,
-                stage: &stage,
-                role,
+        Ok(
+            match self.recheck(views, &recorded.subject, &execution.offer_nonce, call, act)? {
+                Recheck::Blocked(block) => Some(block),
+                Recheck::Clear(_) => None,
             },
-            act,
-        )?))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
