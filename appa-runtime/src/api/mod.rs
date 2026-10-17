@@ -1200,6 +1200,10 @@ struct Pinned {
 /// engine.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RevisionKey {
+    /// The line a revision engine decides for. A cached engine carries its line and revision, and
+    /// a family's opening is judged against both, so two lines that published the same bytes at
+    /// the same revision number never share one engine. `None` for a snapshot engine.
+    line: Option<String>,
     file: String,
     revision: Option<u64>,
     inventory: Option<String>,
@@ -1634,6 +1638,7 @@ impl Inner {
         }
         self.compiled(
             RevisionKey {
+                line: None,
                 file: key,
                 revision: None,
                 inventory: None,
@@ -1660,6 +1665,7 @@ impl Inner {
             .policy_key(line, stamp)
             .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
         let key = RevisionKey {
+            line: Some(line.to_string()),
             file: file.as_str().to_string(),
             revision: Some(revision),
             inventory: inventory.map(inventory_digest),
@@ -1681,6 +1687,7 @@ impl Inner {
         inventory: &appa_runtime_api::inventory::ToolInventory,
     ) -> Result<Arc<RuntimeEngine>, EventError> {
         let key = RevisionKey {
+            line: deployment.revision().map(|_| self.line().to_string()),
             file: deployment.key(),
             revision: deployment.revision(),
             inventory: Some(inventory_digest(inventory)),

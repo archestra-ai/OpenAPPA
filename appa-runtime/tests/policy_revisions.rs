@@ -327,6 +327,37 @@ async fn a_view_pinned_behind_its_lines_head_refuses_until_its_host_pins_the_hea
     );
 }
 
+/// Two lines that publish the same bytes at the same revision numbers keep their own engines: a
+/// compiled engine carries its line, and a family's opening is judged against it, so the second
+/// line's families decide after a publish, and fork, exactly as the first line's do.
+#[tokio::test]
+async fn lines_publishing_the_same_bytes_keep_their_own_engines() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let base = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime = open(dir.path(), &base);
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let second = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    for tenant in ["tenant-a", "tenant-b"] {
+        let line = DeploymentName::new(tenant);
+        let pin = |text: &str| {
+            let prepared = runtime
+                .prepare_deployment(write(dir.path(), text))
+                .expect("the tenant's policy loads");
+            Arc::new(runtime.pinned(&runtime.publish(&line, &prepared).expect("the policy publishes")))
+        };
+        let head = pin(&first);
+        let id = root(&format!("{tenant}-conversation"));
+        start(&head, &id).await;
+        assert!(allowed(&propose(&head, &id, call("notes", 1), "c1").await));
+
+        let head = pin(&second);
+        let decided = propose(&head, &id, call("fetch", 2), "c2").await;
+        assert!(allowed(&decided), "{tenant}: {decided:?}");
+        let forked = head.open_root_fork(&id, &id, &root(&format!("{tenant}-fork")));
+        assert!(forked.is_ok(), "{tenant}: {forked:?}");
+    }
+}
+
 /// A runtime restarted under a later policy replays a family across the revisions that decided
 /// it, without those revisions' externals: an earlier revision only replays and consults nothing.
 #[tokio::test]
