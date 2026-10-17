@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.35.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.34.0...v0.35.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runtime:** carry a typed refusal class on Refuse ([#681](https://github.com/archestra-ai/OpenAPPA/issues/681))
+* **policy:** [aliases] table with host namespace aliases ([#666](https://github.com/archestra-ai/OpenAPPA/issues/666))
+
+### Features
+
+* **annotators:** one label guide for every annotator ([#644](https://github.com/archestra-ai/OpenAPPA/issues/644)) ([5f3f6b9](https://github.com/archestra-ai/OpenAPPA/commit/5f3f6b952bc794b3633128e67e578371521a906f))
+* **engine:** a void return declaration for marked spawns ([#665](https://github.com/archestra-ai/OpenAPPA/issues/665)) ([679bf7c](https://github.com/archestra-ai/OpenAPPA/commit/679bf7c8e199cdf7b5ea48f4c90ff760eb331a0f))
+* **eventlog:** encrypt embedded PostgreSQL trajectory content ([#658](https://github.com/archestra-ai/OpenAPPA/issues/658)) ([2b8f242](https://github.com/archestra-ai/OpenAPPA/commit/2b8f242d867a3b4ddedc3d79d5c8bba410661299))
+* **opencode:** add guided first-run setup ([#645](https://github.com/archestra-ai/OpenAPPA/issues/645)) ([3fa2958](https://github.com/archestra-ai/OpenAPPA/commit/3fa29585728ce651f1596da04582f40a38f7356a))
+* **opencode:** install AppenCode without a source checkout ([#656](https://github.com/archestra-ai/OpenAPPA/issues/656)) ([4f5a4b9](https://github.com/archestra-ai/OpenAPPA/commit/4f5a4b91f63ff2109710411c95c2b68852ca4d0b))
+* **opencode:** support Cloudflare, Notion, and GitHub batteries ([#661](https://github.com/archestra-ai/OpenAPPA/issues/661)) ([6759a45](https://github.com/archestra-ai/OpenAPPA/commit/6759a45b7162a3011132bd94831b53233fd11e11))
+* **policy:** [aliases] table with host namespace aliases ([#666](https://github.com/archestra-ai/OpenAPPA/issues/666)) ([cd3c4a9](https://github.com/archestra-ai/OpenAPPA/commit/cd3c4a9a661f516b78250d4b2e0751ae8f4be205))
+* **replay:** appa/do_something asks what the trajectory allows without naming a tool ([9d63a7d](https://github.com/archestra-ai/OpenAPPA/commit/9d63a7db27c16bb77b19454998f5c48364323c69))
+* **replay:** appa/do_something checks what the trajectory allows without naming a tool ([#670](https://github.com/archestra-ai/OpenAPPA/issues/670)) ([9d63a7d](https://github.com/archestra-ai/OpenAPPA/commit/9d63a7db27c16bb77b19454998f5c48364323c69))
+* **runtime:** attribute archestra consults to their trajectory ([#664](https://github.com/archestra-ai/OpenAPPA/issues/664)) ([3024eba](https://github.com/archestra-ai/OpenAPPA/commit/3024eba8d2e948894fcfd4ffebda7bc2566ad51c))
+* **runtime:** carry a typed refusal class on Refuse ([#681](https://github.com/archestra-ai/OpenAPPA/issues/681)) ([88a41d0](https://github.com/archestra-ai/OpenAPPA/commit/88a41d01c7df20bea357caffb12439d55561c242))
+* **runtime:** open a host's replay deployment under its adapter ([#673](https://github.com/archestra-ai/OpenAPPA/issues/673)) ([6ca466f](https://github.com/archestra-ai/OpenAPPA/commit/6ca466fea5fdc59930b66e145ec987a3ecea88ef))
+* **runtime:** opt-in session principal on the hook wire for kagent ([#654](https://github.com/archestra-ai/OpenAPPA/issues/654)) ([a4d88ca](https://github.com/archestra-ai/OpenAPPA/commit/a4d88ca9f22c9e70460ea1c020db55438ef9fb45))
+* **runtime:** point blocked agents at yell from every block ([#659](https://github.com/archestra-ai/OpenAPPA/issues/659)) ([5b55395](https://github.com/archestra-ai/OpenAPPA/commit/5b55395fc52690bdc3556b4361ef509d3c84b030))
+
+
+### Bug Fixes
+
+* **bench:** count block records only; log what a fork returns to its parent ([#642](https://github.com/archestra-ai/OpenAPPA/issues/642)) ([275b443](https://github.com/archestra-ai/OpenAPPA/commit/275b443f92a94b520f5bc0b54ba58f5cf3e7b4d0))
+* **engine:** keep file labels through output sanitizers; refuse forged approvals and fork kinds ([#668](https://github.com/archestra-ai/OpenAPPA/issues/668)) ([bcf66ee](https://github.com/archestra-ai/OpenAPPA/commit/bcf66ee96cc5069835fbc37d919b0a15b8f5e309))
+* **engine:** recognize the policy identity an earlier engine recorded ([#655](https://github.com/archestra-ai/OpenAPPA/issues/655)) ([dd2f4de](https://github.com/archestra-ai/OpenAPPA/commit/dd2f4decf05baf24e4c5546519f5c257336d8e35))
+* **engine:** release at the default stage when staged derivations block; withhold failure bodies past a bound sanitizer ([#675](https://github.com/archestra-ai/OpenAPPA/issues/675)) ([04d7a2e](https://github.com/archestra-ai/OpenAPPA/commit/04d7a2e63ccedcc814384be9c3d300bc7c098783))
+* **huggingface:** resolve cached tokens on Windows ([#572](https://github.com/archestra-ai/OpenAPPA/issues/572)) ([0f49da4](https://github.com/archestra-ai/OpenAPPA/commit/0f49da4c2ed9192be7c6c1ca2b8c911b47c582fa))
+* **kagent:** despell whole spellings glued to following text ([#569](https://github.com/archestra-ai/OpenAPPA/issues/569)) ([5d228b0](https://github.com/archestra-ai/OpenAPPA/commit/5d228b0f700c6853d407ab603ca8a404ccd43d8e))
+* **kagent:** ship the empty host-members roster the GitHub battery's multi-user target names ([#679](https://github.com/archestra-ai/OpenAPPA/issues/679)) ([45d922b](https://github.com/archestra-ai/OpenAPPA/commit/45d922b8a783f64de9c2dde3a1fab5604a498ddf))
+* **opencode:** wait for MCP discovery before protected prompts ([#660](https://github.com/archestra-ai/OpenAPPA/issues/660)) ([f395bcb](https://github.com/archestra-ai/OpenAPPA/commit/f395bcbd080284afb06a0ec4c3d1c6aa197ccb86))
+* **runtime:** forward a signal that arrives before Claude Code's pid is known ([#678](https://github.com/archestra-ai/OpenAPPA/issues/678)) ([a6af88a](https://github.com/archestra-ai/OpenAPPA/commit/a6af88a17da61de00008609fa29ab83dcd3215b4))
+* **runtime:** say what a narrowing does to recipient checks and returns ([#646](https://github.com/archestra-ai/OpenAPPA/issues/646)) ([5c12f5c](https://github.com/archestra-ai/OpenAPPA/commit/5c12f5c3ac8bc6ba58a26a4e9fbe6ba764be4529))
+* verify marketplace digests against one committed snapshot ([#657](https://github.com/archestra-ai/OpenAPPA/issues/657)) ([375c638](https://github.com/archestra-ai/OpenAPPA/commit/375c6382af4bb0008b0049742dcec5ed3ed9a3bb))
+
+
+### Performance Improvements
+
+* **engine:** scan only unspent approvals ([#682](https://github.com/archestra-ai/OpenAPPA/issues/682)) ([6329042](https://github.com/archestra-ai/OpenAPPA/commit/63290423cfac02c39674ec86c064b7f7f5479334))
+* **engine:** share projection state and cache trajectory labels ([#671](https://github.com/archestra-ai/OpenAPPA/issues/671)) ([804dd5c](https://github.com/archestra-ai/OpenAPPA/commit/804dd5cfe8bf39bb20ae99f570e76a74beeff668))
+
+
+### Dependencies
+
+* bump actions/download-artifact from 8.0.1 to 8.0.2 ([#649](https://github.com/archestra-ai/OpenAPPA/issues/649)) ([75df281](https://github.com/archestra-ai/OpenAPPA/commit/75df2817f09e0760438174a12921ae45bf04e35f))
+* bump actions/upload-artifact from 7.0.1 to 7.0.2 ([#648](https://github.com/archestra-ai/OpenAPPA/issues/648)) ([7d67411](https://github.com/archestra-ai/OpenAPPA/commit/7d6741178e3568c5ed00ae8753397b3b6d639404))
+* bump helm/kind-action from 1.15.0 to 1.15.1 ([#650](https://github.com/archestra-ai/OpenAPPA/issues/650)) ([870be8e](https://github.com/archestra-ai/OpenAPPA/commit/870be8ed4a16037434cae47fc8dcc96597171615))
+* bump jsonschema from 0.57.0 to 0.58.6 ([#600](https://github.com/archestra-ai/OpenAPPA/issues/600)) ([95a24f8](https://github.com/archestra-ai/OpenAPPA/commit/95a24f8e3ef08f69bd2b3530bcb2e765eaec6f15))
+* **corp-systems:** bump rmcp to 3.x, dropping vulnerable 1.8.0 ([#651](https://github.com/archestra-ai/OpenAPPA/issues/651)) ([3df7d35](https://github.com/archestra-ai/OpenAPPA/commit/3df7d35b502d3527f73505bcff4751c0e437fd49))
+* upgrade lockfiles for security alerts ([#653](https://github.com/archestra-ai/OpenAPPA/issues/653)) ([4e6b66f](https://github.com/archestra-ai/OpenAPPA/commit/4e6b66f8a344d3b8010c9a38e96c5f1dd1aa71d2))
+* upgrade lockfiles to patched versions for open Dependabot alerts ([4e6b66f](https://github.com/archestra-ai/OpenAPPA/commit/4e6b66f8a344d3b8010c9a38e96c5f1dd1aa71d2))
+
+
+### Code Refactoring
+
+* **engine:** split admission, decisions, and tests by concern ([#669](https://github.com/archestra-ai/OpenAPPA/issues/669)) ([139bb20](https://github.com/archestra-ai/OpenAPPA/commit/139bb204d421a210ceb2c4b75a7b85a4f1c9dd46))
+
 ## [0.34.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.33.0...v0.34.0) (2026-10-14)
 
 
