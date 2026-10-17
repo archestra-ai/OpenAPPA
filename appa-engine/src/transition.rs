@@ -970,7 +970,6 @@ pub(crate) struct Sequence<'a> {
     remedies: BTreeMap<DispatchId, Remedy>,
     derived: BTreeMap<DispatchId, crate::value::LabeledValue>,
     candidate_accepted: BTreeMap<DispatchId, Narrowing>,
-    admitted: BTreeSet<DispatchId>,
     /// Crossings recorded and not yet admitted into the parent, and merges not yet made: a
     /// crossing ends the child, so a log that records one without folding it into the parent
     /// would leave the parent reading a label the crossing never restricted.
@@ -1067,7 +1066,6 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
-            admitted: BTreeSet::new(),
             crossed: BTreeMap::new(),
             spawn_policies: BTreeMap::new(),
             declared: None,
@@ -1091,7 +1089,6 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
-            admitted: view.projection().admitted_dispatches(),
             crossed: BTreeMap::new(),
             spawn_policies: BTreeMap::new(),
             declared: None,
@@ -2702,7 +2699,7 @@ impl<'a> Sequence<'a> {
                 if !views.closed_successfully(dispatch) && !views.failed_with_body(dispatch) {
                     return Err(TransitionRefusal::DispatchNotOpen);
                 }
-                if !self.admitted.insert(dispatch.clone()) {
+                if self.projection.admitted_result(dispatch) {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
                 let expected = match self.derived.remove(dispatch) {
@@ -3265,7 +3262,7 @@ impl<'a> Sequence<'a> {
         settles: bool,
     ) -> Result<(), TransitionRefusal> {
         let views = self.projection.view(trajectory);
-        if self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
+        if self.projection.admitted_result(dispatch) || self.derived.contains_key(dispatch) {
             return Err(TransitionRefusal::RepeatAdmission);
         }
         let confined = views.is_succeeded(dispatch);

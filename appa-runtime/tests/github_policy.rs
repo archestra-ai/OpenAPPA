@@ -222,6 +222,21 @@ fn multi_user_needs_the_root_host_members_roster() {
     );
 }
 
+/// The shipped kagent config composes the battery under either target. The multi-user target,
+/// which the runtime chart selects (`APPA_BATTERY_TARGET=multi-user`), names the `host-members`
+/// roster the config carries, so a kagent deployment with the battery installed starts; the
+/// single-user target names no roster, and the empty one stands ready unused.
+#[test]
+fn the_shipped_kagent_config_composes_the_battery_under_either_target() {
+    let shipped = std::fs::read_to_string(repo_root().join("marketplace/plugins/kagent/default.appa.toml"))
+        .expect("the shipped kagent config reads");
+    for target in [BatteryTarget::MultiUser, BatteryTarget::SingleUser] {
+        let dir = tempfile::tempdir().unwrap();
+        Config::load_for_target(&installed(dir.path(), &shipped), &[], target)
+            .unwrap_or_else(|error| panic!("the shipped kagent config composes the {target:?} target: {error}"));
+    }
+}
+
 /// The two target policies differ in their helpers alone: the same rules, the same
 /// declarations, and the same externals bound.
 #[test]

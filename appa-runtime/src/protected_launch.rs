@@ -318,10 +318,28 @@ struct Signals {
 #[cfg(unix)]
 static CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// A signal not yet forwarded. One that arrives before the child's pid is stored waits here
+/// for [`Signals::child`] to send it, so it reaches Claude Code rather than being dropped.
+#[cfg(unix)]
+static PENDING: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Forward `signal` to the child. The signal is recorded before the pid is read, and whichever
+/// of this handler and [`Signals::child`] takes the record back sends it: a signal that lands
+/// while the pid is stored reaches the child exactly once.
 #[cfg(unix)]
 extern "C" fn forward(signal: libc::c_int) {
-    let child = CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    use std::sync::atomic::Ordering::SeqCst;
+    PENDING.store(signal, SeqCst);
+    let child = CHILD.load(SeqCst);
     if child > 0 {
+        send(child, PENDING.swap(0, SeqCst));
+    }
+}
+
+/// Send `signal` to `child` unless it is the empty record.
+#[cfg(unix)]
+fn send(child: libc::pid_t, signal: libc::c_int) {
+    if signal != 0 {
         unsafe { libc::kill(child, signal) };
     }
 }
@@ -337,15 +355,20 @@ impl Signals {
         }
     }
 
+    /// Forward later signals to `pid`, and one that arrived before it was known.
     fn child(&self, pid: u32) {
-        CHILD.store(pid as i32, std::sync::atomic::Ordering::Relaxed);
+        use std::sync::atomic::Ordering::SeqCst;
+        let pid = pid as libc::pid_t;
+        CHILD.store(pid, SeqCst);
+        send(pid, PENDING.swap(0, SeqCst));
     }
 }
 
 #[cfg(unix)]
 impl Drop for Signals {
     fn drop(&mut self) {
-        CHILD.store(0, std::sync::atomic::Ordering::Relaxed);
+        CHILD.store(0, std::sync::atomic::Ordering::SeqCst);
+        PENDING.store(0, std::sync::atomic::Ordering::SeqCst);
         unsafe {
             libc::signal(libc::SIGTERM, self.term);
             libc::signal(libc::SIGHUP, self.hup);
@@ -356,6 +379,22 @@ impl Drop for Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signal that lands between spawning Claude Code and storing its pid reaches it once the
+    /// pid is stored: the launcher never waits on a child that missed its termination.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_before_the_child_is_known_reaches_it_once_it_is() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Command::new("sleep").arg("30").spawn().expect("sleep starts");
+        let signals = Signals {
+            term: libc::SIG_DFL,
+            hup: libc::SIG_DFL,
+        };
+        forward(libc::SIGTERM);
+        signals.child(child.id());
+        assert_eq!(child.wait().expect("the child is reaped").signal(), Some(libc::SIGTERM));
+    }
 
     fn arguments(spelled: &[&str]) -> Vec<OsString> {
         spelled.iter().map(OsString::from).collect()
