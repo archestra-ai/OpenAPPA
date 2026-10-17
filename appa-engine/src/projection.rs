@@ -189,6 +189,9 @@ pub struct Projection {
     admissions: OrdMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: OrdMap<crate::value::OfferId, RecordedOffer>,
     approvals: OrdMap<crate::value::OfferId, PreparedApproval>,
+    /// The approvals not yet spent: a spend is the one advance an approval's subject ever
+    /// takes, so a spent approval is never current again and scans skip it.
+    unspent: OrdSet<crate::value::OfferId>,
     versions: crate::basis::Versions,
 }
 
@@ -290,6 +293,7 @@ impl Projection {
             admissions: Default::default(),
             offers: Default::default(),
             approvals: Default::default(),
+            unspent: Default::default(),
             versions: crate::basis::Versions::default(),
         }
     }
@@ -350,6 +354,7 @@ impl Projection {
             admissions,
             offers,
             approvals,
+            unspent,
             versions,
         } = self;
         match fact {
@@ -420,9 +425,12 @@ impl Projection {
             Fact::OfferAccepted { offer, .. } => end_offer(offers, offer, OfferEnd::Accepted),
             Fact::OfferDenied { offer, authority, .. } => end_offer(offers, offer, OfferEnd::Denied(authority.clone())),
             Fact::OfferInvalidated { offer, .. } => end_offer(offers, offer, OfferEnd::Invalidated),
+            Fact::CallApprovalConsumed { offer, .. } => {
+                unspent.remove(offer);
+            }
             // Both only advance their subject, which the prepended `BasisAdvanced` applies:
             // the record they spend falls out of "current" by that alone.
-            Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
+            Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
             Fact::CallApproved {
                 trajectory,
                 offer,
@@ -435,6 +443,7 @@ impl Projection {
                 basis,
                 evidence,
             } => {
+                unspent.insert(*offer);
                 approvals.insert(
                     *offer,
                     PreparedApproval {
@@ -895,12 +904,10 @@ impl Views<'_> {
             .filter(|open| &open.trajectory == self.trajectory && self.is_pending(open))
             .filter_map(|open| self.proposed_call(&open.subject));
         let approved = self
-            .projection
-            .approvals
-            .iter()
+            .unspent_approvals()
             .filter(|(offer, approval)| {
                 &approval.trajectory == self.trajectory
-                    && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(*offer))
             })
             .map(|(_, approval)| &approval.call);
         let digest = call.digest();
@@ -1056,18 +1063,53 @@ impl Views<'_> {
         self.projection.approvals.get(offer)
     }
 
-    /// Every approval prepared for this exact call in this trajectory, whatever their freshness.
-    /// The caller decides what current means: a live decision compares against the basis it stands
-    /// at, and the validator against the basis its decision began from.
+    /// Every current approval in this trajectory, found through the unspent set.
+    #[cfg(test)]
+    pub(crate) fn current_approvals(&self) -> Vec<crate::value::OfferId> {
+        self.unspent_approvals()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(*offer))
+            })
+            .map(|(offer, _)| offer)
+            .collect()
+    }
+
+    /// Every current approval in this trajectory by its definition: every approval ever
+    /// recorded, filtered by freshness. The reference `current_approvals` is checked against.
+    #[cfg(test)]
+    pub(crate) fn current_approvals_by_scan(&self) -> Vec<crate::value::OfferId> {
+        self.projection
+            .approvals
+            .iter()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
+            })
+            .map(|(offer, _)| *offer)
+            .collect()
+    }
+
+    fn unspent_approvals(&self) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
+        self.projection.unspent.iter().map(|offer| {
+            let approval = self
+                .projection
+                .approvals
+                .get(offer)
+                .expect("unspent names only recorded approvals");
+            (*offer, approval)
+        })
+    }
+
+    /// Every unspent approval prepared for this exact call in this trajectory, whatever their
+    /// freshness. The caller decides what current means: a live decision compares against the
+    /// basis it stands at, and the validator against the basis its decision began from.
     pub(crate) fn approvals_for(
         &self,
         call: &ResolvedCall,
     ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
-        self.projection
-            .approvals
-            .iter()
+        self.unspent_approvals()
             .filter(move |(_, approval)| &approval.trajectory == self.trajectory && &approval.call == call)
-            .map(|(offer, approval)| (*offer, approval))
     }
 
     /// Every call candidate staged for exactly these substituted bytes in this trajectory,

@@ -386,6 +386,13 @@ mod held_view_law {
             self.log.extend(batch.facts().iter().cloned());
             self.batches += 1;
             prop_assert_eq!(&self.held, &self.cold());
+            for trajectory in &self.trajectories {
+                let views = self
+                    .held
+                    .views(trajectory)
+                    .expect("the walk records only opened trajectories");
+                prop_assert_eq!(views.current_approvals(), views.current_approvals_by_scan());
+            }
             for fact in batch.facts() {
                 match fact {
                     Fact::DispatchOpened { dispatch, tool, .. } => {
@@ -497,6 +504,7 @@ mod held_view_law {
         let reached = |kind: fn(&Fact) -> bool| walk.log.iter().any(kind);
         assert!(reached(|fact| matches!(fact, Fact::OfferOpened { .. })));
         assert!(reached(|fact| matches!(fact, Fact::CallApproved { .. })));
+        assert!(reached(|fact| matches!(fact, Fact::CallApprovalConsumed { .. })));
         assert!(reached(|fact| matches!(fact, Fact::DispatchClosed { .. })));
         assert!(reached(|fact| matches!(fact, Fact::ForkOpened { .. })));
         assert!(reached(|fact| matches!(fact, Fact::ChildReturn { .. })));
