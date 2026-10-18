@@ -96,7 +96,7 @@ enum Command {
         session_tools: Vec<String>,
     },
 
-    /// Replay trace files against a policy and check every expectation.
+    /// Replay trace files against a policy: check every expectation, report every observed step.
     Replay {
         #[arg(long, env = "APPA_CONFIG")]
         config: Option<PathBuf>,
@@ -107,6 +107,10 @@ enum Command {
         /// Print every step, not only the ones that failed.
         #[arg(short, long)]
         verbose: bool,
+
+        /// Print one JSON object per step, then a summary object, instead of text.
+        #[arg(long, conflicts_with = "verbose")]
+        json: bool,
 
         /// Trace files, or directories holding `.appa` files.
         #[arg(required = true)]
@@ -445,10 +449,15 @@ fn main() -> ExitCode {
             config,
             modules_dir,
             verbose,
+            json,
             paths,
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
-            appa_runtime::replay::main(&config, modules_dir, verbose, &paths)
+            let format = match json {
+                true => appa_runtime::replay::Format::Json,
+                false => appa_runtime::replay::Format::Text { verbose },
+            };
+            appa_runtime::replay::main(&config, modules_dir, format, &paths)
         }
         Command::AddLookupRosters { config, batteries_dir } => {
             match appa_runtime::config::edit::add_missing_rosters(&config, &batteries_dir) {

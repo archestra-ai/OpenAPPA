@@ -56,10 +56,28 @@ fn rendered(reports: &[TraceReport]) -> (String, Summary) {
     (String::from_utf8(out).expect("utf-8"), summary)
 }
 
-const PASSED: StepOutcome = StepOutcome::Passed { taken: None };
+const ALLOWED: StepOutcome = StepOutcome::Passed {
+    got: Got::Allowed,
+    taken: None,
+};
+const DENIED: StepOutcome = StepOutcome::Passed {
+    got: Got::Blocked(BTreeSet::new()),
+    taken: None,
+};
 
 fn taken(kind: OfferKind) -> StepOutcome {
-    StepOutcome::Passed { taken: Some(kind) }
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind.clone()])),
+        taken: Some(kind),
+    }
+}
+
+/// A step that passed on an offer it did not take.
+fn offered(kind: OfferKind) -> StepOutcome {
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind])),
+        taken: None,
+    }
 }
 
 /// An email leaves the company; a deploy needs a backup that never comes.
@@ -87,8 +105,8 @@ async fn one_allow_and_one_deny_pass() {
         trace("deny.appa", "mcp/ops/deploy {}\nexpect deny\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
-    assert_eq!(outcomes(&reports[1]), vec![(1, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &ALLOWED)]);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
     let (text, summary) = rendered(&reports);
     assert_eq!(
         text,
@@ -139,9 +157,60 @@ async fn a_narrowing_read_denies_the_later_email() {
     let reports = run(&runtime, &traces).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED), (11, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED), (11, &ALLOWED)]
     );
     assert_eq!(reports[1].verdict(), Verdict::Ok);
+}
+
+fn observed(got: Got, taken: Option<OfferKind>) -> StepOutcome {
+    StepOutcome::Observed { got, taken }
+}
+
+/// Steps without `expect` report what they got and never end the file. The HR read is
+/// accepted as `expect allow` would; the email it denies takes nothing; the post still runs.
+/// A denied call never ran, so its narrowing `delta` does not land on the trajectory.
+#[tokio::test]
+async fn observed_steps_report_and_never_end_the_file() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let policy = format!(
+        "{NARROWING_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = {{ effects = {{ contains = [\"backup.completed\"] }} }}\ndelta = {{ audience = [\"hr\"] }}\n"
+    );
+    let runtime = runtime(&dir, &policy, "");
+    let email = "mcp/mail/send {\n  to: \"x@other.com\"\n}\n";
+    let traces = [
+        trace(
+            "observe.appa",
+            &format!(
+                "mcp/files/read {{\n  path: \"/hr/salaries.csv\"\n}}\n{email}mcp/slack/post_message {{\n  text: \"reviewed\"\n}}\n{email}expect deny\n"
+            ),
+        ),
+        trace("unlanded.appa", &format!("mcp/ops/deploy {{}}\n{email}")),
+    ];
+    let reports = run(&runtime, &traces).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (
+                1,
+                &observed(
+                    Got::Blocked(BTreeSet::from([OfferKind::Accept])),
+                    Some(OfferKind::Accept)
+                )
+            ),
+            (4, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (7, &observed(Got::Allowed, None)),
+            (10, &DENIED),
+        ]
+    );
+    assert_eq!(
+        outcomes(&reports[1]),
+        vec![
+            (1, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (2, &observed(Got::Allowed, None)),
+        ]
+    );
+    let (_, summary) = rendered(&reports);
+    assert_eq!((summary.ok, summary.exit_code()), (2, std::process::ExitCode::SUCCESS));
 }
 
 /// A wipe needs a person's sign-off; a deploy needs a backup that never comes.
@@ -186,7 +255,7 @@ async fn an_authority_offer_is_taken_as_approved() {
         trace("wipe-other.appa", "mcp/ops/wipe {}\nexpect authority cto\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &DENIED)]);
     assert_eq!(outcomes(&reports[1]), vec![(1, &taken(approver()))]);
     assert!(matches!(
         &reports[2].steps[0].outcome,
@@ -405,7 +474,7 @@ async fn a_bound_annotator_decides_the_step() {
     let reports = run(&runtime, &[trace("annotated.appa", text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED)]
     );
 
     *answer.lock().unwrap() = false;
@@ -437,11 +506,11 @@ async fn do_something_asks_what_the_trajectory_allows() {
     assert_eq!(
         outcomes(&reports[0]),
         vec![
-            (1, &PASSED),
+            (1, &ALLOWED),
             (6, &taken(OfferKind::Accept)),
-            (11, &PASSED),
-            (16, &PASSED),
-            (21, &PASSED),
+            (11, &DENIED),
+            (16, &ALLOWED),
+            (21, &DENIED),
         ]
     );
 
@@ -474,7 +543,11 @@ async fn do_something_never_takes_its_offer() {
     let reports = run(&runtime, &[trace("signoff.appa", &text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &PASSED), (6, &PASSED), (11, &taken(approver()))]
+        vec![
+            (1, &offered(approver())),
+            (6, &offered(approver())),
+            (11, &taken(approver()))
+        ]
     );
 
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -491,7 +564,11 @@ async fn do_something_never_takes_its_offer() {
     };
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED), (11, &taken(redactor))]
+        vec![
+            (1, &taken(OfferKind::Accept)),
+            (6, &offered(redactor.clone())),
+            (11, &taken(redactor))
+        ]
     );
 }
 
@@ -511,7 +588,7 @@ async fn do_something_asks_about_trust() {
     let reports = run(&runtime, &[trace("trust.appa", &text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &PASSED), (6, &taken(OfferKind::Accept)), (11, &PASSED)]
+        vec![(1, &ALLOWED), (6, &taken(OfferKind::Accept)), (11, &DENIED)]
     );
 }
 
@@ -522,7 +599,7 @@ async fn do_something_is_denied_when_nothing_is_offered() {
     let runtime = serving(&dir, ATTENTION_POLICY, "");
     let text = do_something(r#"{"effects": {"contains": ["backup.completed"]}}"#, "deny");
     let reports = run(&runtime, &[trace("backup.appa", &text)]).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &DENIED)]);
 }
 
 /// A requirement the policy cannot state is a step that cannot run, never a deny that would
