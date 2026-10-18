@@ -517,8 +517,6 @@ impl Engine {
     }
 }
 
-/// The Annotator whose annotation a call still owes, if any. A foreign or
-/// out-of-policy answer is a refusal.
 /// The calls `recorded` holds, when `batch` names exactly them — tool and canonical arguments at
 /// every position — carrying the annotations `batch` pins; `None` otherwise.
 fn recorded_repeat(batch: &ProposalBatch, recorded: &[ResolvedCall]) -> Option<Vec<ResolvedCall>> {
@@ -538,6 +536,8 @@ fn recorded_repeat(batch: &ProposalBatch, recorded: &[ResolvedCall]) -> Option<V
         .collect()
 }
 
+/// The Annotator whose annotation a call still owes, if any. A foreign or
+/// out-of-policy answer is a refusal.
 fn unanswered(
     registry: &Registry,
     declaration: &crate::contract::ToolDeclaration,

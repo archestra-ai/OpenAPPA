@@ -690,8 +690,10 @@ impl From<EngineRefusal> for EventError {
             // keeps the operator-facing detail.
             EngineRefusal::UntrustedLog { detail, .. } => EventError::UntrustedLog(detail),
             EngineRefusal::OpeningMismatch { detail, .. } => EventError::PolicyUnavailable(detail),
+            // The engine knows the revision that moved under it, not the line's name; the
+            // message reads "deployment of this family moved to policy revision N".
             EngineRefusal::PolicyMoved { revision } => EventError::PolicyMoved {
-                deployment: "this family's".to_string(),
+                deployment: "of this family".to_string(),
                 head: revision.to_string(),
             },
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
@@ -989,8 +991,9 @@ pub struct Reloaded {
     pub policy_key: String,
     pub policy_identity: String,
     pub policy_revision: u64,
-    /// `false` when the new file's bytes are the ones already serving:
-    /// the reload still ran every gate, and swapped an equal deployment.
+    /// `false` when the line's head already stood at the new file's revision, so nothing was
+    /// published: the reload still ran every gate, and swapped an equal deployment. `true` when
+    /// the reload published the file as the line's next revision.
     pub changed: bool,
 }
 

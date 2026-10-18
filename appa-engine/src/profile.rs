@@ -395,7 +395,6 @@ impl PolicyIdentity {
     }
 }
 
-/// The identity document.
 /// The identity document. `with_forwards` is `false` only for the v1 algorithm, which predates
 /// the `forwards` rule field.
 fn identity_document_from_registry(registry: &Registry, with_forwards: bool) -> serde_json::Value {
