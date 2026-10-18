@@ -247,8 +247,9 @@ impl ForkSnapshot {
 /// reaches the other, so a reservation carried over never settles in the root fork.
 ///
 /// [`crate::engine::Engine::root_fork_origin`] freezes one from the parent family's
-/// validated view, its label expressed in the freezing engine's trust chain, and the runtime records it on the new root's opening record. A root fork has
-/// no prepared spawn, child start, or return contract; those belong to the same-family
+/// validated view, its label expressed in the freezing engine's trust chain, and the runtime
+/// records it on the new root's opening record. A root fork has no prepared spawn, child start,
+/// or return contract; those belong to the same-family
 /// [`ForkSnapshot`] flow. A replay of the root fork's log never reads the parent family's log, so
 /// it takes the recorded origin as trusted log content and refuses only an origin that forks the
 /// root from itself.

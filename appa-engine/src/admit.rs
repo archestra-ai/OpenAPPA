@@ -118,6 +118,8 @@ pub(crate) fn outcome_contract<'a>(
             description: None,
             parameters: crate::params::ToolParameters::open(),
             delta: crate::contract::Delta::NONE,
+            // `forwards` labels what the call sends before dispatch, checked at release.
+            // The outcome uses the pinned result delta, never that outbound label.
             forwards: crate::contract::Delta::NONE,
             emits: EffectSet::default(),
             requires: crate::contract::Requires::default(),

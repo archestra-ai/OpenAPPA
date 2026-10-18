@@ -54,6 +54,9 @@ impl TrustCrossing {
         leaving: impl IntoIterator<Item = &'a str>,
         arriving: &[&'a str],
     ) -> Option<TrustCrossing> {
+        // The loader refuses a policy whose trust chain names no rank. Preserve that invariant
+        // even on the identity path; otherwise the return floor has no highest rank to name.
+        assert!(!arriving.is_empty(), "a trust chain names at least one rank");
         let leaving: Vec<&str> = leaving.into_iter().collect();
         if leaving == arriving {
             return None;
@@ -68,9 +71,6 @@ impl TrustCrossing {
                     .map(Trust)
             })
             .collect();
-        // The loader refuses a policy whose trust chain names no rank, so an arriving chain is
-        // never empty here; `highest` would otherwise be the lowest rank.
-        debug_assert!(!arriving.is_empty(), "a trust chain names at least one rank");
         let highest = Trust(u8::try_from(arriving.len().saturating_sub(1)).unwrap_or(u8::MAX));
         Some(TrustCrossing { ranks, highest })
     }
