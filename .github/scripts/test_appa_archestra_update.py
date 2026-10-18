@@ -13,6 +13,10 @@ updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 BOT = "openappa-archestra-updater[bot]"
 CORE = "# Core\r\nNon-ASCII: żółw — ✓\r\nno trailing newline".encode()
+POLICY = "# Contracts\nCRLF\r\nNon-ASCII: ąę → ∅".encode()
+GUIDE = "platform/backend/src/skills/appa-guide.core.generated.md"
+CONTRACTS = "platform/backend/src/skills/appa-guide.contracts.generated.md"
+COPIES = {GUIDE: CORE, CONTRACTS: POLICY}
 
 
 def command(root, *args):
@@ -100,24 +104,27 @@ class UpdaterTests(unittest.TestCase):
         command(self.origin, "config", "user.name", "Test")
         command(self.origin, "config", "core.autocrlf", "false")
         commits = []
-        core = self.origin / updater.CORE
-        core.parent.mkdir(parents=True)
-        for number in (1, 2, 3):
+        # v1.2.2 ships every generated source, v1.2.3 none, v1.2.4 only core.md.
+        shipped = {1: {}, 2: COPIES, 3: {}, 4: {GUIDE: CORE}}
+        for number, copies in shipped.items():
             (self.origin / "Cargo.toml").write_text(f'[workspace.package]\nversion = "1.2.{number}"\n')
-            # Only the v1.2.2 release ships the appa-guide core.
-            if number == 2:
-                core.write_bytes(CORE)
-            else:
-                core.unlink(missing_ok=True)
+            for target, origin in updater.GENERATED.items():
+                path = self.origin / origin
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if target in copies:
+                    path.write_bytes(copies[target])
+                else:
+                    path.unlink(missing_ok=True)
             command(self.origin, "add", "-A")
             command(self.origin, "commit", "-m", f"release {number}")
             commits.append(command(self.origin, "rev-parse", "HEAD"))
             command(self.origin, "tag", f"v1.2.{number}")
-        self.old, current, future = commits
+        self.old, current, future, partial = commits
         self.source = self.root / "source"
         subprocess.run(["git", "clone", "--quiet", str(self.origin), str(self.source)], check=True)
         self.candidate = {"tag": "v1.2.2", "sha": current, "id": 22, "url": f"https://github.com/{updater.SOURCE}/releases/tag/v1.2.2"}
         self.future = {"tag": "v1.2.3", "sha": future, "id": 23, "url": f"https://github.com/{updater.SOURCE}/releases/tag/v1.2.3"}
+        self.partial = {"tag": "v1.2.4", "sha": partial, "id": 24, "url": f"https://github.com/{updater.SOURCE}/releases/tag/v1.2.4"}
         self.files = {updater.MANIFEST: manifest(self.old), updater.LOCK: lock({**self.candidate, "tag": "v1.2.1", "sha": self.old})}
         self.api = API(self.source, self.candidate, self.files)
         self.bundle = self.root / "update.json"
@@ -130,25 +137,28 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "GitHub", return_value=self.api), patch.dict(os.environ, {"GH_TOKEN": "test-only"}):
             updater.publish(self.args)
 
-    def with_guide(self, original, prepared=CORE.decode()):
-        self.files[updater.GUIDE] = original
+    def with_copy(self, path, original, prepared=None):
+        self.files[path] = original
         bundle = json.loads(self.bundle.read_text())
-        bundle["original_hashes"][updater.GUIDE] = updater.digest(original)
-        bundle["files"][updater.GUIDE] = prepared
+        bundle["original_hashes"][path] = updater.digest(original)
+        bundle["files"][path] = COPIES[path].decode() if prepared is None else prepared
         self.bundle.write_text(json.dumps(bundle))
+
+    def use_release(self, candidate):
+        self.api.candidate = candidate
+        self.api.release_record.update(id=candidate["id"], tag_name=candidate["tag"], html_url=candidate["url"])
 
     def tree_paths(self):
         tree = next(data for _, path, data in self.api.writes if path.endswith("/git/trees"))
         return {entry["path"]: entry["content"] for entry in tree["tree"]}
 
-    def run_prepare(self, guide=None):
-        target = self.root / "target"
-        target.mkdir()
+    def run_prepare(self, copies={}):
+        target = Path(tempfile.mkdtemp(dir=self.root))
         command(target, "init", "-b", "main")
         command(target, "config", "user.email", "test@example.invalid")
         command(target, "config", "user.name", "Test")
         command(target, "config", "core.autocrlf", "false")
-        installed = {p: t.encode() for p, t in self.files.items()} | ({updater.GUIDE: guide} if guide is not None else {})
+        installed = {p: t.encode() for p, t in self.files.items()} | copies
         for path, data in installed.items():
             (target / path).parent.mkdir(parents=True, exist_ok=True)
             (target / path).write_bytes(data)
@@ -342,54 +352,84 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(updater.pin(bundle["files"][updater.MANIFEST]), self.candidate["sha"])
         updater.validate_lock(bundle["files"][updater.LOCK], self.candidate)
 
-    def test_prepare_copies_release_core_byte_for_byte(self):
-        target, bundle = self.run_prepare(guide=b"stale\n")
-        self.assertEqual((target / updater.GUIDE).read_bytes(), CORE)
-        self.assertEqual(bundle["files"][updater.GUIDE].encode(), CORE)
-        self.assertEqual(bundle["original_hashes"][updater.GUIDE], updater.digest("stale\n"))
-        self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), {*updater.FILES, updater.GUIDE})
+    def test_prepare_copies_release_files_byte_for_byte(self):
+        for installed in ({GUIDE: b"stale\n", CONTRACTS: b"old\n"}, {GUIDE: b"stale\n"}, {CONTRACTS: b"old\n"}):
+            with self.subTest(installed=set(installed)):
+                target, bundle = self.run_prepare(installed)
+                for path, original in installed.items():
+                    self.assertEqual((target / path).read_bytes(), COPIES[path])
+                    self.assertEqual(bundle["files"][path].encode(), COPIES[path])
+                    self.assertEqual(bundle["original_hashes"][path], updater.digest(original.decode()))
+                self.assertEqual(set(bundle["files"]), {*updater.FILES, *installed})
+                self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), {*updater.FILES, *installed})
 
-    def test_prepare_accepts_unchanged_core(self):
-        target, bundle = self.run_prepare(guide=CORE)
-        self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), set(updater.FILES))
-        self.assertEqual(bundle["files"][updater.GUIDE].encode(), CORE)
-        self.assertEqual(bundle["original_hashes"][updater.GUIDE], updater.digest(CORE.decode()))
+    def test_prepare_accepts_unchanged_copy(self):
+        target, bundle = self.run_prepare({GUIDE: CORE, CONTRACTS: b"old\n"})
+        self.assertEqual(set(command(target, "diff", "--name-only").splitlines()), {*updater.FILES, CONTRACTS})
+        self.assertEqual(bundle["files"][GUIDE].encode(), CORE)
+        self.assertEqual(bundle["original_hashes"][GUIDE], updater.digest(CORE.decode()))
+        self.assertEqual(bundle["files"][CONTRACTS].encode(), POLICY)
 
-    def test_prepare_refuses_release_without_core(self):
-        self.api.candidate = self.future
-        self.api.release_record.update(id=self.future["id"], tag_name=self.future["tag"], html_url=self.future["url"])
+    def test_prepare_refuses_release_without_source(self):
+        self.use_release(self.future)
         with self.assertRaisesRegex(ValueError, "no integrations/appa-guide/references/core.md"):
-            self.run_prepare(guide=b"stale\n")
+            self.run_prepare({GUIDE: b"stale\n"})
+        self.use_release(self.partial)
+        with self.assertRaisesRegex(ValueError, "no website/content/docs/contracts.md"):
+            self.run_prepare({GUIDE: b"stale\n", CONTRACTS: b"old\n"})
+        target, bundle = self.run_prepare({GUIDE: b"stale\n"})
+        self.assertEqual(set(bundle["files"]), {*updater.FILES, GUIDE})
+        self.assertEqual((target / GUIDE).read_bytes(), CORE)
 
-    def test_publish_refreshes_changed_core_only(self):
-        self.with_guide("stale\n")
+    def test_publish_refreshes_changed_copies_only(self):
+        self.with_copy(GUIDE, "stale\n")
+        self.with_copy(CONTRACTS, "old\n")
         self.publish()
-        self.assertEqual(self.tree_paths()[updater.GUIDE].encode(), CORE)
+        tree = self.tree_paths()
+        self.assertEqual(set(tree), {*updater.FILES, GUIDE, CONTRACTS})
+        for path, data in COPIES.items():
+            self.assertEqual(tree[path].encode(), data)
         self.api.prs, self.api.writes, self.api.ref = [], [], None
-        self.with_guide(CORE.decode())
+        self.with_copy(GUIDE, CORE.decode())
+        self.publish()
+        self.assertEqual(set(self.tree_paths()), {*updater.FILES, CONTRACTS})
+        self.api.prs, self.api.writes, self.api.ref = [], [], None
+        self.with_copy(CONTRACTS, POLICY.decode())
         self.publish()
         self.assertEqual(set(self.tree_paths()), set(updater.FILES))
 
-    def test_publish_refuses_tampered_core(self):
-        self.with_guide("stale\n", prepared=CORE.decode() + "\ninjected")
-        with self.assertRaisesRegex(ValueError, "not the verified release"):
-            self.publish()
-        self.assertEqual(self.api.writes, [])
+    def test_publish_refuses_tampered_copy(self):
+        for path in COPIES:
+            with self.subTest(path=path):
+                for other in COPIES:
+                    self.with_copy(other, "stale\n")
+                self.with_copy(path, "stale\n", prepared=COPIES[path].decode() + "\ninjected")
+                with self.assertRaisesRegex(ValueError, "not the verified release"):
+                    self.publish()
+                self.assertEqual(self.api.writes, [])
 
-    def test_publish_refuses_core_changed_appeared_or_removed_on_main(self):
-        self.with_guide("stale\n")
-        for main in ({**self.files, updater.GUIDE: "edited\n"}, {p: self.files[p] for p in updater.FILES}):
-            with self.subTest(main=main.get(updater.GUIDE)):
-                self.api.refs["main"] = main
+    def test_publish_refuses_copy_changed_appeared_or_removed_on_main(self):
+        prepared, files = self.bundle.read_text(), dict(self.files)
+        for path in COPIES:
+            self.bundle.write_text(prepared)
+            self.files.clear()
+            self.files.update(files)
+            self.api.refs = {}
+            for copy in COPIES:
+                self.with_copy(copy, "stale\n")
+            for main in ({**self.files, path: "edited\n"}, {p: t for p, t in self.files.items() if p != path}):
+                with self.subTest(path=path, main=main.get(path)):
+                    self.api.refs["main"] = main
+                    with self.assertRaisesRegex(ValueError, "rerun"):
+                        self.publish()
+            bundle = json.loads(self.bundle.read_text())
+            for field in ("files", "original_hashes"):
+                del bundle[field][path]
+            self.bundle.write_text(json.dumps(bundle))
+            self.api.refs = {"a" * 40: {p: t for p, t in self.files.items() if p != path}, "main": self.files}
+            with self.subTest(path=path, main="appeared"):
                 with self.assertRaisesRegex(ValueError, "rerun"):
                     self.publish()
-        bundle = json.loads(self.bundle.read_text())
-        for field in ("files", "original_hashes"):
-            del bundle[field][updater.GUIDE]
-        self.bundle.write_text(json.dumps(bundle))
-        self.api.refs = {"a" * 40: {p: self.files[p] for p in updater.FILES}, "main": self.files}
-        with self.assertRaisesRegex(ValueError, "rerun"):
-            self.publish()
         self.assertEqual(self.api.writes, [])
 
     def test_github_pull_list_paginates_before_filtering(self):
