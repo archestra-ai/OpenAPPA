@@ -216,6 +216,15 @@ fn main() {
     check("A6 old version (rollback) continues it", old::decide(&old_store, &old_engine, &root_a, "a3").map(|f| f.len()));
     check("A7 new version replays it again", new::decide(&new_store, &snapshot, &[], &root_a, "a4").map(|f| f.len()));
 
+    // A pinned family first opened by the new version also survives a downgrade.
+    let root_c = unique("mixver-new-snapshot");
+    new::open(&new_store, &snapshot, &root_c);
+    check("C1 new version opens a pinned family and decides", new::decide(&new_store, &snapshot, &[], &root_c, "c1").map(|f| f.len()));
+    check("C2 the new snapshot names no deployment", Ok::<_, String>(new::deployment(&new_store, &root_c)).and_then(|d| if d.is_none() { Ok("no deployment") } else { Err(format!("{d:?}")) }));
+    check("C3 old version (rollback) replays the new pinned family", old::replays(&old_store, &old_engine, &root_c));
+    check("C4 old version (rollback) continues the new pinned family", old::decide(&old_store, &old_engine, &root_c, "c2").map(|f| f.len()));
+    check("C5 new version replays the downgraded pinned family", new::decide(&new_store, &snapshot, &[], &root_c, "c3").map(|f| f.len()));
+
     // ---------------------------------------------------------------- B: a line family
     let deployment = unique("mixver-line");
     let head = new::publish(&new_store, &deployment, None, POLICY);

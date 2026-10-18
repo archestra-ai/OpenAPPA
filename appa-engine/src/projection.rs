@@ -348,6 +348,7 @@ impl Projection {
         }
         each_mut(&mut self.receiving_bounds, |bound| bound.cross_value(crossing));
         each_mut(&mut self.release_terms, |(terms, _)| {
+            // Audience atoms stay symbolic across revisions; only trust ranks need crossing.
             if let Some(trust) = &mut terms.delta.trust {
                 *trust = crossing.value(*trust);
             }

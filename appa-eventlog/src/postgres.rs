@@ -1920,6 +1920,9 @@ impl Batch {
                 return Ok(Written::ReadClaimLost);
             }
         }
+        // The insert's position CAS catches a writer that wins after the earlier read.
+        // FOR SHARE then holds the observed head until commit, so a publish cannot move it
+        // between this fence check and the batch insert.
         if let Some(head) = self
             .fence
             .as_ref()
