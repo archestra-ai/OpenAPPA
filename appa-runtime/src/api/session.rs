@@ -327,7 +327,7 @@ impl Session {
 
     /// Take the deployment this view now serves after a publish moved the head under `stale`.
     /// `false` when it serves no later revision than `stale`: a view pinned to one revision
-    /// cannot follow, and its host publishes and pins again.
+    /// cannot follow. The operational refusal reaches its host, which reads and pins the head.
     fn follow_head(&self, stale: &Deployment) -> bool {
         let serving = self.inner.deployment();
         if serving.revision() <= stale.revision() {

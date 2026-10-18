@@ -251,6 +251,7 @@ impl PolicyRevision {
     pub const FIRST: PolicyRevision = PolicyRevision(1);
 
     pub const fn new(revision: u64) -> Self {
+        debug_assert!(revision > 0, "a policy revision is positive");
         PolicyRevision(revision)
     }
 
