@@ -1362,6 +1362,26 @@ impl Runtime {
         self.view(|view| view.pinned = Some(pinned))
     }
 
+    /// A view on `line` that opens every new family pinned to `prepared`'s policy file, as the
+    /// version before policy revisions opened every family: the opening names no deployment and
+    /// no revision, the file is stored with it, and nothing is published on `line`. Such a
+    /// family is judged by that file for its whole life, with `prepared`'s externals, and a
+    /// change to the line's policy never reaches it. A family that follows `line` is refused
+    /// through this view: it decides through [`Runtime::pinned`] at the head. A host steps back
+    /// from live revisions with it — new families open pinned while the line's head stays where
+    /// it is.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn snapshot(&self, line: &DeploymentName, prepared: &PreparedDeployment) -> Runtime {
+        let pinned = Pinned {
+            line: line.clone(),
+            deployment: self.own(prepared),
+        };
+        self.view(|view| view.pinned = Some(pinned))
+    }
+
     /// Publish a prepared deployment as the head of `line`: the head's own revision when the
     /// head already names its policy file, or the line's next revision. Every family of `line`
     /// decides at that revision from then on: a decision made at an earlier revision no longer
@@ -1575,9 +1595,9 @@ impl Inner {
     /// A family of another line, or a log stamped later than this deployment's revision, is
     /// refused: the second is retryable once this view serves the newer head.
     ///
-    /// A family pinned to a policy snapshot — one the previous version opened — is judged by the
-    /// engine compiled from the stored file its opening names, with this deployment's externals,
-    /// exactly as that version judges it.
+    /// A family pinned to a policy snapshot — one the previous version opened, or one a
+    /// [`Runtime::snapshot`] view opened — is judged by the engine compiled from the stored file
+    /// its opening names, with this deployment's externals, exactly as that version judges it.
     pub(super) fn resolve_policy<'a>(
         &self,
         deployment: &'a Deployment,
@@ -1593,9 +1613,13 @@ impl Inner {
                 log.root().as_str()
             )));
         }
-        let revision = deployment
-            .revision()
-            .expect("a deployment serving a line decides at one of its revisions");
+        // A snapshot view ([`Runtime::snapshot`]) opens and judges pinned families only.
+        let Some(revision) = deployment.revision() else {
+            return Err(EventError::PolicyUnavailable(format!(
+                "the family of {} follows deployment {followed}; this view opens and judges families pinned to a policy snapshot only",
+                log.root().as_str()
+            )));
+        };
         if let Some(stamp) = log.stamp().map(|stamp| stamp.value())
             && stamp > revision
         {

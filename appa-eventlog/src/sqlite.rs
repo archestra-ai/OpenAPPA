@@ -417,6 +417,18 @@ impl Sqlite {
         Appender(self.connection())
     }
 
+    /// The stored opening batch of `root`, when it has one.
+    pub(crate) fn opening(&self, root: &TrajectoryId) -> Result<Option<Vec<u8>>, ReadError> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                params![root.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub(crate) fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
         let found: Option<i64> = self
             .connection()

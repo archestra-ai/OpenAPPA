@@ -129,7 +129,9 @@
 //! A family whose opening names no deployment is **pinned to a policy snapshot**: the stored
 //! policy file its opening names. A snapshot engine ([`engine::Engine::open`], never `at`) judges
 //! and decides it for its whole life, stamps nothing, and refuses a view of a family that follows
-//! a deployment, as an engine at a revision refuses a pinned view.
+//! a deployment, as an engine at a revision refuses a pinned view. The previous version opened
+//! every family this way; a host steps back from live revisions by opening new families this way
+//! again, while the deployment's head stays where it is.
 //!
 pub mod admit;
 pub mod audience;

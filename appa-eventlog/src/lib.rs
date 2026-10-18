@@ -162,6 +162,15 @@ pub struct PolicyHead {
     pub key: PolicyFileKey,
 }
 
+/// Which policy a family decides under, as its opening record names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FamilyKind {
+    /// Pinned to the policy snapshot its opening names, for its whole life.
+    Pinned,
+    /// Following a deployment: its next decision is made at that line's head.
+    Following(DeploymentName),
+}
+
 /// The records of one read, and the position they were read at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Log {
@@ -996,6 +1005,28 @@ impl LogStore {
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.has_root(root).map_err(Into::into),
         }
+    }
+
+    /// Which kind of family `root` is, from its opening record alone; `None` when the root has
+    /// no log. The question a host asks to pick the view that serves a family — a following one
+    /// decides at its line's head, a pinned one under its own file — without reading the log it
+    /// goes on to read through that view.
+    pub fn family_kind(&self, root: &TrajectoryId) -> Result<Option<FamilyKind>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        let opening = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.opening(root)?,
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.opening(root)?,
+        };
+        opening
+            .map(|bytes| {
+                Ok(match encoding::opening_deployment(&bytes)? {
+                    Some(deployment) => FamilyKind::Following(deployment),
+                    None => FamilyKind::Pinned,
+                })
+            })
+            .transpose()
     }
 
     /// Read one root's whole log, with the position it stands at and the policy file it opened
@@ -3051,6 +3082,42 @@ mod tests {
     /// from a host's migrations or from `tests/fixtures/host_schema.sql`:
     /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres,fault-injection -- --ignored
     #[cfg(feature = "postgres")]
+    /// A family's kind is read from its stored opening alone, on both backends: pinned, following
+    /// the deployment that opened it, or no family at all.
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_reads_a_familys_kind_from_its_opening_alone() {
+        let store = postgres_store(1);
+        let sqlite = memory();
+        let unique = tempfile::tempdir().unwrap();
+        let line = DeploymentName::new(format!("pg-kind:{}", unique.path().display()));
+        let pinned = TrajectoryId::new(format!("pg-kind-pinned:{}", unique.path().display()));
+        let following = TrajectoryId::new(format!("pg-kind-following:{}", unique.path().display()));
+        let follows = |id: &TrajectoryId| {
+            engine()
+                .at(line.clone(), PolicyRevision::FIRST)
+                .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
+                .expect("the opening seals")
+                .into_unsealed()
+        };
+        for store in [&store, &sqlite] {
+            store.publish(&line, None, POLICY.as_bytes()).unwrap();
+            store.create_root(pinned_opening(&pinned), POLICY.as_bytes()).unwrap();
+            store.create_root(follows(&following), POLICY.as_bytes()).unwrap();
+            assert_eq!(store.family_kind(&pinned).unwrap(), Some(FamilyKind::Pinned));
+            assert_eq!(
+                store.family_kind(&following).unwrap(),
+                Some(FamilyKind::Following(line.clone()))
+            );
+            assert_eq!(
+                store
+                    .family_kind(&TrajectoryId::new(format!("pg-kind-ghost:{}", unique.path().display())))
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
     fn postgres_preserves_encoding_and_cas() {

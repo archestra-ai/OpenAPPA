@@ -1180,6 +1180,29 @@ impl PostgresStore {
         })
     }
 
+    /// The stored opening batch of `root`, decrypted, when it has one.
+    pub(super) fn opening(&self, root: &TrajectoryId) -> Result<Option<Vec<u8>>, PostgresError> {
+        let id = root.as_str().to_owned();
+        let stored: Option<Vec<u8>> = self.query({
+            let id = id.clone();
+            move |client| {
+                Ok(client
+                    .query_opt(
+                        "SELECT payload FROM openappa_events WHERE root = $1 AND seq = 0",
+                        &[&id],
+                    )?
+                    .map(|row| row.get(0)))
+            }
+        })?;
+        stored
+            .map(|bytes| {
+                self.cipher
+                    .open_bytes(&event_field(&id, 0), &bytes)
+                    .map_err(PostgresError::from)
+            })
+            .transpose()
+    }
+
     pub(super) fn has_root(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
         let root = root.as_str().to_owned();
         self.query(move |client| {

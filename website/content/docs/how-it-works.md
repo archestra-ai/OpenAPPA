@@ -171,7 +171,7 @@ The family log records which revision decided each batch. Replay judges each bat
 
 **Effect kinds match by name.** A revision that renames an effect kind starts a new history for the new name. A `requires.effects` check on the new name does not see effects recorded under the old name.
 
-**A family opened before its runtime followed a deployment keeps its opening policy.** Such a family was opened by a runtime version that pinned every family to the policy file it opened under. It stays on that file until it ends, and a change to the deployment's policy does not reach it.
+**A family opened before its runtime followed a deployment keeps its opening policy.** Such a family was opened by a runtime version that pinned every family to the policy file it opened under. It stays on that file until it ends, and a change to the deployment's policy does not reach it. A host can step back to that model on purpose: it opens new families pinned to the current policy and publishes nothing, so the deployment's head stays where it is, running families keep the revision they have, and a policy change reaches new families only.
 
 ## Example: sharing information from a private customer ticket
 

@@ -127,6 +127,11 @@ pub(crate) fn deployment_of(opening: &[Fact]) -> Option<DeploymentName> {
     }
 }
 
+/// The deployment a family follows, read from its stored opening batch alone.
+pub(crate) fn opening_deployment(opening: &[u8]) -> Result<Option<DeploymentName>, ReadError> {
+    Ok(deployment_of(&decode(0, opening)?.facts))
+}
+
 pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
     let mut log = Log {
         root: root.clone(),
