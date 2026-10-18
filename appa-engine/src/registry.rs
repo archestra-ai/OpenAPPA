@@ -87,6 +87,30 @@ impl ToolMatcher {
             }
         }
     }
+
+    /// The arguments whose pattern puts `*` inside a URL host, as in `https://*.example.com/*`.
+    /// `*` crosses `/`, `?` and `#`, so such a pattern matches any URL that merely contains the
+    /// rest of it.
+    fn url_host_wildcards(&self) -> impl Iterator<Item = &str> {
+        let clauses = match self {
+            ToolMatcher::Bare => None,
+            ToolMatcher::Arguments(ArgumentPatterns(clauses)) => Some(clauses),
+        };
+        clauses
+            .into_iter()
+            .flatten()
+            .filter(|(_, pattern)| wildcard_in_url_host(pattern))
+            .map(|(argument, _)| argument.as_str())
+    }
+}
+
+fn wildcard_in_url_host(pattern: &[PatternPart]) -> bool {
+    pattern.windows(2).any(|pair| match pair {
+        [PatternPart::Literal(literal), PatternPart::Wildcard] => literal
+            .rsplit_once("://")
+            .is_some_and(|(_, authority)| !authority.contains('/')),
+        _ => false,
+    })
 }
 
 fn wildcard_matches(pattern: &[PatternPart], value: &str) -> bool {
@@ -208,6 +232,14 @@ fn parse_tool_selector(authored: &str) -> Result<(ContractName, ToolMatcher), Lo
         closed = next;
     }
     Ok((ContractName::parse(tool), ToolMatcher::Arguments(clauses)))
+}
+
+/// The arguments of an authored declaration name whose pattern puts `*` inside a URL host. A
+/// malformed selector names none: loading refuses it on its own.
+pub fn url_host_wildcards(authored: &ToolName) -> Vec<String> {
+    parse_tool_selector(authored.as_str())
+        .map(|(_, matcher)| matcher.url_host_wildcards().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2759,6 +2791,32 @@ mod tests {
         assert_eq!(
             narrow.effects().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from([EffectKind::new("audit.log")])
+        );
+    }
+
+    #[test]
+    fn a_wildcard_inside_a_url_host_is_flagged() {
+        let flagged = |name: &str| url_host_wildcards(&ToolName::new(name));
+        for name in [
+            "fetch(url:https://*.github.com/*)",
+            "fetch(url:https://api.*)",
+            "fetch(url:https://github.com*)",
+            "fetch(url:*://*)",
+        ] {
+            assert_eq!(flagged(name), ["url"], "{name}");
+        }
+        for name in [
+            "fetch(url:https://github.com/*)",
+            "fetch(url:https://www.google.com/search?*)",
+            "fetch(url:*)",
+            "read(path:*/.env*)",
+            "fetch",
+        ] {
+            assert!(flagged(name).is_empty(), "{name}");
+        }
+        assert_eq!(
+            flagged("fetch(url:https://github.com/*,mirror:http://*.example/*)"),
+            ["mirror"]
         );
     }
 

@@ -25,7 +25,7 @@ The installer places `appa` in `~/.local/bin`.
 4. Installs the `/appa-guide` onboarding skill.
 5. Installs `clappa` (the protected session launcher) and includes the default `claude-code` battery for built-in tools.
 
-Existing custom hooks, MCP servers, and global status lines remain untouched.
+Existing custom hooks, MCP servers, and global status lines remain untouched. The hooks act only in sessions that `clappa` starts. A plain `claude` session, and every other agent that reads the same settings, runs as before.
 
 ## 1. Teach OpenAPPA about your tools
 

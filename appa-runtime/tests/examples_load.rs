@@ -443,7 +443,11 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "an artifact is private to the requester until they share it"
     );
 
-    let publication = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
+    let publication = propose(
+        &runtime,
+        call("host/claude-code/WebFetch", "url", "https://example.net/page.html"),
+    )
+    .await;
     let HookDecision::DenyCall { offers, review, .. } = publication else {
         panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
     };

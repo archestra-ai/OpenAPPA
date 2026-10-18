@@ -1924,16 +1924,17 @@ delta = { trust = "suspicious" }
 name = "host/claude-code/WebFetch(url:https://google.com/search?*)"
 delta = { trust = "suspicious" }
 
-# Web pages and search results are authored outside the session, and the URL
-# or query itself leaves it: a public sink and an untrusted source at once.
+# Web pages are authored outside the session, and the URL leaves it for any
+# host: a public sink and an untrusted source at once.
 [[policy.tool]]
 name = "host/claude-code/WebFetch"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
+# The search provider sees the query, as Google does above; strangers write
+# the results.
 [[policy.tool]]
 name = "host/claude-code/WebSearch"
-requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 # An inbox message and a resource of any MCP server arrive without the label

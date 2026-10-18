@@ -84,10 +84,11 @@ The other built-in tools get static rules:
   other session-local tools take the session's label as it is. The subagent
   tools `Agent`, `Task` and `Workflow` are the root's to declare: their rules
   rely on the deployment controlling a subagent's context.
-- **WebFetch, WebSearch** — A page or search result is a `suspicious` source,
-  and the URL or query is a `public` sink. A fetch from a listed
-  documentation host keeps the session's label. A Google search URL requires
-  no audience and returns `suspicious` results.
+- **WebFetch, WebSearch** — A page or search result is a `suspicious` source.
+  A fetch URL is a `public` sink, except that a fetch from a listed
+  documentation host keeps the session's label. A search, through `WebSearch`
+  or a Google search URL, requires no audience: the query goes only to the
+  search provider.
 - **Content from elsewhere** — `FetchInboxMessage`, `ReadMcpResourceTool`,
   `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
   `suspicious` content. Starting a remote routine is a `public` sink;
