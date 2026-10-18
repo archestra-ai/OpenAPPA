@@ -483,7 +483,10 @@ pub enum OpenError {
     Storage(String),
     #[error("the policy cannot be published: {0}")]
     Publish(String),
-    #[error("deployment {deployment} moved to policy revision {head:?}; read the policy again before publishing")]
+    #[error(
+        "deployment {deployment} moved to policy revision {head}; read the policy again before publishing",
+        head = .head.map_or_else(|| "none".to_owned(), |revision| revision.to_string())
+    )]
     PolicyHeadMoved {
         deployment: DeploymentName,
         head: Option<appa_engine::profile::PolicyRevision>,
@@ -1498,6 +1501,12 @@ impl Runtime {
                 appa_eventlog::PublishError::Moved { head } => moved(head),
                 error => OpenError::Publish(error.to_string()),
             })?;
+        tracing::info!(
+            deployment = %line,
+            policy_revision = published.revision.value(),
+            policy_key = %published.key.as_str(),
+            "published the policy as the deployment's head"
+        );
         Ok(self.published(line, deployment.at(line, published.revision.value()), true))
     }
 
