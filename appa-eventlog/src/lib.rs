@@ -919,12 +919,11 @@ impl LogStore {
     pub fn published_as(&self, deployment: &DeploymentName, key: &str) -> Result<Option<PolicyRevision>, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
-        let revision = match &self.store {
+        match &self.store {
             Store::Sqlite(sqlite) => sqlite.published_as(deployment, key),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.published_as(deployment, key),
-        }?;
-        Ok(revision.map(|revision| PolicyRevision::new(revision as u64)))
+        }
     }
 
     /// The content key of the policy file `deployment` published as `revision`.

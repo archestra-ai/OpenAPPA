@@ -68,11 +68,11 @@ const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
     // serves `published_as`: the first revision a deployment published a key as.
     "CREATE TABLE deployments (
          name TEXT PRIMARY KEY,
-         head INTEGER NOT NULL
+         head INTEGER NOT NULL CHECK (head > 0)
      );
      CREATE TABLE policy_revisions (
          deployment TEXT NOT NULL,
-         revision   INTEGER NOT NULL,
+         revision   INTEGER NOT NULL CHECK (revision > 0),
          key        TEXT NOT NULL,
          PRIMARY KEY (deployment, revision)
      );
@@ -385,12 +385,17 @@ impl Sqlite {
         revision_key(&self.connection(), deployment, revision)
     }
 
-    pub(crate) fn published_as(&self, deployment: &DeploymentName, key: &str) -> Result<Option<i64>, ReadError> {
-        Ok(self.connection().query_row(
+    pub(crate) fn published_as(
+        &self,
+        deployment: &DeploymentName,
+        key: &str,
+    ) -> Result<Option<PolicyRevision>, ReadError> {
+        let revision: Option<i64> = self.connection().query_row(
             "SELECT MIN(revision) FROM policy_revisions WHERE deployment = ?1 AND key = ?2",
             params![deployment.as_str(), key],
             |row| row.get(0),
-        )?)
+        )?;
+        Ok(revision.map(stored_revision).transpose()?)
     }
 
     /// The key `revision` of `deployment` names, and the bytes stored under it.
@@ -1544,7 +1549,21 @@ fn head_of(connection: &Connection, deployment: &DeploymentName) -> Result<Optio
             |row| row.get(0),
         )
         .optional()?;
-    Ok(head.map(|head| PolicyRevision::new(head as u64)))
+    head.map(stored_revision).transpose()
+}
+
+fn stored_revision(revision: i64) -> Result<PolicyRevision, rusqlite::Error> {
+    u64::try_from(revision)
+        .ok()
+        .filter(|revision| *revision > 0)
+        .map(PolicyRevision::new)
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                format!("a stored policy revision is not positive: {revision}").into(),
+            )
+        })
 }
 
 fn stored_key(key: String) -> Result<appa_engine::profile::PolicyFileKey, ReadError> {
@@ -1852,6 +1871,80 @@ mod tests {
     use super::*;
     use crate::{Backend, LogStore, OpenError};
 
+    #[test]
+    fn sqlite_refuses_nonpositive_policy_revisions_on_write() {
+        for revision in [0_i64, -1, i64::MIN] {
+            let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+            let connection = store.lock();
+            assert!(
+                connection
+                    .execute("INSERT INTO deployments (name, head) VALUES ('test', ?1)", [revision])
+                    .is_err(),
+                "a deployment head must refuse {revision}"
+            );
+            assert!(
+                connection
+                    .execute(
+                        "INSERT INTO policy_revisions (deployment, revision, key) VALUES ('test', ?1, 'key')",
+                        [revision],
+                    )
+                    .is_err(),
+                "a published revision must refuse {revision}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_refuses_nonpositive_stored_heads_on_read() {
+        for revision in [0_i64, -1, i64::MIN] {
+            let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+            let deployment = DeploymentName::new("test");
+            {
+                let connection = store.lock();
+                connection
+                    .execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .expect("legacy invalid rows can be simulated");
+                connection
+                    .execute("INSERT INTO deployments (name, head) VALUES ('test', ?1)", [revision])
+                    .expect("the invalid head is injected");
+            }
+            assert!(
+                matches!(
+                    store.head(&deployment),
+                    Err(ReadError::Storage(rusqlite::Error::FromSqlConversionFailure(..)))
+                ),
+                "head {revision} must be refused as an invalid stored integer"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_refuses_nonpositive_stored_published_revisions_on_read() {
+        for revision in [0_i64, -1, i64::MIN] {
+            let store = LogStore::open(Backend::Memory).expect("a fresh store opens");
+            let deployment = DeploymentName::new("test");
+            {
+                let connection = store.lock();
+                connection
+                    .execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .expect("legacy invalid rows can be simulated");
+                connection
+                    .execute(
+                        "INSERT INTO policy_revisions (deployment, revision, key) VALUES ('test', ?1, 'key')",
+                        [revision],
+                    )
+                    .expect("the invalid revision is injected");
+            }
+            assert!(
+                matches!(
+                    store.published_as(&deployment, "key"),
+                    Err(ReadError::Storage(rusqlite::Error::FromSqlConversionFailure(..)))
+                ),
+                "published revision {revision} must be refused"
+            );
+        }
+    }
+
     /// The SQLite schema is a persisted format: its version stamp and the DDL of each table,
     /// compared token for token.
     #[test]
@@ -1859,14 +1952,14 @@ mod tests {
         let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected: Vec<(String, String, Option<String>)> = [
             ("archived_roots", Some("CREATE TABLE archived_roots ( root TEXT PRIMARY KEY )")),
-            ("deployments", Some("CREATE TABLE deployments ( name TEXT PRIMARY KEY, head INTEGER NOT NULL )")),
+            ("deployments", Some("CREATE TABLE deployments ( name TEXT PRIMARY KEY, head INTEGER NOT NULL CHECK (head > 0) )")),
             ("held_peer_messages", Some("CREATE TABLE held_peer_messages ( seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, receiver TEXT NOT NULL, digest TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL, expires_at INTEGER NOT NULL, notified INTEGER NOT NULL )")),
             ("held_peer_messages_receiver", Some("CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq)")),
             ("host_keys", Some("CREATE TABLE host_keys ( key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root) )")),
             ("logs", Some("CREATE TABLE logs ( root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq) )")),
             ("operations", Some("CREATE TABLE operations ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, operation_id TEXT NOT NULL, root TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, PRIMARY KEY (organization_id, session_id, operation_id) )")),
             ("policy_files", Some("CREATE TABLE policy_files ( key TEXT PRIMARY KEY, bytes BLOB NOT NULL )")),
-            ("policy_revisions", Some("CREATE TABLE policy_revisions ( deployment TEXT NOT NULL, revision INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY (deployment, revision) )")),
+            ("policy_revisions", Some("CREATE TABLE policy_revisions ( deployment TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0), key TEXT NOT NULL, PRIMARY KEY (deployment, revision) )")),
             ("policy_revisions_key", Some("CREATE INDEX policy_revisions_key ON policy_revisions (deployment, key, revision)")),
             ("processed_results", Some("CREATE TABLE processed_results ( organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, root TEXT NOT NULL, status TEXT NOT NULL, approved_output TEXT, decision TEXT, lease_owner TEXT, lease_expires_at INTEGER, completed_at INTEGER, PRIMARY KEY (organization_id, session_id, tool_call_id) )")),
             ("sqlite_autoindex_archived_roots_1", None),

@@ -1353,15 +1353,21 @@ impl PostgresStore {
     }
 
     /// See [`LogStore::published_as`].
-    pub(super) fn published_as(&self, deployment: &DeploymentName, key: &str) -> Result<Option<i64>, ReadError> {
+    pub(super) fn published_as(
+        &self,
+        deployment: &DeploymentName,
+        key: &str,
+    ) -> Result<Option<PolicyRevision>, ReadError> {
         let (name, key) = (deployment.as_str().to_owned(), key.to_owned());
         Ok(self.query(move |client| {
-            Ok(client
+            client
                 .query_one(
                     "SELECT MIN(revision) FROM openappa_policy_revisions WHERE deployment = $1 AND hash = $2",
                     &[&name, &key],
                 )?
-                .get::<_, Option<i64>>(0))
+                .get::<_, Option<i64>>(0)
+                .map(stored_revision)
+                .transpose()
         })?)
     }
 
