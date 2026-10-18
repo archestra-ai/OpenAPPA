@@ -104,7 +104,7 @@ If a change permits the outside recipient or blocks HR, this test fails. It chec
 
 ## Expected decisions
 
-Each call in a test file is followed by one `expect` line:
+Each call in a test file can be followed by one `expect` line:
 
 | Line | The call passes when |
 |---|---|
@@ -115,6 +115,47 @@ Each call in a test file is followed by one `expect` line:
 | `expect sanitizer [name]` | The call is blocked with an offer to apply a sanitizer. Replay takes the offer, and the stand-in returns the value unchanged. |
 
 With a name, the offer must involve that authority or sanitizer. Without a name, any authority or sanitizer passes. After a taken offer, the trajectory continues from the remedied call.
+
+## Observe decisions without expectations
+
+A call may omit its `expect` line. Replay then reports the decision and does not check it. Use this to ask what the policy decides on a real trajectory before you write expectations. A file may mix checked and observed calls.
+
+```text
+mcp/files/read {
+  path: "/hr/salaries.csv"
+}
+
+mcp/mail/send {
+  to: "x@other.com"
+}
+```
+
+```text
+obs   policy-tests/hr-email.appa:1 mcp/files/read got allow (after accepting the narrowing)
+obs   policy-tests/hr-email.appa:5 mcp/mail/send got deny
+ok    policy-tests/hr-email.appa
+1 file: 1 ok, 0 failed, 0 could not run
+```
+
+An observed call never fails its file. When the call is allowed, it runs. When the call is blocked with a plain narrowing acceptance, replay takes it, as for `expect allow`. When the call is blocked otherwise, replay takes no offer. The call did not run, so its `delta` does not change the trajectory. An observed `appa/do_something` call never takes an offer.
+
+## JSON output
+
+`appa replay --json` writes one JSON object per line instead of text. Each call gets one object:
+
+| Field | Value |
+|---|---|
+| `file` | The test file path. |
+| `line` | The line of the call, or `null` when the trajectory could not open. |
+| `tool` | The proposed tool. |
+| `check` | The `expect` text, such as `allow` or `authority hitl`, or `observe`. |
+| `got` | The decision in `expect` words, or `null` when the call could not run. |
+| `offers` | The offers of a blocked call, in `expect` words. |
+| `taken` | The offer that replay took, or `null`. |
+| `outcome` | `passed`, `mismatch`, `observed`, or `cannot_run`. |
+| `detail` | Why the call or trajectory could not run, or `null`. |
+
+The last line is `{"summary": {"ok": …, "failed": …, "cannot_run": …}}`. The exit code is the same as for text output.
 
 ## Check a restriction without naming a tool
 
