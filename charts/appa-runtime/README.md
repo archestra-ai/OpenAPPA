@@ -103,6 +103,19 @@ If a process stops between the two directory renames, the chart's init
 container restores `.release-batteries.previous` before the runtime
 starts. The prior layer remains on the PVC throughout the transaction.
 
+## Runtime upgrades
+
+The chart runs one replica with the `Recreate` strategy. An upgrade restarts
+the runtime. With persistence enabled, stored trajectory families resume
+from the same PVC after startup.
+
+The runtime's SQLite database uses schema 9. Supported existing databases
+upgrade in place and keep their trajectories. An image without schema 9
+support refuses to open that database. An image rollback does not downgrade
+the stored schema: preserve the PVC and use a compatible runtime.
+
+Pause policy and battery changes until the replacement runtime is ready.
+
 ## Policy
 
 The chart mounts a bootstrap policy that lets appa-guide inspect the
