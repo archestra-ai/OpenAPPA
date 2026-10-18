@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.35.0...v0.35.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **runtime:** fence policy publication against an observed head ([#685](https://github.com/archestra-ai/OpenAPPA/issues/685)) ([8e06702](https://github.com/archestra-ai/OpenAPPA/commit/8e067026f6d19aed1833b6366c26e891ce394a9d))
+
 ## [0.35.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.34.0...v0.35.0) (2026-10-18)
 
 
