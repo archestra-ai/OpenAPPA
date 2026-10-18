@@ -483,6 +483,11 @@ pub enum OpenError {
     Storage(String),
     #[error("the policy cannot be published: {0}")]
     Publish(String),
+    #[error("the prepared policy does not match deployment {deployment} revision {revision}")]
+    PolicyRevisionMismatch {
+        deployment: DeploymentName,
+        revision: appa_engine::profile::PolicyRevision,
+    },
 }
 
 /// Why a deployment refused to serve after loading: a source the policy references gave no
@@ -1015,8 +1020,9 @@ impl PreparedDeployment {
     }
 }
 
-/// A prepared deployment serving the head of a deployment line: what [`Runtime::publish`]
-/// returns and [`Runtime::pinned`] serves. It decides at the revision it was published as, and
+/// A prepared deployment serving a published revision of a deployment line: what
+/// [`Runtime::publish`] or [`Runtime::at_revision`] returns and [`Runtime::pinned`] serves.
+/// It decides at the revision it was published as, and
 /// a view serving it refuses with a retryable error once the line moves past that revision.
 #[derive(Clone)]
 pub struct PublishedDeployment {
@@ -1383,6 +1389,43 @@ impl Runtime {
             deployment: self.own(prepared),
         };
         self.view(|view| view.pinned = Some(pinned))
+    }
+
+    /// Serve an existing revision with `prepared`'s externals, without publishing anything.
+    /// The prepared policy file must match the file stored for that revision.
+    ///
+    /// A host that freezes publishing reads the head, prepares its stored file with current
+    /// credentials, and pins this handle through [`Runtime::pinned`]. A concurrent publish
+    /// cannot make this operation publish the old file again. If the line has moved past
+    /// `revision`, the pinned view refuses retryably at dispatch and commits nothing.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn at_revision(
+        &self,
+        line: &DeploymentName,
+        prepared: &PreparedDeployment,
+        revision: appa_engine::profile::PolicyRevision,
+    ) -> Result<PublishedDeployment, OpenError> {
+        let deployment = self.own(prepared);
+        let stored = self
+            .inner
+            .store
+            .policy_file(line, revision)
+            .map_err(|error| OpenError::Storage(error.to_string()))?;
+        let key = appa_engine::profile::PolicyFileKey::of(deployment.config.policy_file().bytes());
+        if appa_engine::profile::PolicyFileKey::of(&stored) != key {
+            return Err(OpenError::PolicyRevisionMismatch {
+                deployment: line.clone(),
+                revision,
+            });
+        }
+        Ok(PublishedDeployment {
+            runtime: Arc::downgrade(&self.inner.shared),
+            line: line.clone(),
+            deployment: Arc::new(deployment.at(line, revision.value())),
+        })
     }
 
     /// Publish a prepared deployment as the head of `line`: the head's own revision when the

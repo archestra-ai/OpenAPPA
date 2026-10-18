@@ -329,6 +329,89 @@ async fn a_view_pinned_behind_its_lines_head_refuses_until_its_host_pins_the_hea
     );
 }
 
+/// A host read the head to rebuild its serving view, but another pod published before the
+/// host pinned it. Pinning the stored revision must never publish the old file over that head.
+#[tokio::test]
+async fn pinning_a_stored_revision_never_publishes_over_a_newer_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let pod = || {
+        Arc::new(
+            Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None)
+                .expect("the base deployment opens"),
+        )
+    };
+    let (one, other) = (pod(), pod());
+    let line = DeploymentName::new("frozen-tenant");
+    let prepared = one
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the first policy prepares");
+    let published = one.publish(&line, &prepared).expect("the first policy publishes");
+    let id = root("frozen-conversation");
+    let view = Arc::new(one.pinned(&published));
+    start(&view, &id).await;
+    let observed = store.head(&line).expect("the head reads").expect("the line exists");
+
+    let next = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    let newer = other
+        .prepare_deployment(write(dir.path(), &next))
+        .expect("the next policy prepares");
+    other.publish(&line, &newer).expect("another pod advances the head");
+    let expected = store.head(&line).expect("the newer head reads");
+
+    let pinned = one
+        .at_revision(&line, &prepared, observed.revision)
+        .expect("the observed revision pins");
+    assert_eq!(
+        store.head(&line).expect("the head reads"),
+        expected,
+        "pinning never publishes"
+    );
+    assert_eq!(pinned.revision(), observed.revision.value());
+    let before = store.log(&id).expect("the family reads");
+    let stale = Arc::new(one.pinned(&pinned));
+    let refused = propose(&stale, &id, call("notes", 1), "stale").await;
+    assert!(moved(&refused), "{refused:?}");
+    let after = store.log(&id).expect("the family reads");
+    assert_eq!(after.facts().len(), before.facts().len(), "a stale pin commits nothing");
+}
+
+#[test]
+fn pinning_requires_the_stored_revisions_policy_file_and_never_creates_a_line() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime = Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None)
+        .expect("the base deployment opens");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the policy prepares");
+    let line = DeploymentName::new("existing");
+    runtime.publish(&line, &prepared).expect("the policy publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let pinned = runtime
+        .at_revision(&line, &prepared, head.revision)
+        .expect("the matching file pins");
+    assert_eq!(pinned.revision(), head.revision.value());
+
+    let different = policy("[[policy.tool]]\nname = \"fetch\"\n");
+    let different = runtime
+        .prepare_deployment(write(dir.path(), &different))
+        .expect("the different policy prepares");
+    assert!(matches!(
+        runtime.at_revision(&line, &different, head.revision),
+        Err(appa_runtime::api::OpenError::PolicyRevisionMismatch { .. })
+    ));
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head.clone()));
+
+    let absent = DeploymentName::new("absent");
+    assert!(runtime.at_revision(&absent, &prepared, head.revision).is_err());
+    assert!(store.head(&absent).expect("the absent head reads").is_none());
+    assert!(runtime.at_revision(&line, &prepared, head.revision.next()).is_err());
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head));
+}
+
 /// Two lines that publish the same bytes at the same revision numbers keep their own engines: a
 /// compiled engine carries its line, and a family's opening is judged against it, so the second
 /// line's families decide after a publish, and fork, exactly as the first line's do.
