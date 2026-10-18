@@ -8,6 +8,17 @@
 * **runtime:** carry a typed refusal class on Refuse ([#681](https://github.com/archestra-ai/OpenAPPA/issues/681))
 * **policy:** [aliases] table with host namespace aliases ([#666](https://github.com/archestra-ai/OpenAPPA/issues/666))
 
+### Live policy revisions and upgrades
+
+Policy changes reach following trajectory families at their next decision. Snapshot families keep their opening policy. Publishing a revision retires pending offers and approvals; the agent must propose the call again.
+
+* SQLite upgrades supported existing databases in place to schema 9 and retains their trajectories. An older runtime that lacks schema 9 support refuses the database. Preserve the database and use a compatible runtime; an image rollback does not downgrade it.
+* The kagent runtime chart uses one replica, the Recreate strategy and the existing PVC. An upgrade restarts the runtime; stored trajectory families resume after startup. Pause policy and battery changes until the replacement is ready.
+* PostgreSQL hosts must install the deployment and policy-revision tables before starting new runtime instances. During a rolling upgrade, freeze policy saves, Git-sync pulls, battery changes, aliases and credential changes until every serving pod is updated. Unchanged inputs publish nothing.
+* Peer labels written by old pods use trust ordinals. Keep trust-rank order and names unchanged until old-format held or embedded messages expire.
+* After the roll, resume changes and verify that a publish advances the head, an existing following family uses it, and snapshot families keep their opening policy. Verify that no policy-moved retry storm or unexpected 503/409 responses follow.
+* An image rollback does not undo published revisions. An older version can refuse a following family that already advanced beyond its opening revision. Freeze edits during mixed-version operation and preserve the additive schema and stored trajectories.
+
 ### Features
 
 * **annotators:** one label guide for every annotator ([#644](https://github.com/archestra-ai/OpenAPPA/issues/644)) ([5f3f6b9](https://github.com/archestra-ai/OpenAPPA/commit/5f3f6b952bc794b3633128e67e578371521a906f))
@@ -18,7 +29,6 @@
 * **opencode:** install AppenCode without a source checkout ([#656](https://github.com/archestra-ai/OpenAPPA/issues/656)) ([4f5a4b9](https://github.com/archestra-ai/OpenAPPA/commit/4f5a4b91f63ff2109710411c95c2b68852ca4d0b))
 * **opencode:** support Cloudflare, Notion, and GitHub batteries ([#661](https://github.com/archestra-ai/OpenAPPA/issues/661)) ([6759a45](https://github.com/archestra-ai/OpenAPPA/commit/6759a45b7162a3011132bd94831b53233fd11e11))
 * **policy:** [aliases] table with host namespace aliases ([#666](https://github.com/archestra-ai/OpenAPPA/issues/666)) ([cd3c4a9](https://github.com/archestra-ai/OpenAPPA/commit/cd3c4a9a661f516b78250d4b2e0751ae8f4be205))
-* **replay:** appa/do_something asks what the trajectory allows without naming a tool ([9d63a7d](https://github.com/archestra-ai/OpenAPPA/commit/9d63a7db27c16bb77b19454998f5c48364323c69))
 * **replay:** appa/do_something checks what the trajectory allows without naming a tool ([#670](https://github.com/archestra-ai/OpenAPPA/issues/670)) ([9d63a7d](https://github.com/archestra-ai/OpenAPPA/commit/9d63a7db27c16bb77b19454998f5c48364323c69))
 * **runtime:** attribute archestra consults to their trajectory ([#664](https://github.com/archestra-ai/OpenAPPA/issues/664)) ([3024eba](https://github.com/archestra-ai/OpenAPPA/commit/3024eba8d2e948894fcfd4ffebda7bc2566ad51c))
 * **runtime:** carry a typed refusal class on Refuse ([#681](https://github.com/archestra-ai/OpenAPPA/issues/681)) ([88a41d0](https://github.com/archestra-ai/OpenAPPA/commit/88a41d01c7df20bea357caffb12439d55561c242))
@@ -56,7 +66,6 @@
 * bump jsonschema from 0.57.0 to 0.58.6 ([#600](https://github.com/archestra-ai/OpenAPPA/issues/600)) ([95a24f8](https://github.com/archestra-ai/OpenAPPA/commit/95a24f8e3ef08f69bd2b3530bcb2e765eaec6f15))
 * **corp-systems:** bump rmcp to 3.x, dropping vulnerable 1.8.0 ([#651](https://github.com/archestra-ai/OpenAPPA/issues/651)) ([3df7d35](https://github.com/archestra-ai/OpenAPPA/commit/3df7d35b502d3527f73505bcff4751c0e437fd49))
 * upgrade lockfiles for security alerts ([#653](https://github.com/archestra-ai/OpenAPPA/issues/653)) ([4e6b66f](https://github.com/archestra-ai/OpenAPPA/commit/4e6b66f8a344d3b8010c9a38e96c5f1dd1aa71d2))
-* upgrade lockfiles to patched versions for open Dependabot alerts ([4e6b66f](https://github.com/archestra-ai/OpenAPPA/commit/4e6b66f8a344d3b8010c9a38e96c5f1dd1aa71d2))
 
 
 ### Code Refactoring

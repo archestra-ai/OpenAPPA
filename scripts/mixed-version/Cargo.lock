@@ -5,9 +5,9 @@ version = 4
 [[package]]
 name = "appa-engine"
 version = "0.34.0"
+source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
 dependencies = [
  "appa-runtime-api 0.34.0",
- "imbl",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -18,10 +18,10 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.34.0"
-source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
+version = "0.35.0"
 dependencies = [
- "appa-runtime-api 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-runtime-api 0.35.0",
+ "imbl",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -33,6 +33,7 @@ dependencies = [
 [[package]]
 name = "appa-eventlog"
 version = "0.34.0"
+source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
 dependencies = [
  "appa-engine 0.34.0",
  "appa-runtime-api 0.34.0",
@@ -52,11 +53,10 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.34.0"
-source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
+version = "0.35.0"
 dependencies = [
- "appa-engine 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
- "appa-runtime-api 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-engine 0.35.0",
+ "appa-runtime-api 0.35.0",
  "base64",
  "native-tls",
  "postgres",
@@ -76,16 +76,17 @@ name = "appa-mixed-version"
 version = "0.0.0"
 dependencies = [
  "appa-engine 0.34.0",
- "appa-engine 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-engine 0.35.0",
  "appa-eventlog 0.34.0",
- "appa-eventlog 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-eventlog 0.35.0",
  "appa-policy 0.34.0",
- "appa-policy 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-policy 0.35.0",
 ]
 
 [[package]]
 name = "appa-policy"
 version = "0.34.0"
+source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
 dependencies = [
  "appa-engine 0.34.0",
  "appa-runtime-api 0.34.0",
@@ -98,11 +99,10 @@ dependencies = [
 
 [[package]]
 name = "appa-policy"
-version = "0.34.0"
-source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
+version = "0.35.0"
 dependencies = [
- "appa-engine 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
- "appa-runtime-api 0.34.0 (git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef)",
+ "appa-engine 0.35.0",
+ "appa-runtime-api 0.35.0",
  "serde",
  "serde_json",
  "thiserror",
@@ -113,6 +113,7 @@ dependencies = [
 [[package]]
 name = "appa-runtime-api"
 version = "0.34.0"
+source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
 dependencies = [
  "serde",
  "serde_json",
@@ -121,8 +122,7 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.34.0"
-source = "git+https://github.com/archestra-ai/OpenAPPA.git?rev=6ca466fea5fdc59930b66e145ec987a3ecea88ef#6ca466fea5fdc59930b66e145ec987a3ecea88ef"
+version = "0.35.0"
 dependencies = [
  "serde",
  "serde_json",
