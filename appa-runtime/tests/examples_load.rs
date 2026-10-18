@@ -443,6 +443,16 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "an artifact is private to the requester until they share it"
     );
 
+    let search = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
+    let HookDecision::DenyCall { offers, review, .. } = search else {
+        panic!("a search returns suspicious results, so it first asks to lower trust: {search:?}");
+    };
+    assert_eq!(
+        (offers.len(), review.len()),
+        (1, 0),
+        "only the search provider reads a query: a `self` trajectory searches after accepting lower trust, with no audience review"
+    );
+
     let publication = propose(
         &runtime,
         call("host/claude-code/WebFetch", "url", "https://example.net/page.html"),

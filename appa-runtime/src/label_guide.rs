@@ -353,8 +353,9 @@ pub(crate) const REQUIRES_AUDIENCE_CRITERIA: RequiresAudienceCriteria = Requires
         "locally, writes to a local path, or retrieves a named resource whose arguments ",
         "only name it — a remote, a ref, an id, a channel, a path or a package name. A ",
         "working-tree edit is `none` because the bytes reach a reader only when a later ",
-        "call pushes or publishes them. A query to a general web search engine is `none` ",
-        "too: only the engine reads it, and it publishes nothing."
+        "call pushes or publishes them. A query to a search engine the harness provides, or ",
+        "to a well-known public engine such as Google or Bing, is `none` too: only the engine ",
+        "reads it, and it publishes nothing."
     ),
     internal: concat!(
         "The call delivers trajectory bytes to a person or service inside the ",
@@ -368,9 +369,9 @@ pub(crate) const REQUIRES_AUDIENCE_CRITERIA: RequiresAudienceCriteria = Requires
         "The call delivers trajectory bytes to a party outside the operator's control: ",
         "a public repository, issue tracker or website, an external email recipient, or a ",
         "third-party service. A request body, an upload, a push, a package publish, or a ",
-        "query to any service other than a general web search engine reaches that ",
-        "destination. A request that only names what to retrieve — a document, a remote, ",
-        "a ref or a package to install — does not."
+        "query to any other service, including a search endpoint on an unfamiliar host, ",
+        "reaches that destination. A request that only names what to retrieve — a document, ",
+        "a remote, a ref or a package to install — does not."
     ),
 };
 
@@ -423,7 +424,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object, with the `context` it came with, if any.
-pub(crate) const EXAMPLES: [Example; 23] = [
+pub(crate) const EXAMPLES: [Example; 24] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: ResultAudience::Internal,
@@ -583,6 +584,14 @@ pub(crate) const EXAMPLES: [Example; 23] = [
         requires_audience: RequiredAudience::Public,
         requires_trusted: true,
         why: "the URL sends a message, so this request is a send, not a fetch; the service answers with its own status",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "curl -s 'https://search.unfamiliar.example/?q=cannot+borrow+self.cache+as+mutable'", "description": "Search for the borrow error"}}"#,
+        delta_audience: ResultAudience::Public,
+        delta_trust: ResultTrust::Suspicious,
+        requires_audience: RequiredAudience::Public,
+        requires_trusted: false,
+        why: "an unfamiliar host reads the query like any other site, whatever its path says; only a harness search or a well-known public engine reads a query without publishing it",
     },
     Example {
         call: r#"{"tool": "ToolSearch", "arguments": {"query": "select:Read,Edit", "max_results": 5}}"#,
@@ -883,8 +892,11 @@ mod tests {
             assert_eq!(undisclosing_read.requires_audience, RequiredAudience::None);
             assert!(!undisclosing_read.requires_trusted);
         }
-        assert_eq!(fetch_with_prompt.requires_audience, RequiredAudience::Public);
-        assert!(!fetch_with_prompt.requires_trusted);
+        let unfamiliar_search = example("search.unfamiliar.example").expect("the unfamiliar-search example");
+        for disclosing_read in [fetch_with_prompt, unfamiliar_search] {
+            assert_eq!(disclosing_read.requires_audience, RequiredAudience::Public);
+            assert!(!disclosing_read.requires_trusted);
+        }
         assert_eq!(install.requires_audience, RequiredAudience::None);
         assert!(install.requires_trusted);
         let send_by_url = example("sendMessage").expect("the send-by-URL example");
