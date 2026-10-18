@@ -60,7 +60,7 @@ digest = "sha256:ed071cf879f00de24bdaeaa5ea10eee585847c6a79676cf73dbc9472b17d1ec
 
 [packages.battery.opencode]
 path = "batteries/opencode"
-digest = "sha256:d2d33f5cfb1910baf6c87314deeb3b976da0eb78c7785bdf2d770b83b499699f"
+digest = "sha256:a46a195fccda972adb18ed66a0a837b04e6b78eda56c0c7dac7412d30fab0abe"
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
