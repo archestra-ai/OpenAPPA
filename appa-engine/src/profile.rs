@@ -3,6 +3,7 @@
 //! policy identity.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -245,23 +246,40 @@ pub fn neutral_starting_label(chain: &TrustChain) -> Label {
 /// policy, so a later publish never changes what an earlier record meant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PolicyRevision(u64);
+pub struct PolicyRevision(NonZeroU64);
 
 impl PolicyRevision {
-    pub const FIRST: PolicyRevision = PolicyRevision(1);
+    pub const FIRST: PolicyRevision = PolicyRevision::new(1);
 
+    /// Construct a positive revision supplied by a validated caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `revision` is zero. Storage reads validate before calling this constructor.
     pub const fn new(revision: u64) -> Self {
-        debug_assert!(revision > 0, "a policy revision is positive");
-        PolicyRevision(revision)
+        match NonZeroU64::new(revision) {
+            Some(revision) => PolicyRevision(revision),
+            None => panic!("a policy revision is positive"),
+        }
     }
 
     pub const fn value(self) -> u64 {
-        self.0
+        self.0.get()
     }
 
     /// The revision a publish over this one produces.
+    ///
+    /// Publishes advance stored heads, which are positive SQL `bigint` values. Their successor
+    /// fits in `u64`; a successor beyond SQL's range is refused by the store's positive constraint.
+    ///
+    /// # Panics
+    ///
+    /// Panics at `u64::MAX`, which no stored head can contain.
     pub const fn next(self) -> Self {
-        PolicyRevision(self.0 + 1)
+        match self.value().checked_add(1) {
+            Some(revision) => PolicyRevision::new(revision),
+            None => panic!("a stored policy revision is below u64::MAX"),
+        }
     }
 }
 
@@ -302,6 +320,9 @@ impl PolicyDialectVersion {
 /// The name of a deployment: a policy line that advances through policy revisions. A standalone
 /// runtime serves one; an embedding host serves one per tenant. A family that follows a line names
 /// it on its opening record.
+///
+/// This is an opaque host identifier, compared byte for byte and stored unchanged. It has no
+/// policy syntax or display-name constraints; the host chooses identifiers suitable for its UI.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeploymentName(String);
@@ -745,6 +766,15 @@ mod tests {
     use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AnnotatorName, AuthorityName, SanitizerName, TagName};
+
+    #[test]
+    fn a_policy_revision_refuses_zero_in_external_data() {
+        assert!(serde_json::from_str::<PolicyRevision>("0").is_err());
+        assert!(serde_json::from_str::<PolicyRevision>("-1").is_err());
+        let revision: PolicyRevision = serde_json::from_str("1").unwrap();
+        assert_eq!(revision, PolicyRevision::FIRST);
+        assert_eq!(serde_json::to_string(&revision).unwrap(), "1");
+    }
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".into(), "trusted".into()])

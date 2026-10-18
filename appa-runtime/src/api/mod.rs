@@ -1229,6 +1229,8 @@ struct Shared {
     line: DeploymentName,
     /// Engines compiled from stored revisions: the replay-only engines of revisions a family's
     /// log was decided under, and the head's engine compiled with a family's opening inventory.
+    /// Entries remain until this runtime is dropped. Hosts with frequent publishes or many lines
+    /// must account for that process-memory growth; stored revisions remain replayable on restart.
     revisions: std::sync::Mutex<std::collections::BTreeMap<RevisionKey, Arc<RuntimeEngine>>>,
     modules: crate::builtins::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
