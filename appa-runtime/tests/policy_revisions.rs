@@ -412,6 +412,138 @@ fn pinning_requires_the_stored_revisions_policy_file_and_never_creates_a_line() 
     assert_eq!(store.head(&line).expect("the head reads"), Some(head));
 }
 
+/// A host validates policy inputs against one observed head. Another publisher winning
+/// afterwards must make the host read its inputs again, never restore the retired bytes.
+#[test]
+fn conditional_publication_refuses_a_stale_head_without_restoring_retired_bytes() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime =
+        Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None).expect("the runtime opens");
+    let line = DeploymentName::new("conditional");
+    let stale = runtime
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the first policy prepares");
+    let first = runtime
+        .publish_if_head(&line, &stale, None)
+        .expect("the first policy publishes");
+    let observed = store.head(&line).expect("the head reads").expect("the line exists");
+    let strict = runtime
+        .prepare_deployment(write(dir.path(), &policy("")))
+        .expect("the strict policy prepares");
+    runtime
+        .publish_if_head(&line, &strict, Some(observed.revision))
+        .expect("the strict policy publishes");
+    let current = store.head(&line).expect("the head reads").expect("the line exists");
+    for expected in [None, Some(observed.revision)] {
+        assert!(matches!(
+            runtime.publish_if_head(&line, &stale, expected),
+            Err(appa_runtime::api::OpenError::PolicyHeadMoved { head: Some(head), .. })
+                if head == current.revision
+        ));
+        assert_eq!(store.head(&line).expect("the head reads"), Some(current.clone()));
+    }
+    assert_eq!(current.revision.value(), first.revision() + 1);
+}
+
+#[test]
+fn conditional_publication_reuses_matching_bytes_only_at_the_expected_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let text = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime =
+        Runtime::open_with_store(write(dir.path(), &text), Arc::clone(&store), None).expect("the runtime opens");
+    let line = DeploymentName::new("conditional");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &text))
+        .expect("the policy prepares");
+    let absent = store.head(&line).expect("the head reads");
+    assert!(absent.is_none());
+    let first = runtime
+        .publish_if_head(&line, &prepared, None)
+        .expect("the first revision publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let same = runtime
+        .publish_if_head(&line, &prepared, Some(head.revision))
+        .expect("the matching policy reuses the head");
+    assert_eq!(first.revision(), same.revision());
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head));
+    assert!(matches!(
+        runtime.publish_if_head(&line, &prepared, None),
+        Err(appa_runtime::api::OpenError::PolicyHeadMoved { .. })
+    ));
+    let missing = DeploymentName::new("missing");
+    assert!(matches!(
+        runtime.publish_if_head(&missing, &prepared, Some(appa_engine::profile::PolicyRevision::FIRST)),
+        Err(appa_runtime::api::OpenError::PolicyHeadMoved { head: None, .. })
+    ));
+    assert!(store.head(&missing).expect("the head reads").is_none());
+}
+
+/// Both publishers have validated against the same revision. At most one may replace it,
+/// even when they enter the runtime concurrently.
+#[test]
+fn competing_conditional_publishers_cannot_retry_over_the_winner() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let text = policy("");
+    let runtime = Arc::new(
+        Runtime::open_with_store(write(dir.path(), &text), Arc::clone(&store), None).expect("the runtime opens"),
+    );
+    let line = DeploymentName::new("competing");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &text))
+        .expect("the initial policy prepares");
+    runtime
+        .publish_if_head(&line, &prepared, None)
+        .expect("the initial policy publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let barrier = std::sync::Barrier::new(2);
+    let candidates: Vec<_> = ["notes", "fetch"]
+        .iter()
+        .map(|tool| {
+            runtime
+                .prepare_deployment(write(
+                    dir.path(),
+                    &policy(&format!("[[policy.tool]]\nname = \"{tool}\"\n")),
+                ))
+                .expect("the candidate prepares")
+        })
+        .collect();
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|prepared| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    runtime.publish_if_head(&line, prepared, Some(head.revision))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("the publisher returns"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(appa_runtime::api::OpenError::PolicyHeadMoved { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .head(&line)
+            .expect("the head reads")
+            .expect("the line exists")
+            .revision,
+        head.revision.next()
+    );
+}
+
 /// Two lines that publish the same bytes at the same revision numbers keep their own engines: a
 /// compiled engine carries its line, and a family's opening is judged against it, so the second
 /// line's families decide after a publish, and fork, exactly as the first line's do.

@@ -110,6 +110,8 @@ A host that serves several policies from one embedded runtime, such as one per o
 
 When another publish moves the deployment's head past a pinned revision, the view refuses events with a retryable error. The host then pins the new head and dispatches the event again.
 
+If the host validates policy inputs that other processes can change, it must read the deployment head before validating those inputs. It then calls `Runtime::publish_if_head` with the observed revision, or `None` for a deployment with no head. If another publisher advances the head, `OpenError::PolicyHeadMoved` tells the host to read and validate its inputs again. This operation never retries publication against a newer head. Matching policy bytes reuse the expected revision without publishing.
+
 A pin selects a policy, not whose trajectories a view can reach. When the policies belong to separate tenants, give each dispatch its tenant's store through `runtime.on(store)`, a store that reads and writes only that tenant's trajectory logs. Also keep root trajectory ids unique across the whole runtime, for example by including the tenant id, because the runtime keys some in-process state by root id alone.
 
 A hosted document (`Config::hosted`, `Config::hosted_composed`, `Config::hosted_included`) resolves each `token_env` through a `lookup` function the host passes in, not through the process environment. Each policy's endpoints receive only the credentials the host supplies for that policy.

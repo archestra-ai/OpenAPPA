@@ -483,6 +483,11 @@ pub enum OpenError {
     Storage(String),
     #[error("the policy cannot be published: {0}")]
     Publish(String),
+    #[error("deployment {deployment} moved to policy revision {head:?}; read the policy again before publishing")]
+    PolicyHeadMoved {
+        deployment: DeploymentName,
+        head: Option<appa_engine::profile::PolicyRevision>,
+    },
     #[error("the prepared policy does not match deployment {deployment} revision {revision}")]
     PolicyRevisionMismatch {
         deployment: DeploymentName,
@@ -1445,6 +1450,58 @@ impl Runtime {
     ) -> Result<PublishedDeployment, OpenError> {
         let deployment = self.own(prepared);
         let (published, new) = serve(&self.inner.store, line, &deployment)?;
+        Ok(self.published(line, published, new))
+    }
+
+    /// Publish only while `line` stands at `expected`, or `None` before its first revision.
+    /// Hosts read the head before validating their current policy inputs, then pass that
+    /// revision here. A competing publish returns [`OpenError::PolicyHeadMoved`]; this call
+    /// never retries against a newer head. The host must read and validate its inputs again.
+    ///
+    /// Matching policy bytes reuse the expected revision without publishing. A later publish
+    /// can fence the returned view at dispatch, as with [`Runtime::at_revision`].
+    /// New revisions record the same publication diagnostic as [`Runtime::publish`].
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn publish_if_head(
+        &self,
+        line: &DeploymentName,
+        prepared: &PreparedDeployment,
+        expected: Option<appa_engine::profile::PolicyRevision>,
+    ) -> Result<PublishedDeployment, OpenError> {
+        let deployment = self.own(prepared);
+        let moved = |head| OpenError::PolicyHeadMoved {
+            deployment: line.clone(),
+            head,
+        };
+        let head = self
+            .inner
+            .store
+            .head(line)
+            .map_err(|error| OpenError::Storage(error.to_string()))?;
+        if head.as_ref().map(|head| head.revision) != expected {
+            return Err(moved(head.map(|head| head.revision)));
+        }
+        let bytes = deployment.config.policy_file().bytes();
+        if let Some(head) = head
+            && head.key == appa_engine::profile::PolicyFileKey::of(bytes)
+        {
+            return Ok(self.published(line, deployment.at(line, head.revision.value()), false));
+        }
+        let published = self
+            .inner
+            .store
+            .publish(line, expected, bytes)
+            .map_err(|error| match error {
+                appa_eventlog::PublishError::Moved { head } => moved(head),
+                error => OpenError::Publish(error.to_string()),
+            })?;
+        Ok(self.published(line, deployment.at(line, published.revision.value()), true))
+    }
+
+    fn published(&self, line: &DeploymentName, published: Deployment, new: bool) -> PublishedDeployment {
         if new {
             self.record(
                 None,
@@ -1457,11 +1514,11 @@ impl Runtime {
                 },
             );
         }
-        Ok(PublishedDeployment {
+        PublishedDeployment {
             runtime: Arc::downgrade(&self.inner.shared),
             line: line.clone(),
             deployment: Arc::new(published),
-        })
+        }
     }
 
     /// Another view of this runtime's shared state: this view's store, recorder and pin,
@@ -4125,6 +4182,63 @@ mod deployment_tests {
 
     use super::*;
     use crate::config::{Endpoint, HostDefaults, Transport};
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn conditional_publication_records_only_new_revisions() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        )
+        .expect("the policy writes");
+        let config = || Config::load(&path).expect("the policy loads");
+        let store = Arc::new(LogStore::open(appa_eventlog::Backend::Memory).expect("the store opens"));
+        let runtime = Runtime::open_with_store(config(), Arc::clone(&store), None).expect("the runtime opens");
+        let root = TrajectoryId("publication-diagnostic".into());
+        // A report includes deployment events after this family's first recorded hook.
+        runtime.record(
+            Some(&root),
+            crate::events::RuntimeEvent::Hook {
+                event: crate::events::HookKind::SessionStart,
+                tool: None,
+                dispatch: None,
+                outcome: crate::events::HookOutcome::Acked,
+                offers: Vec::new(),
+            },
+        );
+        let prepared = runtime.prepare_deployment(config()).expect("the policy prepares");
+        let line = DeploymentName::new("diagnostic");
+        runtime
+            .publish_if_head(&line, &prepared, None)
+            .expect("the first revision publishes");
+        let head = store.head(&line).expect("the head reads").expect("the line exists");
+        runtime
+            .publish_if_head(&line, &prepared, Some(head.revision))
+            .expect("the matching bytes reuse the head");
+        assert!(matches!(
+            runtime.publish_if_head(&line, &prepared, None),
+            Err(OpenError::PolicyHeadMoved { .. })
+        ));
+        let events = runtime.inner.events(&root);
+        let publications: Vec<_> = events
+            .deployment
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                crate::events::RuntimeEvent::PolicyPublished {
+                    deployment,
+                    revision,
+                    policy_key,
+                } => Some((deployment.as_str(), *revision, policy_key.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            publications,
+            vec![("diagnostic", head.revision.value(), head.key.as_str())]
+        );
+    }
 
     #[test]
     fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
