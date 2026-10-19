@@ -334,7 +334,7 @@ mod tests {
             PackageName::parse(name).unwrap(),
             Battery {
                 base: RelativePath::parse("appa.toml").unwrap(),
-                targets: None,
+                targets: appa_package::Targets::Base(appa_package::BatteryTarget::ALL.to_vec()),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: namespaces.iter().map(|text| namespace(text)).collect(),
                 helpers: vec![],

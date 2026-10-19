@@ -779,6 +779,10 @@ pub enum ConfigError {
     )]
     TargetPolicyIncluded { path: String },
     #[error(
+        "the root config includes {path:?}, a battery that does not support the {target} target; remove the include or set {BATTERY_TARGET_VARIABLE} to a target the battery lists under [battery.targets]"
+    )]
+    UnsupportedBatteryTarget { path: String, target: BatteryTarget },
+    #[error(
         "the root config includes {path:?}, which the host does not compose{}",
         reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
     )]
@@ -1925,7 +1929,7 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
         return Ok(vec![include_path]);
     };
     let is_base = std::fs::canonicalize(dir.join(battery.base.as_str())).is_ok_and(|base| base == include_path);
-    match (is_base, &battery.targets) {
+    match (is_base, battery.targets.policies()) {
         (true, _) => (),
         (false, Some(_)) => {
             return Err(ConfigError::TargetPolicyIncluded {
@@ -1933,6 +1937,12 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
             });
         }
         (false, None) => return Ok(vec![include_path]),
+    }
+    if !battery.targets.supports(target) {
+        return Err(ConfigError::UnsupportedBatteryTarget {
+            path: include_path.display().to_string(),
+            target,
+        });
     }
     battery
         .compose_order(target)

@@ -12,3 +12,9 @@ setup = [
   "Bind each Cloudflare server you run: `appa battery install cloudflare --server <docs-server> --server <observability-server>`.",
   "If you run only one of the two servers, bind only that one.",
 ]
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

@@ -16,3 +16,9 @@ setup = [
 
 [battery.readiness]
 required_executables = ["python3"]
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

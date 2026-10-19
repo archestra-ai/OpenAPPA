@@ -179,15 +179,15 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             )?;
             // The loader finds the manifest beside the included base, and helper
             // commands run from the including policy's directory.
-            if battery.targets.is_some() && policy.parent() != Some(contained.root.as_path()) {
+            if battery.targets.policies().is_some() && policy.parent() != Some(contained.root.as_path()) {
                 return Err(PackageError::TargetedPolicyOutsidePackageRoot {
                     field: "battery.policy",
                 });
             }
-            if battery.targets.is_none() {
+            if battery.targets.policies().is_none() {
                 check_lookup_routes(&policy, &base)?;
             }
-            if let Some(targets) = &mut battery.targets {
+            if let Some(targets) = battery.targets.policies_mut() {
                 check_stands_alone(&policy, &base_document, &base.tools)?;
                 for target in BatteryTarget::ALL {
                     let target_policy = targets.get_mut(target);
@@ -227,7 +227,8 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             };
             let target_commands: Vec<&[String]> = battery
                 .targets
-                .iter()
+                .policies()
+                .into_iter()
                 .flat_map(|targets| {
                     targets
                         .iter()
@@ -255,7 +256,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                             && battery
                                 .credentials
                                 .iter()
-                                .chain(battery.targets.iter().flat_map(|targets| {
+                                .chain(battery.targets.policies().into_iter().flat_map(|targets| {
                                     targets.iter().flat_map(|(_, target_policy)| &target_policy.credentials)
                                 }))
                                 .any(|credential| credential == &alt.credential)
@@ -1313,7 +1314,7 @@ mod tests {
         let validated = package.battery().unwrap();
         assert!(validated.audiences.is_empty());
         assert!(validated.credentials.is_empty());
-        let targets = validated.targets.as_ref().unwrap();
+        let targets = validated.targets.policies().unwrap();
         assert_eq!(targets.get(BatteryTarget::SingleUser).audiences, vec!["github"]);
         let multi_user = targets.get(BatteryTarget::MultiUser);
         assert_eq!(multi_user.audiences, vec!["github-org"]);

@@ -271,7 +271,11 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
         };
         let installed = tempfile::tempdir().expect("a temp dir is creatable");
         copy_tree(&directory, installed.path());
-        let targets = battery.targets.iter().flat_map(|targets| targets.iter());
+        let targets = battery
+            .targets
+            .policies()
+            .into_iter()
+            .flat_map(|targets| targets.iter());
         for file in std::iter::once(&battery.base).chain(targets.map(|(_, target)| &target.policy)) {
             let policy: toml::Value = toml::from_str(
                 &std::fs::read_to_string(installed.path().join(file.as_str())).expect("the battery policy reads"),
@@ -886,4 +890,36 @@ fn probe_loads(fragment: &str, with_helper: bool) -> bool {
         std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
     }
     loads_beside_a_root(package.path())
+}
+
+/// A battery that lists only the single-user target loads its base under that
+/// target, and a multi-user deployment refuses it.
+#[test]
+fn a_battery_loads_only_under_the_targets_it_lists() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        package.path().join("appa-package.toml"),
+        "schema = 1\nname = \"probe\"\ndescription = \"a single-user battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n[battery.targets.single-user]\npolicy = \"appa.toml\"\n",
+    )
+    .expect("the manifest is writable");
+    std::fs::write(
+        package.path().join("appa.toml"),
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n",
+    )
+    .expect("the base is writable");
+    validate_package(package.path()).expect("the package validates");
+
+    let (_deployment, root) = deployment_including(package.path(), &["appa.toml"]);
+    let loaded = Config::load_for_target(&root, &[], BatteryTarget::SingleUser).expect("single-user loads");
+    assert_eq!(loaded.tool_names(), ["mcp/probe/read"]);
+    assert!(matches!(
+        Config::load_for_target(&root, &[], BatteryTarget::MultiUser),
+        Err(ConfigError::UnsupportedBatteryTarget {
+            target: BatteryTarget::MultiUser,
+            ..
+        })
+    ));
 }

@@ -35,10 +35,13 @@ export async function configuration(config: string, binary: string) {
   const store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), 'batteries')
   const catalog = await Promise.all((await readdir(store)).sort().filter(name => !name.includes('.')).map(async name => {
     const manifest = Bun.TOML.parse(await readFile(join(store, name, 'appa-package.toml'), 'utf8')) as any
+    const targets = manifest.battery.targets
+    const policy = targets?.[target]?.policy
     return { name, description: manifest.description, hosts: manifest.battery.hosts,
       namespaces: manifest.battery.namespaces ?? [], path: `batteries/${name}/appa.toml`,
-      target_policy: manifest.battery.targets?.[target]?.policy }
-  })).then(items => items.filter(item => item.hosts.includes('opencode')))
+      supported: !targets || policy !== undefined,
+      target_policy: policy === manifest.battery.policy ? undefined : policy }
+  })).then(items => items.filter(item => item.hosts.includes('opencode') && item.supported))
   let publishing = false
   async function describe(path: string, tools: string[] = []) {
     const process = Bun.spawn([binary, 'describe', '--adapter', 'opencode', '--config', path, '--check',
