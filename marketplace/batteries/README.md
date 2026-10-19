@@ -35,7 +35,7 @@ replaces the deployment's battery store beside the root config, so the line it
 writes reads:
 
 ```toml
-include = ["batteries/claude-code/appa.toml"]
+include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 ```
 
 A battery names each tool by its canonical tool id (`mcp/<server>/<tool>`,
