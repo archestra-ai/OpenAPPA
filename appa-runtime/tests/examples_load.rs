@@ -85,10 +85,23 @@ fn the_live_replay_roots_open() {
     );
 }
 
+/// The `coding` battery, whose canonical tools the Claude Code battery binds, beside it in `dir`.
+#[cfg(unix)]
+fn with_the_coding_battery(dir: &Path) {
+    let battery_dir = dir.join("batteries/coding");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/coding/appa.toml"),
+        battery_dir.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
+}
+
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
 /// them: the default's rules run before the battery's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
+    with_the_coding_battery(dir.path());
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
@@ -104,7 +117,7 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let root = dir.path().join("appa.toml");
     std::fs::write(
         &root,
-        format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{default}"),
+        format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}"),
     )
     .expect("the initialized config includes the battery");
 
@@ -171,6 +184,7 @@ fn session_tool(rule: &toml::Value) -> bool {
 
 #[cfg(unix)]
 fn compiled(dir: &Path, root: &str, battery: &str) -> appa_policy::Config {
+    with_the_coding_battery(dir);
     let battery_dir = dir.join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
     std::fs::write(battery_dir.join("appa.toml"), battery).expect("the battery writes");
@@ -193,7 +207,7 @@ fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
         .expect("the initialized default is readable");
     let shipped = std::fs::read_to_string(repository.join("marketplace/batteries/claude-code/appa.toml"))
         .expect("the battery is readable");
-    let include = "include = [\"batteries/claude-code/appa.toml\"]\n\n";
+    let include = "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n";
 
     let mut battery: toml::Value = toml::from_str(&shipped).unwrap();
     let (moved, kept): (Vec<_>, Vec<_>) = battery["policy"]["tool"]
@@ -499,11 +513,12 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
         claude_battery_dir.join("appa.toml"),
     )
     .expect("claude battery file is copied");
+    with_the_coding_battery(dir.path());
 
     let root_path = dir.path().join("appa.toml");
     std::fs::write(
         &root_path,
-        format!("include = [\"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
+        format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
     )
     .expect("the config includes both batteries");
 
@@ -581,6 +596,7 @@ async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
+    with_the_coding_battery(dir.path());
     std::fs::write(
         dir.path().join("annotator.sh"),
         "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"audience\":[\"self\"]},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
@@ -589,7 +605,7 @@ async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
     let root_path = dir.path().join("appa.toml");
     std::fs::write(
         &root_path,
-        r#"include = ["batteries/claude-code/appa.toml"]
+        r#"include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 
 [policy]
 version = 2

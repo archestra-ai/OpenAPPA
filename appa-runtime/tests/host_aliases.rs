@@ -65,14 +65,24 @@ fn adapter() -> Adapter {
 async fn session(aliases: &str) -> (Runtime, Actor) {
     let battery = std::fs::read_to_string(repo_root().join("marketplace/batteries/claude-code/appa.toml"))
         .expect("the shipped battery is readable");
+    let coding = std::fs::read_to_string(repo_root().join("marketplace/batteries/coding/appa.toml"))
+        .expect("the shipped battery is readable");
     let config = Config::hosted_composed(
         &format!("{aliases}{RULES}"),
-        &[HostedBattery {
-            name: "claude-code",
-            base: &battery,
-            target: None,
-            token_env: &[],
-        }],
+        &[
+            HostedBattery {
+                name: "coding",
+                base: &coding,
+                target: None,
+                token_env: &[],
+            },
+            HostedBattery {
+                name: "claude-code",
+                base: &battery,
+                target: None,
+                token_env: &[],
+            },
+        ],
         HostDefaults::new(Duration::from_millis(5000), 65_536),
         |_| None,
     )

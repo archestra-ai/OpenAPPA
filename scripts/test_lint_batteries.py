@@ -187,6 +187,14 @@ class BatteryLinterTests(unittest.TestCase):
         )
         self.assertEqual(self.kinds(directory), [])
 
+    def test_a_tool_map_argument_named_command_is_not_a_command(self):
+        directory = self.make_battery([], [], {})
+        (directory / "appa.toml").write_text(
+            '[aliases.tool.coding]\n'
+            'shell = [{ name = "host/claude-code/Bash", args = { command = "command" } }]\n'
+        )
+        self.assertEqual(self.kinds(directory), [])
+
 
 if __name__ == "__main__":
     unittest.main()
