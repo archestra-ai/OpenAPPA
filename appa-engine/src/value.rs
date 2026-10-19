@@ -446,16 +446,18 @@ impl LabeledValue {
     }
 }
 
-/// The ordinal of a tool declaration among declarations for the same harness tool.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ToolDeclarationId(u32);
+/// The ordinal of a tool declaration among declarations for the same harness tool, as one
+/// registry selects it. Never stored: a recorded call is read under its judging registry, which
+/// selects afresh by tool and arguments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ToolDeclarationId(u32);
 
 impl ToolDeclarationId {
     pub(crate) fn new(ordinal: usize) -> Option<Self> {
         ordinal.try_into().ok().map(ToolDeclarationId)
     }
 
+    #[cfg(test)]
     pub(crate) fn ordinal(self) -> usize {
         self.0 as usize
     }
@@ -464,7 +466,6 @@ impl ToolDeclarationId {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCall {
     tool: ToolName,
-    declaration: ToolDeclarationId,
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,7 +477,6 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         #[derive(Deserialize)]
         struct WireCall {
             tool: ToolName,
-            declaration: ToolDeclarationId,
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
             #[serde(default)]
@@ -484,22 +484,16 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         }
 
         let wire = WireCall::deserialize(deserializer)?;
-        Ok(ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments)
+        Ok(ResolvedCall::new(wire.tool, wire.arguments)
             .with_annotation(wire.annotation)
             .with_file_basis(wire.file_basis))
     }
 }
 
 impl ResolvedCall {
-    #[cfg(test)]
     pub(crate) fn new(tool: ToolName, arguments: CanonicalArguments) -> Self {
-        Self::new_keyed(tool, ToolDeclarationId::default(), arguments)
-    }
-
-    pub(crate) fn new_keyed(tool: ToolName, declaration: ToolDeclarationId, arguments: CanonicalArguments) -> Self {
         ResolvedCall {
             tool,
-            declaration,
             arguments,
             annotation: None,
             file_basis: None,
@@ -510,20 +504,12 @@ impl ResolvedCall {
         &self.tool
     }
 
-    pub fn declaration_id(&self) -> ToolDeclarationId {
-        self.declaration
-    }
-
     pub fn arguments(&self) -> &serde_json::Value {
         self.arguments.value()
     }
 
     pub fn canonical_arguments(&self) -> &CanonicalArguments {
         &self.arguments
-    }
-
-    pub(crate) fn into_canonical_arguments(self) -> CanonicalArguments {
-        self.arguments
     }
 
     /// Attach the complete annotation pinned to this call. `None` is the static case: the
@@ -617,26 +603,12 @@ impl ResolvedCall {
         CanonicalDigest::of_call(&self.tool, &self.arguments)
     }
 
-    /// The call a substitution of this one's arguments renders: the same callee with the
-    /// replacement arguments.
-    ///
-    /// Annotation evidence is exact-call evidence: it binds the canonical digest of the call the
-    /// Annotator saw, and a substitution renders a different canonical call, so no pinned
-    /// annotation rides along — the rewritten call is annotated afresh or not at all. Audience
-    /// evidence is operation-level, pinned on the record, so it needs nothing from the call.
-    pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
-        ResolvedCall::new_keyed(self.tool.clone(), self.declaration, arguments)
-    }
-
     /// Is this the call another proposal renders, up to the host-pinned file basis? The callee,
-    /// the declaration it selects, its canonical arguments and its annotation are the call; the
+    /// its canonical arguments and its annotation are the call; the
     /// basis is evidence the host pins for one proposal, and a record of a call carries none.
     /// A staged derivation is matched this way so a file-mediated call can take one at all.
     pub(crate) fn renders(&self, other: &ResolvedCall) -> bool {
-        self.tool == other.tool
-            && self.declaration == other.declaration
-            && self.arguments == other.arguments
-            && self.annotation == other.annotation
+        self.tool == other.tool && self.arguments == other.arguments && self.annotation == other.annotation
     }
 }
 
@@ -862,19 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_drops_the_pinned_annotation() {
-        // Annotation evidence binds the exact canonical call, so a rewrite renders a call
-        // that must be annotated afresh — the pin never rides along.
+    fn annotation_evidence_is_not_rendered_call_identity() {
         let base = call("lookup", json!({ "id": 7, "deep": true }));
         let resolved = base.clone().with_annotation(Some(pinned(&base, "classifier")));
-        assert_eq!(
-            base.digest(),
-            resolved.digest(),
-            "annotation evidence is not rendered-call identity"
-        );
-        for replacement in [json!({ "deep": true, "id": 7 }), json!({ "id": 8, "deep": true })] {
-            assert_eq!(resolved.substituting(args(replacement)).annotation(), None);
-        }
+        assert_eq!(base.digest(), resolved.digest());
     }
 
     #[test]

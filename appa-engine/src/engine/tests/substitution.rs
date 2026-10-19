@@ -838,13 +838,12 @@ fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
             Fact::CandidateDerived {
                 derived: DerivedCandidate::Call { call, .. },
                 ..
-            } => Some(call.declaration_id()),
+            } => Some(call.clone()),
             _ => None,
         })
         .expect("the hop derives a call candidate");
-    assert_ne!(
-        derived,
-        proposal.declaration_id(),
+    assert!(
+        !e.registry.selects_alike(&derived, &proposal),
         "the rewrite selects the other declaration"
     );
     assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));

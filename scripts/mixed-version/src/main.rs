@@ -1,5 +1,9 @@
 //! Mixed-version proof: the previous release (the `rev` in Cargo.toml) and this checkout share one
-//! PostgreSQL store, as old and new pods do during a rolling release and after a rollback.
+//! PostgreSQL store, as old and new pods do during a rolling release and after a rollback. Both
+//! open families that follow a deployment. This checkout reads and continues the families the
+//! previous release opened. The previous release refuses every family this checkout opened or
+//! wrote to, so a rollback across this release restarts those families. A family the previous
+//! release opened pinned to a policy snapshot is refused by this checkout as a legacy family.
 
 use std::num::NonZeroUsize;
 
@@ -17,6 +21,7 @@ fn unique(prefix: &str) -> String {
 mod old {
     use super::*;
     pub use old_engine::fact::Fact;
+    use old_engine::profile::{DeploymentName, PolicyRevision};
     use old_engine::transition::{EngineEvent, ProposalBatch, ProposalBatchId, ProposedCall};
     use old_engine::value::{OfferNonce, ToolName, TrajectoryId};
 
@@ -28,8 +33,22 @@ mod old {
         .expect("the old store opens")
     }
 
-    pub fn engine(policy: &str) -> old_engine::engine::Engine {
+    /// The policy compiled as the previous release's snapshot engine: a family it opens names no
+    /// deployment.
+    pub fn snapshot(policy: &str) -> old_engine::engine::Engine {
         old_policy::Config::from_toml_str(policy).expect("compiles").engine().clone()
+    }
+
+    pub fn line(policy: &str, deployment: &str, revision: u64) -> old_engine::engine::Engine {
+        snapshot(policy).at(DeploymentName::new(deployment), PolicyRevision::new(revision))
+    }
+
+    pub fn publish(store: &old_eventlog::LogStore, deployment: &str, expected: Option<u64>, policy: &str) -> u64 {
+        store
+            .publish(&DeploymentName::new(deployment), expected.map(PolicyRevision::new), policy.as_bytes())
+            .expect("publishes")
+            .revision
+            .value()
     }
 
     pub fn open(store: &old_eventlog::LogStore, engine: &old_engine::engine::Engine, root: &str) {
@@ -41,12 +60,17 @@ mod old {
         store.create_root(opening, POLICY.as_bytes()).expect("the old version opens the root");
     }
 
-    /// Replay the family under the old engine, propose one `note` call, append the decision.
-    pub fn decide(store: &old_eventlog::LogStore, engine: &old_engine::engine::Engine, root: &str, batch: &str) -> Result<Vec<Fact>, String> {
+    /// Replay the family (each batch under its own revision), propose one `note` call, append.
+    pub fn decide(
+        store: &old_eventlog::LogStore,
+        engine: &old_engine::engine::Engine,
+        root: &str,
+        batch: &str,
+    ) -> Result<Vec<Fact>, String> {
         let id = TrajectoryId::new(root);
         let log = store.log(&id).map_err(|e| format!("old read: {e}"))?;
         let view = engine
-            .view(&id, log.facts().to_vec(), log.basis())
+            .replay(&id, &log.stamped_batches(), &[])
             .map_err(|e| format!("old replay: {e}"))?;
         let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
         let decision = engine
@@ -69,17 +93,15 @@ mod old {
             )
             .map_err(|e| format!("old decide: {e}"))?;
         let facts = decision.append.expect("a release appends").into_unsealed();
-        store.append(&log, &facts).map_err(|e| format!("old append: {e}"))?;
+        store.append(&log, &facts, None).map_err(|e| format!("old append: {e}"))?;
         Ok(facts)
     }
 
-    pub fn replays(store: &old_eventlog::LogStore, engine: &old_engine::engine::Engine, root: &str) -> Result<u64, String> {
-        let id = TrajectoryId::new(root);
-        let log = store.log(&id).map_err(|e| format!("old read: {e}"))?;
-        engine
-            .view(&id, log.facts().to_vec(), log.basis())
-            .map(|view| view.revision())
-            .map_err(|e| format!("old replay: {e}"))
+    pub fn reads(store: &old_eventlog::LogStore, root: &str) -> Result<u64, String> {
+        store
+            .log(&TrajectoryId::new(root))
+            .map(|log| log.basis())
+            .map_err(|e| format!("old read: {e}"))
     }
 }
 
@@ -98,12 +120,12 @@ mod new {
         .expect("the new store opens")
     }
 
-    pub fn snapshot(policy: &str) -> new_engine::engine::Engine {
-        new_policy::Config::from_toml_str(policy).expect("compiles").engine().clone()
-    }
-
     pub fn line(policy: &str, deployment: &str, revision: u64) -> new_engine::engine::Engine {
-        snapshot(policy).at(DeploymentName::new(deployment), PolicyRevision::new(revision))
+        new_policy::Config::from_toml_str(policy)
+            .expect("compiles")
+            .engine()
+            .clone()
+            .at(DeploymentName::new(deployment), PolicyRevision::new(revision))
     }
 
     pub fn publish(store: &new_eventlog::LogStore, deployment: &str, expected: Option<u64>, policy: &str) -> u64 {
@@ -171,12 +193,22 @@ mod new {
             .collect()
     }
 
-    pub fn deployment(store: &new_eventlog::LogStore, root: &str) -> Option<String> {
+    pub fn deployment(store: &new_eventlog::LogStore, root: &str) -> String {
         store
             .log(&TrajectoryId::new(root))
             .expect("reads")
             .deployment()
-            .map(|deployment| deployment.as_str().to_string())
+            .as_str()
+            .to_string()
+    }
+
+    /// Whether the family's read is refused as one opened before live policy revisions.
+    pub fn refused_as_legacy(store: &new_eventlog::LogStore, root: &str) -> Result<String, String> {
+        match store.log(&TrajectoryId::new(root)) {
+            Err(error @ new_eventlog::ReadError::LegacyFamily { .. }) => Ok(error.to_string()),
+            Err(error) => Err(format!("refused, but not as a legacy family: {error}")),
+            Ok(log) => Err(format!("read at position {}", log.basis())),
+        }
     }
 }
 
@@ -200,59 +232,104 @@ fn expect_refused(name: &str, outcome: Result<impl std::fmt::Debug, String>) {
     }
 }
 
+fn equal<T: PartialEq + std::fmt::Debug>(found: T, expected: T) -> Result<T, String> {
+    match found == expected {
+        true => Ok(found),
+        false => Err(format!("expected {expected:?}, found {found:?}")),
+    }
+}
+
 fn main() {
     let (old_store, new_store) = (old::store(), new::store());
-    let old_engine = old::engine(POLICY);
 
-    // ---------------------------------------------------------------- A: a live pinned family
-    let root_a = unique("mixver-pinned");
-    old::open(&old_store, &old_engine, &root_a);
-    check("A1 old version opens a family and decides", old::decide(&old_store, &old_engine, &root_a, "a1").map(|f| f.len()));
-    let snapshot = new::snapshot(POLICY);
-    check("A2 new version reads it as pinned", Ok::<_, String>(new::deployment(&new_store, &root_a)).and_then(|d| if d.is_none() { Ok("no deployment") } else { Err(format!("{d:?}")) }));
-    check("A3 new version continues it under the snapshot", new::decide(&new_store, &snapshot, &[], &root_a, "a2").map(|f| f.len()));
-    check("A4 new version stamps nothing on a pinned family", Ok::<_, String>(new::stamps(&new_store, &root_a)).and_then(|s| if s.iter().all(Option::is_none) { Ok(s) } else { Err(format!("{s:?}")) }));
-    check("A5 old version (rollback) replays it", old::replays(&old_store, &old_engine, &root_a));
-    check("A6 old version (rollback) continues it", old::decide(&old_store, &old_engine, &root_a, "a3").map(|f| f.len()));
-    check("A7 new version replays it again", new::decide(&new_store, &snapshot, &[], &root_a, "a4").map(|f| f.len()));
+    // ------------------------------------- A: a family the previous release opened, read here
+    let line_a = unique("mixver-old-line");
+    let head = old::publish(&old_store, &line_a, None, POLICY);
+    let old_at_one = old::line(POLICY, &line_a, head);
+    let root_a = unique("mixver-old-family");
+    old::open(&old_store, &old_at_one, &root_a);
+    check(
+        "A1 old version opens a following family and decides",
+        old::decide(&old_store, &old_at_one, &root_a, "a1").map(|f| f.len()),
+    );
+    check(
+        "A2 new version reads the deployment it follows",
+        equal(new::deployment(&new_store, &root_a), line_a.clone()),
+    );
+    let at_one = new::line(POLICY, &line_a, head);
+    check(
+        "A3 new version replays it and decides at the head",
+        new::decide(&new_store, &at_one, &[], &root_a, "a2").map(|f| f.len()),
+    );
+    check(
+        "A4 every batch is stamped at the head",
+        equal(new::stamps(&new_store, &root_a), vec![Some(head); 3]),
+    );
+    let next = new::publish(&new_store, &line_a, Some(head), POLICY_NEXT);
+    let at_two = new::line(POLICY_NEXT, &line_a, next);
+    check(
+        "A5 after a publish, the new head decides, replaying the old release's batches under revision 1",
+        new::decide(&new_store, &at_two, &[&at_one], &root_a, "a3").map(|f| f.len()),
+    );
+    check(
+        "A6 stamps",
+        equal(
+            new::stamps(&new_store, &root_a),
+            vec![Some(head), Some(head), Some(head), Some(next)],
+        ),
+    );
+    expect_refused(
+        "A7 old version (rollback) does not read the family once this version wrote to it",
+        old::reads(&old_store, &root_a),
+    );
 
-    // A pinned family first opened by the new version also survives a downgrade.
-    let root_c = unique("mixver-new-snapshot");
-    new::open(&new_store, &snapshot, &root_c);
-    check("C1 new version opens a pinned family and decides", new::decide(&new_store, &snapshot, &[], &root_c, "c1").map(|f| f.len()));
-    check("C2 the new snapshot names no deployment", Ok::<_, String>(new::deployment(&new_store, &root_c)).and_then(|d| if d.is_none() { Ok("no deployment") } else { Err(format!("{d:?}")) }));
-    check("C3 old version (rollback) replays the new pinned family", old::replays(&old_store, &old_engine, &root_c));
-    check("C4 old version (rollback) continues the new pinned family", old::decide(&old_store, &old_engine, &root_c, "c2").map(|f| f.len()));
-    check("C5 new version replays the downgraded pinned family", new::decide(&new_store, &snapshot, &[], &root_c, "c3").map(|f| f.len()));
-
-    // ---------------------------------------------------------------- B: a line family
-    let deployment = unique("mixver-line");
-    let head = new::publish(&new_store, &deployment, None, POLICY);
-    let at_one = new::line(POLICY, &deployment, head);
-    let root_b = unique("mixver-following");
+    // ---------------------- B: a family this checkout opened, which the previous release refuses
+    let line_b = unique("mixver-new-line");
+    let head = new::publish(&new_store, &line_b, None, POLICY);
+    let at_one = new::line(POLICY, &line_b, head);
+    let root_b = unique("mixver-new-family");
     new::open(&new_store, &at_one, &root_b);
-    check("B1 new version opens a following family and decides at the head", new::decide(&new_store, &at_one, &[], &root_b, "b1").map(|f| f.len()));
-    check("B2 stamps", Ok::<_, String>(new::stamps(&new_store, &root_b)));
-    check("B3 old version (mid-roll or rollback) replays it as pinned to the opening file", old::replays(&old_store, &old_engine, &root_b));
-    check("B4 old version continues it", old::decide(&old_store, &old_engine, &root_b, "b2").map(|f| f.len()));
-    check("B5 new version replays the old batch under the opening revision and decides", new::decide(&new_store, &at_one, &[], &root_b, "b3").map(|f| f.len()));
-    check("B6 stamps", Ok::<_, String>(new::stamps(&new_store, &root_b)));
+    check(
+        "B1 new version opens a following family and decides at the head",
+        new::decide(&new_store, &at_one, &[], &root_b, "b1").map(|f| f.len()),
+    );
+    expect_refused(
+        "B2 old version (rollback) does not read a family this version opened",
+        old::reads(&old_store, &root_b),
+    );
+    let old_at_one = old::line(POLICY, &line_b, head);
+    expect_refused(
+        "B3 old version (rollback) does not continue it",
+        old::decide(&old_store, &old_at_one, &root_b, "b2"),
+    );
+    check(
+        "B4 new version continues it: the refused rollback wrote nothing",
+        new::decide(&new_store, &at_one, &[], &root_b, "b3").map(|f| f.len()),
+    );
 
-    // A publish moves the head: the stale engine's next decision is fenced.
-    let next = new::publish(&new_store, &deployment, Some(head), POLICY_NEXT);
-    expect_refused("B7 a decision made at the previous revision does not commit", new::decide(&new_store, &at_one, &[], &root_b, "b4"));
-    let at_two = new::line(POLICY_NEXT, &deployment, next);
-    check("B8 the head decides, replaying earlier batches under revision 1", new::decide(&new_store, &at_two, &[&at_one], &root_b, "b5").map(|f| f.len()));
-    check("B9 stamps", Ok::<_, String>(new::stamps(&new_store, &root_b)));
-    // After a decision under a later revision, the old version may or may not reproduce it: it
-    // knows only the opening file. Report what it does.
-    match old::replays(&old_store, &old_engine, &root_b) {
-        Ok(position) => println!("INFO  B10 old version still replays the family at position {position} (the revision-2 change did not alter any recorded fact)"),
-        Err(error) => println!("INFO  B10 old version refuses the family after a later-revision decision: {error}"),
-    }
-    // An old pod writing after the publish (a publish mid-roll) is unfenced; the new version then
-    // refuses the regression, as the runbook documents.
-    let _ = old::decide(&old_store, &old_engine, &root_b, "b6");
-    expect_refused("B11 an old write after a later-revision batch is a regression", new::decide(&new_store, &at_two, &[&at_one], &root_b, "b7"));
+    // ------------------------------------------------- C: a publish fences the previous revision
+    let next = new::publish(&new_store, &line_b, Some(head), POLICY_NEXT);
+    expect_refused(
+        "C1 a decision made at the previous revision does not commit",
+        new::decide(&new_store, &at_one, &[], &root_b, "c1"),
+    );
+    let at_two = new::line(POLICY_NEXT, &line_b, next);
+    check(
+        "C2 the head decides, replaying earlier batches under revision 1",
+        new::decide(&new_store, &at_two, &[&at_one], &root_b, "c2").map(|f| f.len()),
+    );
+
+    // ------------------------ D: a family the previous release opened pinned to a policy snapshot
+    let root_d = unique("mixver-old-snapshot");
+    let snapshot = old::snapshot(POLICY);
+    old::open(&old_store, &snapshot, &root_d);
+    check(
+        "D1 old version opens a pinned family and decides",
+        old::decide(&old_store, &snapshot, &root_d, "d1").map(|f| f.len()),
+    );
+    check(
+        "D2 new version refuses it as a family opened before live policy revisions",
+        new::refused_as_legacy(&new_store, &root_d),
+    );
     println!("done");
 }

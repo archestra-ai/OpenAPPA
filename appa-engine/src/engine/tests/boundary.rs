@@ -240,7 +240,6 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             trajectory: traj(),
             dispatch,
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
@@ -249,7 +248,7 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         },
     ];
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::MisdecidedBatch));

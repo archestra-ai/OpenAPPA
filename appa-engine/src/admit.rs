@@ -74,13 +74,12 @@ pub enum AdmitError {
 /// A release pins the call's delta, tags and effects on its `DispatchOpened`. A result that
 /// arrives after a later revision was published is labelled by the meet of the pinned output label
 /// and the one the judging policy declares for the call, where it still declares it, and commits
-/// the effects the release reserved. A record that pinned no terms is judged by the judging
-/// policy's declaration alone, as the engine that wrote it judged it.
+/// the effects the release reserved.
 pub(crate) struct OutcomeContract<'a> {
     /// The contract with the release's delta, tags and effects: the judging policy's
     /// declaration of the call, or one made from the pin where it declares the call no longer.
     pub(crate) contract: std::borrow::Cow<'a, crate::contract::ToolAnnotation>,
-    /// The judging policy's declared output label for a call whose terms the release pinned.
+    /// The judging policy's declared output label for the call, where it still declares it.
     head_output: Option<Label>,
 }
 
@@ -95,20 +94,15 @@ impl OutcomeContract<'_> {
     }
 }
 
-/// The contract `call`'s outcome is judged under: see [`OutcomeContract`]. `None` where neither
-/// the release pinned terms nor the judging policy declares the call.
+/// The contract `call`'s outcome is judged under: see [`OutcomeContract`]. `None` for a dispatch
+/// the family never released.
 pub(crate) fn outcome_contract<'a>(
     registry: &'a Registry,
     call: &'a ResolvedCall,
     pinned: Option<&(crate::fact::ReleaseTerms, EffectSet)>,
 ) -> Option<OutcomeContract<'a>> {
+    let (terms, emits) = pinned?;
     let head = registry.annotation_of(call);
-    let Some((terms, emits)) = pinned else {
-        return head.map(|contract| OutcomeContract {
-            contract,
-            head_output: None,
-        });
-    };
     let head_output = head.as_ref().map(|head| head.output_label());
     let mut contract = head
         .map(std::borrow::Cow::into_owned)
@@ -140,8 +134,7 @@ pub(crate) fn observe_success(
     call: &ResolvedCall,
     observed: ObservedResult,
 ) -> Result<Vec<Fact>, AdmitError> {
-    let contract = outcome_contract(registry, call, views.release_terms(dispatch))
-        .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
+    let contract = outcome_contract(registry, call, views.release_terms(dispatch)).ok_or(AdmitError::NotOpen)?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
     }
@@ -224,8 +217,7 @@ pub(crate) fn admit_result(
     context: &MembershipContext<'_>,
     evidence: &AudienceEvidence,
 ) -> Result<Vec<Fact>, AdmitError> {
-    let contract = outcome_contract(registry, call, views.release_terms(dispatch))
-        .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
+    let contract = outcome_contract(registry, call, views.release_terms(dispatch)).ok_or(AdmitError::NotOpen)?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
     }
@@ -548,11 +540,10 @@ mod tests {
     fn dispatch_opened(call: &ResolvedCall) -> (Fact, DispatchId) {
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
         let record = Fact::DispatchOpened {
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             receiving: Label::top(),

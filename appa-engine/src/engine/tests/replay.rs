@@ -198,7 +198,6 @@ fn an_ended_branch_releases_nothing_more() {
             trajectory: child.clone(),
             dispatch: DispatchId::new(child.clone(), call.digest(), 0),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
@@ -207,7 +206,7 @@ fn an_ended_branch_releases_nothing_more() {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         }],
     ]
     .concat();

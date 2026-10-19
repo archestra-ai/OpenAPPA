@@ -1,6 +1,6 @@
-# The deployed version and this checkout against one PostgreSQL store, as old and new pods share
-# one during a rolling release and after a rollback. Point `rev` at the version being replaced:
-# the OpenAPPA revision Archestra pins (platform/archestra-rs/openappa-rs/Cargo.toml).
+# The previous release and this checkout against one PostgreSQL store, as old and new pods share
+# one during a rolling release and after a rollback. `rev` is the previous release's commit
+# (`git rev-list -n1 v0.35.1`).
 #
 #   OPENAPPA_TEST_DATABASE_URL=postgres://… cargo run --manifest-path scripts/mixed-version/Cargo.toml
 #
@@ -14,9 +14,9 @@ publish = false
 [workspace]
 
 [dependencies]
-old_engine = { package = "appa-engine", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "6ca466fea5fdc59930b66e145ec987a3ecea88ef" }
-old_eventlog = { package = "appa-eventlog", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "6ca466fea5fdc59930b66e145ec987a3ecea88ef", features = ["postgres"] }
-old_policy = { package = "appa-policy", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "6ca466fea5fdc59930b66e145ec987a3ecea88ef" }
+old_engine = { package = "appa-engine", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123" }
+old_eventlog = { package = "appa-eventlog", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123", features = ["postgres"] }
+old_policy = { package = "appa-policy", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123" }
 new_engine = { package = "appa-engine", path = "../../appa-engine" }
 new_eventlog = { package = "appa-eventlog", path = "../../appa-eventlog", features = ["postgres"] }
 new_policy = { package = "appa-policy", path = "../../appa-policy" }

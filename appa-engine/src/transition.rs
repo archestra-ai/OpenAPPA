@@ -1263,7 +1263,6 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
-                declaration,
                 arguments,
                 proposed_label,
                 receiving,
@@ -1274,12 +1273,7 @@ impl<'a> Sequence<'a> {
                 terms,
                 ..
             } => {
-                let call = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
-                // The recorded ordinal names the declaration this revision selects for these
-                // arguments; any other ordinal names no declaration of this revision.
-                if !self.engine.registry().selection_matches(&call) {
-                    return Err(TransitionRefusal::UnknownTool(tool.as_str().to_string()));
-                }
+                let call = crate::projection::opened_call(tool, arguments, annotation, file_basis);
                 self.opened(trajectory, dispatch, &call, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects, terms)?;
             }
@@ -1455,13 +1449,14 @@ impl<'a> Sequence<'a> {
         proposed_label: &Label,
         receiving: &Label,
         proposed_effects: &EffectSet,
-        terms: &Option<crate::fact::ReleaseTerms>,
+        terms: &crate::fact::ReleaseTerms,
     ) -> Result<(), TransitionRefusal> {
         let tool = call.tool();
+        // The declaration this revision selects for the call's tool and arguments.
         let entry = self
             .engine
             .registry()
-            .keyed_tool(tool, call.declaration_id())
+            .declaration(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
         // The record stores a pin only where an Annotator produced one; a static
         // declaration's annotation is the registry's own, so a record that carries
@@ -1491,12 +1486,8 @@ impl<'a> Sequence<'a> {
         if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        // The terms a release pins are the contract it was checked under, exactly. A record with
-        // none was written by an engine that pinned none.
-        if terms
-            .as_ref()
-            .is_some_and(|terms| terms != &crate::fact::ReleaseTerms::of(&checked))
-        {
+        // The terms a release pins are the contract it was checked under, exactly.
+        if terms != &crate::fact::ReleaseTerms::of(&checked) {
             return Err(TransitionRefusal::ForgedLabel);
         }
         Ok(())
@@ -2352,7 +2343,6 @@ impl<'a> Sequence<'a> {
                 Fact::DispatchOpened {
                     dispatch,
                     tool,
-                    declaration,
                     arguments,
                     annotation,
                     subject,
@@ -2361,7 +2351,7 @@ impl<'a> Sequence<'a> {
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = crate::projection::opened_call(tool, *declaration, arguments, annotation, file_basis);
+                let opened = crate::projection::opened_call(tool, arguments, annotation, file_basis);
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2501,16 +2491,13 @@ impl<'a> Sequence<'a> {
             if !self.engine.registry().contains_tool(call.tool()) {
                 return Err(TransitionRefusal::UnknownTool(call.tool().as_str().to_string()));
             }
-            let (selected, declaration) = self
+            let declaration = self
                 .engine
                 .registry()
-                .select_tool(call.tool(), call.arguments())
+                .declaration(call)
                 .ok_or(TransitionRefusal::InvalidPayload(
                     crate::params::ArgumentError::NoMatchingContract,
                 ))?;
-            if selected != call.declaration_id() {
-                return Err(TransitionRefusal::MisdecidedBatch);
-            }
             if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err() {
                 return Err(TransitionRefusal::ForgedEvidence);
             }
@@ -2773,7 +2760,7 @@ impl<'a> Sequence<'a> {
                 let views = self.projection.view(trajectory);
                 let contract =
                     crate::admit::outcome_contract(self.engine.registry(), call, views.release_terms(dispatch))
-                        .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+                        .ok_or(TransitionRefusal::UnknownDispatch)?;
                 // Admission lands with the close, and only a success admits anything.
                 if !views.closed_successfully(dispatch) && !views.failed_with_body(dispatch) {
                     return Err(TransitionRefusal::DispatchNotOpen);
@@ -3067,7 +3054,7 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::UnknownDispatch)?;
         let pinned = self.projection.view(trajectory).release_terms(dispatch).cloned();
         crate::admit::outcome_contract(self.engine.registry(), call, pinned.as_ref())
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
+            .ok_or(TransitionRefusal::UnknownDispatch)
     }
 
     fn open_dispatch_contract(
@@ -3279,20 +3266,16 @@ impl<'a> Sequence<'a> {
         }
         extends_lineage(&views, subject, sanitizer, lineage)?;
         // The contract the offer was planned on judges the sanitizer's scope and the block the
-        // hop improves; the contract the rewritten arguments select judges the rewrite. The
-        // persisted ordinal is checked against a fresh selection, never taken on the record's word.
+        // hop improves; the contract the rewritten arguments select judges the rewrite.
         let registry = self.engine.registry();
         let before_contract = annotation_or_unknown(registry, predecessor)?;
         // A sanitizer rewrites arguments; the tool is never replaced.
         if call.tool() != predecessor.tool() {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if !registry.selection_matches(call) {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
-        }
         let declaration = registry
             .declaration(call)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+            .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
         // Annotation evidence binds the exact canonical call: whatever declaration the rewrite
         // selects, the pin the record carries is judged afresh against it.
         if crate::check::validate_annotation(registry, declaration, call).is_err() {
@@ -3310,7 +3293,7 @@ impl<'a> Sequence<'a> {
         }
         // A rewrite carries only the arguments and a fresh annotation pin, never a host-pinned
         // file basis.
-        if call.declaration_id() == predecessor.declaration_id() && call.file_basis().is_some() {
+        if registry.selects_alike(call, predecessor) && call.file_basis().is_some() {
             return Err(TransitionRefusal::ForgedLabel);
         }
         let stage = views.call_stage(subject);

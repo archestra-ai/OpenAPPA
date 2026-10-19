@@ -348,6 +348,17 @@ impl ReleaseTerms {
     }
 }
 
+#[cfg(test)]
+impl ReleaseTerms {
+    /// No delta and no tags: the terms a fixture dispatch of a plain tool pins.
+    pub(crate) fn none() -> ReleaseTerms {
+        ReleaseTerms {
+            delta: crate::contract::Delta::NONE,
+            tags: Vec::new(),
+        }
+    }
+}
+
 /// The fields that open a root trajectory family. The family follows the deployment its opening
 /// names and decides at that deployment's head.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,7 +396,6 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
-        declaration: crate::value::ToolDeclarationId,
         arguments: crate::params::CanonicalArguments,
         proposed_label: Label,
         /// The established bound this dispatch's result is received against, snapshotted here
@@ -405,10 +415,8 @@ pub enum Fact {
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,
-        /// The terms that released the call. Absent on a record an engine that pinned no terms
-        /// wrote; its outcome is judged by the judging policy's declaration alone.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        terms: Option<ReleaseTerms>,
+        /// The terms that released the call.
+        terms: ReleaseTerms,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,

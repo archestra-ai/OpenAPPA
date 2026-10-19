@@ -130,7 +130,6 @@ mod tests {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             receiving: Label::top(),
@@ -139,7 +138,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&trajectory),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         });
         log.push(Fact::DispatchClosed {
             trajectory: trajectory.clone(),
@@ -313,7 +312,6 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             receiving: Label::top(),
@@ -322,7 +320,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         });
         log.push(Fact::DispatchClosed {
             trajectory: child(),
@@ -437,7 +435,6 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             receiving: Label::top(),
@@ -446,7 +443,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         });
         let projection = build(&log);
         let parent_id = parent();

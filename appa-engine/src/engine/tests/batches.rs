@@ -66,7 +66,6 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 trajectory: traj(),
                 dispatch,
                 tool: proposal.tool().clone(),
-                declaration: proposal.declaration_id(),
                 arguments: proposal.canonical_arguments().clone(),
                 proposed_label: Label::new(TRUSTED, Audience::public()),
                 receiving: Label::new(TRUSTED, Audience::public()),
@@ -75,7 +74,7 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
-                terms: None,
+                terms: crate::fact::ReleaseTerms::none(),
             },
         ]
     };
@@ -99,55 +98,6 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
         covered.validate_replay(&forged_static),
         Err(TransitionRefusal::ForgedEvidence)
     );
-    let second = ResolvedCall::new_keyed(
-        ghost.tool().clone(),
-        crate::value::ToolDeclarationId::new(1).unwrap(),
-        ghost.canonical_arguments().clone(),
-    );
-    // A covered name has exactly one ordinal: a fresh selection contradicts the record.
-    let forged_ordinal = {
-        let mut log = forged(second);
-        log[0] = opened(&covered);
-        log
-    };
-    assert_eq!(
-        covered.validate_replay(&forged_ordinal),
-        Err(TransitionRefusal::MisdecidedBatch)
-    );
-}
-
-#[test]
-fn replay_rejects_a_dispatch_switched_to_a_later_overlapping_contract() {
-    let e = engine(vec![plain_tool("mcp/*/read"), plain_tool("mcp/demo/read")]);
-    let records = vec![opened(&e)];
-    let view = e.view(&traj(), records.clone(), 1).unwrap();
-    let call = e.resolve_call(ToolName::new("mcp/demo/read"), b"{}").unwrap();
-    let decision = e
-        .handle(
-            &view,
-            EngineEvent::Proposals(ProposalBatch {
-                id: crate::transition::ProposalBatchId::new("overlap"),
-                trajectory: traj(),
-                provider_results: Vec::new(),
-                proposals: vec![raw(&call)],
-                spawn: None,
-                offer_nonce: nonce(),
-                evidence: Vec::new(),
-                audience: crate::audience::AudienceEvidence::default(),
-            }),
-        )
-        .unwrap();
-    let mut log = [records, decision.append.unwrap().into_unsealed()].concat();
-    e.validate_replay(&log).unwrap();
-    let mut changed = false;
-    for fact in &mut log {
-        if let Fact::DispatchOpened { declaration, .. } = fact {
-            *declaration = crate::value::ToolDeclarationId::new(1).unwrap();
-            changed = true;
-        }
-    }
-    assert!(changed);
-    assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::UnbackedDecision));
 }
 
 #[test]

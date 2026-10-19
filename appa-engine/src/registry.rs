@@ -1604,24 +1604,9 @@ impl Registry {
         }
     }
 
-    /// The declaration a persisted call names. The wildcard follows all explicit variants,
-    /// at ordinal zero for an undeclared name. Larger ordinals name no contract.
-    pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
-        match self.classify(name)? {
-            ToolKind::Declared => self
-                .matching_variants(name.clone())
-                .map(|(_, declaration)| declaration)
-                .chain(self.wildcard.iter())
-                .nth(id.ordinal()),
-            ToolKind::ProviderRun => None,
-            ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
-        }
-    }
-
-    /// The declaration this registry selects for a call: by its tool and arguments, never by
-    /// the ordinal the call carries. A call recorded at one policy revision is read at another,
-    /// whose declarations stand in another order; the transition validator holds a recorded
-    /// ordinal to this selection only under the revision that recorded it.
+    /// The declaration this registry selects for a call, by its tool and arguments. A call
+    /// recorded at one policy revision is read at another, whose declarations stand in another
+    /// order: no record carries a selection, so each registry selects afresh.
     pub fn declaration(&self, call: &crate::value::ResolvedCall) -> Option<&ToolDeclaration> {
         self.select_tool(call.tool(), call.arguments())
             .map(|(_, declaration)| declaration)
@@ -1691,9 +1676,17 @@ impl Registry {
         }
     }
 
-    pub(crate) fn selection_matches(&self, call: &crate::value::ResolvedCall) -> bool {
-        self.select_tool(call.tool(), call.arguments())
-            .is_some_and(|(selected, _)| selected == call.declaration_id())
+    /// The ordinal of the declaration this registry selects for `call`.
+    #[cfg(test)]
+    pub(crate) fn selected(&self, call: &crate::value::ResolvedCall) -> Option<ToolDeclarationId> {
+        self.select_tool(call.tool(), call.arguments()).map(|(id, _)| id)
+    }
+
+    /// Whether this registry selects one declaration for both calls.
+    pub(crate) fn selects_alike(&self, one: &crate::value::ResolvedCall, other: &crate::value::ResolvedCall) -> bool {
+        let selected =
+            |call: &crate::value::ResolvedCall| self.select_tool(call.tool(), call.arguments()).map(|(id, _)| id);
+        selected(one).is_some_and(|id| Some(id) == selected(other))
     }
 
     /// Whether a proposal naming this tool has a checkable declaration: written exactly, or
@@ -3129,9 +3122,8 @@ mod tests {
             let (id, selected) = registry.select_tool(&actual, arguments.value()).unwrap();
             assert_eq!(id.ordinal(), 0);
             assert_eq!(selected.name().as_str(), names[0].split('(').next().unwrap());
-            let call = crate::value::ResolvedCall::new_keyed(actual.clone(), id, arguments);
+            let call = crate::value::ResolvedCall::new(actual.clone(), arguments);
             assert_eq!(registry.declaration(&call), Some(selected));
-            assert!(registry.selection_matches(&call));
             assert_eq!(registry.annotation_of(&call).unwrap().name, actual);
         }
         let mut cfg = base();
@@ -3208,11 +3200,6 @@ mod tests {
 
         let (_, exact) = registry.select_tool(&read, &serde_json::json!({})).unwrap();
         assert!(exact.declared().is_some(), "an exact declaration beats the wildcard");
-        assert!(
-            registry
-                .keyed_tool(&ghost, ToolDeclarationId::new(1).unwrap())
-                .is_none()
-        );
         assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_SPELLING));
         assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_SPELLING));
         assert!(
@@ -3249,13 +3236,12 @@ mod tests {
                 let (id, selected) = registry.select_tool(&name, arguments.value()).unwrap();
                 assert_eq!(id.ordinal(), 2);
                 assert_eq!(selected.annotator(), Some(&AnnotatorName::new("any")));
-                let call = crate::value::ResolvedCall::new_keyed(name.clone(), id, arguments);
+                let call = crate::value::ResolvedCall::new(name.clone(), arguments);
                 assert_eq!(registry.declaration(&call), Some(selected));
-                assert!(registry.selection_matches(&call));
                 let persisted = serde_json::to_value(&call).unwrap();
+                assert!(persisted.get("declaration").is_none(), "a call stores no selection");
                 let restored: crate::value::ResolvedCall = serde_json::from_value(persisted).unwrap();
                 assert_eq!(registry.declaration(&restored), Some(selected));
-                assert!(registry.selection_matches(&restored));
             }
             for (args, ordinal) in [
                 (serde_json::json!({"command":"git push"}), 0),
@@ -3265,7 +3251,6 @@ mod tests {
                 assert_eq!(id.ordinal(), ordinal);
                 assert!(selected.declared().is_some());
             }
-            assert!(registry.keyed_tool(&name, ToolDeclarationId::new(3).unwrap()).is_none());
         }
     }
 
@@ -3285,7 +3270,6 @@ mod tests {
         assert!(!registry.contains_tool(&literal));
         assert!(!registry.declared(&literal));
         assert!(registry.select_tool(&literal, &serde_json::json!({})).is_none());
-        assert!(registry.keyed_tool(&literal, ToolDeclarationId::default()).is_none());
         assert_eq!(
             registry.classify(&ToolName::new("ghost")),
             Some(ToolKind::Wildcard),
@@ -3320,7 +3304,6 @@ mod tests {
         assert_eq!(registry.classify(&ghost), None);
         assert!(!registry.contains_tool(&ghost));
         assert!(registry.select_tool(&ghost, &serde_json::json!({})).is_none());
-        assert!(registry.keyed_tool(&ghost, ToolDeclarationId::default()).is_none());
     }
 
     #[test]

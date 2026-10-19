@@ -1092,7 +1092,6 @@ mod tests {
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::public()),
             receiving: Label::new(TRUSTED, Audience::public()),
@@ -1101,7 +1100,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
-            terms: None,
+            terms: crate::fact::ReleaseTerms::none(),
         }
     }
 

@@ -69,7 +69,6 @@ pub(crate) fn opened_dispatch(
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
-        declaration: call.declaration_id(),
         arguments: call.canonical_arguments().clone(),
         proposed_label: current.combine(&call.output_label(contract, &current)),
         receiving: current.clone(),
@@ -78,7 +77,7 @@ pub(crate) fn opened_dispatch(
         file_basis: call.file_basis().cloned(),
         evidence: act.pinned().clone(),
         subject,
-        terms: Some(crate::fact::ReleaseTerms::of(contract)),
+        terms: crate::fact::ReleaseTerms::of(contract),
     };
     (dispatch, fact)
 }

@@ -434,11 +434,13 @@ impl Engine {
         advance: crate::basis::BasisAdvance,
         facts: Vec<Fact>,
     ) -> Vec<Fact> {
-        // A record bound to the act it lands under — an offer, an approval, a provider
-        // admission — needs the act declared over it even when nothing moves. So does a
-        // record pinning audience evidence: the declaration delimits the per-act audit
-        // bracket at replay, and evidence justified by a neighboring act's asks would
-        // otherwise pass a full-log replay that the live seal refuses.
+        // Every act is declared: the declaration carries the revision that decided the batch,
+        // which the store fences and a replay judges by. A declaration that moves something names
+        // the trajectory its first record moves, and so does one over a record bound to the act
+        // it lands under — an offer, an approval, a provider admission — or pinning audience
+        // evidence: the declaration delimits the per-act audit bracket at replay. One declared
+        // only to carry the revision names the family: its first record may open the trajectory
+        // it is about, as a fork binding opens the child.
         let bound = facts.iter().any(|fact| {
             matches!(
                 fact,
@@ -450,12 +452,8 @@ impl Engine {
                     }
             ) || fact.audience_evidence().is_some_and(|evidence| !evidence.is_empty())
         });
-        // Every act is declared: the declaration carries the revision that decided the batch,
-        // which the store fences and a replay judges by. A declaration that moves something names the trajectory its first record moves. One
-        // declared only to carry the revision names the family: its first record may open the
-        // trajectory it is about, as a fork binding opens the child.
         let trajectory = match facts.first() {
-            Some(first) if !(advance.is_empty() && !bound) => first.trajectory().clone(),
+            Some(first) if !advance.is_empty() || bound => first.trajectory().clone(),
             _ => family.clone(),
         };
         let mut declared = vec![Fact::BasisAdvanced {
@@ -964,7 +962,7 @@ impl Engine {
             )));
         }
         admit::outcome_contract(&self.registry, call, views.release_terms(dispatch))
-            .ok_or_else(|| TransitionError::Call(EngineError::UnknownTool(call.tool().as_str().to_string())))
+            .ok_or(TransitionError::UnknownDispatch)
     }
 
     fn validated_contract<'c>(
@@ -1005,7 +1003,7 @@ fn select_call<'a>(
     raw_arguments: &[u8],
 ) -> Result<(ResolvedCall, &'a crate::contract::ToolDeclaration), EngineError> {
     let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
-    let (id, declaration) = registry.select_tool(&tool, parsed.value()).ok_or_else(|| {
+    let (_, declaration) = registry.select_tool(&tool, parsed.value()).ok_or_else(|| {
         // A name no declaration and no wildcard covers has no contract at all; a declared
         // name whose arguments select no ordered variant is a malformed call under it.
         match registry.classify(&tool) {
@@ -1020,7 +1018,7 @@ fn select_call<'a>(
     registry
         .placeholders_filled(declaration, parsed.value())
         .map_err(EngineError::InvalidCall)?;
-    Ok((ResolvedCall::new_keyed(tool, id, parsed), declaration))
+    Ok((ResolvedCall::new(tool, parsed), declaration))
 }
 
 /// The call a sanitizer's replacement renders, under the ordered declaration its arguments select.
@@ -1037,13 +1035,7 @@ fn substituted_call(
 ) -> Result<ResolvedCall, TransitionError> {
     let (rewritten, declaration) =
         select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
-    let same = rewritten.declaration_id() == call.declaration_id();
-    let substituted = if same {
-        call.substituting(rewritten.into_canonical_arguments())
-            .with_annotation(annotation.cloned())
-    } else {
-        rewritten.with_annotation(annotation.cloned())
-    };
+    let substituted = rewritten.with_annotation(annotation.cloned());
     match check::validate_annotation(registry, declaration, &substituted) {
         Ok(()) => {}
         Err(check::AnnotationRefusal::Needed(annotator)) => {
