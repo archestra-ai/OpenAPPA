@@ -243,6 +243,28 @@ pub enum RespellError {
     Unmapped(String),
     #[error("two arguments are mapped onto argument {0:?}")]
     Collides(String),
+    #[error("{0:?} is not an argument name a selector or placeholder can spell")]
+    Unspellable(String),
+}
+
+/// Whether `name` reads back as one argument name in a selector clause and in a placeholder
+/// segment: non-empty, no delimiter of either grammar, and no leading placeholder mark.
+pub fn is_spellable_argument(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('$')
+        && !name
+            .chars()
+            .any(|c| matches!(c, '(' | ')' | ',' | ':' | '\\' | '/') || c.is_control())
+}
+
+pub(crate) fn respelled_argument(arguments: &BTreeMap<String, String>, argument: &str) -> Result<String, RespellError> {
+    let target = arguments
+        .get(argument)
+        .ok_or_else(|| RespellError::Unmapped(argument.to_string()))?;
+    if !is_spellable_argument(target) {
+        return Err(RespellError::Unspellable(target.clone()));
+    }
+    Ok(target.clone())
 }
 
 /// `authored` for the tool `tool`, each selector argument renamed through `arguments`: the
@@ -258,11 +280,9 @@ pub fn respell_declaration(
     };
     let mut renamed = BTreeMap::new();
     for (argument, pattern) in clauses {
-        let target = arguments
-            .get(&argument)
-            .ok_or_else(|| RespellError::Unmapped(argument.clone()))?;
+        let target = respelled_argument(arguments, &argument)?;
         if renamed.insert(target.clone(), pattern).is_some() {
-            return Err(RespellError::Collides(target.clone()));
+            return Err(RespellError::Collides(target));
         }
     }
     let clauses: Vec<String> = renamed
@@ -3053,6 +3073,11 @@ mod tests {
             respell_declaration("t(a:x", "u", &arguments),
             Err(RespellError::Malformed(_))
         ));
+        let reshaping = BTreeMap::from([("a".to_string(), "x:prefix".to_string())]);
+        assert_eq!(
+            respell_declaration("t(a:*)", "u", &reshaping),
+            Err(RespellError::Unspellable("x:prefix".to_string()))
+        );
     }
 
     #[test]

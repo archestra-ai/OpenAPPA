@@ -199,10 +199,9 @@ impl SelectorPlaceholder {
             .iter()
             .map(|segment| match segment {
                 Segment::Literal(literal) => Ok(Segment::Literal(literal.clone())),
-                Segment::Argument(argument) => arguments
-                    .get(argument)
-                    .map(|target| Segment::Argument(target.clone()))
-                    .ok_or_else(|| crate::registry::RespellError::Unmapped(argument.clone())),
+                Segment::Argument(argument) => {
+                    crate::registry::respelled_argument(arguments, argument).map(Segment::Argument)
+                }
             })
             .collect::<Result<_, _>>()?;
         Ok(SelectorPlaceholder {
@@ -746,6 +745,14 @@ mod tests {
         assert_eq!(
             placeholder.respelled(&BTreeMap::from([("kind".to_string(), "type".to_string())])),
             Err(crate::registry::RespellError::Unmapped("id".to_string()))
+        );
+        let reshaping = BTreeMap::from([
+            ("kind".to_string(), "x/y".to_string()),
+            ("id".to_string(), "id".to_string()),
+        ]);
+        assert_eq!(
+            placeholder.respelled(&reshaping),
+            Err(crate::registry::RespellError::Unspellable("x/y".to_string()))
         );
     }
 

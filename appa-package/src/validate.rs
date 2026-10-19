@@ -219,7 +219,19 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                         &document,
                     )?;
                     check_composes(&policy_path, &base, &bindings)?;
-                    check_variants(&policy_path, &bindings.tools, &base.tools)?;
+                    // Variants shadow each other as composed: target before base, canonical
+                    // rules lowered through either policy's map.
+                    let mut map = base.tool_map.clone();
+                    for (canonical, targets) in &bindings.tool_map {
+                        map.entry(canonical.clone())
+                            .or_default()
+                            .extend(targets.iter().cloned());
+                    }
+                    check_variants(
+                        &policy_path,
+                        &lowered_variants(&bindings.tools, &map),
+                        &lowered_variants(&base.tools, &map),
+                    )?;
                     check_lookup_routes(&policy_path, &bindings)?;
                     target_policy.audiences = bindings.audiences;
                     target_policy.credentials = bindings.credentials;
@@ -456,7 +468,7 @@ fn check_policy(
         .iter()
         .flat_map(|namespace| ["mcp", "host", "agent", "tool"].map(|family| format!("{family}/{namespace}/")))
         .collect();
-    check_tool_aliases(policy, document, &covered, namespaces)?;
+    let tool_map = check_tool_aliases(policy, document, &covered, namespaces)?;
     check_named(policy, document)?;
     let tools = declared_contracts(policy, document)?;
     for contract in &tools {
@@ -479,6 +491,7 @@ fn check_policy(
         credentials,
         externals: externals(document).map(|(external, _)| external).collect(),
         tools,
+        tool_map,
         declarations: named_declarations(document),
     })
 }
@@ -660,6 +673,8 @@ struct PolicyBindings {
     externals: BTreeSet<NamedExternal>,
     /// The declared tool contracts, canonical and in declaration order.
     tools: Vec<String>,
+    /// The policy's own `[aliases.tool]` map.
+    tool_map: ToolMap,
     declarations: BTreeSet<NamedDeclaration>,
 }
 
@@ -1082,6 +1097,9 @@ fn check_named(policy: &Path, document: &Value) -> Result<(), PackageError> {
 /// The tool contract names a policy declares. Only `[[policy.tool]]` names a
 /// contract; the other declaration arrays name annotators, authorities and
 /// sanitizers, which are identifiers and belong to no namespace.
+/// The client tools each canonical tool `tool/<namespace>/<tool>` is bound to.
+type ToolMap = BTreeMap<String, Vec<String>>;
+
 /// A battery's `[aliases]` carries only `tool`, and binds canonical tools only to client
 /// tools in the namespaces it covers. Which server or host serves a namespace is the
 /// deployment's to say.
@@ -1090,9 +1108,9 @@ fn check_tool_aliases(
     document: &Value,
     covered: &[String],
     namespaces: &[Namespace],
-) -> Result<(), PackageError> {
+) -> Result<ToolMap, PackageError> {
     let Some(aliases) = document.get("aliases") else {
-        return Ok(());
+        return Ok(ToolMap::new());
     };
     let top_level = |field: &str| PackageError::PolicyTopLevel {
         policy: policy.to_path_buf(),
@@ -1102,17 +1120,25 @@ fn check_tool_aliases(
     if let Some(field) = aliases.keys().find(|field| field.as_str() != "tool") {
         return Err(top_level(&format!("aliases.{field}")));
     }
-    let targets = aliases
+    let map: ToolMap = aliases
         .get("tool")
         .and_then(Value::as_table)
         .into_iter()
-        .flat_map(|maps| maps.values())
-        .filter_map(Value::as_table)
-        .flat_map(|tools| tools.values())
-        .filter_map(Value::as_array)
         .flatten()
-        .filter_map(|target| target.get("name").and_then(Value::as_str));
-    for target in targets {
+        .filter_map(|(namespace, tools)| Some((namespace, tools.as_table()?)))
+        .flat_map(|(namespace, tools)| {
+            tools.iter().map(move |(tool, targets)| {
+                let names = targets
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|target| target.get("name").and_then(Value::as_str).map(str::to_owned))
+                    .collect();
+                (format!("tool/{namespace}/{tool}"), names)
+            })
+        })
+        .collect();
+    for target in map.values().flatten() {
         if appa_runtime_api::CanonicalTool::parse(target).is_err() {
             return Err(PackageError::PolicyAliasTarget {
                 policy: policy.to_path_buf(),
@@ -1131,7 +1157,24 @@ fn check_tool_aliases(
             });
         }
     }
-    Ok(())
+    Ok(map)
+}
+
+/// `tools` as composition lowers them through `map`: a canonical variant becomes one
+/// variant per client tool it is bound to, keeping whether it carries a selector.
+fn lowered_variants(tools: &[String], map: &ToolMap) -> Vec<String> {
+    tools
+        .iter()
+        .flat_map(|variant| {
+            let (tool, selector) = variant
+                .split_once('(')
+                .map_or((variant.as_str(), ""), |(tool, _)| (tool, "(…)"));
+            match map.get(tool) {
+                Some(targets) => targets.iter().map(|target| format!("{target}{selector}")).collect(),
+                None => vec![variant.clone()],
+            }
+        })
+        .collect()
 }
 
 fn declared_contracts(policy: &Path, document: &Value) -> Result<Vec<String>, PackageError> {
@@ -2297,6 +2340,19 @@ mod tests {
             Err(PackageError::ToolWithoutBareVariant { tool, .. }) if tool == "mcp/github/send"
         ));
         validate(&["send"], &["send(to:me)"]).unwrap();
+    }
+
+    #[test]
+    fn a_target_cannot_shadow_a_base_variant_it_reaches_through_the_base_map() {
+        let base = "[aliases.tool.github]\nlist = [{ name = \"mcp/github/list\" }]\n\n[policy]\nversion = 2\n\n\
+             [[policy.tool]]\nname = \"tool/github/list(owner:me)\"\ndelta = {}\n\n\
+             [[policy.tool]]\nname = \"tool/github/list\"\ndelta = {}\n";
+        let shadowing = format!("{MULTI_USER_POLICY}\n[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = {{}}\n");
+        assert!(matches!(
+            validate_package(targeted(base, &shadowing).path()),
+            Err(PackageError::TargetShadowsBase { tool, .. }) if tool == "mcp/github/list"
+        ));
+        validate_package(targeted(base, MULTI_USER_POLICY).path()).unwrap();
     }
 
     /// A battery without targets is only ever composed whole, so it keeps its lookups

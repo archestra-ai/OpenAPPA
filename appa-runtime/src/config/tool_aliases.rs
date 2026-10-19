@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use appa_engine::contract::SelectorPlaceholder;
-use appa_engine::registry::{RespellError, respell_declaration};
+use appa_engine::registry::{RespellError, is_spellable_argument, respell_declaration};
 use appa_runtime_api::CanonicalTool;
 use serde::Deserialize;
 
@@ -226,16 +226,12 @@ fn check_target(origin: &MapOrigin, namespace: &str, tool: &str, target: &ToolTa
             target: target.name.clone(),
         });
     }
-    // An argument name is spliced into selectors and placeholders, so it must be one their
-    // grammars read back as a name: no delimiter, separator, or placeholder mark.
-    let unspliceable = |argument: &String| {
-        argument.is_empty()
-            || argument.starts_with('$')
-            || argument
-                .chars()
-                .any(|c| matches!(c, '(' | ')' | ',' | ':' | '\\' | '/') || c.is_control())
-    };
-    if let Some(argument) = target.args.keys().chain(target.args.values()).find(|a| unspliceable(a)) {
+    if let Some(argument) = target
+        .args
+        .keys()
+        .chain(target.args.values())
+        .find(|argument| !is_spellable_argument(argument))
+    {
         return Err(ToolAliasError::InvalidArgument {
             origin: origin.to_string(),
             canonical: canonical(),
@@ -327,7 +323,8 @@ fn lowered(rule: &toml::Value, name: &str, target: &ToolTarget) -> Result<toml::
             target: target.name.clone(),
             argument,
         },
-        RespellError::Malformed(_) | RespellError::Collides(_) => {
+        // A map is admitted only when injective and spellable, so these name the rule.
+        RespellError::Malformed(_) | RespellError::Collides(_) | RespellError::Unspellable(_) => {
             ToolAliasError::MalformedRule { rule: name.to_owned() }
         }
     };
