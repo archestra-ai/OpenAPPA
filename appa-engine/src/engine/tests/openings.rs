@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn the_opening_batch_carries_the_identity_and_derived_vectors() {
+fn the_opening_batch_names_the_deployment_and_revision_it_opened_at() {
     let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
     let t = traj();
     let key = crate::profile::PolicyFileKey::of(b"the policy file");
@@ -9,16 +9,17 @@ fn the_opening_batch_carries_the_identity_and_derived_vectors() {
         .open_trajectory(&t, key.clone(), None)
         .expect("a fresh root's opening seals");
     assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
-    assert_eq!(batch.revision(), None, "a snapshot engine stamps nothing");
+    assert_eq!(
+        batch.revision(),
+        e.revision(),
+        "the opening is stamped at the engine's revision"
+    );
     match batch.facts() {
         [
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
-                dialect,
                 profile,
-                policy_digest,
                 policy_file_key,
-                open_vectors,
                 deployment,
                 revision,
                 forked_from,
@@ -29,35 +30,53 @@ fn the_opening_batch_carries_the_identity_and_derived_vectors() {
             assert_eq!(principal, &None, "an opening no host named a principal for has none");
             assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
             assert_eq!(trajectory, &t);
-            assert_eq!(*dialect, PolicyDialectVersion::new(1));
             assert_eq!(profile, e.profile());
-            assert_eq!(*policy_digest, e.identity());
-            assert_eq!(open_vectors, &e.open_vectors());
-            assert_eq!(open_vectors.len(), 1);
-            assert_eq!(
-                (deployment, revision),
-                (&None, &None),
-                "a pinned family follows no deployment"
-            );
+            assert_eq!(Some(deployment), e.deployment());
+            assert_eq!(Some(*revision), e.revision());
         }
         other => panic!("expected exactly the opening record, got {other:?}"),
     }
     let wire = serde_json::to_string(batch.facts()).unwrap();
     assert_eq!(serde_json::from_str::<Vec<Fact>>(&wire).unwrap(), batch.facts());
+}
 
-    // The same policy deciding at a revision of a deployment names both on the opening and
-    // stamps the batch; the rest of the record is the same.
-    let line = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(4));
-    let following = line.open_trajectory(&t, key, None).expect("the opening seals");
-    assert_eq!(following.revision(), Some(PolicyRevision::new(4)));
-    match following.facts() {
-        [Fact::TrajectoryOpened(opening)] => {
-            assert_eq!(opening.deployment, Some(DeploymentName::new("default")));
-            assert_eq!(opening.revision, Some(PolicyRevision::new(4)));
-            assert_eq!(opening.policy_digest, e.identity());
-        }
-        other => panic!("expected exactly the opening record, got {other:?}"),
-    }
+#[test]
+fn an_engine_at_no_revision_opens_and_judges_nothing() {
+    let placed = engine(vec![plain_tool("send")]);
+    let compiled = Engine::open(DeploymentPolicy {
+        registry: test_config(vec![plain_tool("send"), plain_tool("spawn")]),
+        planner_cap: crate::registry::PlannerCap::default(),
+        profile: crate::profile::covering_declaration(&test_config(vec![plain_tool("send"), plain_tool("spawn")])),
+    })
+    .expect("the policy compiles");
+    assert_eq!(compiled.revision(), None);
+    let key = crate::profile::PolicyFileKey::of(b"policy");
+    assert_eq!(
+        compiled.open_trajectory(&traj(), key, None).map(|_| ()),
+        Err(TransitionRefusal::NoRevision)
+    );
+    let log = opening_log(&placed);
+    let view = placed
+        .view(&traj(), log.clone(), 1)
+        .expect("the placed engine judges its own opening");
+    assert!(compiled.view(&traj(), log.clone(), 1).is_err());
+    assert_eq!(
+        compiled
+            .replay(
+                &traj(),
+                &[crate::engine::StampedBatch {
+                    revision: placed.revision(),
+                    facts: &log,
+                }],
+                &[],
+            )
+            .map(|_| ()),
+        Err(crate::engine::ReplayRefusal::Transition(TransitionRefusal::NoRevision))
+    );
+    assert!(matches!(
+        compiled.handle(&view, batch_on(&traj(), "b", Vec::new(), Vec::new(), None)),
+        Err(TransitionError::NoRevision)
+    ));
 }
 
 #[test]
@@ -101,46 +120,16 @@ fn cold_replay_verifies_the_opening_strictly() {
         replay(&t, vec![fact])
     };
     assert_eq!(
-        mutated(&|opening| opening.dialect = PolicyDialectVersion::new(9)),
-        Err(TransitionRefusal::Opening(
-            OpeningTransitionRefusal::UnsupportedDialect { found: 9 }
-        ))
-    );
-    assert_eq!(
-        mutated(&|opening| opening.policy_digest = engine(vec![plain_tool("send")]).identity()),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
-    );
-    // An opening an earlier engine recorded carries the identity its algorithm gave this
-    // policy, and names this policy as surely as the current identity does.
-    let earlier = *e
-        .earlier_identities()
-        .first()
-        .expect("a policy that forwards nothing has a v1 identity");
-    assert_ne!(earlier, e.identity(), "the algorithms differ in their domain tag");
-    assert!(
-        mutated(&|opening| opening.policy_digest = earlier).is_ok(),
-        "the v1 identity of this policy reopens its trajectory"
-    );
-    assert_eq!(
-        mutated(&|opening| opening.policy_digest = engine(vec![plain_tool("send")]).earlier_identities()[0]),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch)),
-        "the v1 identity of another policy does not"
-    );
-    assert_eq!(
         mutated(&|opening| opening.profile = engine(vec![plain_tool("send")]).profile().clone()),
         Err(TransitionRefusal::Opening(OpeningTransitionRefusal::ProfileMismatch))
     );
+    // An engine at a revision judges only an opening of its deployment at that revision.
     assert_eq!(
-        mutated(&|opening| opening.open_vectors.clear()),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::VectorMismatch))
+        mutated(&|opening| opening.deployment = DeploymentName::new("elsewhere")),
+        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
     );
-    // A snapshot engine judges no opening that follows a deployment, and an engine at a
-    // revision judges only an opening at that revision.
     assert_eq!(
-        mutated(&|opening| {
-            opening.deployment = Some(DeploymentName::new("default"));
-            opening.revision = Some(PolicyRevision::FIRST);
-        }),
+        mutated(&|opening| opening.revision = opening.revision.next()),
         Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
     );
     let line = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(2));
@@ -149,10 +138,6 @@ fn cold_replay_verifies_the_opening_strictly() {
         .expect("the opening seals")
         .into_unsealed();
     assert!(line.view(&t, followed.clone(), 1).is_ok());
-    assert_eq!(
-        e.view(&t, followed.clone(), 1).map(|_| ()),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
-    );
     let other_revision = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(3));
     assert_eq!(
         other_revision.view(&t, followed, 1).map(|_| ()),

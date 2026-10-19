@@ -128,8 +128,7 @@ mod held_view_law {
             value: bool,
         },
         HostOnly,
-        /// The deployment publishes its next revision: a walk that follows it decides there
-        /// from then on. A walk pinned to a snapshot ignores it.
+        /// The deployment publishes its next revision: the walk decides there from then on.
         Publish(Successor),
     }
 
@@ -336,12 +335,8 @@ mod held_view_law {
     }
 
     impl Walk {
-        fn open() -> Walk {
-            Walk::opened(law_engine())
-        }
-
         /// A walk whose family follows a deployment, starting at its first revision.
-        fn following() -> Walk {
+        fn open() -> Walk {
             Walk::opened(law_engine().at(DeploymentName::new("law"), PolicyRevision::FIRST))
         }
 
@@ -369,12 +364,6 @@ mod held_view_law {
         }
 
         fn cold(&self) -> EngineView {
-            if self.engine.revision().is_none() {
-                return self
-                    .engine
-                    .view(&traj(), self.log.clone(), self.batches)
-                    .expect("every prefix the engine sealed replays");
-            }
             let batches: Vec<StampedBatch<'_>> = self
                 .stamped
                 .iter()
@@ -393,9 +382,7 @@ mod held_view_law {
         /// No offer opened before the publish is current after it: executing one consults
         /// nothing.
         fn publish(&mut self, successor: &Successor) -> Result<(), TestCaseError> {
-            let Some(revision) = self.engine.revision() else {
-                return Ok(());
-            };
+            let revision = self.engine.revision().expect("a walk decides at a revision");
             let next =
                 law_engine_as(successor).at(DeploymentName::new("law"), PolicyRevision::new(revision.value() + 1));
             self.earlier.push(std::mem::replace(&mut self.engine, next));
@@ -607,25 +594,14 @@ mod held_view_law {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
-        #[test]
-        fn a_view_advanced_by_its_sealed_batches_is_the_cold_replay_at_every_prefix(
-            steps in prop::collection::vec(step(), 1..48),
-        ) {
-            let mut walk = Walk::open();
-            for step in &steps {
-                walk.take(step)?;
-            }
-        }
-
-        /// The same law for a family that follows its deployment while revisions are published:
-        /// the held view, advanced by each batch at the revision that sealed it, equals the cold
-        /// replay that judges every batch under its own revision; and a publish leaves no offer
-        /// current that an earlier revision opened.
+        /// The held view, advanced by each batch at the revision that sealed it while revisions
+        /// are published, equals the cold replay that judges every batch under its own revision;
+        /// and a publish leaves no offer current that an earlier revision opened.
         #[test]
         fn a_view_advanced_across_published_revisions_is_the_cold_replay_at_every_prefix(
             steps in prop::collection::vec(step(), 1..48),
         ) {
-            let mut walk = Walk::following();
+            let mut walk = Walk::open();
             for step in &steps {
                 walk.take(step)?;
             }
@@ -640,7 +616,7 @@ mod held_view_law {
         fn a_family_crossing_any_successor_revisions_is_decided_and_replays(
             steps in prop::collection::vec(evolving_step(), 1..48),
         ) {
-            let mut walk = Walk::following();
+            let mut walk = Walk::open();
             for step in &steps {
                 walk.take(step)?;
             }
@@ -670,7 +646,7 @@ mod held_view_law {
             chain: CHAINS.iter().position(|chain| *chain == ["low", "high"]).unwrap(),
             ..Successor::same()
         };
-        let mut walk = Walk::following();
+        let mut walk = Walk::open();
         let trust = |walk: &Walk| walk.held.views(&traj()).unwrap().current_label().trust;
         let opened_after = |walk: &Walk, from: usize, name: &str| {
             walk.log[from..]

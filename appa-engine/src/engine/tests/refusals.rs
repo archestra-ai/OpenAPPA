@@ -303,7 +303,7 @@ fn an_attested_crossing_in_non_canonical_form_is_refused() {
     assert_eq!(e.validate_replay(&whole), Ok(()));
 
     let mut forged = whole;
-    let Fact::ChildReturn { value, .. } = &mut forged[log.len()] else {
+    let Fact::ChildReturn { value, .. } = &mut forged[log.len() + 1] else {
         panic!("the crossing leads with its return record")
     };
     // The shape admits these bytes; only their canonical form crosses.
@@ -411,7 +411,7 @@ fn a_second_spend_of_one_approval_is_stale() {
                 subjects: vec![subject],
                 ..crate::basis::BasisAdvance::default()
             },
-            revision: None,
+            revision: e.revision(),
         },
         Fact::CallApprovalConsumed {
             trajectory: traj(),
@@ -454,7 +454,7 @@ fn a_second_take_of_one_candidate_is_stale() {
                 subjects: vec![subject.clone()],
                 ..crate::basis::BasisAdvance::default()
             },
-            revision: None,
+            revision: e.revision(),
         },
         Fact::CandidateConsumed {
             trajectory: traj(),

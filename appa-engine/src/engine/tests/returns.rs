@@ -644,7 +644,7 @@ fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
     );
     let facts = appended_facts(first);
     assert!(matches!(
-        facts.as_slice(),
+        declared_records(&facts),
         [
             Fact::ChildReturn {
                 derivation: ReturnDerivation::Raw,
@@ -832,7 +832,7 @@ fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
     );
     let facts = appended_facts(merged);
     assert!(matches!(
-        &facts[0],
+        &declared_records(&facts)[0],
         Fact::ChildReturn {
             value,
             derivation: ReturnDerivation::Sanitized { sanitizer, .. },
@@ -928,7 +928,7 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
     );
     let facts = appended_facts(echoed);
     assert!(matches!(
-        &facts[0],
+        &declared_records(&facts)[0],
         Fact::ChildReturn {
             value,
             derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
@@ -992,7 +992,7 @@ fn a_return_after_a_resume_is_a_new_crossing_even_when_its_bytes_repeat() {
     let facts = appended_facts(again);
     assert!(
         matches!(
-            facts.as_slice(),
+            declared_records(&facts),
             [
                 Fact::ChildReturn { .. },
                 Fact::ValueAdmitted { .. },

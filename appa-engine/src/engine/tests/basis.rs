@@ -129,7 +129,10 @@ fn a_neutral_release_advances_no_basis_component() {
     let log = vec![opened(&e)];
     let before = basis_of(&e, &log);
     let facts = appended_facts(decide(&e, &log, "b1", &call("read_note", json!({}))));
-    assert!(!facts.iter().any(|fact| matches!(fact, Fact::BasisAdvanced { .. })));
+    assert!(matches!(
+        facts.first(),
+        Some(Fact::BasisAdvanced { advance, revision, .. }) if advance.is_empty() && *revision == e.revision()
+    ));
     assert_eq!(basis_of(&e, &[log, facts].concat()), before);
 }
 

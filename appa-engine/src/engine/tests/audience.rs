@@ -884,9 +884,9 @@ mod symbolic_audiences {
         Engine::open(DeploymentPolicy {
             registry: cfg,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
             profile: declaration,
         })
+        .map(placed)
         .unwrap()
     }
 
@@ -1604,9 +1604,9 @@ mod symbolic_audiences {
         let e = Engine::open(DeploymentPolicy {
             registry: cfg,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
             profile: declaration,
         })
+        .map(placed)
         .expect("a context-controlled deployment opens");
         let child = TrajectoryId::new("child");
         let opened_log = vec![opened(&e)];

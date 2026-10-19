@@ -3,8 +3,7 @@ use appa_engine::engine::Engine;
 use appa_engine::fact::{Fact, RootForkOrigin};
 use appa_engine::label::ReaderId;
 use appa_engine::profile::{
-    DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity,
-    ProfileDeclaration,
+    DeploymentName, DeploymentPolicy, DeploymentProfile, PolicyFileKey, PolicyRevision, ProfileDeclaration,
 };
 use appa_engine::registry::{PlannerCap, RegistryConfig, TrustChain};
 use appa_engine::value::TrajectoryId;
@@ -15,22 +14,27 @@ use serde::Serialize;
 enum StoredFact<'a> {
     TrajectoryOpened {
         trajectory: &'a TrajectoryId,
-        dialect: PolicyDialectVersion,
         profile: &'a DeploymentProfile,
-        policy_digest: PolicyIdentity,
         policy_file_key: &'a PolicyFileKey,
-        open_vectors: Vec<OpenVector>,
+        deployment: &'a DeploymentName,
+        revision: PolicyRevision,
         #[serde(skip_serializing_if = "Option::is_none")]
         forked_from: Option<&'a RootForkOrigin>,
     },
 }
 
+/// An engine of the test deployment line, at its first revision.
+fn placed(policy: DeploymentPolicy) -> Engine {
+    Engine::open(policy)
+        .expect("the policy opens")
+        .at(DeploymentName::new("default"), PolicyRevision::FIRST)
+}
+
 #[test]
 fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
     let chain = TrustChain::new(vec!["untrusted".into(), "trusted".into()]);
-    let engine = Engine::open(DeploymentPolicy {
+    let engine = placed(DeploymentPolicy {
         profile: ProfileDeclaration::no_coverage(&chain),
-        dialect: PolicyDialectVersion::new(1),
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
             trust_chain: chain,
@@ -40,8 +44,7 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
             sanitizers: vec![],
             audience: AudienceConfig::default(),
         },
-    })
-    .expect("the policy opens");
+    });
     let parent = TrajectoryId::new("parent");
     let fork = TrajectoryId::new("fork");
     let key = PolicyFileKey::of(b"stored opening policy");
@@ -61,11 +64,10 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
     for (id, facts, source) in [(&parent, &ordinary, None), (&fork, &forked, Some(&origin))] {
         let stored = StoredFact::TrajectoryOpened {
             trajectory: id,
-            dialect: PolicyDialectVersion::new(1),
             profile: engine.profile(),
-            policy_digest: engine.identity(),
             policy_file_key: &key,
-            open_vectors: engine.open_vectors(),
+            deployment: engine.deployment().expect("the engine is placed"),
+            revision: engine.revision().expect("the engine is placed"),
             forked_from: source,
         };
         let bytes = serde_json::to_vec(&stored).expect("the stored form serializes");
@@ -84,6 +86,22 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
                 facts[0]
             );
         }
+
+        // The opening fields an earlier release also wrote are read past: its families stay
+        // readable. An opening that names no deployment does not read at all.
+        let mut earlier = serde_json::to_value(&stored).expect("the stored form is JSON");
+        earlier["TrajectoryOpened"]["dialect"] = 1.into();
+        earlier["TrajectoryOpened"]["policy_digest"] = "00".repeat(32).into();
+        earlier["TrajectoryOpened"]["open_vectors"] = serde_json::json!([]);
+        assert_eq!(
+            serde_json::from_value::<Fact>(earlier.clone()).expect("an earlier release's opening reads"),
+            facts[0]
+        );
+        earlier["TrajectoryOpened"]
+            .as_object_mut()
+            .expect("the opening is an object")
+            .remove("deployment");
+        assert!(serde_json::from_value::<Fact>(earlier).is_err());
     }
 }
 
@@ -92,9 +110,8 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
 #[test]
 fn a_principal_opening_forks_with_its_principal_and_replay_holds_it_to_shape() {
     let chain = TrustChain::new(vec!["untrusted".into(), "trusted".into()]);
-    let engine = Engine::open(DeploymentPolicy {
+    let engine = placed(DeploymentPolicy {
         profile: ProfileDeclaration::no_coverage(&chain),
-        dialect: PolicyDialectVersion::new(1),
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
             trust_chain: chain,
@@ -104,8 +121,7 @@ fn a_principal_opening_forks_with_its_principal_and_replay_holds_it_to_shape() {
             sanitizers: vec![],
             audience: AudienceConfig::default(),
         },
-    })
-    .expect("the policy opens");
+    });
     let parent = TrajectoryId::new("parent");
     let fork = TrajectoryId::new("fork");
     let key = PolicyFileKey::of(b"stored opening policy");

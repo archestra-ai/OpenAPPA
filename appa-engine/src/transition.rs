@@ -442,10 +442,8 @@ pub enum TransitionError {
         view: PolicyRevision,
         engine: PolicyRevision,
     },
-    #[error("the view is a family pinned to a policy snapshot; an engine deciding at a revision does not decide it")]
-    PinnedView,
-    #[error("the view is a family that follows a deployment; a snapshot engine does not decide it")]
-    FollowingView,
+    #[error("the engine decides at no policy revision of a deployment")]
+    NoRevision,
     #[error("the event names a trajectory this family has not opened")]
     UnopenedTrajectory,
     #[error("the decision does not pass the transition validator: {0}")]
@@ -592,7 +590,7 @@ impl ValidatedFactBatch {
     }
 
     /// The policy revision that decided this batch, and that a replay judges it under; `None`
-    /// for a batch a snapshot engine decided, or one holding no record.
+    /// for a batch holding no record.
     pub fn revision(&self) -> Option<PolicyRevision> {
         self.revision
     }
@@ -625,10 +623,8 @@ pub enum ViewMismatch {
         view: PolicyRevision,
         batch: PolicyRevision,
     },
-    #[error(
-        "the batch and the view do not belong to one family kind: one is pinned to a policy snapshot, the other follows a deployment"
-    )]
-    ForeignLine,
+    #[error("the batch names no policy revision, or the engine decides at none")]
+    Unstamped,
 }
 
 /// Why [`crate::Engine::admit_batch`] did not advance a view: the batch's records failed the
@@ -676,15 +672,9 @@ impl EngineView {
     }
 
     /// The policy revision this view stands at: that of the last stamped batch it folded, or a
-    /// later one an engine deciding at it crossed the view to; `None` for a family pinned to a
-    /// policy snapshot.
+    /// later one an engine deciding at it crossed the view to.
     pub fn stamp(&self) -> Option<PolicyRevision> {
         self.stamp
-    }
-
-    /// The revision that opened the family, or `None` for a family pinned to a policy snapshot.
-    pub fn opening_revision(&self) -> Option<PolicyRevision> {
-        self.projection.opening_revision()
     }
 
     /// Move past batches that fold nothing: host observations alone, or a stamp carried over. A
@@ -791,8 +781,8 @@ impl EngineView {
                 batch: batch_revision,
             });
         }
-        if batch.revision.is_some() != self.opening_revision().is_some() && self.projection.is_opened(&self.family) {
-            return Err(ViewMismatch::ForeignLine);
+        if batch.revision.is_none() {
+            return Err(ViewMismatch::Unstamped);
         }
         if let Some(crossing) = self.chain.crossing_to(&batch.chain) {
             self.projection.cross(&crossing);
@@ -820,14 +810,8 @@ pub enum OpeningTransitionRefusal {
     Duplicate,
     #[error("the opening record names trajectory {found}, not the root being replayed")]
     WrongTrajectory { found: String },
-    #[error("the opening record carries policy dialect version {found}, which this engine does not support")]
-    UnsupportedDialect { found: u32 },
-    #[error("the opening record's policy digest does not match the supplied policy")]
-    DigestMismatch,
     #[error("the opening record's declaration does not match the supplied policy's validated profile")]
     ProfileMismatch,
-    #[error("the opening record's open vectors are not the set derived from its declaration")]
-    VectorMismatch,
     #[error("the opening record names a deployment and policy revision other than the engine judging it decides at")]
     DeploymentMismatch,
     #[error("the opening record forks the root from its own family")]
@@ -845,6 +829,8 @@ pub enum OpeningTransitionRefusal {
 pub enum TransitionRefusal {
     #[error("the family log does not open with its TrajectoryOpened record")]
     Unopened,
+    #[error("the engine decides at no policy revision of a deployment")]
+    NoRevision,
     #[error("evidence entry {entry} is neither an inherited pin nor requested by its act")]
     UnrequestedEvidence { entry: String },
     #[error("the family log's opening record cannot be trusted: {0}")]
@@ -1206,10 +1192,8 @@ impl<'a> Sequence<'a> {
             Fact::BasisAdvanced {
                 act, advance, revision, ..
             } => {
-                // A stamped batch was decided at the revision judging it; an unstamped one was
-                // decided under the opening file, which is what a snapshot engine, or the opening
-                // revision's engine standing in for one, judges it by.
-                if revision.is_some() && *revision != self.engine.revision() {
+                // A batch is decided at the revision judging it.
+                if *revision != self.engine.revision() {
                     return Err(TransitionRefusal::ForeignRevision);
                 }
                 self.declare(act, advance)?
@@ -2408,11 +2392,9 @@ impl<'a> Sequence<'a> {
     }
 
     /// The strict judgment of the durable opening: the family's first record, naming
-    /// the family, at a dialect this engine reads, carrying a digest that names this policy
-    /// ([`crate::engine::Engine::recognizes`]), its validated declaration byte for byte — which
-    /// subsumes re-running the coverage matrix over it — and the open vectors that declaration
-    /// derives. An opening that follows a deployment names the deployment and revision the
-    /// engine judging it decides at. `policy_file_key` is deliberately not judged here: it names a
+    /// the family, its validated declaration byte for byte — which subsumes re-running the
+    /// coverage matrix over it — and the deployment and revision the engine judging it decides
+    /// at. `policy_file_key` is deliberately not judged here: it names a
     /// stored file this engine never sees, and the outer layer re-hashes the file it loaded against
     /// the record on every event.
     fn root_opened(&self, opening: &TrajectoryOpening) -> Result<(), OpeningTransitionRefusal> {
@@ -2424,21 +2406,10 @@ impl<'a> Sequence<'a> {
                 found: opening.trajectory.as_str().to_string(),
             });
         }
-        if opening.dialect != self.engine.dialect() {
-            return Err(OpeningTransitionRefusal::UnsupportedDialect {
-                found: opening.dialect.value(),
-            });
-        }
-        if !self.engine.recognizes(&opening.policy_digest) {
-            return Err(OpeningTransitionRefusal::DigestMismatch);
-        }
         if opening.profile != *self.engine.registry().profile() {
             return Err(OpeningTransitionRefusal::ProfileMismatch);
         }
-        if opening.open_vectors != self.engine.open_vectors() {
-            return Err(OpeningTransitionRefusal::VectorMismatch);
-        }
-        if opening.deployment.as_ref() != self.engine.deployment() || opening.revision != self.engine.revision() {
+        if Some(&opening.deployment) != self.engine.deployment() || Some(opening.revision) != self.engine.revision() {
             return Err(OpeningTransitionRefusal::DeploymentMismatch);
         }
         if let Some(principal) = &opening.principal
@@ -3662,10 +3633,10 @@ mod tests {
         Engine::open(crate::profile::DeploymentPolicy {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: crate::profile::PolicyDialectVersion::new(1),
             profile,
         })
         .expect("the test policy opens")
+        .at(line(), PolicyRevision::FIRST)
     }
 
     fn starting() -> Label {
@@ -3928,18 +3899,17 @@ mod tests {
         );
     }
 
-    /// A family that follows a deployment holds two kinds of batch without a stamp. A batch of
-    /// host observations alone decides nothing and leaves the stamp where it was, after a publish
-    /// too. A decided one is what an engine reading the family as pinned to its opening file wrote
-    /// during a rolling release: it is judged under the opening revision, and refused once a later
-    /// stamp precedes it.
+    /// Only a batch of host observations alone carries no stamp: it decides nothing and leaves
+    /// the stamp where it was, after a publish too. A batch that holds engine records and names
+    /// no revision is refused, wherever it stands.
     #[test]
-    fn an_unstamped_batch_of_a_following_family_is_judged_under_its_opening_revision() {
+    fn only_a_batch_that_decides_nothing_replays_without_a_stamp() {
         let first = engine_noting(Some(noting(None)), 1);
         let second = engine_noting(Some(noting(None)), 2);
         let (released, _, release) = released_note(&first);
         let unstamped: Vec<Fact> = release
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|fact| match fact {
                 Fact::BasisAdvanced {
                     trajectory,
@@ -3961,13 +3931,18 @@ mod tests {
             facts,
         };
 
+        assert_eq!(
+            second.replay(&traj(), &[batch(Some(1), &opened), batch(None, &unstamped)], &[&first]),
+            Err(crate::engine::ReplayRefusal::Unstamped { position: 1 }),
+            "an unstamped decision is refused"
+        );
         let replayed = second
-            .replay(&traj(), &[batch(Some(1), &opened), batch(None, &unstamped)], &[&first])
-            .expect("an unstamped decision replays under the opening revision");
+            .replay(&traj(), &[batch(Some(1), &opened), batch(Some(1), &release)], &[&first])
+            .expect("the same decision, stamped, replays under its revision");
         assert_eq!(
             replayed,
             *released.crossed_to(&second),
-            "the decision is the opening revision's, and the view stands at the deciding one"
+            "the decision is the first revision's, and the view stands at the deciding one"
         );
         assert_eq!(replayed.stamp(), Some(PolicyRevision::new(2)));
 
@@ -3987,12 +3962,8 @@ mod tests {
                 &[batch(Some(1), &opened), batch(Some(2), &[]), batch(None, &unstamped)],
                 &[&first],
             ),
-            Err(crate::engine::ReplayRefusal::RevisionRegressed {
-                position: 2,
-                before: PolicyRevision::new(2),
-                batch: PolicyRevision::FIRST,
-            }),
-            "a decision under the opening file after a publish is a regression"
+            Err(crate::engine::ReplayRefusal::Unstamped { position: 2 }),
+            "an unstamped decision after a publish is refused too"
         );
     }
 
@@ -4018,10 +3989,10 @@ mod tests {
         Engine::open(crate::profile::DeploymentPolicy {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: crate::profile::PolicyDialectVersion::new(1),
             profile,
         })
         .expect("the test policy opens")
+        .at(line(), PolicyRevision::FIRST)
         .at(line(), PolicyRevision::new(revision))
     }
 

@@ -132,8 +132,6 @@ struct ReturnedChild {
 pub struct Projection {
     /// How many batches the family log held when this was folded.
     position: u64,
-    /// The policy revision that opened the family, where it follows a deployment.
-    opening_revision: Option<crate::profile::PolicyRevision>,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
     /// The meet of every label in `local`, met with only terms the trajectory's live fold also
@@ -277,7 +275,6 @@ impl Projection {
     pub(crate) fn empty(position: u64) -> Self {
         Projection {
             position,
-            opening_revision: None,
             values: Default::default(),
             local: Default::default(),
             local_label: Default::default(),
@@ -405,7 +402,6 @@ impl Projection {
     pub(crate) fn fold(&mut self, fact: &Fact) {
         let Projection {
             position: _,
-            opening_revision,
             values,
             local,
             local_label,
@@ -447,12 +443,10 @@ impl Projection {
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
                 profile,
-                revision,
                 forked_from,
                 principal: opened_for,
                 ..
             }) => {
-                *opening_revision = *revision;
                 let mut starting = profile.starting_label().clone();
                 // A root opened as a fork starts where its parent stood: the parent's label
                 // folds into the base every later admission folds onto, and the parent
@@ -782,11 +776,6 @@ impl Projection {
 
     pub(crate) fn position(&self) -> u64 {
         self.position
-    }
-
-    /// The revision that opened the family, or `None` for a family pinned to a policy snapshot.
-    pub(crate) fn opening_revision(&self) -> Option<crate::profile::PolicyRevision> {
-        self.opening_revision
     }
 
     fn value(&self, id: ValueId) -> Option<&AdmittedValue> {

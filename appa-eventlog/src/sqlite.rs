@@ -37,48 +37,14 @@ const SCHEMA_VERSION: i64 = 9;
 /// The oldest version a database upgrades from. A fresh database installs [`BASE_SCHEMA`] at
 /// this version and then runs every step of [`UPGRADES`], so the fresh and the upgraded paths
 /// are one path.
-pub(crate) const BASE_VERSION: i64 = 5;
+pub(crate) const BASE_VERSION: i64 = 9;
 
 /// Step `n` moves a database from `BASE_VERSION + n` to the next version. A change that cannot
 /// carry the stored data forward raises `BASE_VERSION` instead of adding a step.
-const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [
-    "CREATE TABLE held_peer_messages (
-         seq INTEGER PRIMARY KEY,
-         id TEXT NOT NULL UNIQUE,
-         receiver TEXT NOT NULL,
-         digest TEXT NOT NULL,
-         label TEXT NOT NULL,
-         body TEXT NOT NULL,
-         expires_at INTEGER NOT NULL,
-         notified INTEGER NOT NULL
-     );
-     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);",
-    "CREATE TABLE archived_roots (
-         root TEXT PRIMARY KEY
-     );",
-    // Lease expiries and completion times are unix milliseconds. A pending receipt carried
-    // forward has no lease, so its next claim recovers it.
-    "ALTER TABLE operations ADD COLUMN lease_owner TEXT;
-     ALTER TABLE operations ADD COLUMN lease_expires_at INTEGER;
-     ALTER TABLE processed_results ADD COLUMN lease_owner TEXT;
-     ALTER TABLE processed_results ADD COLUMN lease_expires_at INTEGER;
-     ALTER TABLE processed_results ADD COLUMN completed_at INTEGER;",
-    // Deployments and the policy revisions each has published. Logs written before this step
-    // belong to families pinned to the policy file their opening names, and stay so. The index
-    // serves `published_as`: the first revision a deployment published a key as.
-    "CREATE TABLE deployments (
-         name TEXT PRIMARY KEY,
-         head INTEGER NOT NULL CHECK (head > 0)
-     );
-     CREATE TABLE policy_revisions (
-         deployment TEXT NOT NULL,
-         revision   INTEGER NOT NULL CHECK (revision > 0),
-         key        TEXT NOT NULL,
-         PRIMARY KEY (deployment, revision)
-     );
-     CREATE INDEX policy_revisions_key ON policy_revisions (deployment, key, revision);",
-];
+const UPGRADES: [&str; (SCHEMA_VERSION - BASE_VERSION) as usize] = [];
 
+/// Lease expiries and completion times are unix milliseconds. The index on `policy_revisions`
+/// serves `published_as`: the first revision a deployment published a key as.
 const BASE_SCHEMA: &str = "CREATE TABLE logs (
                          root  TEXT NOT NULL,
                          seq   INTEGER NOT NULL,
@@ -103,6 +69,8 @@ const BASE_SCHEMA: &str = "CREATE TABLE logs (
                          input TEXT NOT NULL,
                          status TEXT NOT NULL,
                          decision TEXT,
+                         lease_owner TEXT,
+                         lease_expires_at INTEGER,
                          PRIMARY KEY (organization_id, session_id, operation_id)
                      );
                      CREATE TABLE processed_results (
@@ -114,8 +82,36 @@ const BASE_SCHEMA: &str = "CREATE TABLE logs (
                          status TEXT NOT NULL,
                          approved_output TEXT,
                          decision TEXT,
+                         lease_owner TEXT,
+                         lease_expires_at INTEGER,
+                         completed_at INTEGER,
                          PRIMARY KEY (organization_id, session_id, tool_call_id)
-                     );";
+                     );
+                     CREATE TABLE held_peer_messages (
+                         seq INTEGER PRIMARY KEY,
+                         id TEXT NOT NULL UNIQUE,
+                         receiver TEXT NOT NULL,
+                         digest TEXT NOT NULL,
+                         label TEXT NOT NULL,
+                         body TEXT NOT NULL,
+                         expires_at INTEGER NOT NULL,
+                         notified INTEGER NOT NULL
+                     );
+                     CREATE INDEX held_peer_messages_receiver ON held_peer_messages (receiver, seq);
+                     CREATE TABLE archived_roots (
+                         root TEXT PRIMARY KEY
+                     );
+                     CREATE TABLE deployments (
+                         name TEXT PRIMARY KEY,
+                         head INTEGER NOT NULL CHECK (head > 0)
+                     );
+                     CREATE TABLE policy_revisions (
+                         deployment TEXT NOT NULL,
+                         revision   INTEGER NOT NULL CHECK (revision > 0),
+                         key        TEXT NOT NULL,
+                         PRIMARY KEY (deployment, revision)
+                     );
+                     CREATE INDEX policy_revisions_key ON policy_revisions (deployment, key, revision);";
 
 const FILE_SCHEMA: &str = "CREATE TABLE file_events (
                                workspace TEXT NOT NULL,
@@ -420,18 +416,6 @@ impl Sqlite {
     /// The connection an append runs on, held until the append is done.
     pub(crate) fn appender(&self) -> Appender<'_> {
         Appender(self.connection())
-    }
-
-    /// The stored opening batch of `root`, when it has one.
-    pub(crate) fn opening(&self, root: &TrajectoryId) -> Result<Option<Vec<u8>>, ReadError> {
-        Ok(self
-            .connection()
-            .query_row(
-                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
-                params![root.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?)
     }
 
     pub(crate) fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {

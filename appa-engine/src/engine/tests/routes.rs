@@ -102,11 +102,6 @@ fn only_a_blocked_standing_call_has_routes() {
         "a view a later revision stamped is refused before anything is read"
     );
     assert_eq!(
-        routes(&e),
-        Err(RouteError::ForeignLine),
-        "a snapshot engine reads no family that follows a deployment"
-    );
-    assert_eq!(
         at(&crate::basis::SubjectKey::Return(ChildReturnId::new(
             TrajectoryId::new("child"),
             0

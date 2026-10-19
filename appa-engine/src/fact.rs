@@ -9,9 +9,7 @@ use crate::execute::AuthorityReview;
 use crate::label::{Label, ReaderId};
 use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::plan::PlanId;
-use crate::profile::{
-    DeploymentName, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity, PolicyRevision,
-};
+use crate::profile::{DeploymentName, DeploymentProfile, PolicyFileKey, PolicyRevision};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
     ValueId,
@@ -350,25 +348,18 @@ impl ReleaseTerms {
     }
 }
 
-/// The fields that open a root trajectory family. A family that follows a deployment names it and
-/// the revision it opened at, and decides at the deployment's head; a family whose opening names
-/// neither is pinned to the policy file its opening names.
+/// The fields that open a root trajectory family. The family follows the deployment its opening
+/// names and decides at that deployment's head.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrajectoryOpening {
     pub trajectory: TrajectoryId,
-    pub dialect: PolicyDialectVersion,
     pub profile: DeploymentProfile,
-    pub policy_digest: PolicyIdentity,
+    /// The file of the revision that opened the family.
     pub policy_file_key: PolicyFileKey,
-    pub open_vectors: Vec<OpenVector>,
-    /// The deployment this family follows, and the policy revision that opened it. Both are set
-    /// together, by an engine deciding at a revision: the family then decides at that
-    /// deployment's head, and `policy_file_key` names the file of the revision that opened it.
-    /// Both absent, the family is pinned to `policy_file_key` for its whole life.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deployment: Option<DeploymentName>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<PolicyRevision>,
+    /// The deployment this family follows.
+    pub deployment: DeploymentName,
+    /// The policy revision that opened the family.
+    pub revision: PolicyRevision,
     /// Set when the root opened as a fork of another family's trajectory. Its label starts
     /// from the deployment's starting label folded with the origin's, and its effects,
     /// unsettled reservations and denials start as the origin's.
@@ -585,9 +576,8 @@ pub enum Fact {
         trajectory: TrajectoryId,
         act: crate::basis::DecidedAct,
         advance: crate::basis::BasisAdvance,
-        /// The policy revision that decided this batch: the stamp of a family that follows a
-        /// deployment. Absent in a family pinned to a policy snapshot, and in a batch an engine
-        /// deciding under the snapshot of a following family's opening revision wrote.
+        /// The policy revision that decided this batch. Every engine writes it; a replay refuses a
+        /// decided batch that carries none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<PolicyRevision>,
     },

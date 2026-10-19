@@ -30,8 +30,9 @@ fn a_release_replays_only_as_the_records_its_decision_obliged() {
         records.clone(),
         vec![
             batch[0].clone(),
-            stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
             batch[1].clone(),
+            stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
+            batch[2].clone(),
         ],
     ]
     .concat();
@@ -42,7 +43,7 @@ fn a_release_replays_only_as_the_records_its_decision_obliged() {
 
     let tampered = |mutate: &dyn Fn(&mut Fact)| {
         let mut facts = batch.clone();
-        mutate(&mut facts[1]);
+        mutate(&mut facts[2]);
         e.validate_replay(&[records.clone(), facts].concat())
     };
     assert_eq!(
@@ -89,15 +90,21 @@ fn a_crossing_replays_only_with_its_admission_and_its_merge() {
     assert_eq!(e.validate_replay(&whole), Ok(()));
 
     assert_eq!(
-        e.validate_replay(&[log.clone(), vec![crossing[0].clone()]].concat()),
+        e.validate_replay(&[log.clone(), crossing[..2].to_vec()].concat()),
         Err(TransitionRefusal::UnmergedCrossing)
     );
     assert_eq!(
-        e.validate_replay(&[log.clone(), vec![crossing[0].clone(), crossing[2].clone()]].concat()),
+        e.validate_replay(
+            &[
+                log.clone(),
+                vec![crossing[0].clone(), crossing[1].clone(), crossing[3].clone()]
+            ]
+            .concat()
+        ),
         Err(TransitionRefusal::RepeatAdmission)
     );
     let mut forged = whole.clone();
-    if let Fact::ValueAdmitted { value, .. } = &mut forged[log.len() + 1] {
+    if let Fact::ValueAdmitted { value, .. } = &mut forged[log.len() + 2] {
         *value = LabeledValue::new(ValueBody::new("something else"), value.label.clone());
     }
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ForgedLabel));
@@ -286,9 +293,9 @@ fn a_sanitizer_settlement_replays_only_where_the_deployment_confines_the_result(
     let unconfined = Engine::open(DeploymentPolicy {
         registry: config,
         planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
         profile: declaration,
     })
+    .map(placed)
     .expect("an unconfined deployment opens");
     let forged = [vec![opened(&unconfined)], log[1..].to_vec()].concat();
     assert_eq!(

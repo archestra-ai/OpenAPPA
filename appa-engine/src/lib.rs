@@ -96,17 +96,18 @@
 //! ## Policy revisions
 //!
 //! A **deployment** ([`profile::DeploymentName`]) is a policy line that advances through numbered
-//! **policy revisions** ([`profile::PolicyRevision`]). A family that follows a deployment names it,
-//! and the revision that opened it, on its opening record. An [`engine::Engine`] deciding at a
-//! revision ([`engine::Engine::at`]) stamps every batch it seals with that revision, on the
-//! `BasisAdvanced` record the batch begins with, so the family's next decision is always made at
-//! the deployment's head and a family's stamps never decrease.
+//! **policy revisions** ([`profile::PolicyRevision`]). Every family follows a deployment: its
+//! opening record names the deployment and the revision that opened it. An [`engine::Engine`]
+//! decides only at a revision ([`engine::Engine::at`]); an engine [`engine::Engine::open`] compiled
+//! and no revision placed opens, replays and decides nothing. A deciding engine stamps every batch
+//! it seals with its revision, on the `BasisAdvanced` record the batch begins with, so the family's
+//! next decision is always made at the deployment's head and a family's stamps never decrease.
 //!
 //! [`engine::Engine::replay`] judges each batch under the engine of the revision stamped on it,
 //! so a later revision never changes what an earlier record meant. An earlier revision's engine
-//! only validates; replay consults nothing. A batch no revision stamped — one an engine that read
-//! the family as pinned to its opening file decided — is judged under the opening revision. No
-//! decision is made on a view stamped later than the deciding engine's revision.
+//! only validates; replay consults nothing. Only a batch of host observations alone carries no
+//! stamp; a batch that holds engine records and names no revision is refused. No decision is made
+//! on a view stamped later than the deciding engine's revision.
 //!
 //! Labels index the trust chain of the revision that wrote them. Where a later revision's chain
 //! names other ranks, the labels a view holds cross into it by rank name
@@ -125,13 +126,6 @@
 //! declaration of the call: the result's label is the meet of both, and the effects are those
 //! the release reserved. A result whose release bound an output sanitizer that the later
 //! revision no longer registers is withheld.
-//!
-//! A family whose opening names no deployment is **pinned to a policy snapshot**: the stored
-//! policy file its opening names. A snapshot engine ([`engine::Engine::open`], never `at`) judges
-//! and decides it for its whole life, stamps nothing, and refuses a view of a family that follows
-//! a deployment, as an engine at a revision refuses a pinned view. The previous version opened
-//! every family this way; a host steps back from live revisions by opening new families this way
-//! again, while the deployment's head stays where it is.
 //!
 pub mod admit;
 pub mod audience;

@@ -198,8 +198,8 @@ pub enum RouteError {
         view: crate::profile::PolicyRevision,
         engine: crate::profile::PolicyRevision,
     },
-    #[error("the view and the engine do not belong to one family kind")]
-    ForeignLine,
+    #[error("the engine decides at no policy revision of a deployment")]
+    NoRevision,
 }
 
 impl From<MembershipNeeded> for RouteError {

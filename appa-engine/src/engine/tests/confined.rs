@@ -327,9 +327,9 @@ fn file_redacting_engine() -> Engine {
     Engine::open(DeploymentPolicy {
         registry: cfg,
         planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
         profile,
     })
+    .map(placed)
     .unwrap()
 }
 

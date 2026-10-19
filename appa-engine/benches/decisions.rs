@@ -14,9 +14,7 @@ use appa_engine::fact::EffectSet;
 use appa_engine::label::{Audience, Label, Trust};
 use appa_engine::names::AuthorityName;
 use appa_engine::params::ToolParameters;
-use appa_engine::profile::{
-    BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, PolicyFileKey, ProfileDeclaration,
-};
+use appa_engine::profile::{BindingMode, DeploymentPolicy, ExecutorClass, PolicyFileKey, ProfileDeclaration};
 use appa_engine::registry::{PlannerCap, RegistryConfig, TrustChain};
 use appa_engine::transition::{
     EngineDecision, EngineEvent, EngineView, FollowUp, OfferExecution, OfferOutcome, OutcomeBody, ProposalBatch,
@@ -90,7 +88,6 @@ fn engine() -> Engine {
             provider_surfaces: BTreeMap::new(),
             binding: BindingMode::Harness,
         },
-        dialect: PolicyDialectVersion::new(1),
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
             trust_chain: chain,

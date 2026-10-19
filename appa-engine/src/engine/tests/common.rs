@@ -420,13 +420,22 @@ pub(super) fn open_engine_at(mut cfg: RegistryConfig, starting: Label) -> Engine
         starting_label: starting,
         ..crate::profile::covering_declaration(&cfg)
     };
-    Engine::open(DeploymentPolicy {
-        registry: cfg,
-        planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
-        profile,
-    })
-    .unwrap()
+    placed(
+        Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            profile,
+        })
+        .unwrap(),
+    )
+}
+
+/// `engine` deciding at the first revision of the test deployment line.
+pub(super) fn placed(engine: Engine) -> Engine {
+    engine.at(
+        crate::profile::DeploymentName::new("default"),
+        crate::profile::PolicyRevision::FIRST,
+    )
 }
 
 pub(super) fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -922,13 +931,14 @@ pub(super) fn provider_run_engine(cfg: RegistryConfig, provider_run: &[&str]) ->
             .insert(ToolName::new(*name), crate::profile::ExecutorClass::ProviderRun);
         declaration.confined_results.remove(&ToolName::new(*name));
     }
-    Engine::open(DeploymentPolicy {
-        registry: cfg,
-        planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
-        profile: declaration,
-    })
-    .unwrap()
+    placed(
+        Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            profile: declaration,
+        })
+        .unwrap(),
+    )
 }
 
 pub(super) fn exposed(tool: &str, body: &str) -> crate::transition::ProviderResult {
@@ -1277,4 +1287,12 @@ pub(super) fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody,
         )
         .expect("the derivation stages");
     (log, dispatch, derived, staged)
+}
+
+/// A batch's records after the `BasisAdvanced` declaration every decided batch leads with.
+pub(super) fn declared_records(facts: &[Fact]) -> &[Fact] {
+    match facts {
+        [Fact::BasisAdvanced { .. }, rest @ ..] => rest,
+        _ => panic!("a decided batch leads with its declaration: {facts:?}"),
+    }
 }

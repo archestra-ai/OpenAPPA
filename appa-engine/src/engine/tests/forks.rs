@@ -150,7 +150,7 @@ fn one_fan_out_declaration_backs_a_member_fork_per_child() {
         )
         .expect("a started child addressed again resumes");
     assert!(matches!(
-        appended_facts(again).as_slice(),
+        declared_records(&appended_facts(again)),
         [Fact::Boundary {
             kind: BoundaryKind::Resume { .. },
             ..
@@ -320,7 +320,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
         .expect("the child binds");
     assert_eq!(bound.follow_up, FollowUp::Fork { child: child.clone() });
     let opened = bound.append.expect("the binding appends").facts().to_vec();
-    assert!(matches!(opened.as_slice(), [Fact::ForkOpened { .. }]));
+    assert!(matches!(declared_records(&opened), [Fact::ForkOpened { .. }]));
 
     let after = e
         .view(&traj(), [log.clone(), opened].concat(), log.len() as u64 + 1)
@@ -332,7 +332,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
     let resumed = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
     assert!(
         matches!(
-            resumed.append.as_ref().map(ValidatedFactBatch::facts),
+            resumed.append.as_ref().map(|batch| declared_records(batch.facts())),
             Some([Fact::Boundary {
                 kind: crate::fact::BoundaryKind::Resume { .. },
                 ..
@@ -492,9 +492,9 @@ fn a_spawn_mark_takes_declared_context_control() {
     let e = Engine::open(DeploymentPolicy {
         registry: config,
         planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
         profile: declaration,
     })
+    .map(placed)
     .expect("an uncontrolled deployment opens");
     let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
     assert_eq!(
