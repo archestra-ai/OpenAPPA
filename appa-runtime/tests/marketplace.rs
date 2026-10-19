@@ -197,17 +197,19 @@ fn every_package_directory_is_named_by_the_marketplace() {
 fn every_battery_composes_into_each_host_it_declares() {
     let root = marketplace_root();
     let manifest = manifest();
+    // The host's default policy, and the batteries its plugin installs beside it.
     let default_policy = |host: Host| match host {
         // AppenCode is source-distributed, without a marketplace plugin package.
-        Host::OpenCode => repository().join("integrations/opencode/appa.toml"),
+        Host::OpenCode => (repository().join("integrations/opencode/appa.toml"), Vec::new()),
         _ => manifest
             .packages
             .iter()
             .find_map(
                 |entry| match validate_package(&root.join(entry.path.as_str())).ok()?.role {
-                    Role::Plugin(adapter) if adapter.host() == host => {
-                        Some(root.join(entry.path.as_str()).join(adapter.default_policy().as_str()))
-                    }
+                    Role::Plugin(adapter) if adapter.host() == host => Some((
+                        root.join(entry.path.as_str()).join(adapter.default_policy().as_str()),
+                        adapter.batteries().iter().map(ToString::to_string).collect(),
+                    )),
                     _ => None,
                 },
             )
@@ -224,15 +226,27 @@ fn every_battery_composes_into_each_host_it_declares() {
             // includes it by a relative path, which is the only shape the
             // loader accepts. The composition is that arrangement.
             let composed = tempfile::tempdir().expect("a temp dir is creatable");
+            let (seed, plugin_batteries) = default_policy(*host);
+            let mut includes = Vec::new();
+            for name in plugin_batteries
+                .iter()
+                .filter(|name| name.as_str() != entry.name.as_str())
+            {
+                let plugin_battery = manifest
+                    .packages
+                    .iter()
+                    .find(|other| other.name.as_str() == name.as_str())
+                    .expect("the plugin's batteries ship in the marketplace");
+                copy_tree(&root.join(plugin_battery.path.as_str()), &composed.path().join(name));
+                includes.push(format!("\"{name}/appa.toml\""));
+            }
             let installed = composed.path().join(entry.name.as_str());
             copy_tree(&directory, &installed);
-            let seed = std::fs::read_to_string(default_policy(*host)).expect("the adapter ships its default policy");
+            includes.push(format!("\"{}/{}\"", entry.name, battery.base));
+            let seed = std::fs::read_to_string(seed).expect("the adapter ships its default policy");
             let path = composed.path().join("appa.toml");
-            std::fs::write(
-                &path,
-                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.base),
-            )
-            .expect("the composed config is writable");
+            std::fs::write(&path, format!("include = [{}]\n{seed}", includes.join(", ")))
+                .expect("the composed config is writable");
 
             Config::load(&path)
                 .unwrap_or_else(|error| panic!("{} validates but does not compose into {host}: {error}", entry.path));
