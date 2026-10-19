@@ -135,6 +135,8 @@ pub enum PackageError {
         contract: String,
         namespaces: String,
     },
+    #[error("{policy} maps two canonical tools onto `{target}`")]
+    PolicyAliasClaimedTwice { policy: PathBuf, target: String },
     #[error("{policy} maps a canonical tool onto `{target}`, which is not a canonical tool id")]
     PolicyAliasTarget { policy: PathBuf, target: String },
     #[error("{policy} maps a canonical tool onto `{target}`, which is outside the namespaces it covers ({namespaces})")]
@@ -227,6 +229,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                             .or_default()
                             .extend(targets.iter().cloned());
                     }
+                    check_single_claims(&policy_path, &map)?;
                     let base_variants = lowered_variants(&base.tools, &map);
                     check_variants(&policy, &base_variants, &[])?;
                     check_variants(&policy_path, &lowered_variants(&bindings.tools, &map), &base_variants)?;
@@ -1155,7 +1158,21 @@ fn check_tool_aliases(
             });
         }
     }
+    check_single_claims(policy, &map)?;
     Ok(map)
+}
+
+/// Each client tool has one canonical reading: the loader refuses a client tool two
+/// bindings name.
+fn check_single_claims(policy: &Path, map: &ToolMap) -> Result<(), PackageError> {
+    let mut claimed = BTreeSet::new();
+    match map.values().flatten().find(|target| !claimed.insert(*target)) {
+        Some(target) => Err(PackageError::PolicyAliasClaimedTwice {
+            policy: policy.to_path_buf(),
+            target: target.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// `tools` as composition lowers them through `map`: a canonical variant becomes one
@@ -2359,6 +2376,15 @@ mod tests {
         assert!(matches!(
             validate_package(targeted(&native_first, MULTI_USER_POLICY).path()),
             Err(PackageError::UnreachableVariant { tool, .. }) if tool == "mcp/github/list"
+        ));
+
+        let claiming = format!(
+            "[aliases.tool.github]\nother = [{{ name = \"mcp/github/list\" }}]\n\n{MULTI_USER_POLICY}\n\
+             [[policy.tool]]\nname = \"tool/github/other\"\ndelta = {{}}\n"
+        );
+        assert!(matches!(
+            validate_package(targeted(base, &claiming).path()),
+            Err(PackageError::PolicyAliasClaimedTwice { target, .. }) if target == "mcp/github/list"
         ));
     }
 
