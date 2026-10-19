@@ -1247,16 +1247,17 @@ async function configuration(config, binary) {
   if (!["single-user", "multi-user"].includes(target))
     throw Error("APPA_BATTERY_TARGET must be single-user or multi-user.");
   let store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), "batteries"), catalog = await Promise.all((await readdir(store)).sort().filter((name) => !name.includes(".")).map(async (name) => {
-    let manifest = Bun.TOML.parse(await readFile(join(store, name, "appa-package.toml"), "utf8"));
+    let manifest = Bun.TOML.parse(await readFile(join(store, name, "appa-package.toml"), "utf8")), targets = manifest.battery.targets, policy = targets?.[target]?.policy;
     return {
       name,
       description: manifest.description,
       hosts: manifest.battery.hosts,
       namespaces: manifest.battery.namespaces ?? [],
       path: `batteries/${name}/appa.toml`,
-      target_policy: manifest.battery.targets?.[target]?.policy
+      supported: !targets || policy !== void 0,
+      target_policy: policy === manifest.battery.policy ? void 0 : policy
     };
-  })).then((items) => items.filter((item) => item.hosts.includes("opencode"))), publishing = !1;
+  })).then((items) => items.filter((item) => item.hosts.includes("opencode") && item.supported)), publishing = !1;
   async function describe(path, tools = []) {
     let process2 = Bun.spawn([
       binary,
