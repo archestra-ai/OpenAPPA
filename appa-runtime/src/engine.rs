@@ -848,10 +848,10 @@ impl HeldViews {
         // The family was used now, whether or not this view replaces the held one.
         held.order.retain(|family| family != log.root());
         held.order.push_back(log.root().clone());
-        if !held
+        if held
             .views
             .get(log.root())
-            .is_some_and(|found| found.basis > log.basis())
+            .is_none_or(|found| found.basis <= log.basis())
         {
             let fresh = HeldView {
                 view: view.clone(),
