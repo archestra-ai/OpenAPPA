@@ -1650,7 +1650,11 @@ func (p *AppaPluginKagent) declareReturn(
 	if err != nil {
 		return Decision{}, err
 	}
-	if vouch.Kind != "pass_control" {
+	switch vouch.Kind {
+	case "pass_control":
+	case "refuse":
+		return Decision{}, failClosed("appa refused the return declaration: %s", vouch.describe())
+	default:
 		log.Printf("appa: appa answered the return declaration %s with %s, so the block goes to the model",
 			offer.OfferID, vouch.Kind)
 		return denial, nil

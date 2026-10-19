@@ -153,6 +153,17 @@ async def test_an_allowed_persist_runs_the_stock_callback_and_reports():
     assert outcome["outcome"]["body"] == {"persisted": True}
 
 
+async def test_a_refused_persist_report_fails_closed():
+    hook = Hook(ALLOW, {"protocol": 1, "decision": "refuse", "class": "storage", "detail": "disk full"})
+    plugin = plugin_over(hook)
+    ran = []
+    agent = FakeAgent([stock_persist_callback(ran)])
+    gate_memory_persist(agent, plugin)
+    with pytest.raises(AppaFailClosed):
+        await agent.after_agent_callback[0](MemoryCallbackContext(FakeSession("s1")))
+    assert [event["event"] for event in hook.events] == ["tool_call", "tool_result"]
+
+
 async def test_a_denied_persist_writes_nothing_to_the_memory_backend():
     hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
     plugin = plugin_over(hook)

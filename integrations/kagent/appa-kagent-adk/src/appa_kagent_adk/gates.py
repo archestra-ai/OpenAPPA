@@ -156,7 +156,11 @@ def _gated_persist(stock: Any, plugin: AppaPluginKagent):
         if decision.kind not in ("allow_call", "pass_control"):
             raise AppaFailClosed(f"appa answered the memory persist with {decision.describe()}")
         returned = await stock(callback_context)
-        await plugin.report_synthetic_result(invocation_context, MEMORY_PERSIST_TOOL, arguments, {"persisted": True})
+        report = await plugin.report_synthetic_result(
+            invocation_context, MEMORY_PERSIST_TOOL, arguments, {"persisted": True}
+        )
+        if report.kind == "refuse":
+            raise AppaFailClosed(f"appa answered the memory persist report with {report.describe()}")
         return returned
 
     return appa_gated_memory_persist

@@ -90,13 +90,13 @@ func newHook(t *testing.T, answers ...any) *hook {
 		if err != nil {
 			t.Errorf("the scripted answer must encode: %v", err)
 		}
-		var kind struct {
+		var answered struct {
 			Decision string `json:"decision"`
 		}
-		_ = json.Unmarshal(encoded, &kind)
+		_ = json.Unmarshal(encoded, &answered)
 		w.Header().Set("Content-Type", "application/json")
 		// The runtime answers a refuse with 409 and every other decision with 200.
-		if kind.Decision == "refuse" {
+		if answered.Decision == "refuse" {
 			w.WriteHeader(http.StatusConflict)
 		}
 		_, _ = w.Write(encoded)
@@ -2260,6 +2260,20 @@ func TestADeclarationTheRuntimeDoesNotVouchForReachesTheModel(t *testing.T) {
 	}
 	if len(scripted.calls) != 0 {
 		t.Errorf("no vouch, no plan, got %v", scripted.calls)
+	}
+}
+
+func TestARefusedDeclarationFailsTheCallClosed(t *testing.T) {
+	h := newHook(t, heldSpawn(), map[string]any{"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "moved"})
+	p := pluginOver(t, h)
+	scripted := remedyOver(p)
+	_, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"}, map[string]any{})
+	mustFailClosed(t, err, "the refused declaration")
+	if len(scripted.calls) != 0 {
+		t.Errorf("a refused declaration runs no plan, got %v", scripted.calls)
+	}
+	if events := gated(h); len(events) != 2 {
+		t.Errorf("nothing is proposed after the refusal, got %v", events)
 	}
 }
 

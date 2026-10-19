@@ -675,7 +675,7 @@ class AppaPluginKagent(BasePlugin):
                     wire.spawn_resume(root_id, spelled, _plain_json(tool_args), target, child_id)
                 )
                 if decision.kind != "ack":
-                    raise AppaFailClosed(f"appa refused the spawn resume: {decision.reason or decision.kind}")
+                    raise AppaFailClosed(f"appa refused the spawn resume: {decision.reason or decision.describe()}")
                 return None
             except BaseException:
                 self._release_tool_dispatch(tool_context)
@@ -856,6 +856,8 @@ class AppaPluginKagent(BasePlugin):
         """
         arguments = {"offer_id": offer.offer_id, "label": {}}
         vouch = await self._post(wire.tool_call(root_id, wire.CONTROL_TOOL, arguments, child_id))
+        if vouch.kind == "refuse":
+            raise AppaFailClosed(f"appa refused the return declaration: {vouch.describe()}")
         if vouch.kind != "pass_control":
             logger.info(
                 "appa answered the return declaration %s with %s, so the block goes to the model",

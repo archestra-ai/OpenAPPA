@@ -1781,6 +1781,18 @@ async def test_a_declaration_the_runtime_does_not_vouch_for_reaches_the_model():
     assert remedy.calls == [], "no vouch, no plan"
 
 
+async def test_a_refused_declaration_fails_the_call_closed():
+    hook = Hook(HELD_SPAWN, {"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "moved"})
+    remedy = Remedy()
+    plugin = plugin_over(hook, remedy)
+    with pytest.raises(AppaFailClosed):
+        await plugin.before_tool_callback(
+            tool=FakeTool("kagent__NS__log_analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
+        )
+    assert remedy.calls == [], "a refused declaration runs no plan"
+    assert len(gated(hook)) == 2, "nothing is proposed after the refusal"
+
+
 async def test_a_deny_with_no_return_route_goes_straight_to_the_model():
     hook = Hook(
         {"protocol": 1, "decision": "deny_call", "feedback": "[appa] Blocked", "offers": [{"offer_id": "offer-9"}]}
