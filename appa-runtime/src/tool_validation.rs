@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use appa_runtime_api::inventory::{InventorySource, InventoryStatus, ToolInventory};
-use appa_runtime_api::{Adapter, AdapterName, CanonicalTool};
+use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, CanonicalToolError};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AliasFamily;
@@ -175,6 +175,29 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     None
 }
 
+/// Why an authored name that spells a server identifies no tool, written for the
+/// policy author: what is wrong with the name and what a valid one looks like.
+fn unidentified_tool(name: &str) -> String {
+    if name == crate::do_something::NAME {
+        return format!("tool {name:?} is the replay-only call of validation scenarios; a policy rule cannot name it");
+    }
+    if !name.contains('/') {
+        return format!(
+            "tool {name:?} is not a tool name this host reports; use the exact reported name or a full id such as \"mcp/github/list_issues\""
+        );
+    }
+    let reason = match CanonicalTool::parse(name) {
+        Err(CanonicalToolError::Family { .. }) => "a full id starts with mcp/, host/, or agent/".to_owned(),
+        Err(CanonicalToolError::Shape { .. }) => "a full id has three parts, <family>/<namespace>/<tool>".to_owned(),
+        Err(CanonicalToolError::Segment { segment, .. }) => {
+            format!("part {segment:?} can contain only letters, digits, \"_\", \".\", and \"-\"")
+        }
+        Err(CanonicalToolError::Namespace { .. }) => "the namespace part cannot contain \"__\"".to_owned(),
+        Err(CanonicalToolError::Control { .. }) | Ok(_) => "the appa/ family belongs to the runtime".to_owned(),
+    };
+    format!("tool {name:?} is not a valid tool id: {reason}, such as \"mcp/github/list_issues\"")
+}
+
 /// Whether an authored name already spells a server: as a canonical id, or in the host's
 /// own grammar, so a `server` selector beside it would name the server twice.
 fn spells_server(adapter: Adapter, name: &str) -> bool {
@@ -287,7 +310,7 @@ pub fn resolve(
             }
         });
         if qualified.is_none() && spells_server(adapter, name) {
-            return Err(format!("tool {name:?} has an invalid qualified identity"));
+            return Err(unidentified_tool(name));
         }
         if qualified.is_none() && adapter.name == AdapterName::Kagent {
             CanonicalTool::of("mcp", "server", name).map_err(|error| error.to_string())?;
@@ -483,6 +506,32 @@ mod tests {
         assert_eq!(
             result.policy["tool"][0]["name"].as_str(),
             Some("host/claude-code/Bash(command:cargo test*)")
+        );
+    }
+
+    #[test]
+    fn an_unidentified_tool_name_says_what_is_wrong_with_it() {
+        let error_for = |name: &str| {
+            let result = resolve(
+                &policy(name),
+                appa_adapter_claude_code::adapter(),
+                &inventory(&[]),
+                &crate::config::Aliases::default(),
+            );
+            assert_eq!(result.report.errors.len(), 1, "{:?}", result.report);
+            result.report.errors[0].clone()
+        };
+        assert_eq!(
+            error_for("appa/do_something"),
+            "tool \"appa/do_something\" is the replay-only call of validation scenarios; a policy rule cannot name it"
+        );
+        assert_eq!(
+            error_for("mcp/github"),
+            "tool \"mcp/github\" is not a valid tool id: a full id has three parts, <family>/<namespace>/<tool>, such as \"mcp/github/list_issues\""
+        );
+        assert_eq!(
+            error_for("slack/send_message"),
+            "tool \"slack/send_message\" is not a valid tool id: a full id starts with mcp/, host/, or agent/, such as \"mcp/github/list_issues\""
         );
     }
 
