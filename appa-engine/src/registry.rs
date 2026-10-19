@@ -234,6 +234,60 @@ fn parse_tool_selector(authored: &str) -> Result<(ContractName, ToolMatcher), Lo
     Ok((ContractName::parse(tool), ToolMatcher::Arguments(clauses)))
 }
 
+/// Why an authored name cannot be respelled for another spelling of the same call.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RespellError {
+    #[error("malformed tool selector {0:?}")]
+    Malformed(String),
+    #[error("argument {0:?} is read but not mapped")]
+    Unmapped(String),
+    #[error("two arguments are mapped onto argument {0:?}")]
+    Collides(String),
+}
+
+/// `authored` for the tool `tool`, each selector argument renamed through `arguments`: the
+/// same matcher over another tool's spelling of one call.
+pub fn respell_declaration(
+    authored: &str,
+    tool: &str,
+    arguments: &BTreeMap<String, String>,
+) -> Result<String, RespellError> {
+    let (_, matcher) = parse_tool_selector(authored).map_err(|_| RespellError::Malformed(authored.to_string()))?;
+    let ToolMatcher::Arguments(ArgumentPatterns(clauses)) = matcher else {
+        return Ok(tool.to_string());
+    };
+    let mut renamed = BTreeMap::new();
+    for (argument, pattern) in clauses {
+        let target = arguments
+            .get(&argument)
+            .ok_or_else(|| RespellError::Unmapped(argument.clone()))?;
+        if renamed.insert(target.clone(), pattern).is_some() {
+            return Err(RespellError::Collides(target.clone()));
+        }
+    }
+    let clauses: Vec<String> = renamed
+        .iter()
+        .map(|(argument, pattern)| format!("{argument}:{}", spell_pattern(pattern)))
+        .collect();
+    Ok(format!("{tool}({})", clauses.join(",")))
+}
+
+fn spell_pattern(pattern: &[PatternPart]) -> String {
+    pattern
+        .iter()
+        .map(|part| match part {
+            PatternPart::Wildcard => "*".to_string(),
+            PatternPart::Literal(literal) => literal
+                .chars()
+                .flat_map(|c| match c {
+                    '*' | ')' | '\\' | ',' => vec!['\\', c],
+                    c => vec![c],
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// The arguments of an authored declaration name whose pattern puts `*` inside a URL host. A
 /// malformed selector names none: loading refuses it on its own.
 pub fn url_host_wildcards(authored: &ToolName) -> Vec<String> {
@@ -2967,6 +3021,38 @@ mod tests {
                 "{malformed:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_respelled_selector_matches_the_renamed_arguments_of_the_same_call() {
+        let arguments = BTreeMap::from([("command".to_string(), "cmd".to_string())]);
+        let authored = r"tool/coding/shell(command:*a\*b\)c\\d\,e*)";
+        let respelled = respell_declaration(authored, "host/codex/exec", &arguments).unwrap();
+        let (name, matcher) = parse_tool_selector(&respelled).unwrap();
+        assert_eq!(name, ContractName::Named(ToolName::new("host/codex/exec")));
+        let value = r"x a*b)c\d,e y";
+        assert!(matcher.matches(&serde_json::json!({ "cmd": value })));
+        assert!(!matcher.matches(&serde_json::json!({ "command": value })));
+        let (_, original) = parse_tool_selector(authored).unwrap();
+        assert!(original.matches(&serde_json::json!({ "command": value })));
+
+        assert_eq!(
+            respell_declaration("tool/coding/shell", "host/codex/exec", &BTreeMap::new()),
+            Ok("host/codex/exec".to_string())
+        );
+        assert_eq!(
+            respell_declaration("tool/coding/shell(path:x)", "host/codex/exec", &arguments),
+            Err(RespellError::Unmapped("path".to_string()))
+        );
+        let collapsing = BTreeMap::from([("a".to_string(), "z".to_string()), ("b".to_string(), "z".to_string())]);
+        assert_eq!(
+            respell_declaration("t(a:x,b:y)", "u", &collapsing),
+            Err(RespellError::Collides("z".to_string()))
+        );
+        assert!(matches!(
+            respell_declaration("t(a:x", "u", &arguments),
+            Err(RespellError::Malformed(_))
+        ));
     }
 
     #[test]
