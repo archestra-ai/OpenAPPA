@@ -15,6 +15,7 @@ from appa_kagent_adk import wire
 
 REPOSITORY = Path(__file__).parents[4]
 FIXTURES = REPOSITORY / "marketplace" / "plugins" / "kagent" / "fixtures" / "wire-events.jsonl"
+REFUSAL_CLASSES = REPOSITORY / "appa-runtime-api" / "refusal-classes.txt"
 
 ROOT = "adk-4f6c2f1e"
 CHILD = "adk-9b0d11aa"
@@ -145,8 +146,8 @@ def test_absent_optionals_stay_off_the_wire():
         ),
         (
             "refuse",
-            {"decision": "refuse", "detail": "storage failure: disk full"},
-            wire.Decision(kind="refuse", detail="storage failure: disk full"),
+            {"decision": "refuse", "class": "storage", "detail": "storage failure: disk full"},
+            wire.Decision(kind="refuse", detail="storage failure: disk full", refusal_class=wire.RefusalClass.STORAGE),
         ),
     ],
 )
@@ -170,7 +171,10 @@ def test_every_decision_envelope_parses(name, body, expected):
         ("block_without_reason", b'{"protocol": 1, "decision": "block"}'),
         ("replace_without_output", b'{"protocol": 1, "decision": "replace_output"}'),
         ("deliver_without_value", b'{"protocol": 1, "decision": "deliver_value"}'),
-        ("refuse_without_detail", b'{"protocol": 1, "decision": "refuse"}'),
+        ("refuse_without_detail", b'{"protocol": 1, "decision": "refuse", "class": "storage"}'),
+        ("refuse_without_class", b'{"protocol": 1, "decision": "refuse", "detail": "d"}'),
+        ("refuse_class_not_a_string", b'{"protocol": 1, "decision": "refuse", "class": 7, "detail": "d"}'),
+        ("refuse_class_outside_the_wire", b'{"protocol": 1, "decision": "refuse", "class": "disk", "detail": "d"}'),
         ("context_without_text", b'{"protocol": 1, "decision": "context"}'),
         ("offers_not_a_list", b'{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": {}}'),
         (
@@ -200,6 +204,32 @@ def test_every_decision_envelope_parses(name, body, expected):
 def test_an_envelope_outside_the_contract_is_a_wire_error(name, body):
     with pytest.raises(wire.WireError):
         wire.parse_decision(body)
+
+
+def test_the_refusal_classes_are_the_runtimes_exactly():
+    assert [refusal.value for refusal in wire.RefusalClass] == REFUSAL_CLASSES.read_text().splitlines()
+
+
+REFUSE = b'{"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "d"}'
+
+
+def test_a_409_answer_is_a_refuse():
+    assert wire.parse_answer(409, REFUSE).refusal_class is wire.RefusalClass.POLICY_MOVED
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (409, b'{"protocol": 1, "decision": "ack"}'),
+        (409, b'{"protocol": 1, "decision": "refuse", "detail": "d"}'),
+        (409, b'{"error": "malformed event"}'),
+        (500, REFUSE),
+        (400, b'{"protocol": 1, "decision": "ack"}'),
+    ],
+)
+def test_an_answer_outside_its_status_is_a_wire_error(status, body):
+    with pytest.raises(wire.WireError):
+        wire.parse_answer(status, body)
 
 
 def test_a_deny_without_offers_or_review_carries_none():

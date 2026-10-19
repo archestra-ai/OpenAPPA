@@ -488,7 +488,7 @@ async def test_the_same_parent_sends_no_second_child_start():
 async def test_a_refused_child_start_leaves_the_pair_unopened():
     """The pair joins the opened set only after the runtime acked, so a
     refused opening is sent again on the next entry."""
-    hook = Hook({"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ACK, ACK)
+    hook = Hook({"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure"}, ACK, ACK)
     plugin = plugin_over(hook)
     session = delegated_child("root-1")
     with pytest.raises(AppaFailClosed, match="appa refused the session: storage failure"):

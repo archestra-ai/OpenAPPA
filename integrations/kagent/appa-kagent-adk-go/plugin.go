@@ -580,16 +580,13 @@ func (p *AppaPluginKagent) send(ctx context.Context, wire map[string]any, timeou
 	return answer.StatusCode, answered, nil
 }
 
-// post sends one gated event; anything but a 200 decision fails closed.
+// post sends one gated event; an answer outside parseAnswer fails closed.
 func (p *AppaPluginKagent) post(ctx context.Context, wire map[string]any) (Decision, error) {
 	status, answered, err := p.send(ctx, wire, gatedTimeout)
 	if err != nil {
 		return Decision{}, failClosed("the appa /hook channel is down: %v", err)
 	}
-	if status != http.StatusOK {
-		return Decision{}, failClosed("appa answered %d: %s", status, truncate(answered, 500))
-	}
-	decision, err := parseDecision(answered)
+	decision, err := parseAnswer(status, answered)
 	if err != nil {
 		return Decision{}, failClosed("%v", err)
 	}
@@ -1608,15 +1605,12 @@ func (p *AppaPluginKagent) crossing(invocationID, value string) map[string]any {
 }
 
 // describeAnswer names a decision in a fail-closed message: the
-// runtime's detail, then the reason a block carries, then the kind.
+// reason a block carries, otherwise what describe names.
 func describeAnswer(decision Decision) string {
-	if decision.Detail != "" {
-		return decision.Detail
-	}
 	if decision.Reason != "" {
 		return decision.Reason
 	}
-	return decision.Kind
+	return decision.describe()
 }
 
 // returnOffer is the offer of a deny that takes the return of a child
