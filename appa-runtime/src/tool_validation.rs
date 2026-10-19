@@ -178,25 +178,25 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
 /// Why an authored name that spells a server identifies no tool, in plain words for
 /// the policy author: what is wrong and what to write instead.
 fn unidentified_tool(name: &str) -> String {
-    const EXAMPLE: &str = "\"mcp/github/list_issues\"";
+    const FULL_NAME: &str = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
     if name == crate::do_something::NAME {
-        return format!("{name:?} works only in test scenarios. Remove this rule from the policy.");
+        return format!("{name:?} is a test step, not a tool. Remove this rule from the policy.");
     }
     if !name.contains('/') {
-        return format!("{name:?} is not a tool name. Use the exact tool name, or a full name like {EXAMPLE}.");
+        return format!("{FULL_NAME} {name:?} is not a full name or the exact name of a tool. Use one of them.");
     }
     match CanonicalTool::parse(name) {
         Err(CanonicalToolError::Family { .. }) => {
-            format!("{name:?} must start with \"mcp/\", \"host/\", or \"agent/\", like {EXAMPLE}.")
+            format!(
+                "{FULL_NAME} {name:?} does not say where the tool comes from. For a tool from an MCP server, start it with \"mcp/\"."
+            )
         }
-        Err(CanonicalToolError::Shape { .. }) => {
-            format!("{name:?} is missing a part. A full tool name has three parts, like {EXAMPLE}.")
-        }
-        Err(CanonicalToolError::Segment { segment, .. }) => {
-            format!("{name:?} has a bad part: {segment:?}. Use only letters, digits, \"_\", \".\", and \"-\".")
-        }
+        Err(CanonicalToolError::Shape { .. }) => format!("{FULL_NAME} {name:?} has no tool. Add the tool at the end."),
+        Err(CanonicalToolError::Segment { .. }) => format!(
+            "{FULL_NAME} {name:?} has a character that is not allowed. Use only letters, digits, \"_\", \".\", and \"-\"."
+        ),
         Err(CanonicalToolError::Namespace { .. }) => {
-            format!("{name:?}: the server part cannot contain \"__\".")
+            format!("{FULL_NAME} The server in {name:?} contains \"__\". Remove it.")
         }
         Err(CanonicalToolError::Control { .. }) | Ok(_) => {
             format!("{name:?} is not allowed. Names that start with \"appa/\" are reserved.")
@@ -527,17 +527,20 @@ mod tests {
             assert_eq!(result.report.errors.len(), 1, "{:?}", result.report);
             result.report.errors[0].clone()
         };
+        let full_name = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
         assert_eq!(
             error_for("appa/do_something"),
-            "\"appa/do_something\" works only in test scenarios. Remove this rule from the policy."
+            "\"appa/do_something\" is a test step, not a tool. Remove this rule from the policy."
         );
         assert_eq!(
             error_for("mcp/github"),
-            "\"mcp/github\" is missing a part. A full tool name has three parts, like \"mcp/github/list_issues\"."
+            format!("{full_name} \"mcp/github\" has no tool. Add the tool at the end.")
         );
         assert_eq!(
             error_for("slack/send_message"),
-            "\"slack/send_message\" must start with \"mcp/\", \"host/\", or \"agent/\", like \"mcp/github/list_issues\"."
+            format!(
+                "{full_name} \"slack/send_message\" does not say where the tool comes from. For a tool from an MCP server, start it with \"mcp/\"."
+            )
         );
     }
 
