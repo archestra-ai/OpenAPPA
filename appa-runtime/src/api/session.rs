@@ -1657,7 +1657,10 @@ impl Session {
                 step.append(&log, facts, host_record.as_ref())
             };
             match appended {
-                Ok(()) => return Ok(decision),
+                Ok(()) => {
+                    self.inner.shared.spawn_holds.appended();
+                    return Ok(decision);
+                }
                 Err(appa_eventlog::AppendError::ReadClaimLost) => {
                     return Err(EventError::OutcomeMismatch);
                 }

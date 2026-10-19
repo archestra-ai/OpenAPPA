@@ -25,6 +25,13 @@ fn wire(decision: &HookDecision) -> serde_json::Value {
 /// closed.
 type Answered = (u16, serde_json::Value);
 
+/// How long after its hook arrived a single spawn proposed while another waits for its child
+/// is still decided again rather than refused as outstanding. Half the hook's authorization
+/// budget, so the decision that releases it still fits in the other half.
+const SPAWN_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(feature = "daemon")]
+const _: () = assert!(2 * SPAWN_HOLD.as_secs() <= crate::hook_client::AUTHORIZATION_BUDGET.as_secs());
+
 /// One hook call: validate the canonical wire, take in what the event observed, check what
 /// it names, dispatch, and record its outcome. Each step either hands the next one an event
 /// or answers the hook itself.
@@ -750,6 +757,7 @@ impl Dispatcher<'_> {
         prompt: Option<PromptKey>,
         ruling: Option<Ruling>,
     ) -> HookDecision {
+        let hold_until = tokio::time::Instant::now() + SPAWN_HOLD;
         let missing_start = MissingStart::OpenLate {
             prompt: prompt.as_ref(),
         };
@@ -786,14 +794,21 @@ impl Dispatcher<'_> {
             },
             false => None,
         };
-        match on_actor(self.runtime, &actor, missing_start, self.options, |session| {
-            let call = call.clone();
-            let call_id = call_id.clone();
-            let prompt = prompt.clone();
-            async move { session.on_tool_call_identified(call, call_id, spawn, prompt).await }
-        })
-        .await
-        {
+        let propose = || {
+            on_actor(self.runtime, &actor, missing_start, self.options, |session| {
+                let call = call.clone();
+                let call_id = call_id.clone();
+                let prompt = prompt.clone();
+                async move { session.on_tool_call_identified(call, call_id, spawn, prompt).await }
+            })
+        };
+        let decided = match (spawn, propose().await) {
+            (Some(SpawnKind::Single), Err(EventError::SpawnOutstanding)) => {
+                self.runtime.hold_spawn(&actor.root, hold_until, propose).await
+            }
+            (_, decided) => decided,
+        };
+        match decided {
             Ok(ToolCallDecision::Allow {
                 spawn,
                 dispatch: opened,
@@ -2828,5 +2843,144 @@ mod tests {
             runtime.take_vouched(&ticket("the hook blocked", true)),
             Err(crate::api::Unvouched::Nobody)
         );
+    }
+
+    /// One of a turn's parallel single spawns, as Claude Code proposes it: its own host call id.
+    fn parallel_spawn(root: &TrajectoryId, prompt: &str, call_id: &str) -> HookEvent {
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: crate::api::ProposedCall {
+                tool: "host/claude-code/Task".to_string(),
+                arguments: crate::api::raw(serde_json::json!({ "prompt": prompt })),
+                cwd: None,
+            },
+            call_id: Some(call_id.to_string()),
+            spawn: Some(SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+        }
+    }
+
+    /// Declare a spawn's return, so its next proposal is the one that may release.
+    async fn declared(runtime: &Runtime, root: &TrajectoryId, prompt: &str) {
+        let HookDecision::DenyCall { offers, .. } =
+            handle(runtime, parallel_spawn(root, prompt, &format!("{prompt}-menu"))).await
+        else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(runtime, root, &offers).await;
+    }
+
+    fn started(root: &TrajectoryId, child: &str) -> HookEvent {
+        HookEvent::ChildStart {
+            root: root.clone(),
+            child: TrajectoryId(child.to_string()),
+            spawn: SpawnRef::InFlight,
+        }
+    }
+
+    fn forks(runtime: &Runtime, root: &TrajectoryId) -> usize {
+        runtime
+            .audit(root)
+            .expect("the audit reads")
+            .into_iter()
+            .filter(|entry| matches!(entry.event, crate::api::AuditEvent::Forked { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_parallel_spawn_is_held_until_the_earlier_one_binds_its_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        declared(&runtime, &root, "first").await;
+        declared(&runtime, &root, "second").await;
+        let HookDecision::AllowCall { spawn: Some(_) } = handle(&runtime, parallel_spawn(&root, "first", "a")).await
+        else {
+            panic!("the first spawn releases");
+        };
+
+        let mut second = std::pin::pin!(handle(&runtime, parallel_spawn(&root, "second", "b")));
+        tokio::select! {
+            biased;
+            decided = &mut second => panic!("the second spawn is held while the first waits, got {decided:?}"),
+            () = std::future::ready(()) => {}
+        }
+        assert_eq!(handle(&runtime, started(&root, "cc:s1:a1")).await, HookDecision::Ack);
+        let HookDecision::AllowCall { spawn: Some(_) } = second.await else {
+            panic!("the held spawn releases once the first child is bound");
+        };
+        assert_eq!(
+            handle(&runtime, started(&root, "cc:s1:a2")).await,
+            HookDecision::Ack,
+            "the second child binds the one spawn in flight"
+        );
+        assert_eq!(forks(&runtime, &root), 2);
+    }
+
+    #[tokio::test]
+    async fn a_held_spawn_is_released_when_the_earlier_spawn_fails_before_its_child_starts() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        declared(&runtime, &root, "first").await;
+        declared(&runtime, &root, "second").await;
+        let HookDecision::AllowCall { spawn: Some(_) } = handle(&runtime, parallel_spawn(&root, "first", "a")).await
+        else {
+            panic!("the first spawn releases");
+        };
+
+        let mut second = std::pin::pin!(handle(&runtime, parallel_spawn(&root, "second", "b")));
+        tokio::select! {
+            biased;
+            decided = &mut second => panic!("the second spawn is held while the first waits, got {decided:?}"),
+            () = std::future::ready(()) => {}
+        }
+        let HookEvent::ToolCall { actor, call, .. } = parallel_spawn(&root, "first", "a") else {
+            unreachable!("a spawn is a tool call");
+        };
+        let failed = HookEvent::ToolResult {
+            actor,
+            call,
+            call_id: Some("a".to_string()),
+            outcome: ToolOutcome::Failure {
+                message: "the subagent did not start".to_string(),
+            },
+        };
+        assert_eq!(handle(&runtime, failed).await, HookDecision::Ack);
+        let HookDecision::AllowCall { spawn: Some(_) } = second.await else {
+            panic!("the held spawn releases once the first stops waiting for a child");
+        };
+        assert_eq!(handle(&runtime, started(&root, "cc:s1:a2")).await, HookDecision::Ack);
+        assert_eq!(forks(&runtime, &root), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_spawn_is_refused_as_outstanding_when_the_earlier_one_never_binds() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        declared(&runtime, &root, "first").await;
+        declared(&runtime, &root, "second").await;
+        let HookDecision::AllowCall { spawn: Some(_) } = handle(&runtime, parallel_spawn(&root, "first", "a")).await
+        else {
+            panic!("the first spawn releases");
+        };
+
+        let held_since = tokio::time::Instant::now();
+        assert_eq!(
+            handle(&runtime, parallel_spawn(&root, "second", "b")).await,
+            deny(EventError::SpawnOutstanding.to_string())
+        );
+        assert!(held_since.elapsed() >= SPAWN_HOLD);
+
+        assert_eq!(handle(&runtime, started(&root, "cc:s1:a1")).await, HookDecision::Ack);
+        let HookDecision::AllowCall { spawn: Some(_) } = handle(&runtime, parallel_spawn(&root, "second", "b2")).await
+        else {
+            panic!("the refused spawn consumed nothing: proposed again, it releases");
+        };
     }
 }
