@@ -397,6 +397,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
     fn from(refusal: &TransitionRefusal) -> Self {
         match refusal {
             TransitionRefusal::Unopened => ReplayRefusalClass("unopened"),
+            TransitionRefusal::NoRevision => ReplayRefusalClass("no_revision"),
             TransitionRefusal::ForeignRevision => ReplayRefusalClass("foreign_revision"),
             TransitionRefusal::UnrequestedEvidence { .. } => ReplayRefusalClass("unrequested_evidence"),
             TransitionRefusal::Opening(opening) => opening.into(),
@@ -482,17 +483,8 @@ impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalC
             appa_engine::transition::OpeningTransitionRefusal::WrongTrajectory { .. } => {
                 ReplayRefusalClass("opening_wrong_trajectory")
             }
-            appa_engine::transition::OpeningTransitionRefusal::UnsupportedDialect { .. } => {
-                ReplayRefusalClass("opening_unsupported_dialect")
-            }
-            appa_engine::transition::OpeningTransitionRefusal::DigestMismatch => {
-                ReplayRefusalClass("opening_digest_mismatch")
-            }
             appa_engine::transition::OpeningTransitionRefusal::ProfileMismatch => {
                 ReplayRefusalClass("opening_profile_mismatch")
-            }
-            appa_engine::transition::OpeningTransitionRefusal::VectorMismatch => {
-                ReplayRefusalClass("opening_vector_mismatch")
             }
             appa_engine::transition::OpeningTransitionRefusal::DeploymentMismatch => {
                 ReplayRefusalClass("opening_deployment_mismatch")
@@ -939,7 +931,7 @@ impl RuntimeEngine {
     }
 
     /// The policy revision this engine decides at, and stamps every batch it seals with; `None`
-    /// for an engine deciding under a policy snapshot.
+    /// for a deployment that serves no line yet.
     pub(crate) fn revision(&self) -> Option<u64> {
         self.engine.revision().map(|revision| revision.value())
     }
@@ -1200,18 +1192,18 @@ impl RuntimeEngine {
         use appa_engine::engine::ReplayRefusal;
         let error = match self.engine.replay(log.root(), &log.stamped_batches(), earlier) {
             Ok(view) => return Ok(view),
-            Err(ReplayRefusal::Transition(error)) => error,
-            // The runtime paired the family with an engine of the other kind: its bug, not the
+            // The runtime replayed through an engine it placed at no revision: its bug, not the
             // log's.
-            Err(error @ (ReplayRefusal::PinnedFamily | ReplayRefusal::FollowingFamily)) => {
+            Err(error @ ReplayRefusal::Transition(TransitionRefusal::NoRevision)) => {
                 return Err(EngineRefusal::Invariant {
                     detail: error.to_string(),
                 });
             }
-            Err(error @ ReplayRefusal::StampInPinnedFamily { .. }) => {
+            Err(ReplayRefusal::Transition(error)) => error,
+            Err(error @ ReplayRefusal::Unstamped { .. }) => {
                 return Err(EngineRefusal::UntrustedLog {
                     detail: error.to_string(),
-                    class: ReplayRefusalClass("stamp_in_pinned_family"),
+                    class: ReplayRefusalClass("unstamped_batch"),
                 });
             }
             Err(ReplayRefusal::NewerRevision { batch, .. }) => {
@@ -4673,7 +4665,8 @@ mod tests {
         "#,
         )
         .expect("the read policy compiles");
-        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored)
+            .at(&appa_engine::profile::DeploymentName::new("default"), 1);
         let trajectory = TrajectoryId::new("file-delivery-retry");
         let mut facts = engine.root_opening(&trajectory, b"policy", None);
         let view = engine.viewed(facts.clone(), &trajectory, 1).unwrap();
@@ -4776,6 +4769,7 @@ mod tests {
 
     fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
         RuntimeEngine::from_policy(policy, ToolNaming::AsAuthored)
+            .at(&appa_engine::profile::DeploymentName::new("default"), 1)
     }
 
     #[test]

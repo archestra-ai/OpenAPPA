@@ -898,7 +898,6 @@ fn an_absent_deployment_table_is_the_no_coverage_default_and_refuses_covered_con
         plain.engine().profile().executor_class(&ToolName::new("t")),
         ExecutorClass::Assumed
     );
-    assert_eq!(plain.engine().open_vectors().len(), 1);
     let uncovered = DECLARATIONS.replace(
         "[deployment]\ndispatch = \"enforced\"\nconfined_results = [\"lookup\"]\n",
         "",
@@ -1530,7 +1529,10 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
         "{ trust = \"suspicious\", audience = [\"@slack:user-group/eng\"] }",
     ))
     .expect("a literal forwards loads");
-    let engine = config.engine();
+    let engine = config.engine().clone().at(
+        appa_engine::profile::DeploymentName::new("default"),
+        appa_engine::profile::PolicyRevision::FIRST,
+    );
     let declared = engine
         .registry()
         .variants(&ToolName::new("mail_report"))

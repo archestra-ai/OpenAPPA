@@ -567,6 +567,9 @@ pub enum RefusalClass {
     /// The deployment published a later revision while this event was being decided.
     /// Nothing was committed; the same event decides at the head when the host retries it.
     PolicyMoved,
+    /// The trajectory family was opened before live policy revisions, and no policy of this
+    /// runtime decides it. A retry is refused again: the host opens a new family.
+    LegacyFamily,
     InventoryRefused,
     EngineInvariant,
     Contended,

@@ -82,20 +82,10 @@ fn opening(log: &Log) -> Option<&TrajectoryOpening> {
 
 /// Two families of one deployment line acting for one principal: both decide at the line's
 /// head, so a label one records means the same to the other.
-pub(super) fn pinned_alike(one: &Log, other: &Log) -> bool {
+pub(super) fn decide_alike(one: &Log, other: &Log) -> bool {
     match (opening(one), opening(other)) {
         (Some(one_opening), Some(other_opening)) => {
-            let same_policy = match (one.deployment(), other.deployment()) {
-                // Two following families of one line decide at its head.
-                (Some(one_line), Some(other_line)) => one_line == other_line,
-                // Two pinned families decide under one file.
-                (None, None) => {
-                    one_opening.policy_file_key == other_opening.policy_file_key
-                        && one_opening.policy_digest == other_opening.policy_digest
-                }
-                _ => false,
-            };
-            same_policy && one_opening.principal == other_opening.principal
+            one.deployment() == other.deployment() && one_opening.principal == other_opening.principal
         }
         _ => false,
     }
@@ -205,7 +195,7 @@ impl Runtime {
             .mentioning(key)?
             .into_iter()
             .filter(|(root, log)| {
-                root != sender && matches(log) && pinned_alike(sent, log) && self.live(root, root).is_ok()
+                root != sender && matches(log) && decide_alike(sent, log) && self.live(root, root).is_ok()
             })
             .collect();
         Ok(match found.len() {
@@ -314,7 +304,7 @@ impl Runtime {
         let labels = self
             .mentioning(&appa_eventlog::peer_sent_key(digest))?
             .into_iter()
-            .filter(|(_, log)| pinned_alike(receiver, log))
+            .filter(|(_, log)| decide_alike(receiver, log))
             .flat_map(|(_, log)| {
                 log.host_records()
                     .iter()

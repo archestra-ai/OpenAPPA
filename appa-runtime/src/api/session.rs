@@ -524,34 +524,24 @@ impl Session {
         let (operation, path) = super::files::operation(&call)?;
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
-        // A following family shares the ledger with every family of its deployment while the
-        // ledger opened under a policy file the deployment published with the trust chain the
-        // family is judged under: the ledger's labels rank against that chain. A pinned family
-        // shares it only while the ledger, the family and the serving policy are one file, as the
-        // previous version requires.
-        let shares_ledger = match log.deployment() {
-            Some(followed) if followed.as_str() == files.deployment => {
-                match self
-                    .inner
-                    .store
-                    .published_as(followed, &ledger_policy)
-                    .map_err(|error| EventError::Storage(error.to_string()))?
-                {
-                    Some(revision) => {
-                        let ledger_chain = self.inner.replay_engine(revision.value(), None)?;
-                        let judging = self.inner.trust_chain(&deployment, &log)?;
-                        ledger_chain.trust_chain().names().eq(judging.names())
-                    }
-                    None => false,
+        // A family shares the ledger with every family of its deployment while the ledger opened
+        // under a policy file the deployment published with the trust chain the family is judged
+        // under: the ledger's labels rank against that chain.
+        let followed = log.deployment();
+        let shares_ledger = followed.as_str() == files.deployment
+            && match self
+                .inner
+                .store
+                .published_as(followed, &ledger_policy)
+                .map_err(|error| EventError::Storage(error.to_string()))?
+            {
+                Some(revision) => {
+                    let ledger_chain = self.inner.replay_engine(revision.value(), None)?;
+                    let judging = self.inner.trust_chain(&deployment, &log)?;
+                    ledger_chain.trust_chain().names().eq(judging.names())
                 }
-            }
-            Some(_) => false,
-            None => {
-                ledger_policy == files.policy_key
-                    && crate::engine::policy_file_key(log.policy_file()) == files.policy_key
-                    && crate::engine::policy_file_key(deployment.config.policy_file().bytes()) == files.policy_key
-            }
-        };
+                None => false,
+            };
         if !shares_ledger {
             return Err(super::files::refused(
                 "the workspace ledger must belong to the trajectory's policy and rank its labels against \
@@ -1459,9 +1449,9 @@ impl Session {
         let policy = self.inner.resolve_policy(deployment, &opened)?;
         tracing::Span::current().record(
             "appa.policy.id",
-            match (opened.deployment(), policy.engine().revision()) {
-                (Some(deployment), Some(revision)) => format!("{deployment}@{revision}"),
-                _ => crate::engine::policy_file_key(opened.policy_file()),
+            match policy.engine().revision() {
+                Some(revision) => format!("{}@{revision}", opened.deployment()),
+                None => crate::engine::policy_file_key(opened.policy_file()),
             },
         );
         // External answers carry the exact call or group they answered for, and the

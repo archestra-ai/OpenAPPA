@@ -95,7 +95,7 @@ pub(super) struct FileTracking {
     /// The deployment whose following families share the tracked workspaces.
     pub deployment: String,
     /// The key of the policy file the runtime opened with. A new workspace stream opens under
-    /// it, and a pinned family's ledger must still name it.
+    /// it.
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
     pub process_backend: Option<PathBuf>,
@@ -1472,38 +1472,6 @@ else:
             allow(&runtime, id, call("Read", "source.txt")).await;
             success(&runtime, id, call("Read", "source.txt")).await;
         }
-    }
-
-    #[tokio::test]
-    async fn a_pinned_family_shares_the_workspace_ledger_only_while_the_runtime_serves_its_file() {
-        let dir = fixture();
-        let runtime = open(dir.path());
-        let pinned = TrajectoryId("opened-by-the-previous-version".into());
-        bind(&runtime, &pinned, dir.path());
-        runtime.create_pinned_session(pinned.clone()).unwrap();
-        let following = TrajectoryId("following".into());
-        bind(&runtime, &following, dir.path());
-        runtime.create_session(following.clone(), None).unwrap();
-        for id in [&pinned, &following] {
-            allow(&runtime, id, call("Read", "source.txt")).await;
-            success(&runtime, id, call("Read", "source.txt")).await;
-        }
-        let files = runtime.inner.shared.files.as_ref().unwrap();
-        assert_eq!(
-            files.store(&runtime.inner.store, &pinned).unwrap().policy().unwrap(),
-            files.policy_key,
-            "the ledger opens under the serving policy file, as the previous version opens it"
-        );
-
-        publish_a_tool(&runtime, dir.path());
-        let refused = runtime
-            .session(&pinned, &pinned)
-            .unwrap()
-            .on_tool_call(call("Read", "source.txt"), false)
-            .await;
-        assert!(refused_ledger(&refused), "{refused:?}");
-        allow(&runtime, &following, call("Read", "source.txt")).await;
-        success(&runtime, &following, call("Read", "source.txt")).await;
     }
 
     #[tokio::test]

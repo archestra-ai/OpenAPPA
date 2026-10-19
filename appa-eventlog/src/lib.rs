@@ -402,9 +402,8 @@ impl Log {
         Some(batches)
     }
 
-    /// The policy file the family opened under, byte for byte: what a pinned family is judged by
-    /// for its whole life, and what a following family's opening revision compiled with the
-    /// family's inventory.
+    /// The policy file the family opened under, byte for byte: what the family's opening revision
+    /// compiled with the family's inventory.
     pub fn policy_file(&self) -> &[u8] {
         &self.policy_file
     }
@@ -2126,9 +2125,8 @@ mod tests {
         store
             .append_host(&log, &observed(root().as_str(), "demo"))
             .expect("a host observation is not fenced");
-        // The previous version, reading this family as pinned to its opening file, stamps
-        // nothing and fences nothing: its row lands as written, and the engine judges it by the
-        // opening revision.
+        // A row an earlier build wrote without a stamp lands as written: the store never judges,
+        // and the engine's replay refuses it.
         store
             .lock()
             .execute(

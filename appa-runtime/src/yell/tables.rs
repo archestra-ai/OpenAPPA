@@ -493,45 +493,16 @@ static PROFILE: Table = Table {
     ],
 };
 
-static OPEN_VECTOR_TOOL: Table = Table {
-    name: "OpenVector::tool",
-    entries: &[("tool", Rule::VouchedTool)],
-};
-
-static OPEN_VECTOR_SURFACE: Table = Table {
-    name: "OpenVector::surface",
-    entries: &[("surface", Rule::Token(Class::Surface))],
-};
-
-static OPEN_VECTOR_RULE: Table = Table {
-    name: "OpenVector::rule",
-    entries: &[("rule", Rule::Token(Class::Tool))],
-};
-
-static OPEN_VECTOR: Table = Table {
-    name: "OpenVector",
-    entries: &[
-        ("AssumedExecutor", Rule::Table(&OPEN_VECTOR_TOOL)),
-        ("ProviderRunDispatch", Rule::Table(&OPEN_VECTOR_TOOL)),
-        ("AssumedExecutorRule", Rule::Table(&OPEN_VECTOR_RULE)),
-        ("ProviderRunRule", Rule::Table(&OPEN_VECTOR_RULE)),
-        ("OpenProviderSurface", Rule::Table(&OPEN_VECTOR_SURFACE)),
-    ],
-};
-
 // ---------------------------------------------------------------- the facts themselves
 
 static TRAJECTORY_OPENED: Table = Table {
     name: "TrajectoryOpened",
     entries: &[
         ("trajectory", TRAJECTORY),
-        ("dialect", NUMBER),
         ("profile", Rule::Table(&PROFILE)),
-        // Neither names a person, but together they fingerprint the deployment, which is
-        // exactly what a pseudonymized report must not carry from one report to the next.
-        ("policy_digest", Rule::Fingerprint),
+        // It names no person, but it fingerprints the deployment, which is exactly what a
+        // pseudonymized report must not carry from one report to the next.
         ("policy_file_key", Rule::Fingerprint),
-        ("open_vectors", Rule::Each(&Rule::Table(&OPEN_VECTOR))),
         // The deployment names a tenant; the revision is a counter within it.
         ("deployment", Rule::Fingerprint),
         ("revision", NUMBER),

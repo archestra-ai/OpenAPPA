@@ -10,7 +10,7 @@ use common::{last_offer, raw};
 use std::path::Path;
 use std::sync::Arc;
 
-use appa_eventlog::{Backend, DeploymentName, FamilyKind, LogStore};
+use appa_eventlog::{Backend, DeploymentName, LogStore};
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{
@@ -575,96 +575,63 @@ async fn lines_publishing_the_same_bytes_keep_their_own_engines() {
     }
 }
 
-/// A snapshot view opens every new family pinned to its policy file: the opening names no
-/// deployment, nothing it decides is stamped, nothing is published, and the line moving on never
-/// reaches it. A root fork of such a family is pinned to the same file.
+/// A family whose opening names no deployment — one a runtime opened before live policy
+/// revisions, or a host's snapshot view opened pinned — is refused at its next event under its own
+/// class, whatever its log holds after the opening, and a retry is refused again. A new family
+/// opens and decides.
 #[tokio::test]
-async fn a_snapshot_view_opens_families_pinned_to_their_file() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
-    let notes = policy("[[policy.tool]]\nname = \"notes\"\n");
-    let fetch_only = policy("[[policy.tool]]\nname = \"fetch\"\n");
-    let runtime = Arc::new(
-        Runtime::open_with_store(write(dir.path(), &notes), Arc::clone(&store), None).expect("the deployment opens"),
-    );
-    let line = DeploymentName::new("tenant");
-    let prepared = runtime
-        .prepare_deployment(write(dir.path(), &notes))
-        .expect("the policy loads");
-    let snapshot = Arc::new(runtime.snapshot(&line, &prepared));
-    let pinned = root("pinned");
-    start(&snapshot, &pinned).await;
-    assert!(allowed(&propose(&snapshot, &pinned, call("notes", 1), "p1").await));
-    let log = store.log(&pinned).expect("the log reads");
-    assert_eq!(log.deployment(), None, "the opening names no deployment");
-    assert_eq!(log.stamp(), None, "nothing a snapshot view decides is stamped");
-    assert_eq!(
-        store.family_kind(&pinned).expect("the kind reads"),
-        Some(FamilyKind::Pinned)
-    );
-    assert!(
-        store.head(&line).expect("the head reads").is_none(),
-        "a snapshot view publishes nothing"
-    );
-
-    let head = Arc::new(
-        runtime.pinned(
-            &runtime
-                .publish(
-                    &line,
-                    &runtime
-                        .prepare_deployment(write(dir.path(), &fetch_only))
-                        .expect("loads"),
-                )
-                .expect("the policy publishes"),
-        ),
-    );
-    let following = root("following");
-    start(&head, &following).await;
-    assert!(!allowed(&propose(&head, &following, call("notes", 1), "f1").await));
-    assert_eq!(
-        store.family_kind(&following).expect("the kind reads"),
-        Some(FamilyKind::Following(line.clone()))
-    );
-    assert!(
-        allowed(&propose(&snapshot, &pinned, call("notes", 2), "p2").await),
-        "the pinned family keeps its opening policy after the line moved on"
-    );
-    let fork = root("pinned-fork");
-    snapshot
-        .open_root_fork(&pinned, &pinned, &fork)
-        .expect("the pinned family forks");
-    assert_eq!(
-        store.family_kind(&fork).expect("the kind reads"),
-        Some(FamilyKind::Pinned)
-    );
-    assert_eq!(store.family_kind(&root("absent")).expect("the kind reads"), None);
-}
-
-/// A family that follows the line is refused through a snapshot view: it decides at the head,
-/// through a pinned view, and the refusal says so.
-#[tokio::test]
-async fn a_snapshot_view_refuses_a_following_family() {
+async fn a_legacy_opening_is_refused_with_legacy_family() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let notes = policy("[[policy.tool]]\nname = \"notes\"\n");
-    let runtime = open(dir.path(), &notes);
-    let line = DeploymentName::new("tenant");
-    let prepared = runtime
-        .prepare_deployment(write(dir.path(), &notes))
-        .expect("the policy loads");
-    let head = Arc::new(runtime.pinned(&runtime.publish(&line, &prepared).expect("the policy publishes")));
-    let following = root("following");
-    start(&head, &following).await;
-    assert!(allowed(&propose(&head, &following, call("notes", 1), "f1").await));
-    let snapshot = Arc::new(runtime.snapshot(&line, &prepared));
-    match propose(&snapshot, &following, call("notes", 2), "f2").await {
-        HookDecision::Refuse { class, detail } => {
-            assert_eq!(class, RefusalClass::PolicyUnavailable);
-            assert!(detail.contains("follows deployment tenant"), "{detail}");
-        }
-        other => panic!("a following family is refused through a snapshot view: {other:?}"),
+    let legacy = root("legacy");
+    {
+        let runtime = open(dir.path(), &notes);
+        start(&runtime, &legacy).await;
+        assert!(allowed(&propose(&runtime, &legacy, call("notes", 1), "c1").await));
+        assert_eq!(
+            report(&runtime, &legacy, call("notes", 1), "c1").await,
+            HookDecision::Ack
+        );
     }
-    assert!(allowed(&propose(&head, &following, call("notes", 3), "f3").await));
+    {
+        let store = rusqlite::Connection::open(dir.path().join("appa.db")).expect("the database reopens");
+        let stored: Vec<u8> = store
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                [legacy.0.as_str()],
+                |row| row.get(0),
+            )
+            .expect("the opening reads");
+        let mut opening: serde_json::Value = serde_json::from_slice(&stored).expect("the opening is JSON");
+        let fields = opening[0]["TrajectoryOpened"]
+            .as_object_mut()
+            .expect("the opening record is an object");
+        fields.remove("deployment");
+        fields.remove("revision");
+        store
+            .execute(
+                "UPDATE logs SET facts = ?2 WHERE root = ?1 AND seq = 0",
+                rusqlite::params![legacy.0.as_str(), serde_json::to_vec(&opening).expect("serializes")],
+            )
+            .expect("the opening is rewritten as one that names no deployment");
+    }
+
+    let runtime = open(dir.path(), &notes);
+    for id in ["c2", "c3"] {
+        match propose(&runtime, &legacy, call("notes", 2), id).await {
+            HookDecision::Refuse { class, detail } => {
+                assert_eq!(class, RefusalClass::LegacyFamily);
+                assert_eq!(
+                    detail,
+                    "this trajectory family was opened before live policy revisions; open a new one"
+                );
+            }
+            other => panic!("a legacy family is refused: {other:?}"),
+        }
+    }
+    let fresh = root("fresh");
+    start(&runtime, &fresh).await;
+    assert!(allowed(&propose(&runtime, &fresh, call("notes", 1), "f1").await));
 }
 
 /// A runtime restarted under a later policy replays a family across the revisions that decided

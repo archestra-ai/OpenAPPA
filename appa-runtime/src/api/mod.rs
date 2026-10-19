@@ -547,6 +547,8 @@ pub(crate) enum EventError {
         "this session started under an APPA version whose database could not be upgraded, so its label is unknown; start a new session"
     )]
     RootArchived,
+    #[error("this trajectory family was opened before live policy revisions; open a new one")]
+    LegacyFamily,
     #[error("the session principal {0:?} is not an address")]
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
@@ -627,6 +629,7 @@ impl EventError {
             EventError::UntrustedLog(_) => RefusalClass::UntrustedLog,
             EventError::PolicyUnavailable(_) => RefusalClass::PolicyUnavailable,
             EventError::PolicyMoved { .. } => RefusalClass::PolicyMoved,
+            EventError::LegacyFamily => RefusalClass::LegacyFamily,
             EventError::InventoryRefused(_) => RefusalClass::InventoryRefused,
             EventError::EngineInvariant(_) | EventError::UnexpectedDecision => RefusalClass::EngineInvariant,
             EventError::Contended { .. } => RefusalClass::Contended,
@@ -667,6 +670,7 @@ impl EventError {
             | EventError::UntrustedLog(_)
             | EventError::PolicyUnavailable(_)
             | EventError::PolicyMoved { .. }
+            | EventError::LegacyFamily
             | EventError::InventoryRefused(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
@@ -852,6 +856,13 @@ impl Deployment {
     /// The policy revision this deployment decides at; `None` before it serves a line.
     pub(crate) fn revision(&self) -> Option<u64> {
         self.resident.revision()
+    }
+
+    /// The policy revision this deployment decides at. A view serves only a deployment published
+    /// on its line, so one at no revision is the runtime's own fault.
+    fn serving_revision(&self) -> Result<u64, EventError> {
+        self.revision()
+            .ok_or_else(|| EventError::EngineInvariant("the serving deployment decides at no policy revision".into()))
     }
 
     /// The content key of this deployment's policy file.
@@ -1216,18 +1227,17 @@ struct Pinned {
 }
 
 /// One engine this process compiled beside the serving deployment's own: the content key of
-/// the policy file, the revision it stamps (`None` for the snapshot engine a pinned family is
-/// judged by), and the digest of the inventory it compiles with. The file is named by its content
-/// and not by its line, so views over different stores whose lines share a name never share an
-/// engine.
+/// the policy file, the revision it stamps, and the digest of the inventory it compiles with.
+/// The file is named by its content and not by its line, so views over different stores whose
+/// lines share a name never share an engine.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RevisionKey {
-    /// The line a revision engine decides for. A cached engine carries its line and revision, and
-    /// a family's opening is judged against both, so two lines that published the same bytes at
-    /// the same revision number never share one engine. `None` for a snapshot engine.
-    line: Option<String>,
+    /// The line the engine decides for. A cached engine carries its line and revision, and a
+    /// family's opening is judged against both, so two lines that published the same bytes at
+    /// the same revision number never share one engine.
+    line: String,
     file: String,
-    revision: Option<u64>,
+    revision: u64,
     inventory: Option<String>,
 }
 
@@ -1383,26 +1393,6 @@ impl Runtime {
         let pinned = Pinned {
             line: deployment.line.clone(),
             deployment: Arc::clone(&deployment.deployment),
-        };
-        self.view(|view| view.pinned = Some(pinned))
-    }
-
-    /// A view on `line` that opens every new family pinned to `prepared`'s policy file, as the
-    /// version before policy revisions opened every family: the opening names no deployment and
-    /// no revision, the file is stored with it, and nothing is published on `line`. Such a
-    /// family is judged by that file for its whole life, with `prepared`'s externals, and a
-    /// change to the line's policy never reaches it. A family that follows `line` is refused
-    /// through this view: it decides through [`Runtime::pinned`] at the head. A host steps back
-    /// from live revisions with it — new families open pinned while the line's head stays where
-    /// it is.
-    ///
-    /// # Panics
-    ///
-    /// On a deployment another runtime prepared.
-    pub fn snapshot(&self, line: &DeploymentName, prepared: &PreparedDeployment) -> Runtime {
-        let pinned = Pinned {
-            line: line.clone(),
-            deployment: self.own(prepared),
         };
         self.view(|view| view.pinned = Some(pinned))
     }
@@ -1714,32 +1704,20 @@ impl Inner {
     /// inventory — with a replay-only engine for every earlier revision the log is stamped with.
     /// A family of another line, or a log stamped later than this deployment's revision, is
     /// refused: the second is retryable once this view serves the newer head.
-    ///
-    /// A family pinned to a policy snapshot — one the previous version opened, or one a
-    /// [`Runtime::snapshot`] view opened — is judged by the engine compiled from the stored file
-    /// its opening names, with this deployment's externals, exactly as that version judges it.
     pub(super) fn resolve_policy<'a>(
         &self,
         deployment: &'a Deployment,
         log: &Log,
     ) -> Result<PolicyEngine<'a>, EventError> {
         let line = self.line();
-        let Some(followed) = log.deployment() else {
-            return Ok(PolicyEngine::compiled(self.snapshot_engine(log)?, Vec::new()));
-        };
+        let followed = log.deployment();
         if followed != line {
             return Err(EventError::PolicyUnavailable(format!(
                 "the family of {} follows deployment {followed}, not {line}",
                 log.root().as_str()
             )));
         }
-        // A snapshot view ([`Runtime::snapshot`]) opens and judges pinned families only.
-        let Some(revision) = deployment.revision() else {
-            return Err(EventError::PolicyUnavailable(format!(
-                "the family of {} follows deployment {followed}; this view opens and judges families pinned to a policy snapshot only",
-                log.root().as_str()
-            )));
-        };
+        let revision = deployment.serving_revision()?;
         if let Some(stamp) = log.stamp().map(|stamp| stamp.value())
             && stamp > revision
         {
@@ -1762,38 +1740,6 @@ impl Inner {
         })
     }
 
-    /// The snapshot engine a pinned family is judged by: the stored policy file its opening
-    /// names, compiled once with no externals of its own. The opening's digest, dialect and
-    /// declaration are held to this engine when the log replays.
-    fn snapshot_engine(&self, log: &Log) -> Result<Arc<RuntimeEngine>, EventError> {
-        let key = match log.facts().first() {
-            Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => opening.policy_file_key.as_str().to_string(),
-            _ => {
-                return Err(EventError::PolicyUnavailable(format!(
-                    "the log of {} does not open with its opening record",
-                    log.root().as_str()
-                )));
-            }
-        };
-        if crate::engine::policy_file_key(log.policy_file()) != key {
-            return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file does not hash to the key {key} its opening names"
-            )));
-        }
-        self.compiled(
-            RevisionKey {
-                line: None,
-                file: key,
-                revision: None,
-                inventory: None,
-            },
-            || {
-                compile_stored_with_inventory(log.policy_file(), None, self.shared.naming)
-                    .map_err(EventError::PolicyUnavailable)
-            },
-        )
-    }
-
     /// The replay-only engine of `revision` of this view's line, compiled once from the file the
     /// store holds for it with no externals: it validates the batches that revision decided and
     /// consults nothing.
@@ -1809,9 +1755,9 @@ impl Inner {
             .policy_key(line, stamp)
             .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
         let key = RevisionKey {
-            line: Some(line.to_string()),
+            line: line.to_string(),
             file: file.as_str().to_string(),
-            revision: Some(revision),
+            revision,
             inventory: inventory.map(inventory_digest),
         };
         self.compiled(key, || {
@@ -1831,9 +1777,9 @@ impl Inner {
         inventory: &appa_runtime_api::inventory::ToolInventory,
     ) -> Result<Arc<RuntimeEngine>, EventError> {
         let key = RevisionKey {
-            line: deployment.revision().map(|_| self.line().to_string()),
+            line: self.line().to_string(),
             file: deployment.key(),
-            revision: deployment.revision(),
+            revision: deployment.serving_revision()?,
             inventory: Some(inventory_digest(inventory)),
         };
         self.compiled(key, || {
@@ -1868,11 +1814,7 @@ impl Inner {
             return Ok(Arc::clone(engine));
         }
         let naming = self.shared.naming;
-        let engine = RuntimeEngine::from_policy(&compile()?, naming);
-        let engine = Arc::new(match key.revision {
-            Some(revision) => engine.at(self.line(), revision),
-            None => engine,
-        });
+        let engine = Arc::new(RuntimeEngine::from_policy(&compile()?, naming).at(self.line(), key.revision));
         Ok(Arc::clone(cache().entry(key).or_insert(engine)))
     }
 
@@ -1975,6 +1917,7 @@ pub enum RootForkRefusal {
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
+        appa_eventlog::ReadError::LegacyFamily { .. } => EventError::LegacyFamily,
         error @ (appa_eventlog::ReadError::Undecodable { .. } | appa_eventlog::ReadError::UndecodableKey { .. }) => {
             EventError::UntrustedLog(error.to_string())
         }
@@ -2495,7 +2438,7 @@ impl Runtime {
         }
     }
 
-    /// Read-only preflight under a pinned family policy, including child startup.
+    /// Read-only preflight under the family's policy, including child startup.
     pub(crate) fn check_inventory(
         &self,
         root: &TrajectoryId,
@@ -2515,12 +2458,8 @@ impl Runtime {
         let deployment = self.inner.deployment();
         self.inner.resolve_policy(&deployment, log)?;
         let undecodable = || EventError::PolicyUnavailable("stored validation rules do not decode".into());
-        // A family that follows its deployment is decided under the head's rules; a family pinned
-        // to a policy snapshot, under the file it opened with.
-        let rules = match log.deployment() {
-            Some(_) => deployment.config.policy_file().bytes(),
-            None => log.policy_file(),
-        };
+        // A family is decided under its deployment's head rules.
+        let rules = deployment.config.policy_file().bytes();
         let source = std::str::from_utf8(rules)
             .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
         let document: toml::Value = toml::from_str(source).map_err(|_| undecodable())?;
@@ -2576,8 +2515,7 @@ impl Runtime {
             .root_fork_origin(&view, parent)
             .ok_or(RootForkRefusal::ParentUnavailable)?;
         // The fork opens under its parent's stored file: the same composed file, so the same
-        // inventory, and — for a pinned parent — the same snapshot. A following parent's fork
-        // follows the same deployment at the head.
+        // inventory. It follows the parent's deployment at the head.
         let opening = policy
             .engine()
             .root_fork_opening(new_root, log.policy_file(), origin)
@@ -2660,32 +2598,6 @@ impl Runtime {
                 },
                 error => EventError::Storage(error.to_string()),
             })?;
-        Ok(Session::attach(
-            Arc::clone(&self.inner),
-            deployment,
-            root.clone(),
-            root,
-            EmbeddedPresentationOptions::default(),
-        ))
-    }
-
-    /// Open `id` as the previous version opens a root: pinned to the serving policy file, its
-    /// opening naming no deployment or revision.
-    #[cfg(test)]
-    pub(crate) fn create_pinned_session(&self, id: TrajectoryId) -> Result<Session, EventError> {
-        let deployment = self.inner.deployment();
-        let mut opening = deployment.root_opening(&id, None);
-        for fact in &mut opening {
-            if let appa_engine::fact::Fact::TrajectoryOpened(opened) = fact {
-                opened.deployment = None;
-                opened.revision = None;
-            }
-        }
-        let root = self
-            .inner
-            .store
-            .create_root(opening, deployment.config.policy_file().bytes())
-            .map_err(|error| EventError::Storage(error.to_string()))?;
         Ok(Session::attach(
             Arc::clone(&self.inner),
             deployment,
@@ -4870,148 +4782,64 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"notes\"\ndelta = {}\n")
     }
 
-    /// A family the previous version opened keeps its opening policy across a restart under an
-    /// edited policy, while a family that follows the deployment moves to the edit.
+    /// A family whose opening names no deployment was opened before live policy revisions: every
+    /// event on it is refused as such, operationally and under its own class, whatever its log
+    /// holds after the opening. A new family opens and decides.
     #[tokio::test]
-    async fn a_pinned_family_keeps_its_opening_policy_across_a_restart() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let pinned = TrajectoryId("opened-by-the-previous-version".into());
-        let following = TrajectoryId("following".into());
-        {
-            let runtime = Runtime::open(notes_policy(), dir.path().join("appa.db"), None).expect("opens");
-            runtime
-                .create_pinned_session(pinned.clone())
-                .expect("the pinned root opens");
-            runtime.create_session(following.clone(), None).expect("the root opens");
-            assert!(released_call(&runtime, &pinned, "notes", 1).await);
-            assert!(released_call(&runtime, &following, "notes", 1).await);
-        }
-        let runtime = Runtime::open(minimal_policy(), dir.path().join("appa.db"), None).expect("reopens");
-        assert!(
-            released_call(&runtime, &pinned, "notes", 2).await,
-            "the pinned family is judged by its opening file"
-        );
-        assert!(
-            !released_call(&runtime, &following, "notes", 2).await,
-            "the following family decides at the head"
-        );
-    }
-
-    /// An independent root fork of a pinned family is pinned to the same file; one of a following
-    /// family follows the deployment.
-    #[tokio::test]
-    async fn a_root_fork_keeps_its_parent_familys_kind() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(notes_policy(), dir.path().join("appa.db"), None).expect("opens");
-        let pinned = TrajectoryId("pinned".into());
-        let following = TrajectoryId("following".into());
-        runtime
-            .create_pinned_session(pinned.clone())
-            .expect("the pinned root opens");
-        runtime.create_session(following.clone(), None).expect("the root opens");
-        let (pinned_fork, following_fork) = (
-            TrajectoryId("pinned-fork".into()),
-            TrajectoryId("following-fork".into()),
-        );
-        runtime
-            .open_root_fork(&pinned, &pinned, &pinned_fork)
-            .expect("the pinned family forks");
-        runtime
-            .open_root_fork(&following, &following, &following_fork)
-            .expect("the following family forks");
-
-        assert!(runtime.reload(minimal_policy()).expect("the edit publishes").changed);
-        assert!(released_call(&runtime, &pinned_fork, "notes", 1).await);
-        assert!(!released_call(&runtime, &following_fork, "notes", 1).await);
-    }
-
-    /// A database the previous version wrote — schema 8, without the deployment tables — with a
-    /// live family upgrades in place when this version opens it: the family continues on its
-    /// opening file, and a new family follows the deployment.
-    #[tokio::test]
-    async fn a_live_family_in_a_database_the_previous_version_wrote_continues() {
+    async fn a_family_opened_before_live_policy_revisions_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        let pinned = TrajectoryId("opened-by-the-previous-version".into());
+        let legacy = TrajectoryId("opened-before-live-revisions".into());
         {
             let runtime = Runtime::open(notes_policy(), db.clone(), None).expect("opens");
-            runtime
-                .create_pinned_session(pinned.clone())
-                .expect("the pinned root opens");
-            assert!(released_call(&runtime, &pinned, "notes", 1).await);
+            runtime.create_session(legacy.clone(), None).expect("the root opens");
+            assert!(released_call(&runtime, &legacy, "notes", 1).await);
         }
         {
-            let old = rusqlite::Connection::open(&db).expect("the database reopens");
-            old.execute_batch("DROP TABLE deployments; DROP TABLE policy_revisions;")
-                .expect("the tables the previous version lacks drop");
-            old.pragma_update(None, "user_version", 8)
-                .expect("the version moves back");
+            let store = rusqlite::Connection::open(&db).expect("the database reopens");
+            let stored: Vec<u8> = store
+                .query_row(
+                    "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                    [legacy.0.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("the opening reads");
+            let mut opening: serde_json::Value = serde_json::from_slice(&stored).expect("the opening is JSON");
+            let fields = opening[0]["TrajectoryOpened"]
+                .as_object_mut()
+                .expect("the opening record is an object");
+            fields.remove("deployment");
+            fields.remove("revision");
+            store
+                .execute(
+                    "UPDATE logs SET facts = ?2 WHERE root = ?1 AND seq = 0",
+                    rusqlite::params![legacy.0.as_str(), serde_json::to_vec(&opening).unwrap()],
+                )
+                .expect("the opening is rewritten as one that names no deployment");
         }
 
-        let runtime = Runtime::open(minimal_policy(), db, None).expect("the database upgrades");
-        assert!(released_call(&runtime, &pinned, "notes", 2).await);
-        let following = TrajectoryId("following".into());
-        runtime
-            .create_session(following.clone(), None)
-            .expect("a new root opens");
-        assert!(!released_call(&runtime, &following, "notes", 1).await);
-    }
-
-    /// A family the previous version opened stays on the policy file it opened under: a reload
-    /// that drops a tool refuses it to every family that follows the deployment, and the pinned
-    /// family keeps it, decided as the previous version decides it.
-    #[tokio::test]
-    async fn a_pinned_family_keeps_its_opening_policy_across_a_reload() {
-        let with_notes = || claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"notes\"\ndelta = {}\n");
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(with_notes(), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let pinned = TrajectoryId("opened-by-the-previous-version".into());
-        let following = TrajectoryId("following".into());
-        runtime
-            .create_pinned_session(pinned.clone())
-            .expect("the pinned root opens");
-        runtime.create_session(following.clone(), None).expect("the root opens");
-        let notes = |n: u32| ProposedCall {
+        let runtime = Runtime::open(notes_policy(), db, None).expect("reopens");
+        let session = runtime.session(&legacy, &legacy).expect("the root exists");
+        let call = ProposedCall {
             tool: "notes".into(),
-            arguments: session::raw(serde_json::json!({ "n": n })),
+            arguments: session::raw(serde_json::json!({ "n": 2 })),
             cwd: None,
         };
-        let allowed =
-            |decision: &Result<ToolCallDecision, EventError>| matches!(decision, Ok(ToolCallDecision::Allow { .. }));
-        for id in [&pinned, &following] {
-            let session = runtime.session(id, id).unwrap();
-            let decision = session.on_tool_call(notes(1), false).await;
-            assert!(allowed(&decision), "{decision:?}");
-            session
-                .on_tool_result(
-                    notes(1),
-                    ToolOutcome::Success {
-                        body: OutcomeBody::Available("noted".into()),
-                    },
-                )
-                .await
-                .expect("the result is admitted");
-        }
+        let error = session
+            .on_tool_call(call, false)
+            .await
+            .expect_err("the legacy family decides nothing");
+        assert!(matches!(error, EventError::LegacyFamily), "{error:?}");
+        assert!(error.is_operational());
+        assert_eq!(error.class(), appa_runtime_api::RefusalClass::LegacyFamily);
+        assert_eq!(
+            error.to_string(),
+            "this trajectory family was opened before live policy revisions; open a new one"
+        );
 
-        assert!(runtime.reload(minimal_policy()).expect("the edit publishes").changed);
-        let decision = runtime
-            .session(&pinned, &pinned)
-            .unwrap()
-            .on_tool_call(notes(2), false)
-            .await;
-        assert!(
-            allowed(&decision),
-            "the pinned family keeps its opening file: {decision:?}"
-        );
-        let decision = runtime
-            .session(&following, &following)
-            .unwrap()
-            .on_tool_call(notes(2), false)
-            .await;
-        assert!(
-            !allowed(&decision),
-            "the following family decides at the head: {decision:?}"
-        );
+        let fresh = TrajectoryId("opened-after".into());
+        runtime.create_session(fresh.clone(), None).expect("a new root opens");
+        assert!(released_call(&runtime, &fresh, "notes", 1).await);
     }
 
     #[test]
@@ -6738,7 +6566,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let later_log = reopened.inner.log(&later).expect("the root reads");
         assert_eq!(later_log.stamp().map(|revision| revision.value()), Some(2));
         assert!(
-            peer::pinned_alike(&earlier_log, &later_log),
+            peer::decide_alike(&earlier_log, &later_log),
             "two families of one line act alike"
         );
     }
