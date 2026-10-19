@@ -215,6 +215,11 @@ pub(crate) const CALL_RULES: &str = concat!(
     "harness itself produces its result. A tool or catalog search that an MCP server or gateway answers is ",
     "not a harness call: it is a search against that service. A call started in the background gets the ",
     "labels of the output it will produce, not of the task id it returns at once.\n\n",
+    "A request to this machine's loopback address, such as `localhost` or `127.0.0.1`, reaches a service ",
+    "on this machine, not a reader outside it, unless the call or its `context` shows that the port forwards ",
+    "to another host or that the service sends the request onward. The address decides only where the ",
+    "request lands: judge the bytes it returns, and any send or publish the service performs, by the rules ",
+    "below.\n\n",
     "A browser action that types into, fills or submits a page delivers its text to that page's site, and ",
     "it writes where people may read it.\n\n",
     "Decide by the facts in `context` where they apply, such as a repository's visibility or who wrote an ",
@@ -435,7 +440,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object, with the `context` it came with, if any.
-pub(crate) const EXAMPLES: [Example; 24] = [
+pub(crate) const EXAMPLES: [Example; 25] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: ResultAudience::Internal,
@@ -459,6 +464,14 @@ pub(crate) const EXAMPLES: [Example; 24] = [
         requires_audience: RequiredAudience::None,
         requires_trusted: false,
         why: "returns secrets, but reads them locally",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "curl -s 'http://localhost:3000/api/projects?limit=5'", "description": "Check the dev server's projects"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "a service on this machine answers a read; nothing leaves the machine",
     },
     Example {
         call: r#"{"tool": "send_email", "arguments": {"recipient": "colleague@corp.example", "body": "The migration finished."}}"#,
