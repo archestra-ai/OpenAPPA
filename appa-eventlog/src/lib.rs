@@ -3118,6 +3118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
     fn postgres_preserves_encoding_and_cas() {
         let first = postgres_store(2).lease().unwrap();
