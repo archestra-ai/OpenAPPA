@@ -196,7 +196,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 check_lookup_routes(&policy, &base)?;
             }
             if let Some(targets) = battery.targets.policies_mut() {
-                check_stands_alone(&policy, &base_document, &base.tools)?;
+                check_stands_alone(&policy, &base_document, &lowered_variants(&base.tools, &base.tool_map))?;
                 for target in BatteryTarget::ALL {
                     let target_policy = targets.get_mut(target);
                     let field = target.policy_field();
@@ -227,11 +227,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                             .or_default()
                             .extend(targets.iter().cloned());
                     }
-                    check_variants(
-                        &policy_path,
-                        &lowered_variants(&bindings.tools, &map),
-                        &lowered_variants(&base.tools, &map),
-                    )?;
+                    let base_variants = lowered_variants(&base.tools, &map);
+                    check_variants(&policy, &base_variants, &[])?;
+                    check_variants(&policy_path, &lowered_variants(&bindings.tools, &map), &base_variants)?;
                     check_lookup_routes(&policy_path, &bindings)?;
                     target_policy.audiences = bindings.audiences;
                     target_policy.credentials = bindings.credentials;
@@ -2353,6 +2351,15 @@ mod tests {
             Err(PackageError::TargetShadowsBase { tool, .. }) if tool == "mcp/github/list"
         ));
         validate_package(targeted(base, MULTI_USER_POLICY).path()).unwrap();
+
+        let native_first = base.replace(
+            "[[policy.tool]]\nname = \"tool/github/list(owner:me)\"",
+            "[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = {}\n\n[[policy.tool]]\nname = \"tool/github/list(owner:me)\"",
+        );
+        assert!(matches!(
+            validate_package(targeted(&native_first, MULTI_USER_POLICY).path()),
+            Err(PackageError::UnreachableVariant { tool, .. }) if tool == "mcp/github/list"
+        ));
     }
 
     /// A battery without targets is only ever composed whole, so it keeps its lookups
