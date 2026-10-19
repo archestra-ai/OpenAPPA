@@ -3376,6 +3376,24 @@ mod tests {
             "{diagnostic}"
         );
         assert!(!diagnostic.contains(private_value), "{diagnostic}");
+
+        let error = pg
+            .with_client::<()>(move |client| {
+                client.batch_execute(
+                    "CREATE DOMAIN pg_temp.appa_diagnostic_type AS text \
+                     CONSTRAINT appa_diagnostic_type_check CHECK (false)",
+                )?;
+                let error = client
+                    .query("SELECT $1::text::pg_temp.appa_diagnostic_type", &[&private_value])
+                    .unwrap_err();
+                assert!(error.as_db_error().unwrap().message().contains("appa_diagnostic_type"));
+                Err(error.into())
+            })
+            .unwrap_err();
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("SQLSTATE 23514"), "{diagnostic}");
+        assert!(diagnostic.contains("datatype=\"appa_diagnostic_type\""), "{diagnostic}");
+        assert!(!diagnostic.contains(private_value), "{diagnostic}");
     }
 
     #[cfg(feature = "postgres")]

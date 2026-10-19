@@ -31,6 +31,7 @@
 //! `openappa_peer_inboxes`, and `openappa_roots`.
 //! `tests/fixtures/host_schema.sql` holds the full DDL.
 
+use std::fmt::Write;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime};
@@ -72,10 +73,10 @@ impl From<::postgres::Error> for PostgresError {
             ("schema", database.schema()),
             ("table", database.table()),
             ("column", database.column()),
+            ("datatype", database.datatype()),
             ("constraint", database.constraint()),
         ] {
             if let Some(name) = name {
-                use std::fmt::Write;
                 let _ = write!(diagnostic, "; {field}={name:?}");
             }
         }
