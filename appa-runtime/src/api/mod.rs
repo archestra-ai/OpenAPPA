@@ -7,6 +7,7 @@ mod host;
 mod launch;
 pub(crate) mod peer;
 mod session;
+mod spawn_hold;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
 /// modules' test suites.
@@ -523,7 +524,10 @@ pub enum ProbeError {
 pub(crate) enum EventError {
     #[error("a call without a host id is already outstanding; this host must propose one unidentified call at a time")]
     CallOutstanding,
-    #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
+    #[error(
+        "an earlier subagent spawn is still waiting for its subagent to start; this spawn consumed nothing and can \
+         be proposed again once that subagent has started"
+    )]
     SpawnOutstanding,
     #[error("a fan-out spawn released under this prompt still starts subagents; wait for it to finish")]
     FanOutOutstanding,
@@ -1138,6 +1142,7 @@ impl Prepared {
                     files: None,
                     state_path,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
                 recorder: None,
@@ -1255,6 +1260,7 @@ struct Shared {
     /// not a call's, so a remedy's rewritten call is annotated in it too. In this process
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
+    spawn_holds: spawn_hold::SpawnHolds,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
