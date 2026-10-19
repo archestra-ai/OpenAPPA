@@ -175,27 +175,33 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     None
 }
 
-/// Why an authored name that spells a server identifies no tool, written for the
-/// policy author: what is wrong with the name and what a valid one looks like.
+/// Why an authored name that spells a server identifies no tool, in plain words for
+/// the policy author: what is wrong and what to write instead.
 fn unidentified_tool(name: &str) -> String {
+    const EXAMPLE: &str = "\"mcp/github/list_issues\"";
     if name == crate::do_something::NAME {
-        return format!("tool {name:?} is the replay-only call of validation scenarios; a policy rule cannot name it");
+        return format!("{name:?} works only in test scenarios. Remove this rule from the policy.");
     }
     if !name.contains('/') {
-        return format!(
-            "tool {name:?} is not a tool name this host reports; use the exact reported name or a full id such as \"mcp/github/list_issues\""
-        );
+        return format!("{name:?} is not a tool name. Use the exact tool name, or a full name like {EXAMPLE}.");
     }
-    let reason = match CanonicalTool::parse(name) {
-        Err(CanonicalToolError::Family { .. }) => "a full id starts with mcp/, host/, or agent/".to_owned(),
-        Err(CanonicalToolError::Shape { .. }) => "a full id has three parts, <family>/<namespace>/<tool>".to_owned(),
-        Err(CanonicalToolError::Segment { segment, .. }) => {
-            format!("part {segment:?} can contain only letters, digits, \"_\", \".\", and \"-\"")
+    match CanonicalTool::parse(name) {
+        Err(CanonicalToolError::Family { .. }) => {
+            format!("{name:?} must start with \"mcp/\", \"host/\", or \"agent/\", like {EXAMPLE}.")
         }
-        Err(CanonicalToolError::Namespace { .. }) => "the namespace part cannot contain \"__\"".to_owned(),
-        Err(CanonicalToolError::Control { .. }) | Ok(_) => "the appa/ family belongs to the runtime".to_owned(),
-    };
-    format!("tool {name:?} is not a valid tool id: {reason}, such as \"mcp/github/list_issues\"")
+        Err(CanonicalToolError::Shape { .. }) => {
+            format!("{name:?} is missing a part. A full tool name has three parts, like {EXAMPLE}.")
+        }
+        Err(CanonicalToolError::Segment { segment, .. }) => {
+            format!("{name:?} has a bad part: {segment:?}. Use only letters, digits, \"_\", \".\", and \"-\".")
+        }
+        Err(CanonicalToolError::Namespace { .. }) => {
+            format!("{name:?}: the server part cannot contain \"__\".")
+        }
+        Err(CanonicalToolError::Control { .. }) | Ok(_) => {
+            format!("{name:?} is not allowed. Names that start with \"appa/\" are reserved.")
+        }
+    }
 }
 
 /// Whether an authored name already spells a server: as a canonical id, or in the host's
@@ -523,15 +529,15 @@ mod tests {
         };
         assert_eq!(
             error_for("appa/do_something"),
-            "tool \"appa/do_something\" is the replay-only call of validation scenarios; a policy rule cannot name it"
+            "\"appa/do_something\" works only in test scenarios. Remove this rule from the policy."
         );
         assert_eq!(
             error_for("mcp/github"),
-            "tool \"mcp/github\" is not a valid tool id: a full id has three parts, <family>/<namespace>/<tool>, such as \"mcp/github/list_issues\""
+            "\"mcp/github\" is missing a part. A full tool name has three parts, like \"mcp/github/list_issues\"."
         );
         assert_eq!(
             error_for("slack/send_message"),
-            "tool \"slack/send_message\" is not a valid tool id: a full id starts with mcp/, host/, or agent/, such as \"mcp/github/list_issues\""
+            "\"slack/send_message\" must start with \"mcp/\", \"host/\", or \"agent/\", like \"mcp/github/list_issues\"."
         );
     }
 
