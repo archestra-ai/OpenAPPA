@@ -3275,6 +3275,112 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_receipt_errors_identify_the_database_failure_and_remain_fail_closed() {
+        let pool = postgres_store(1);
+        let store = pool.lease().expect("the connection leases");
+        let pg = store.postgres().unwrap();
+        let (_, request) = postgres_receipts();
+        let lease = receipt_lease("diagnostics");
+        pg.with_client(|client| {
+            client.batch_execute("SET default_transaction_read_only = on")?;
+            Ok(())
+        })
+        .unwrap();
+
+        let error = store.claim_processed_result(request.clone(), &lease).unwrap_err();
+        assert!(matches!(error, ReceiptError::Storage(_)));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("SQLSTATE 25006"), "{diagnostic}");
+        assert!(diagnostic.contains("ERROR"), "{diagnostic}");
+
+        pg.with_client(|client| {
+            client.batch_execute("SET default_transaction_read_only = off")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            store.claim_processed_result(request.clone(), &lease).unwrap(),
+            ProcessedResultClaim::Claimed
+        );
+        let decision = serde_json::json!({"decision": "mcp_result"});
+        pg.with_client(|client| {
+            client.batch_execute("SET default_transaction_read_only = on")?;
+            Ok(())
+        })
+        .unwrap();
+        let error = store
+            .complete_processed_result(request.key.clone(), "approved".into(), decision.clone(), lease.owner())
+            .unwrap_err();
+        assert!(error.to_string().contains("SQLSTATE 25006"), "{error}");
+        pg.with_client(|client| {
+            client.batch_execute("SET default_transaction_read_only = off")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            store
+                .claim_processed_result(request.clone(), &receipt_lease("other"))
+                .unwrap(),
+            ProcessedResultClaim::Held
+        );
+        store
+            .complete_processed_result(request.key.clone(), "approved".into(), decision.clone(), lease.owner())
+            .unwrap();
+        assert_eq!(
+            store.claim_processed_result(request.clone(), &lease).unwrap(),
+            ProcessedResultClaim::Complete {
+                approved_output: "approved".into(),
+                decision,
+            }
+        );
+        drop(store);
+        forget_postgres_receipts(&pool, &request.key.session.session_id);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_diagnostics_exclude_values_from_server_messages_and_details() {
+        let store = postgres_store(1).lease().unwrap();
+        let pg = store.postgres().unwrap();
+        let private_value = "private-receipt-value";
+        let error = pg
+            .with_client::<()>(move |client| {
+                let error = client.query("SELECT $1::text::integer", &[&private_value]).unwrap_err();
+                assert!(error.as_db_error().unwrap().message().contains(private_value));
+                Err(error.into())
+            })
+            .unwrap_err();
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("SQLSTATE 22P02"), "{diagnostic}");
+        assert!(!diagnostic.contains(private_value), "{diagnostic}");
+
+        let error = pg
+            .with_client::<()>(move |client| {
+                client.batch_execute(
+                    "CREATE TEMP TABLE appa_diagnostic_test \
+                     (value text CONSTRAINT appa_diagnostic_check CHECK (false))",
+                )?;
+                let error = client
+                    .execute("INSERT INTO appa_diagnostic_test VALUES ($1)", &[&private_value])
+                    .unwrap_err();
+                assert!(error.as_db_error().unwrap().detail().unwrap().contains(private_value));
+                Err(error.into())
+            })
+            .unwrap_err();
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("SQLSTATE 23514"), "{diagnostic}");
+        assert!(diagnostic.contains("table=\"appa_diagnostic_test\""), "{diagnostic}");
+        assert!(
+            diagnostic.contains("constraint=\"appa_diagnostic_check\""),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains(private_value), "{diagnostic}");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
     fn postgres_typed_receipts_are_idempotent_and_fail_closed() {
         let store = postgres_store(1).lease().expect("the connection leases");
         let pg = store.postgres().expect("the PostgreSQL API is present");

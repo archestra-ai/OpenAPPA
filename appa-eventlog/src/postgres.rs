@@ -58,7 +58,28 @@ pub struct PostgresError(pub String);
 
 impl From<::postgres::Error> for PostgresError {
     fn from(error: ::postgres::Error) -> Self {
-        Self(error.to_string())
+        let Some(database) = error.as_db_error() else {
+            return Self(error.to_string());
+        };
+        // The driver's Display says only "db error". Its server message, detail, hint and
+        // query context can contain receipt values, so retain only the code and schema objects.
+        let mut diagnostic = format!(
+            "PostgreSQL {} (SQLSTATE {})",
+            database.parsed_severity().unwrap_or(::postgres::error::Severity::Error),
+            database.code().code(),
+        );
+        for (field, name) in [
+            ("schema", database.schema()),
+            ("table", database.table()),
+            ("column", database.column()),
+            ("constraint", database.constraint()),
+        ] {
+            if let Some(name) = name {
+                use std::fmt::Write;
+                let _ = write!(diagnostic, "; {field}={name:?}");
+            }
+        }
+        Self(diagnostic)
     }
 }
 
