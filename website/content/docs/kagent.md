@@ -323,7 +323,7 @@ Use `appa-guide` in chat to inspect and modify policies conversationally:
 - **`refresh batteries`**: Updates included battery definitions (requires persistence).
 - **`diagnose the OpenAPPA integration`**: Runs read-only health checks on connectivity and configuration.
 
-The guide publishes and reloads the approved policy through the runtime's management tools. Chats that follow the runtime's revisions use it for their next tool call. Chats pinned to a policy snapshot keep that snapshot. The guide confirms once the policy is published and reloaded.
+The guide publishes and reloads the approved policy through the runtime's management tools. Every chat uses it for its next tool call. The guide confirms once the policy is published and reloaded.
 
 ## Troubleshooting
 

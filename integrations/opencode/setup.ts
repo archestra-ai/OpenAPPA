@@ -95,7 +95,7 @@ export async function configuration(config: string, binary: string) {
           if (digest(await readFile(config, 'utf8')) !== input.expected_digest) throw new Error('Policy changed during validation; inspect and propose again.')
           await rename(candidate, config)
           return JSON.stringify({ state: 'saved', description, inventory,
-            next: 'Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions retain their opening policy.' })
+            next: 'Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions use the saved policy for their next tool call.' })
         } finally {
           publishing = false
           await rm(candidate, { force: true })

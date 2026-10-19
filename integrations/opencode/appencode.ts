@@ -71,7 +71,7 @@ export default Plugin.define({
         await childHistory(sessionID)
         return { actor: { root: child.root, child: sessionID }, context: child.context }
       }
-      // Reopening preserves the runtime's pinned policy and Label. No Label lives here.
+      // Reopening resumes the runtime's family, which holds the Label. No Label lives here.
       const actor: Actor = { root: sessionID }
       const started = await post('session_start', actor)
       if (started.decision !== 'ack' && started.decision !== 'context') {

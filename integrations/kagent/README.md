@@ -185,7 +185,7 @@ kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 1. Open `http://localhost:8080/agents/kagent/appa-guide/chat` and send `init`.
 2. Review the complete proposal. In a later message, approve that exact proposal and ask the guide to open its confirmation card.
 3. Approve the native kagent card. The guide writes, synchronizes, and reloads the policy, or leaves the prior policy serving on rejection or failure.
-4. Start a new `cluster-ops` chat to use the activated policy. Existing Trajectories retain their policy snapshot. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
+4. Start a `cluster-ops` chat to use the activated policy. Existing chats use it for their next tool call. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
 
 ### 6. Uninstall
 
