@@ -1095,11 +1095,19 @@ fn check_named(policy: &Path, document: &Value) -> Result<(), PackageError> {
     Ok(())
 }
 
-/// The tool contract names a policy declares. Only `[[policy.tool]]` names a
-/// contract; the other declaration arrays name annotators, authorities and
-/// sanitizers, which are identifiers and belong to no namespace.
 /// The client tools each canonical tool `tool/<namespace>/<tool>` is bound to.
 type ToolMap = BTreeMap<String, Vec<String>>;
+
+/// One `[aliases.tool]` entry, in the shape the loader reads.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasTarget {
+    name: String,
+    #[serde(default, rename = "args")]
+    _args: BTreeMap<String, String>,
+    #[serde(default, rename = "confined")]
+    _confined: bool,
+}
 
 /// A battery's `[aliases]` carries only `tool`, and binds canonical tools only to client
 /// tools in the namespaces it covers. Which server or host serves a namespace is the
@@ -1121,24 +1129,25 @@ fn check_tool_aliases(
     if let Some(field) = aliases.keys().find(|field| field.as_str() != "tool") {
         return Err(top_level(&format!("aliases.{field}")));
     }
-    let map: ToolMap = aliases
-        .get("tool")
-        .and_then(Value::as_table)
-        .into_iter()
-        .flatten()
-        .filter_map(|(namespace, tools)| Some((namespace, tools.as_table()?)))
-        .flat_map(|(namespace, tools)| {
-            tools.iter().map(move |(tool, targets)| {
-                let names = targets
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|target| target.get("name").and_then(Value::as_str).map(str::to_owned))
-                    .collect();
-                (format!("tool/{namespace}/{tool}"), names)
-            })
-        })
-        .collect();
+    let parsed: BTreeMap<String, BTreeMap<String, Vec<AliasTarget>>> = match aliases.get("tool") {
+        Some(tool) => tool.clone().try_into().map_err(|_| top_level("aliases.tool"))?,
+        None => BTreeMap::new(),
+    };
+    let mut map = ToolMap::new();
+    for (namespace, tools) in parsed {
+        if tools.is_empty() {
+            return Err(top_level(&format!("aliases.tool.{namespace}")));
+        }
+        for (tool, targets) in tools {
+            if targets.is_empty() {
+                return Err(top_level(&format!("aliases.tool.{namespace}.{tool}")));
+            }
+            map.insert(
+                format!("tool/{namespace}/{tool}"),
+                targets.into_iter().map(|target| target.name).collect(),
+            );
+        }
+    }
     for target in map.values().flatten() {
         if appa_runtime_api::CanonicalTool::parse(target).is_err() {
             return Err(PackageError::PolicyAliasTarget {
@@ -1192,6 +1201,9 @@ fn lowered_variants(tools: &[String], map: &ToolMap) -> Vec<String> {
         .collect()
 }
 
+/// The tool contract names a policy declares. Only `[[policy.tool]]` names a
+/// contract; the other declaration arrays name annotators, authorities and
+/// sanitizers, which are identifiers and belong to no namespace.
 fn declared_contracts(policy: &Path, document: &Value) -> Result<Vec<String>, PackageError> {
     declarations(document, "tool")
         .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(|name| (tool, name)))
@@ -1309,6 +1321,22 @@ mod tests {
                     Err(PackageError::PolicyAliasTarget { .. })
                 ),
                 "{client}"
+            );
+        }
+        for malformed in [
+            "[aliases]\ntool = 42\n",
+            "[aliases.tool.coding]\nshell = []\n",
+            "[aliases.tool]\ncoding = {}\n",
+            "[aliases.tool.coding]\nshell = [{ name = 42 }]\n",
+            "[aliases.tool.coding]\nshell = [{ name = \"mcp/github/run\", args = { a = 1 } }]\n",
+        ] {
+            let policy = format!("{malformed}{BATTERY_POLICY}");
+            assert!(
+                matches!(
+                    validate_package(battery(&policy).path()),
+                    Err(PackageError::PolicyTopLevel { .. })
+                ),
+                "{malformed}"
             );
         }
         let host = format!("[aliases]\nhost = {{ github = [\"other\"] }}\n{BATTERY_POLICY}");
