@@ -180,7 +180,7 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
 fn unidentified_tool(name: &str) -> String {
     const FULL_NAME: &str = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
     if name == crate::do_something::NAME {
-        return format!("{name:?} is a test step, not a tool. Remove this rule from the policy.");
+        return format!("{name:?} is a test-only tool. Remove this rule from the policy.");
     }
     if !name.contains('/') {
         return format!("{FULL_NAME} {name:?} is not a full name or the exact name of a tool. Use one of them.");
@@ -530,7 +530,7 @@ mod tests {
         let full_name = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
         assert_eq!(
             error_for("appa/do_something"),
-            "\"appa/do_something\" is a test step, not a tool. Remove this rule from the policy."
+            "\"appa/do_something\" is a test-only tool. Remove this rule from the policy."
         );
         assert_eq!(
             error_for("mcp/github"),
