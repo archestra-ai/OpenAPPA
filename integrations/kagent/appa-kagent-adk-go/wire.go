@@ -281,15 +281,6 @@ var refusalClasses = []RefusalClass{
 	RefusalTrajectory, RefusalDispatch, RefusalRemedy, RefusalSpawnNotTaken, RefusalSpawn,
 }
 
-// describe names the decision in a fail-closed message: a refuse's
-// detail and class, the kind otherwise.
-func (d Decision) describe() string {
-	if d.Kind == "refuse" {
-		return fmt.Sprintf("%s (%s)", d.Detail, d.Class)
-	}
-	return d.Kind
-}
-
 // decisionPayloads maps each decision kind to the payload field it
 // must carry. A kind outside this map is outside the wire.
 var decisionPayloads = map[string]string{

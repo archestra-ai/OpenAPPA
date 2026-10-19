@@ -296,13 +296,6 @@ class Decision:
     """On a ``deny_call``: every remedy the block offers, in the order
     the feedback lists them."""
 
-    def describe(self) -> str:
-        """The decision in a fail-closed message: a refuse's detail and
-        class, the kind otherwise."""
-        if self.refusal_class is None:
-            return self.kind
-        return f"{self.detail} ({self.refusal_class.value})"
-
 
 _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
     "ack": (),

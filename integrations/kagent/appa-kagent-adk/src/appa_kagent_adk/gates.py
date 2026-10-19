@@ -36,7 +36,7 @@ import httpx
 from . import wire
 from .identity import SessionIdentity
 from .inventory import ToolInventory, gate_spelling
-from .plugin import AppaFailClosed, AppaPluginKagent
+from .plugin import AppaFailClosed, AppaPluginKagent, decided
 
 logger = logging.getLogger("appa_kagent_adk.gates")
 
@@ -70,10 +70,7 @@ class SyncHookGate:
             answer = self._client.post(self._hook_url, json=event)
         except httpx.HTTPError as error:
             raise AppaFailClosed(f"the appa /hook channel is down: {error}") from error
-        try:
-            return wire.parse_answer(answer.status_code, answer.content)
-        except wire.WireError as error:
-            raise AppaFailClosed(str(error)) from error
+        return decided(answer.status_code, answer.content)
 
     def ids(self, invocation_context: Any) -> tuple[str, str | None]:
         return self._identity.ids_for(invocation_context)
@@ -107,7 +104,7 @@ class GatedCodeExecutor:
         if decision.kind == "deny_call":
             return CodeExecutionResult(stdout="", stderr=self._gate.for_model(decision.feedback))
         if decision.kind not in ("allow_call", "pass_control"):
-            raise AppaFailClosed(f"appa answered the code execution with {decision.describe()}")
+            raise AppaFailClosed(f"appa answered the code execution with {decision.kind}")
         result = self._inner.execute_code(invocation_context, code_execution_input)
         outcome = wire.success({"stdout": result.stdout, "stderr": result.stderr})
         answer = self._gate.post(wire.tool_result(root_id, CODE_EXECUTION_TOOL, arguments, outcome, child_id))
@@ -121,7 +118,7 @@ class GatedCodeExecutor:
         if answer.kind == "block":
             withheld = f"[appa] the tool result was withheld: {self._gate.for_model(answer.reason)}"
             return CodeExecutionResult(stdout="", stderr=withheld)
-        raise AppaFailClosed(f"appa answered the code output with {answer.describe()}")
+        raise AppaFailClosed(f"appa answered the code output with {answer.kind}")
 
 
 def gate_memory_persist(agent: Any, plugin: AppaPluginKagent) -> bool:
@@ -154,13 +151,9 @@ def _gated_persist(stock: Any, plugin: AppaPluginKagent):
             logger.info("appa denied the memory persist for session %s: %s", session.id, decision.feedback)
             return None
         if decision.kind not in ("allow_call", "pass_control"):
-            raise AppaFailClosed(f"appa answered the memory persist with {decision.describe()}")
+            raise AppaFailClosed(f"appa answered the memory persist with {decision.kind}")
         returned = await stock(callback_context)
-        report = await plugin.report_synthetic_result(
-            invocation_context, MEMORY_PERSIST_TOOL, arguments, {"persisted": True}
-        )
-        if report.kind == "refuse":
-            raise AppaFailClosed(f"appa answered the memory persist report with {report.describe()}")
+        await plugin.report_synthetic_result(invocation_context, MEMORY_PERSIST_TOOL, arguments, {"persisted": True})
         return returned
 
     return appa_gated_memory_persist

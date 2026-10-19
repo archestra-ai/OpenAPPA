@@ -591,7 +591,7 @@ func TestARefusedChildStartFailsClosedAndTheNextEntryOpensAgain(t *testing.T) {
 	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	_, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices"))
 	failure := mustFailClosed(t, err, "the refused child start")
-	if failure.Reason != "appa refused the session: storage failure (storage)" {
+	if failure.Reason != "appa refused: storage failure (storage)" {
 		t.Errorf("the refusal detail must reach the failure, got %q", failure.Reason)
 	}
 	// Content another run landed in the shared child session between the
@@ -1314,7 +1314,7 @@ func TestARefusedChildScopeFailsClosed(t *testing.T) {
 	}
 	_, err := p.beforeAgent(newFakeContext(sess).forAgent("billing-agent"))
 	failure := mustFailClosed(t, err, "the refused child scope")
-	if failure.Reason != "appa refused the child scope: storage failure (storage)" {
+	if failure.Reason != "appa refused: storage failure (storage)" {
 		t.Errorf("the refusal detail must reach the failure, got %q", failure.Reason)
 	}
 }

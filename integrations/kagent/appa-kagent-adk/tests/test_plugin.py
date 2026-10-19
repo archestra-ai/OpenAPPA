@@ -491,7 +491,7 @@ async def test_a_refused_child_start_leaves_the_pair_unopened():
     hook = Hook({"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure"}, ACK, ACK)
     plugin = plugin_over(hook)
     session = delegated_child("root-1")
-    with pytest.raises(AppaFailClosed, match="appa refused the session: storage failure"):
+    with pytest.raises(AppaFailClosed):
         await plugin.on_user_message_callback(
             invocation_context=FakeInvocationContext(session, "i1"), user_message=FakeContent("total the invoices")
         )

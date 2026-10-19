@@ -580,7 +580,8 @@ func (p *AppaPluginKagent) send(ctx context.Context, wire map[string]any, timeou
 	return answer.StatusCode, answered, nil
 }
 
-// post sends one gated event; an answer outside parseAnswer fails closed.
+// post sends one gated event. A refuse, and an answer outside
+// parseAnswer, fail closed here, so no caller sees either.
 func (p *AppaPluginKagent) post(ctx context.Context, wire map[string]any) (Decision, error) {
 	status, answered, err := p.send(ctx, wire, gatedTimeout)
 	if err != nil {
@@ -589,6 +590,9 @@ func (p *AppaPluginKagent) post(ctx context.Context, wire map[string]any) (Decis
 	decision, err := parseAnswer(status, answered)
 	if err != nil {
 		return Decision{}, failClosed("%v", err)
+	}
+	if decision.Kind == "refuse" {
+		return Decision{}, failClosed("appa refused: %s (%s)", decision.Detail, decision.Class)
 	}
 	return decision, nil
 }
@@ -894,7 +898,7 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 		// request stands unchanged.
 		contract = p.forModel(ctx, decision.Text)
 	case decision.Kind != "ack":
-		return "", failClosed("appa refused the session: %s", decision.describe())
+		return "", failClosed("appa refused the session: %s", decision.Kind)
 	}
 	if ids.childID != "" {
 		// A child_start for a pair the runtime already holds open
@@ -944,7 +948,7 @@ func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessa
 	case "block":
 		return nil, failClosed("appa blocked the prompt: %s", decision.Reason)
 	default:
-		return nil, failClosed("appa answered the prompt with %s", decision.describe())
+		return nil, failClosed("appa answered the prompt with %s", decision.Kind)
 	}
 }
 
@@ -1254,7 +1258,7 @@ func (p *AppaPluginKagent) beforeAgent(ctx agent.Context) (*genai.Content, error
 		return nil, err
 	}
 	if decision.Kind != "ack" {
-		return nil, failClosed("appa refused the child scope: %s", decision.describe())
+		return nil, failClosed("appa refused the child scope: %s", decision.Kind)
 	}
 	return nil, nil
 }
@@ -1339,7 +1343,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 			return nil, err
 		}
 		if decision.Kind != "ack" {
-			return nil, failClosed("appa answered the spawn resume with %s", decision.describe())
+			return nil, failClosed("appa answered the spawn resume with %s", decision.Kind)
 		}
 		return nil, nil
 	}
@@ -1371,7 +1375,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 		p.answerOwn(ctx.FunctionCallID())
 		return map[string]any{"result": p.forModel(ctx, decision.Feedback), denyKey: denied}, nil
 	default:
-		return nil, failClosed("appa answered the tool call with %s", decision.describe())
+		return nil, failClosed("appa answered the tool call with %s", decision.Kind)
 	}
 }
 
@@ -1444,7 +1448,7 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		case "block":
 			return withheldResult(p.forModel(ctx, decision.Reason)), nil
 		default:
-			return nil, failClosed("appa answered the spawn result with %s", decision.describe())
+			return nil, failClosed("appa answered the spawn result with %s", decision.Kind)
 		}
 	}
 	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, arguments, outcome, ids.childID))
@@ -1466,7 +1470,7 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	case "block":
 		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
-		return nil, failClosed("appa answered the tool result with %s", decision.describe())
+		return nil, failClosed("appa answered the tool result with %s", decision.Kind)
 	}
 }
 
@@ -1511,7 +1515,7 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	case "block":
 		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
-		return nil, failClosed("appa answered the tool failure with %s", decision.describe())
+		return nil, failClosed("appa answered the tool failure with %s", decision.Kind)
 	}
 }
 
@@ -1590,7 +1594,7 @@ func (p *AppaPluginKagent) holdTheReturn(ctx agent.Context, text string) (map[st
 	case "block":
 		return map[string]any{"result": fmt.Sprintf(returnBlocked, p.forModel(ctx, decision.Reason))}, nil
 	default:
-		return nil, failClosed("appa answered the child end with %s", decision.describe())
+		return nil, failClosed("appa answered the child end with %s", decision.Kind)
 	}
 }
 
@@ -1605,12 +1609,12 @@ func (p *AppaPluginKagent) crossing(invocationID, value string) map[string]any {
 }
 
 // describeAnswer names a decision in a fail-closed message: the
-// reason a block carries, otherwise what describe names.
+// reason a block carries, otherwise the kind.
 func describeAnswer(decision Decision) string {
 	if decision.Reason != "" {
 		return decision.Reason
 	}
-	return decision.describe()
+	return decision.Kind
 }
 
 // returnOffer is the offer of a deny that takes the return of a child
@@ -1650,11 +1654,7 @@ func (p *AppaPluginKagent) declareReturn(
 	if err != nil {
 		return Decision{}, err
 	}
-	switch vouch.Kind {
-	case "pass_control":
-	case "refuse":
-		return Decision{}, failClosed("appa refused the return declaration: %s", vouch.describe())
-	default:
+	if vouch.Kind != "pass_control" {
 		log.Printf("appa: appa answered the return declaration %s with %s, so the block goes to the model",
 			offer.OfferID, vouch.Kind)
 		return denial, nil
