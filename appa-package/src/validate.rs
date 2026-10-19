@@ -1103,8 +1103,8 @@ type ToolMap = BTreeMap<String, Vec<String>>;
 #[serde(deny_unknown_fields)]
 struct AliasTarget {
     name: String,
-    #[serde(default, rename = "args")]
-    _args: BTreeMap<String, String>,
+    #[serde(default)]
+    args: BTreeMap<String, String>,
     #[serde(default, rename = "confined")]
     _confined: bool,
 }
@@ -1139,8 +1139,12 @@ fn check_tool_aliases(
             return Err(top_level(&format!("aliases.tool.{namespace}")));
         }
         for (tool, targets) in tools {
-            if targets.is_empty() {
-                return Err(top_level(&format!("aliases.tool.{namespace}.{tool}")));
+            let field = format!("aliases.tool.{namespace}.{tool}");
+            // The loader refuses a target reading two canonical arguments as one.
+            let collapses =
+                |target: &AliasTarget| target.args.values().collect::<BTreeSet<_>>().len() != target.args.len();
+            if targets.is_empty() || targets.iter().any(collapses) {
+                return Err(top_level(&field));
             }
             map.insert(
                 format!("tool/{namespace}/{tool}"),
@@ -1329,6 +1333,7 @@ mod tests {
             "[aliases.tool]\ncoding = {}\n",
             "[aliases.tool.coding]\nshell = [{ name = 42 }]\n",
             "[aliases.tool.coding]\nshell = [{ name = \"mcp/github/run\", args = { a = 1 } }]\n",
+            "[aliases.tool.coding]\nshell = [{ name = \"mcp/github/run\", args = { a = \"x\", b = \"x\" } }]\n",
         ] {
             let policy = format!("{malformed}{BATTERY_POLICY}");
             assert!(
