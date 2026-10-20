@@ -22,8 +22,7 @@ canonical tool does:
 | `tool/coding/fetch_url` | `host/claude-code/WebFetch` | |
 | `tool/coding/web_search` | `host/claude-code/WebSearch` | |
 
-The `coding` battery's README describes those rules. A confined Bash or
-PowerShell result is withheld until the `redact-secrets` sanitizer masks it.
+The `coding` battery's README describes those rules.
 PowerShell is the tool Claude Code offers on Windows beside Bash.
 
 `host/claude-code/Monitor` runs a shell command or opens a WebSocket, and its
@@ -64,8 +63,9 @@ particular Bash command or Read path needs stricter, looser, or fully blocked
 behavior. A root Bash rule also precedes the `coding` battery's credential
 rules, so a command it matches is not narrowed for a credential path it names.
 
-The map's `confined = true` confines Bash and PowerShell results, so the masker
-can run on the command's output; a root needs no deployment setting for it.
+The map's `confined = true` confines Bash and PowerShell results, so a
+sanitizer the root declares can run on the command's output; a root needs no
+deployment setting for it.
 `appa battery remove claude-code` takes the map, and with it the confinement,
 out.
 

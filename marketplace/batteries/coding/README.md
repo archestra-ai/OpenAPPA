@@ -20,16 +20,7 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. A client whose map entry sets
-  `confined = true` withholds the command's result, and the battery offers the
-  stock `redact-secrets` sanitizer, which masks private-key blocks, tokens of
-  well-known shapes, the AWS secret access key, passwords inside URLs, the
-  value of any assignment whose key names a secret, and long high-entropy
-  runs, then returns the masked output to `internal`: the model reads the masked
-  text and the session keeps its label.
-  The sanitizer carries no tags: it is offered for any withheld shell result
-  the session cannot read as it is, including one the Annotator narrowed to
-  `self`, and for a subagent's return. Before any other command runs, the
+  the session to `self`, the requester. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
@@ -58,7 +49,7 @@ claude-code` includes both. A rule no map binds is inactive.
   for both path separators and for the Windows homes of the GitHub CLI and
   gcloud configs, plus `Get-StoredCredential` and `Get-Secret`; the same
   publishing selectors; the `claude-code.bash-requirements` Annotator
-  for every other command; and the same masked results.
+  for every other command.
 - **read_file** — Reading a hidden path, a credential file, a private key, or
   a system secret location narrows the session to `self`: nothing built from
   it reaches a sink that requires `internal` or `public`. The rules match the

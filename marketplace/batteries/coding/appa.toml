@@ -14,14 +14,10 @@
 [policy]
 version = 2
 
-# --- shell: commands naming requester credentials are `self` data, masked ---
+# --- shell: commands naming requester credentials are `self` data ---
 
 # A command naming a credential path narrows the session to `self`, the
-# requester. A client's map entry withholds the command's result (`confined = true`)
-# and the `redact-secrets` sanitizer masks every token before the
-# output reaches the model and returns the value to `internal`: the session
-# keeps its label and the masked text is what the model reads. The `credentials`
-# tag records why a rule is here; the sanitizer is not scoped to it.
+# requester. The `credentials` tag records why a rule is here.
 [[policy.tool]]
 name = "tool/coding/shell(command:*.env*)"
 delta = { audience = ["self"] }
@@ -451,24 +447,6 @@ annotator = "claude-code.bash-repository-requirements"
 name = "tool/coding/powershell"
 description = "Runs one PowerShell command and returns its output."
 annotator = "claude-code.bash-requirements"
-
-# The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
-# well-known shapes, the AWS secret access key, the value of any assignment
-# whose key names a secret, and long high-entropy runs. It carries no tags, so
-# it is offered for every withheld Bash result the session cannot read as it
-# is, whether a static `credentials` rule or the Annotator narrowed it: an
-# Annotator's answer cannot tag a call, so a tagged sanitizer would never reach
-# a command the static rules do not name. Without tags it is also offered for a
-# subagent's return.
-[[policy.sanitizer]]
-name = "redact-secrets"
-on = ["tool_output"]
-
-[policy.sanitizer.permits]
-audience = { from = ["self"], to = ["internal"] }
-
-[externals.sanitizers.redact-secrets]
-builtin = "redact-secrets"
 
 # --- read_file: the requester's own secrets are `self` data ---
 

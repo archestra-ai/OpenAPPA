@@ -8,7 +8,7 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `coding/` | canonical coding-agent tools under `tool/coding/`: `shell`, `powershell`, `read_file`, `search_files`, `write_file`, `edit_file`, `fetch_url`, `web_search`; a client battery's `[aliases.tool.coding]` map binds them | The Claude Code model annotates shell and PowerShell calls; the stock `redact-secrets` sanitizer masks each confined shell result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `coding/` | canonical coding-agent tools under `tool/coding/`: `shell`, `powershell`, `read_file`, `search_files`, `write_file`, `edit_file`, `fetch_url`, `web_search`; a client battery's `[aliases.tool.coding]` map binds them | The Claude Code model annotates shell and PowerShell calls; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
 | `claude-code/` | Claude Code's built-in tools: the map binding `coding`'s canonical tools to `Bash`, `PowerShell`, `Read`, `Grep`, `Write`, `Edit`, `WebFetch` and `WebSearch`, and rules for `Monitor` and the tools only Claude Code offers; include it with `coding` | The Claude Code model annotates Monitor calls |
 | `opencode/` | selected OpenCode V2 file, web, shell, and foreground delegation tools; shell starts with `pwd` only | none |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
