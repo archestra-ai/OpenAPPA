@@ -3330,6 +3330,9 @@ mod tests {
         let token = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = \"APPA_X\"\n");
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
 
+        let no_tokens = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = []\n");
+        assert!(matches!(parse(&no_tokens), Err(ConfigError::ImplementationChoice { .. })));
+
         let command_and_url =
             format!("{MINIMAL}\n[externals.sanitizers.pii]\nurl = \"https://a.example\"\ncommand = [\"x\"]\n");
         assert!(matches!(
@@ -4512,6 +4515,59 @@ mod tests {
 
         std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write version mismatch");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
+    }
+
+    #[test]
+    fn a_root_policy_version_is_judged_before_its_command_metadata() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let write_root = |version: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "[policy]\nversion = {version}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                     [externals.annotators.root]\ncommand = ['python3', 'root.py']\n\
+                     [appa_composed.command_cwd]\n'sanitizers.other' = '/elsewhere'\n"
+                ),
+            )
+            .expect("write root config");
+        };
+
+        write_root("'two'");
+        assert!(matches!(Config::load(&root), Err(ConfigError::InvalidPolicyVersion)));
+
+        write_root("2");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::InvalidComposedMetadata { .. })
+        ));
+    }
+
+    #[test]
+    fn a_fragment_version_is_judged_before_its_externals() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            "include = ['battery.toml']\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root config");
+        let write_battery = |version: i64| {
+            std::fs::write(
+                dir.path().join("battery.toml"),
+                format!("externals = 3\n[policy]\nversion = {version}\n"),
+            )
+            .expect("write included config");
+        };
+
+        write_battery(1);
+        assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
+
+        write_battery(2);
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "externals"
+        ));
     }
 
     /// Per section: a fragment may add named entries and nothing else; the same name in
