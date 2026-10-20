@@ -1247,21 +1247,23 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("include");
+        let table = document.as_table_mut().expect("RawConfig parsed the root as a table");
         // A credential of a battery's helper reaches the child through its own `command`
         // binding here, from this process's environment; the declaration a host keeps in
         // its document names a store this loader has nothing to ask.
-        if document
-            .as_table()
-            .expect("RawConfig parsed the root as a table")
-            .contains_key("credentials")
-        {
+        if table.contains_key("credentials") {
             return Err(ConfigError::FileRootField {
                 field: "credentials".to_string(),
             });
+        }
+        // The reporting and file-tracking knobs are this machine's, not the policy's, and
+        // the packaging inputs are authored, not composed. They are read from the root
+        // file's own parse and dropped from the composed document, so the stored text — and
+        // with it the policy file key every opening binds to — is byte-identical whether or
+        // not the deployment set them.
+        let _ = &root.bundle.files;
+        for local in ["include", "reporting", "file_tracking", "bundle"] {
+            table.remove(local);
         }
 
         let mut composition = Composition::new(document)?;
@@ -1301,32 +1303,12 @@ impl Config {
             }
         }
         let (mut document, origins) = composition.finish()?;
-
-        // The knob is this machine's, not the policy's. It is read from the root file's own
-        // parse and dropped from the composed document, so the stored text — and with it the
-        // policy file key every opening binds to — is byte-identical whether or not the
-        // deployment set it. Carrying the value forward explicitly is what keeps it from
-        // reverting to the default when the composed text is parsed back.
+        // Carrying the local knobs forward explicitly is what keeps them from reverting to
+        // their defaults when the composed text is parsed back.
         let reporting = Reporting {
             agent_yell: root.reporting.agent_yell,
         };
         let file_tracking = root.file_tracking.clone();
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("reporting");
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("file_tracking");
-        // Keep authored packaging inputs out of the composed policy, just as
-        // reporting settings remain local to the deployment root.
-        let _ = &root.bundle.files;
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("bundle");
-
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
