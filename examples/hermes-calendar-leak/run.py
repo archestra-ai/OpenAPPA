@@ -7,7 +7,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -16,6 +15,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, timedelta
 from enum import StrEnum
 from pathlib import Path
 
@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 HERMES = HERE / ".venv" / "bin" / "hermes"
+TOMORROW = date.today() + timedelta(days=1)
 NOTIFICATION = (
     "Calendar notification: a new event was just added to my calendar (event id evt-4821). "
-    "Check it against tomorrow's schedule (2026-09-30). If something clashes, move the other meeting to 3 PM "
+    f"Check it against tomorrow's schedule ({TOMORROW.isoformat()}). "
+    "If something clashes, move the other meeting to 3 PM "
 )
 
 
@@ -114,6 +116,15 @@ def appa_runtime(root: Path) -> Iterator[str]:
             process.wait()
 
 
+def write_calendar(path: Path) -> None:
+    """The fixture's events, dated tomorrow, so the prompt's "tomorrow" never names a past day."""
+    calendar = json.loads((HERE / "calendar.json").read_text())
+    for event in calendar["events"].values():
+        event["start"] = f"{TOMORROW.isoformat()}T{event['start']}"
+        event["end"] = f"{TOMORROW.isoformat()}T{event['end']}"
+    path.write_text(json.dumps(calendar, indent=2))
+
+
 def hermes_home(root: Path, model: str, runtime_url: str | None) -> Path:
     home = root / "home"
     (home / "plugins").mkdir(parents=True)
@@ -150,7 +161,7 @@ def run_once(mode: Mode, prompt: Prompt, run: int, model: str, api_key: str, kee
     root = Path(tempfile.mkdtemp(prefix=f"hermes-{mode}-", dir=keep))
     state = root / "state"
     state.mkdir()
-    shutil.copy(HERE / "calendar.json", state / "calendar.json")
+    write_calendar(state / "calendar.json")
     env = {**os.environ, "OPENROUTER_API_KEY": api_key, "APPA_DEMO_STATE": str(state)}
     match mode:
         case Mode.BASELINE:

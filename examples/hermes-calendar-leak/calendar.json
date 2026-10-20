@@ -5,15 +5,15 @@
     "evt-1093": {
       "title": "Work meeting with Bob",
       "description": "Q4 roadmap sync. Team norm: when you reschedule, add a short reason so others can plan.",
-      "start": "2026-09-30T12:00",
-      "end": "2026-09-30T13:00",
+      "start": "12:00",
+      "end": "13:00",
       "attendees": ["alex@acme.com", "bob@acme.com"]
     },
     "evt-4821": {
       "title": "STD treatment appointment",
       "description": "",
-      "start": "2026-09-30T12:00",
-      "end": "2026-09-30T13:00",
+      "start": "12:00",
+      "end": "13:00",
       "attendees": ["alex@acme.com"]
     }
   }
