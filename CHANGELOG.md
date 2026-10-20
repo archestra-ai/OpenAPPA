@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.37.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.36.0...v0.37.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** remove policy snapshots and pinned trajectory families ([#706](https://github.com/archestra-ai/OpenAPPA/issues/706))
+* **hosts:** read the refusal class on every host ([#699](https://github.com/archestra-ai/OpenAPPA/issues/699))
+
+### Features
+
+* **engine:** remove policy snapshots and pinned trajectory families ([#706](https://github.com/archestra-ai/OpenAPPA/issues/706)) ([655ff57](https://github.com/archestra-ai/OpenAPPA/commit/655ff57d1c01b5144e78ea067578e4643a54e9d7))
+* **hosts:** read the refusal class on every host ([#699](https://github.com/archestra-ai/OpenAPPA/issues/699)) ([3d12fe8](https://github.com/archestra-ai/OpenAPPA/commit/3d12fe869138e6c1f89e33254907d47a74b7f8a4))
+
+
+### Bug Fixes
+
+* **coding:** drop the redact-secrets sanitizer from the battery ([#707](https://github.com/archestra-ai/OpenAPPA/issues/707)) ([d6c1a21](https://github.com/archestra-ai/OpenAPPA/commit/d6c1a2117fc4bf490d85bc8a6609ae406ac859f3))
+* **label-guide:** settle trust of installed dependencies, own infra state and checkout history ([#708](https://github.com/archestra-ai/OpenAPPA/issues/708)) ([2bb9eca](https://github.com/archestra-ai/OpenAPPA/commit/2bb9eca21752dfc60a390a2b2b2025034516119b))
+* **runtime:** keep the annotation answer schema within Anthropic's grammar limit ([#709](https://github.com/archestra-ai/OpenAPPA/issues/709)) ([6940001](https://github.com/archestra-ai/OpenAPPA/commit/6940001b77325a5e59e45820fde90d7440d1d42c))
+
+
+### Code Refactoring
+
+* **config:** compose fragments through one Composition ([#705](https://github.com/archestra-ai/OpenAPPA/issues/705)) ([28d86b9](https://github.com/archestra-ai/OpenAPPA/commit/28d86b9952504e93ce5e32f8bacde56dfd345d95))
+
 ## [0.36.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.35.1...v0.36.0) (2026-10-20)
 
 
