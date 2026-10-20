@@ -23,7 +23,7 @@ The installer places `appa` in `~/.local/bin`.
 2. Registers lifecycle hooks in your user-level Claude Code settings.
 3. Adds the runtime's `appa` MCP server to Claude Code.
 4. Installs the `/appa-guide` onboarding skill.
-5. Installs `clappa` (the protected session launcher) and includes the default `claude-code` battery for built-in tools.
+5. Installs `clappa` (the protected session launcher) and includes the default `coding` and `claude-code` batteries for built-in tools.
 
 Existing custom hooks, MCP servers, and global status lines remain untouched. The hooks act only in sessions that `clappa` starts. A plain `claude` session, and every other agent that reads the same settings, runs as before.
 

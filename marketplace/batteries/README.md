@@ -8,7 +8,8 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | seven built-in tools of a Claude Code session: `host/claude-code/Bash`, `Monitor`, `PowerShell`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash, PowerShell and Monitor calls; the stock `redact-secrets` sanitizer masks each withheld Bash and PowerShell result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `coding/` | canonical coding-agent tools under `tool/coding/`: `shell`, `powershell`, `read_file`, `search_files`, `write_file`, `edit_file`, `fetch_url`, `web_search`; a client battery's `[aliases.tool.coding]` map binds them | The Claude Code model annotates shell and PowerShell calls; the stock `redact-secrets` sanitizer masks each confined shell result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `claude-code/` | Claude Code's built-in tools: the map binding `coding`'s canonical tools to `Bash`, `PowerShell`, `Read`, `Grep`, `Write`, `Edit`, `WebFetch` and `WebSearch`, and rules for `Monitor` and the tools only Claude Code offers; include it with `coding` | The Claude Code model annotates Monitor calls |
 | `opencode/` | selected OpenCode V2 file, web, shell, and foreground delegation tools; shell starts with `pwd` only | none |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
@@ -34,11 +35,11 @@ replaces the deployment's battery store beside the root config, so the line it
 writes reads:
 
 ```toml
-include = ["batteries/claude-code/appa.toml"]
+include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 ```
 
 A battery names each tool by its canonical tool id (`mcp/<server>/<tool>`,
-`host/claude-code/<name>`), never by the host's own spelling.
+`host/claude-code/<name>`, `tool/<namespace>/<tool>`), never by the host's own spelling.
 
 Each battery's `command` bindings run in the battery's own directory.
 [`examples/README.md`](../../examples/README.md) explains how a root

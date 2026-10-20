@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.36.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.35.1...v0.36.0) (2026-10-20)
+
+
+### Features
+
+* **marketplace:** canonical coding battery; claude-code maps onto it ([#697](https://github.com/archestra-ai/OpenAPPA/issues/697)) ([e935b5b](https://github.com/archestra-ai/OpenAPPA/commit/e935b5b10293677a498413a7c43ce06c576d8008))
+* **package:** batteries list the deployment targets they support ([#691](https://github.com/archestra-ai/OpenAPPA/issues/691)) ([2b0358c](https://github.com/archestra-ai/OpenAPPA/commit/2b0358c04789f060d3a99885f78c41178beb82fd))
+* **policy:** [aliases.tool] binds canonical tools to client tools ([#696](https://github.com/archestra-ai/OpenAPPA/issues/696)) ([975459a](https://github.com/archestra-ai/OpenAPPA/commit/975459aac861cdddc5feb122374dcf34d6417862))
+* **replay:** observe steps without `expect` and print decisions as JSON ([#688](https://github.com/archestra-ai/OpenAPPA/issues/688)) ([e6015f9](https://github.com/archestra-ai/OpenAPPA/commit/e6015f99982f4fb7d4962cc01fb723624637bb3e))
+
+
+### Bug Fixes
+
+* **annotators:** a request to a loopback address stays on this machine ([#692](https://github.com/archestra-ai/OpenAPPA/issues/692)) ([b1cd70b](https://github.com/archestra-ai/OpenAPPA/commit/b1cd70b93f8f76818f30c50c42508d6b7352ea9d))
+* **annotators:** require trust only for outward acts and fetched code ([#690](https://github.com/archestra-ai/OpenAPPA/issues/690)) ([7a3c42d](https://github.com/archestra-ai/OpenAPPA/commit/7a3c42d5b2412daf7779fa6d94969508d6a47167))
+* **eventlog:** gate the postgres CAS test behind the postgres feature ([#693](https://github.com/archestra-ai/OpenAPPA/issues/693)) ([e118cc2](https://github.com/archestra-ai/OpenAPPA/commit/e118cc23bb743df45e90c3c09d9c50f8f0a0056d))
+* **eventlog:** retain safe PostgreSQL error diagnostics ([#700](https://github.com/archestra-ai/OpenAPPA/issues/700)) ([2a8e13d](https://github.com/archestra-ai/OpenAPPA/commit/2a8e13d1f273ac538abbbb4e044b60b95d83432a))
+* **runtime:** explain what is wrong with an unidentified tool name ([#698](https://github.com/archestra-ai/OpenAPPA/issues/698)) ([714a142](https://github.com/archestra-ai/OpenAPPA/commit/714a14272d8361c600ea74c75ca8a65b2698a417))
+* **runtime:** hold a parallel subagent spawn until the earlier one binds ([#694](https://github.com/archestra-ai/OpenAPPA/issues/694)) ([54a17d0](https://github.com/archestra-ai/OpenAPPA/commit/54a17d00c0fd626839d40ecf5a9f5cb380e5651c))
+* warn on `*` inside a URL host; let a search query leave a narrowed session ([#687](https://github.com/archestra-ai/OpenAPPA/issues/687)) ([c9a66ae](https://github.com/archestra-ai/OpenAPPA/commit/c9a66aeb8bbaec4ffb4738d18a914357dc72b6bd))
+
 ## [0.35.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.35.0...v0.35.1) (2026-10-18)
 
 

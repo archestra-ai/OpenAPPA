@@ -620,21 +620,23 @@ max_body_bytes = 65536
     #[test]
     fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
         let dir = tempfile::tempdir().unwrap();
-        let battery = dir.path().join("batteries/claude-code");
-        std::fs::create_dir_all(&battery).unwrap();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let default =
             std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
-        std::fs::copy(
-            repository.join("marketplace/batteries/claude-code/appa.toml"),
-            battery.join("appa.toml"),
-        )
-        .unwrap();
+        for name in ["coding", "claude-code"] {
+            let battery = dir.path().join("batteries").join(name);
+            std::fs::create_dir_all(&battery).unwrap();
+            std::fs::copy(
+                repository.join("marketplace/batteries").join(name).join("appa.toml"),
+                battery.join("appa.toml"),
+            )
+            .unwrap();
+        }
         let config = dir.path().join("appa.toml");
         std::fs::write(
             &config,
             format!(
-                "include = [\"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
+                "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
             ),
         )
         .unwrap();

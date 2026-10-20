@@ -96,6 +96,7 @@ jobs:
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
               - 'marketplace/plugins/kagent/fixtures/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - '.github/workflows/ci.yml'
             receiver:
               - 'receiver/**'
@@ -108,6 +109,7 @@ jobs:
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'marketplace/plugins/kagent/fixtures/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
@@ -145,6 +147,7 @@ jobs:
             plugin:
               - 'integrations/amp/**'
               - 'integrations/opencode/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - 'marketplace/plugins/opencode/**'
               - 'integrations/appa-guide/**'
               - 'website/content/docs/contracts.md'

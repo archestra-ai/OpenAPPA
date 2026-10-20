@@ -1226,6 +1226,38 @@ import { Cause, Effect as Effect4, Schema as Schema29, Semaphore } from "effect"
 import { lstat as lstat2, realpath as realpath2, stat } from "fs/promises";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, relative, resolve as resolve2, sep } from "path";
 
+// integrations/opencode/refusal.ts
+var REFUSAL_CLASSES = [
+  "storage",
+  "untrusted_log",
+  "policy_unavailable",
+  "policy_moved",
+  "inventory_refused",
+  "engine_invariant",
+  "contended",
+  "resolution_diverged",
+  "annotation_refused",
+  "undeclared_tool",
+  "undeclared_spawn",
+  "peer_message",
+  "principal",
+  "outstanding_call",
+  "call_id_reused",
+  "trajectory_ended",
+  "trajectory",
+  "dispatch",
+  "remedy",
+  "spawn_not_taken",
+  "spawn"
+];
+function isRefusalClass(value) {
+  return REFUSAL_CLASSES.includes(value);
+}
+function refusal(reply) {
+  let { class: refused, detail } = reply;
+  return isRefusalClass(refused) && typeof detail === "string" ? { class: refused, detail } : void 0;
+}
+
 // integrations/opencode/setup.ts
 import { createHash } from "crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "fs/promises";
@@ -1380,11 +1412,15 @@ var appencode_default = Plugin.define({
         }),
         signal: AbortSignal.timeout(30000),
         redirect: "error"
-      }), reply = await response2.json();
+      }), reply = await response2.json(), invalid = Error("[appencode] Invalid runtime reply. Check --adapter opencode and the runtime logs.");
       if (!reply || reply.protocol !== 1 || typeof reply.decision !== "string")
-        throw Error("[appencode] Invalid runtime reply. Check --adapter opencode and the runtime logs.");
-      if (reply.decision === "refuse")
-        throw Error(`[appencode] ${text(reply, "detail")}`);
+        throw invalid;
+      if (reply.decision === "refuse") {
+        let refused = refusal(reply);
+        if (!refused || response2.status !== 409)
+          throw invalid;
+        throw Error(`[appencode] ${refused.detail} (${refused.class})`);
+      }
       if (!response2.ok)
         throw Error(`[appencode] Runtime returned HTTP ${response2.status}.`);
       return reply;

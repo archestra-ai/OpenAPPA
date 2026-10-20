@@ -1,0 +1,1782 @@
+# Rules for the tools every coding agent offers, written once for canonical
+# tools: `shell`, `powershell`, `read_file`, `search_files`, `write_file`,
+# `edit_file`, `fetch_url` and `web_search` under `tool/coding/`. A client
+# battery's `[aliases.tool.coding]` map binds each canonical tool to the
+# client's own tool and argument names; a rule no map binds is inactive.
+#
+# Order matters: the first matching rule wins, so the argument-selected
+# credential rules come before each tool's bare rule. A name written
+# with a selector is declared, and a call no selector matches is refused rather
+# than sent to a root's `*` fallback, so the bare rules at the end of each
+# group are what keep ordinary commands, reads, searches and writes running.
+
+
+[policy]
+version = 2
+
+# --- shell: commands naming requester credentials are `self` data, masked ---
+
+# A command naming a credential path narrows the session to `self`, the
+# requester. A client's map entry withholds the command's result (`confined = true`)
+# and the `redact-secrets` sanitizer masks every token before the
+# output reaches the model and returns the value to `public`: the session
+# keeps its label and the masked text is what the model reads. The `credentials`
+# tag records why a rule is here; the sanitizer is not scoped to it.
+[[policy.tool]]
+name = "tool/coding/shell(command:*.env*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.claude.json*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.credentials.json*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.ssh/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.aws/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.netrc*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.config/gh/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*id_rsa*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*id_ed25519*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/proc/*environ*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.docker/config.json*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.git-credentials*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.kube/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.npmrc*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.pypirc*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.azure/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.gnupg/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.config/gcloud/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.password-store/*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*.vault-token*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+# The Databricks CLI prints the login's own credential on request, and its
+# profile file holds tokens; `configure` writes one there. The CLI takes its
+# global flags anywhere (`databricks --profile dev auth token`), so the
+# verb is matched after `databricks` with anything between. A selector is a
+# substring of the command line, so a spelling these miss (the command
+# inside `$(...)`, a heredoc, an alias) reaches the Bash Annotator below.
+[[policy.tool]]
+name = "tool/coding/shell(command:*.databrickscfg*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*databricks*auth token*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*databricks*auth env*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*databricks*secrets get-secret*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*databricks*configure*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+# --- shell: publishing selectors, then every other command ---
+
+# A command no credential selector above names is labeled per call. The GitHub
+# battery's context provider, when installed, tells the repository Annotator
+# which repository a command reaches and who wrote what it reads.
+[[policy.annotator]]
+name = "claude-code.bash-repository-requirements"
+builtin = "claude-code"
+hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience."
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*git push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+# Options between `git` and `push`, such as `git -C sub push`.
+[[policy.tool]]
+name = "tool/coding/shell(command:*git -* push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*gh pr *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*gh issue *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*gh release *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*gh api *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*gh repo *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+# How a model Annotator classifies — trust by who wrote the returned text,
+# audience by the visible destination — is the runtime's. Add a `hint` with
+# what only this deployment knows: which hosts are its own and which paths hold
+# whose data. The mandate leaves `audiences` omitted, so it may name readers.
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+
+[[policy.tool]]
+name = "tool/coding/shell"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-requirements"
+
+
+# --- powershell: the shell rules, spelled for Windows ---
+
+# Claude Code on Windows offers PowerShell beside Bash, with the same `command`
+# argument and result. PowerShell takes either path separator, so each
+# directory rule is written for both; `\\` is one literal backslash in a
+# selector. The Windows homes of the GitHub CLI and gcloud configs, the
+# CredentialManager module's `Get-StoredCredential` and SecretManagement's
+# `Get-Secret` are named here too, and `/proc/*/environ` for a WSL command. A
+# selector matches case-sensitively, so another spelling reaches the Annotator.
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.env*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.claude.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.credentials.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.netrc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*id_rsa*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*id_ed25519*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.git-credentials*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.npmrc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.pypirc*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.vault-token*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.databrickscfg*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.ssh/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.ssh\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.aws/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.aws\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.kube/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.kube\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.azure/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.azure\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.gnupg/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.gnupg\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.password-store/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.password-store\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.config/gh/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.config\\gh\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/gcloud/*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.docker/config.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*.docker\\config.json*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*GitHub CLI*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\gcloud\\*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*Get-StoredCredential*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*Get-Secret*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/proc/*environ*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*databricks*auth token*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*databricks*auth env*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*databricks*secrets get-secret*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*databricks*configure*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*git push*)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*git -* push*)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*gh pr *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*gh issue *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*gh release *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*gh api *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*gh repo *)'
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "tool/coding/powershell"
+description = "Runs one PowerShell command and returns its output."
+annotator = "claude-code.bash-requirements"
+
+# The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
+# well-known shapes, the AWS secret access key, the value of any assignment
+# whose key names a secret, and long high-entropy runs. It carries no tags, so
+# it is offered for every withheld Bash result the session cannot read as it
+# is, whether a static `credentials` rule or the Annotator narrowed it: an
+# Annotator's answer cannot tag a call, so a tagged sanitizer would never reach
+# a command the static rules do not name. Without tags it is also offered for a
+# subagent's return.
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_output"]
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
+
+# --- read_file: the requester's own secrets are `self` data ---
+
+# Reading a credential file, a private key, or a system secret location
+# narrows the session to `self`. A selector matches the argument as written,
+# absolute (`*/.ssh/*`) or relative (`.ssh/*`), not the resolved path or its
+# case, so a symlink or an alias (`~`, `..`) to one of these reads under its
+# written name. Hidden names are listed one by one: a selector for every
+# dot-prefixed path would also match `./src/main.rs`. Every other path keeps
+# the session's label. No rule blocks a read or lowers its trust.
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*_history)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*credentials*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*secrets*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*auth.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*token.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*service*account.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*shadow)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.jks)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.key)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.keystore)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.p12)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.pem)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*.pfx)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:/etc/ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:/etc/sudoers*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:/proc/*/environ)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/read_file"
+description = "Reads a file and returns its contents."
+delta = {}
+
+# --- search_files: the content of the requester's secrets is `self` data ---
+
+# Grep returns matching lines when asked for content, and which files match
+# otherwise, so a search inside a credential path is a read of it: the same
+# paths as the Read rules narrow the session to `self`. A search over a
+# directory that happens to hold one of these files is not matched; only the
+# path as written is.
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*_history)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*credentials*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*secrets*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*auth.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*token.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*service*account.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*shadow)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.jks)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.key)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.keystore)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.p12)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.pem)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*.pfx)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:/etc/ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:/etc/sudoers*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:/proc/*/environ)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "tool/coding/search_files"
+description = "Searches file contents and returns the matching lines or file names."
+delta = {}
+
+# --- write_file and edit_file: the requester's secrets and the harness are sinks ---
+
+# Writing into a credential path, or into a file a later process reads as
+# instructions or runs as code (CLAUDE.md, skills, agents, commands, git hooks,
+# shell startup files, launch agents), requires a `trusted` session: content
+# that arrived at `suspicious`, from a web page or an unvetted command, lands
+# there only when the person running the session approves the exact call. The
+# files that can turn the protection off ask that person every time: the
+# harness's settings and hooks, its MCP server list, and the deployment's
+# policy. A selector matches the path as written and is case-sensitive, so
+# a write through a symlink or an alias reads under its written name. Every
+# other path takes the session's label as it is.
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.claude/settings*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.claude/settings*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/appa/appa.toml)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/appa/batteries/*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*_history)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*credentials*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*secrets*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*auth.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*token.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*service*account.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*shadow)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.jks)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.key)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.keystore)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.p12)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.pem)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.pfx)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:/etc/ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:/etc/sudoers*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:/proc/*/environ)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/Library/Keychains/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.claude/settings*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.claude/settings*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/appa/appa.toml)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/appa/batteries/*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*_history)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*credentials*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*secrets*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*auth.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*token.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*service*account.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*shadow)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.jks)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.key)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.keystore)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.p12)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.pem)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.pfx)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:/etc/ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:/etc/sudoers*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:/proc/*/environ)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/Library/Keychains/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.mcp.json)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.claude/hooks/*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*CLAUDE.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*CLAUDE.local.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.claude/skills/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.claude/agents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.claude/commands/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.git/hooks/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.zshrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.zprofile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.bashrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.bash_profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*.profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*/Library/LaunchAgents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/write_file"
+description = "Writes a file."
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.mcp.json)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.claude/hooks/*)"
+requires = { attention = ["human-approval"] }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*CLAUDE.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*CLAUDE.local.md)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.claude/skills/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.claude/agents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.claude/commands/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.git/hooks/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.zshrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.zprofile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.bashrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.bash_profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*.profile)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*/Library/LaunchAgents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/edit_file"
+description = "Replaces text in a file."
+delta = {}
+
+# --- tools that bring outside content into the session ---
+
+# Vendor-written docs and OpenAPPA's own sites: the operator may see the URL,
+# and strangers do not write the page. Each host ends in `/` so a lookalike
+# host such as `code.claude.com.example` falls through to the bare rule.
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://openappa.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://archestra.ai/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://code.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://docs.anthropic.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://platform.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://developers.openai.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://learn.chatgpt.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://doc.rust-lang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://docs.python.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://docs.astral.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://www.typescriptlang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://nodejs.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://developer.mozilla.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://modelcontextprotocol.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://kubernetes.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://helm.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://docs.github.com/*)"
+delta = {}
+
+# Google sees the search query; strangers write the results.
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://www.google.com/search?*)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "tool/coding/fetch_url(url:https://google.com/search?*)"
+delta = { trust = "suspicious" }
+
+# Web pages are authored outside the session, and the URL leaves it for any
+# host: a public sink and an untrusted source at once.
+[[policy.tool]]
+name = "tool/coding/fetch_url"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+# The search provider sees the query, as Google does above; strangers write
+# the results.
+[[policy.tool]]
+name = "tool/coding/web_search"
+delta = { trust = "suspicious" }
