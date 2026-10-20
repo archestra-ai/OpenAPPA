@@ -38,7 +38,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::encryption::{StorageCipher, field_context};
 use ::postgres::{Client, GenericClient};
-use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
@@ -52,6 +51,9 @@ use crate::receipts::{
     Completion, SessionScope, StoredLease, StoredOperation, StoredOperationInput, StoredResult,
     resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
 };
+
+mod target;
+use target::Target;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -120,7 +122,7 @@ struct Worker {
 impl Worker {
     /// `wait` bounds each connection attempt and the opening as a whole, unless the URL
     /// sets its own `connect_timeout`.
-    fn connect(url: String, wait: Duration, stall: Option<Duration>) -> Result<Worker, PostgresError> {
+    fn connect(target: Target, wait: Duration, stall: Option<Duration>) -> Result<Worker, PostgresError> {
         let (sender, receiver) = mpsc::channel::<Job>();
         let (ready, initialized) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -130,12 +132,11 @@ impl Worker {
                     if let Some(stall) = stall {
                         std::thread::sleep(stall);
                     }
-                    let tls = native_tls::TlsConnector::new().map_err(|e| PostgresError(e.to_string()))?;
-                    let mut config: ::postgres::Config = url.parse()?;
+                    let Target { mut config, tls } = target;
                     if config.get_connect_timeout().is_none() {
                         config.connect_timeout(wait);
                     }
-                    let mut client = config.connect(MakeTlsConnector::new(tls))?;
+                    let mut client = config.connect(tls)?;
                     // Deliberately no DDL. Core host migrations are required at startup;
                     // optional file-event migrations are checked only when file tracking uses them.
                     client.batch_execute(
@@ -230,7 +231,7 @@ impl Worker {
 }
 
 struct Pool {
-    url: String,
+    target: Target,
     max_connections: NonZeroUsize,
     state: Mutex<PoolState>,
     freed: Condvar,
@@ -287,7 +288,7 @@ impl Pool {
                 state.open += 1;
                 let stall = state.stall_next_connect.take();
                 drop(state);
-                return match Worker::connect(self.url.clone(), remaining, stall) {
+                return match Worker::connect(self.target.clone(), remaining, stall) {
                     Ok(worker) => Ok(Lease {
                         pool: Arc::clone(self),
                         worker: Some(worker),
@@ -483,7 +484,7 @@ impl LeasedPostgres {
 impl PostgresStore {
     pub(super) fn open(url: String, max_connections: NonZeroUsize) -> Result<Self, PostgresError> {
         let pool = Arc::new(Pool {
-            url,
+            target: Target::from_url(&url)?,
             max_connections,
             state: Mutex::new(PoolState {
                 idle: Vec::new(),

@@ -258,6 +258,7 @@ dependencies = [
  "appa-runtime-api",
  "base64 0.22.1",
  "native-tls",
+ "percent-encoding",
  "postgres",
  "postgres-native-tls",
  "ring",
