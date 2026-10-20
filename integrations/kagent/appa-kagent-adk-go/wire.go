@@ -389,24 +389,20 @@ func parseRefusalClass(raw any) (RefusalClass, error) {
 }
 
 // parseAnswer parses the runtime's answer to a gated event; anything
-// else is a *WireError. A 200 carries a decision, a 409 a refuse and
-// nothing else, and every other status fails closed.
+// else is a *WireError. A 409 carries a refuse, a 200 any other
+// decision, and every other status fails closed.
 func parseAnswer(status int, body []byte) (Decision, error) {
-	switch status {
-	case http.StatusOK:
-		return parseDecision(body)
-	case http.StatusConflict:
-		decision, err := parseDecision(body)
-		if err != nil {
-			return Decision{}, err
-		}
-		if decision.Kind != "refuse" {
-			return Decision{}, wireErrorf("a 409 answer carrying a %s decision", decision.Kind)
-		}
-		return decision, nil
-	default:
+	if status != http.StatusOK && status != http.StatusConflict {
 		return Decision{}, wireErrorf("appa answered %d: %s", status, truncate(body, 500))
 	}
+	decision, err := parseDecision(body)
+	if err != nil {
+		return Decision{}, err
+	}
+	if (decision.Kind == "refuse") != (status == http.StatusConflict) {
+		return Decision{}, wireErrorf("a %d answer carrying a %s decision", status, decision.Kind)
+	}
+	return decision, nil
 }
 
 // parseReview reads a deny_call's review entries; absent is none, and

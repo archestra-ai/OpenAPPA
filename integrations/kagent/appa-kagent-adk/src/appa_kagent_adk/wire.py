@@ -357,18 +357,16 @@ def parse_decision(body: bytes | str) -> Decision:
 
 def parse_answer(status: int, body: bytes) -> Decision:
     """Parse the runtime's answer to a gated event; anything else is a
-    `WireError`. A 200 carries a decision, a 409 a ``refuse`` and
-    nothing else, and every other status fails closed."""
+    `WireError`. A 409 carries a ``refuse``, a 200 any other decision,
+    and every other status fails closed."""
     match status:
-        case 200:
-            return parse_decision(body)
-        case 409:
+        case 200 | 409:
             decision = parse_decision(body)
-            if decision.kind != "refuse":
-                raise WireError(f"a 409 answer carrying a {decision.kind} decision")
-            return decision
         case _:
             raise WireError(f"appa answered {status}: {body.decode(errors='replace')[:500]}")
+    if (decision.kind == "refuse") != (status == 409):
+        raise WireError(f"a {status} answer carrying a {decision.kind} decision")
+    return decision
 
 
 def _parse_refusal_class(raw: Any) -> RefusalClass:

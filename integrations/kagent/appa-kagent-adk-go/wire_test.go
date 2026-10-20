@@ -307,6 +307,7 @@ func TestA409AnswerIsARefuse(t *testing.T) {
 		{409, `{"protocol": 1, "decision": "ack"}`},
 		{409, `{"protocol": 1, "decision": "refuse", "detail": "d"}`},
 		{409, `{"error": "malformed event"}`},
+		{200, string(refuse)},
 		{500, string(refuse)},
 		{400, `{"protocol": 1, "decision": "ack"}`},
 	} {

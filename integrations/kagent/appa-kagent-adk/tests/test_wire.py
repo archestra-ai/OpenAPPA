@@ -223,6 +223,7 @@ def test_a_409_answer_is_a_refuse():
         (409, b'{"protocol": 1, "decision": "ack"}'),
         (409, b'{"protocol": 1, "decision": "refuse", "detail": "d"}'),
         (409, b'{"error": "malformed event"}'),
+        (200, REFUSE),
         (500, REFUSE),
         (400, b'{"protocol": 1, "decision": "ack"}'),
     ],

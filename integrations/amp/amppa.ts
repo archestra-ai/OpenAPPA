@@ -59,7 +59,7 @@ export default function amppa(amp: PluginAPI) {
     if (!reply || reply.protocol !== 1 || typeof reply.decision !== 'string') throw invalid
     if (reply.decision === 'refuse') {
       const refused = refusal(reply)
-      if (!refused) throw invalid
+      if (!refused || response.status !== 409) throw invalid
       throw new Error(`[amppa] ${refused.detail} (${refused.class})`)
     }
     if (!response.ok) throw new Error(`[amppa] Runtime returned HTTP ${response.status}.`)

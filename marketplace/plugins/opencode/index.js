@@ -1417,7 +1417,7 @@ var appencode_default = Plugin.define({
         throw invalid;
       if (reply.decision === "refuse") {
         let refused = refusal(reply);
-        if (!refused)
+        if (!refused || response2.status !== 409)
           throw invalid;
         throw Error(`[appencode] ${refused.detail} (${refused.class})`);
       }

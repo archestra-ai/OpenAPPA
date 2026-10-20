@@ -166,8 +166,8 @@ describe('decision enforcement', () => {
       expect(message).toContain(refusalClass)
       server!.stop(true)
     }
-    for (const outside of [{}, { class: 'disk' }, { class: listed[0].toUpperCase() }]) {
-      const plugin = fixture({ protocol: 1, decision: 'refuse', detail, ...outside }, 409)
+    for (const [outside, status] of [[{}, 409], [{ class: 'disk' }, 409], [{ class: listed[0].toUpperCase() }, 409], [{ class: listed[0] }, 200]] as const) {
+      const plugin = fixture({ protocol: 1, decision: 'refuse', detail, ...outside }, status)
       const { action, message } = await plugin.emit('tool.call', call('Read'))
       expect(action).toBe('error')
       expect(message).not.toContain(detail)

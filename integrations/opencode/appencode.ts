@@ -57,7 +57,7 @@ export default Plugin.define({
       if (!reply || reply.protocol !== 1 || typeof reply.decision !== 'string') throw invalid
       if (reply.decision === 'refuse') {
         const refused = refusal(reply)
-        if (!refused) throw invalid
+        if (!refused || response.status !== 409) throw invalid
         throw new Error(`[appencode] ${refused.detail} (${refused.class})`)
       }
       if (!response.ok) throw new Error(`[appencode] Runtime returned HTTP ${response.status}.`)

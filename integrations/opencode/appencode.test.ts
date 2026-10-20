@@ -79,7 +79,8 @@ async function fixture(reply: (event: any) => unknown = event => ({
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const event = await request.json()
     events.push(event)
-    const answer = reply(event) as { decision?: unknown } | null
+    const answer = reply(event) as { decision?: unknown } | Response | null
+    if (answer instanceof Response) return answer
     // The runtime answers a refuse with 409 and every other decision with 200.
     return Response.json(answer, { status: answer?.decision === 'refuse' ? 409 : 200 })
   } })
@@ -176,8 +177,10 @@ describe('published V2 hook contract', () => {
       [{ class: 'policy_moved' }, true],
       [{}, false],
       [{ class: 'disk' }, false],
+      [{ class: 'policy_moved', status: 200 }, false],
     ] as const) {
-      const plugin = await fixture(() => ({ protocol: 1, decision: 'refuse', detail, ...fields }))
+      const { status, ...rest } = { status: 409, ...fields }
+      const plugin = await fixture(() => Response.json({ protocol: 1, decision: 'refuse', detail, ...rest }, { status }))
       const error = await plugin.before('write').then(() => undefined, (error: Error) => error)
       expect(error).toBeInstanceOf(Error)
       expect(error!.message.includes(detail)).toBe(surfaced)
