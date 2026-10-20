@@ -28,7 +28,7 @@ Every Claude Code install includes the [Claude Code tools battery](/battery-clau
 - **Reading credentials narrows the trajectory.** Read, Grep, Bash, or PowerShell calls that contain configured credential-path spellings narrow the audience to `self`.
 - **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
 - **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
-- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands. The `redact-secrets` sanitizer can mask credential tokens before output reaches the model.
+- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
 These contracts label what a command reads or returns; they do not sandbox the command. Use [isolated file processing](#isolated-file-processing) or an operating-system sandbox for confinement.
 

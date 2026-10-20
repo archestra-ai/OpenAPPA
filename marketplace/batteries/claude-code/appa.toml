@@ -4,8 +4,8 @@
 # live session when it drifts. Include the `coding` battery beside this one.
 
 # Claude Code spells each argument as the canonical tools do. Bash and
-# PowerShell results stay confined so the `coding` battery's `redact-secrets`
-# sanitizer can mask them.
+# PowerShell results stay confined so a sanitizer the root declares can run
+# on them.
 [aliases.tool.coding]
 shell = [{ name = "host/claude-code/Bash", args = { command = "command" }, confined = true }]
 powershell = [{ name = "host/claude-code/PowerShell", args = { command = "command" }, confined = true }]
