@@ -1232,6 +1232,7 @@ var REFUSAL_CLASSES = [
   "untrusted_log",
   "policy_unavailable",
   "policy_moved",
+  "legacy_family",
   "inventory_refused",
   "engine_invariant",
   "contended",

@@ -207,6 +207,7 @@ class RefusalClass(str, Enum):
     UNTRUSTED_LOG = "untrusted_log"
     POLICY_UNAVAILABLE = "policy_unavailable"
     POLICY_MOVED = "policy_moved"
+    LEGACY_FAMILY = "legacy_family"
     INVENTORY_REFUSED = "inventory_refused"
     ENGINE_INVARIANT = "engine_invariant"
     CONTENDED = "contended"

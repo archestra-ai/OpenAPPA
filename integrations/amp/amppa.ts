@@ -7,10 +7,10 @@ type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 // Which operational fault a refuse names, as the runtime spells it (RefusalClass in appa-runtime-api).
 // amppa installs as this one file, so it carries its own copy; its tests hold it to the runtime's list.
 const REFUSAL_CLASSES = [
-  'storage', 'untrusted_log', 'policy_unavailable', 'policy_moved', 'inventory_refused', 'engine_invariant',
-  'contended', 'resolution_diverged', 'annotation_refused', 'undeclared_tool', 'undeclared_spawn', 'peer_message',
-  'principal', 'outstanding_call', 'call_id_reused', 'trajectory_ended', 'trajectory', 'dispatch', 'remedy',
-  'spawn_not_taken', 'spawn',
+  'storage', 'untrusted_log', 'policy_unavailable', 'policy_moved', 'legacy_family', 'inventory_refused',
+  'engine_invariant', 'contended', 'resolution_diverged', 'annotation_refused', 'undeclared_tool',
+  'undeclared_spawn', 'peer_message', 'principal', 'outstanding_call', 'call_id_reused', 'trajectory_ended',
+  'trajectory', 'dispatch', 'remedy', 'spawn_not_taken', 'spawn',
 ] as const
 
 type RefusalClass = (typeof REFUSAL_CLASSES)[number]
