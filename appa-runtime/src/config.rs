@@ -4,6 +4,7 @@
 
 pub mod aliases;
 pub mod edit;
+pub mod tool_aliases;
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -789,8 +790,8 @@ pub enum ConfigError {
     UnresolvedInclude { path: String, reason: Option<String> },
     #[error("the document declares both [aliases] and [server_aliases]; bind mcp namespaces under aliases.mcp only")]
     MixedAliasSpellings,
-    #[error("[aliases] tool is not supported yet; alias namespaces under aliases.mcp or aliases.host")]
-    UnsupportedToolAliases,
+    #[error(transparent)]
+    ToolAlias(#[from] tool_aliases::ToolAliasError),
     #[error("included config {path} has unsupported top-level field {field:?}")]
     IncludedTopLevel { path: String, field: String },
     #[error("included config {path} cannot set policy field {field:?}")]
@@ -1269,6 +1270,7 @@ impl Config {
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
         let mut replaced_annotators = std::collections::BTreeSet::new();
+        let mut tool_maps = Vec::new();
         for authored in &root.include {
             let include = Path::new(authored);
             if include.is_absolute() {
@@ -1279,8 +1281,9 @@ impl Config {
                 path: include_path.display().to_string(),
                 source,
             })?;
-            if let Some(name) = crate::batteries::name_from_include(include) {
-                included_batteries.insert(name);
+            let battery = crate::batteries::name_from_include(include);
+            if let Some(name) = &battery {
+                included_batteries.insert(name.clone());
             }
             for policy_path in target_policies(include_path, target)? {
                 if !seen.insert(policy_path.clone()) {
@@ -1296,7 +1299,7 @@ impl Config {
                         path: policy_path.display().to_string(),
                         source,
                     })?;
-                compose_include(
+                let maps = compose_include(
                     &mut document,
                     included,
                     &policy_path,
@@ -1305,8 +1308,12 @@ impl Config {
                     &mut replaced_annotators,
                     &mut origins,
                 )?;
+                let origin = tool_aliases::MapOrigin::Battery(battery.clone().unwrap_or_else(|| authored.clone()));
+                tool_maps.extend(maps.map(|maps| (origin, maps)));
             }
         }
+        let aliases = aliases::of_document(&document)?;
+        tool_aliases::lower(&mut document, tool_maps, &aliases)?;
 
         // The knob is this machine's, not the policy's. It is read from the root file's own
         // parse and dropped from the composed document, so the stored text — and with it the
@@ -1457,6 +1464,7 @@ impl Config {
         let mut included_batteries = std::collections::BTreeSet::new();
         let mut replaced_annotators = std::collections::BTreeSet::new();
         let mut origins = BTreeMap::new();
+        let mut tool_maps = Vec::new();
         for battery in batteries {
             if !included_batteries.insert(battery.name.to_string()) {
                 return Err(ConfigError::DuplicateInclude {
@@ -1469,7 +1477,7 @@ impl Config {
                     source,
                 })?;
                 refuse_ungranted_credentials(battery, &included)?;
-                compose_include(
+                let maps = compose_include(
                     &mut document,
                     included,
                     Path::new(battery.name),
@@ -1478,8 +1486,12 @@ impl Config {
                     &mut replaced_annotators,
                     &mut origins,
                 )?;
+                let origin = tool_aliases::MapOrigin::Battery(battery.name.to_string());
+                tool_maps.extend(maps.map(|maps| (origin, maps)));
             }
         }
+        let aliases = aliases::of_document(&document)?;
+        tool_aliases::lower(&mut document, tool_maps, &aliases)?;
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         let timeout_ms = i64::try_from(defaults.consult_timeout.as_millis()).map_err(|_| {
             ConfigError::UnrepresentableHostDefault {
@@ -2003,17 +2015,38 @@ fn compose_include(
     root_annotators: &std::collections::BTreeSet<String>,
     replaced_annotators: &mut std::collections::BTreeSet<String>,
     origins: &mut BTreeMap<String, PathBuf>,
-) -> Result<(), ConfigError> {
+) -> Result<Option<tool_aliases::ToolMaps>, ConfigError> {
     let display = include_path.display().to_string();
     let mut included = included.as_table().expect("a TOML document is always a table").clone();
     for field in included.keys() {
-        if !matches!(field.as_str(), "policy" | "externals") {
+        if !matches!(field.as_str(), "policy" | "externals" | "aliases") {
             return Err(ConfigError::IncludedTopLevel {
                 path: display,
                 field: field.clone(),
             });
         }
     }
+    // A fragment may map its own client tools onto canonical ones; which server or host
+    // serves a namespace stays the deployment's to say.
+    let tool_maps = match included.remove("aliases") {
+        None => None,
+        Some(toml::Value::Table(mut aliases)) => {
+            let maps = aliases.remove("tool");
+            if let Some(field) = aliases.keys().next() {
+                return Err(ConfigError::IncludedTopLevel {
+                    path: display,
+                    field: format!("aliases.{field}"),
+                });
+            }
+            maps.map(tool_aliases::parse).transpose()?
+        }
+        Some(_) => {
+            return Err(ConfigError::IncludedTopLevel {
+                path: display,
+                field: "aliases".to_string(),
+            });
+        }
+    };
 
     let included_policy = included
         .remove("policy")
@@ -2088,7 +2121,7 @@ fn compose_include(
     }
 
     let Some(included_externals) = included.remove("externals") else {
-        return Ok(());
+        return Ok(tool_maps);
     };
     let included_externals = included_externals
         .as_table()
@@ -2161,7 +2194,7 @@ fn compose_include(
             );
         }
     }
-    Ok(())
+    Ok(tool_maps)
 }
 
 /// The one deployment setting a fragment may carry: `confined_results` over tools the
@@ -4136,7 +4169,11 @@ mod tests {
         ));
         assert!(matches!(
             hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[aliases]\nhost = { x = [\"y\"] }\n")]),
-            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases"
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases.host"
+        ));
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[aliases]\nmcp = { x = [\"y\"] }\n")]),
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases.mcp"
         ));
         assert!(matches!(
             hosted_composed(

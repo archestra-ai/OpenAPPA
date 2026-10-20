@@ -89,12 +89,17 @@ def _line_for_key(text: str, key: str, start: int = 0) -> tuple[int, int] | None
 def _command_values(
     value: Any, source: Path, text: str, cursor: list[int] | None = None
 ) -> Iterator[Command]:
-    """Yield every value under a TOML key named ``command`` recursively."""
+    """Yield every value under a TOML key named ``command`` recursively.
+
+    A tool map under ``aliases`` names client tool arguments, never commands.
+    """
 
     if cursor is None:
         cursor = [0]
     if isinstance(value, dict):
         for key, child in value.items():
+            if key == "aliases":
+                continue
             if key == "command":
                 found = _line_for_key(text, "command", cursor[0])
                 if found is None:

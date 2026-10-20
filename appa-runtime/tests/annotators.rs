@@ -9,7 +9,10 @@ use common::{actor, audit_len, offer_of, propose, ran, raw, root, serve};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_engine::fact::Fact;
+use appa_engine::label::Trust;
+use appa_eventlog::{Backend, LogStore};
+use appa_runtime::api::{AuditEntry, AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
@@ -405,6 +408,233 @@ async fn a_call_in_flight_across_a_reload_is_decided_at_the_head() {
             HookDecision::Refuse { detail, .. } if detail.contains("status=7")
         ),
         "the in-flight call is decided again at the head, whose Annotator refuses it"
+    );
+}
+
+/// A policy whose two annotated tools route to one Annotator, `annotator`, served at `url`.
+fn revised_policy(annotator: &str, url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "{annotator}"
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+annotator = "{annotator}"
+
+[[policy.tool]]
+name = "search"
+parameters = {{ type = "object", properties = {{ query = {{ type = "string" }} }}, required = ["query"] }}
+annotator = "{annotator}"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.{annotator}]
+url = "{url}"
+"#
+    )
+}
+
+/// The Annotator and tool of every consult `annotator` answered, in order.
+fn consults(annotator: &Annotator) -> Vec<(String, String)> {
+    annotator
+        .requests()
+        .iter()
+        .map(|request| {
+            (
+                request["name"]
+                    .as_str()
+                    .expect("a consult names its Annotator")
+                    .to_string(),
+                request["artifact"]["args"]["name"]
+                    .as_str()
+                    .expect("a consult names its tool")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Every call the family released, with the trust its released label carries, in log order.
+fn released_trust(audit: &[AuditEntry]) -> Vec<(String, String)> {
+    audit
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            AuditEvent::Released { tool, label, .. } => Some((tool.clone(), label.trust.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two tools annotated by one Annotator under revision 1, then by its stricter replacement
+/// under revision 2 after the first is removed from the policy. Each dispatch record keeps
+/// the pin the Annotator of its own revision produced, and a restarted runtime replays the
+/// family from those records: revision 1's calls under the retired Annotator's pins and
+/// labels, revision 2's under its successor's, consulting nothing. The replay agrees with the
+/// live run, the head decides the next call through the successor, and a second replay over
+/// the extended log agrees with the first.
+#[tokio::test]
+async fn a_replay_keeps_each_calls_annotation_from_the_revision_that_recorded_it() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config_path = dir.path().join("appa.toml");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    annotator.set("strict", Answer::Wire(produced("suspicious")));
+    let search = |query: &str| call("search", serde_json::json!({ "query": query }));
+
+    let (live_status, live_audit) = {
+        let runtime = open_runtime(&dir, &revised_policy("classifier", &url)).await;
+        for c in [fetch("https://a.example"), search("alpha")] {
+            assert_eq!(
+                propose(&runtime, c.clone()).await,
+                HookDecision::AllowCall { spawn: None }
+            );
+            ran(&runtime, c).await;
+        }
+
+        std::fs::write(&config_path, revised_policy("strict", &url)).expect("revision 2 writes");
+        let reloaded = runtime
+            .reload(Config::load(&config_path).expect("revision 2 loads"))
+            .expect("revision 2 publishes");
+        assert!(reloaded.changed);
+        assert_eq!(reloaded.policy_revision, 2);
+
+        // The successor's stricter pin narrows the trajectory, which the agent accepts once;
+        // the second call under it is already within the narrowed label.
+        narrow_through(&runtime, fetch("https://b.example")).await;
+        assert_eq!(
+            propose(&runtime, search("bravo")).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        ran(&runtime, search("bravo")).await;
+
+        let consulted = consults(&annotator);
+        assert_eq!(
+            consulted[..2],
+            [("classifier", "fetch"), ("classifier", "search")].map(|(a, t)| (a.to_string(), t.to_string())),
+            "revision 1's calls consulted the first Annotator"
+        );
+        assert!(
+            consulted[2..].iter().all(|(name, _)| name == "strict"),
+            "revision 2's calls consulted only its successor: {consulted:?}"
+        );
+        assert_eq!(
+            consulted[2..]
+                .iter()
+                .map(|(_, tool)| tool.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["fetch", "search"].into_iter().collect()
+        );
+
+        let audit = runtime.audit(&root()).expect("the live family audits");
+        assert_eq!(
+            released_trust(&audit),
+            [
+                ("fetch", "trusted"),
+                ("search", "trusted"),
+                ("fetch", "suspicious"),
+                ("search", "suspicious")
+            ]
+            .map(|(t, l)| (t.to_string(), l.to_string())),
+            "each release carries the label its revision's Annotator produced"
+        );
+        (runtime.status(&root()).expect("the live family has a status"), audit)
+    };
+
+    // The log records, per dispatch, the revision that judged it and the pin that revision's
+    // Annotator produced: nothing a later revision replaces.
+    {
+        let store = LogStore::open(Backend::Sqlite {
+            path: dir.path().join("appa.db"),
+        })
+        .expect("the family's store reopens");
+        let log = store.log(&root()).expect("the family's log reads");
+        let recorded: Vec<(u64, &str, &str, Option<Trust>)> = log
+            .stamped_batches()
+            .iter()
+            .flat_map(|batch| {
+                batch.facts.iter().filter_map(move |fact| match fact {
+                    Fact::DispatchOpened { tool, annotation, .. } => {
+                        let pin = annotation.as_ref().expect("an annotated dispatch records its pin");
+                        Some((
+                            batch.revision.expect("a decided batch is stamped").value(),
+                            tool.as_str(),
+                            pin.annotator().as_str(),
+                            pin.produced().delta.trust,
+                        ))
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                (1, "fetch", "classifier", Some(Trust::new(1))),
+                (1, "search", "classifier", Some(Trust::new(1))),
+                (2, "fetch", "strict", Some(Trust::new(0))),
+                (2, "search", "strict", Some(Trust::new(0))),
+            ]
+        );
+    }
+
+    // A restarted runtime replays the family from its records alone: revision 1's Annotator no
+    // longer exists, and neither Annotator answers.
+    annotator.set("classifier", Answer::Down);
+    annotator.set("strict", Answer::Down);
+    let consulted = annotator.requests().len();
+    let reopen = || {
+        Arc::new(
+            Runtime::open(
+                Config::load(&config_path).expect("the head's config loads"),
+                dir.path().join("appa.db"),
+                None,
+            )
+            .expect("the deployment reopens"),
+        )
+    };
+    let runtime = reopen();
+    assert_eq!(runtime.status(&root()), Some(live_status.clone()));
+    assert_eq!(runtime.audit(&root()), Some(live_audit.clone()));
+    assert_eq!(annotator.requests().len(), consulted, "a replay consults no Annotator");
+
+    // The head decides the next call through its own Annotator, within the narrowed label.
+    annotator.set("strict", Answer::Wire(produced("suspicious")));
+    assert_eq!(
+        propose(&runtime, fetch("https://c.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://c.example")).await;
+    assert_eq!(consults(&annotator).len(), consulted + 1);
+    assert_eq!(
+        consults(&annotator).last(),
+        Some(&("strict".to_string(), "fetch".to_string()))
+    );
+    let extended_audit = runtime.audit(&root()).expect("the extended family audits");
+    assert_eq!(&extended_audit[..live_audit.len()], &live_audit[..]);
+    assert_eq!(
+        released_trust(&extended_audit[live_audit.len()..]),
+        [("fetch".to_string(), "suspicious".to_string())],
+        "the head released the call under its successor's label"
+    );
+    let extended_status = runtime.status(&root());
+    drop(runtime);
+
+    // A second replay over the extended log agrees with the first.
+    annotator.set("strict", Answer::Down);
+    let runtime = reopen();
+    assert_eq!(runtime.status(&root()), extended_status);
+    assert_eq!(runtime.audit(&root()), Some(extended_audit));
+    assert_eq!(
+        annotator.requests().len(),
+        consulted + 1,
+        "a replay consults no Annotator"
     );
 }
 

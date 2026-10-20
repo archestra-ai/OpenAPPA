@@ -135,6 +135,16 @@ pub enum PackageError {
         contract: String,
         namespaces: String,
     },
+    #[error("{policy} maps two canonical tools onto `{target}`")]
+    PolicyAliasClaimedTwice { policy: PathBuf, target: String },
+    #[error("{policy} maps a canonical tool onto `{target}`, which is not a canonical tool id")]
+    PolicyAliasTarget { policy: PathBuf, target: String },
+    #[error("{policy} maps a canonical tool onto `{target}`, which is outside the namespaces it covers ({namespaces})")]
+    PolicyForeignAliasTarget {
+        policy: PathBuf,
+        target: String,
+        namespaces: String,
+    },
     #[error("{policy}: `audience.{name}` sends its member lookups to itself")]
     AudienceLookupToItself { policy: PathBuf, name: String },
     #[error(
@@ -188,7 +198,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                 check_lookup_routes(&policy, &base)?;
             }
             if let Some(targets) = battery.targets.policies_mut() {
-                check_stands_alone(&policy, &base_document, &base.tools)?;
+                check_stands_alone(&policy, &base_document, &lowered_variants(&base.tools, &base.tool_map))?;
                 for target in BatteryTarget::ALL {
                     let target_policy = targets.get_mut(target);
                     let field = target.policy_field();
@@ -211,7 +221,18 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                         &document,
                     )?;
                     check_composes(&policy_path, &base, &bindings)?;
-                    check_variants(&policy_path, &bindings.tools, &base.tools)?;
+                    // Variants shadow each other as composed: target before base, canonical
+                    // rules lowered through either policy's map.
+                    let mut map = base.tool_map.clone();
+                    for (canonical, targets) in &bindings.tool_map {
+                        map.entry(canonical.clone())
+                            .or_default()
+                            .extend(targets.iter().cloned());
+                    }
+                    check_single_claims(&policy_path, &map)?;
+                    let base_variants = lowered_variants(&base.tools, &map);
+                    check_variants(&policy, &base_variants, &[])?;
+                    check_variants(&policy_path, &lowered_variants(&bindings.tools, &map), &base_variants)?;
                     check_lookup_routes(&policy_path, &bindings)?;
                     target_policy.audiences = bindings.audiences;
                     target_policy.credentials = bindings.credentials;
@@ -338,7 +359,7 @@ impl Contained {
 /// someone's deployment is refused at the package instead. Beside these, a
 /// fragment may carry `policy.deployment.confined_results` naming its own tools
 /// (`check_confinement`).
-const INCLUDABLE_TABLES: [&str; 2] = ["policy", "externals"];
+const INCLUDABLE_TABLES: [&str; 3] = ["policy", "externals", "aliases"];
 pub const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
 /// Those of them that are arrays of named declarations.
 const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "sanitizer"];
@@ -446,8 +467,9 @@ fn check_policy(
     // id: parsing the tool half is the registry's job, not this one's.
     let covered: Vec<String> = namespaces
         .iter()
-        .flat_map(|namespace| ["mcp", "host", "agent"].map(|family| format!("{family}/{namespace}/")))
+        .flat_map(|namespace| ["mcp", "host", "agent", "tool"].map(|family| format!("{family}/{namespace}/")))
         .collect();
+    let tool_map = check_tool_aliases(policy, document, &covered, namespaces)?;
     check_named(policy, document)?;
     let tools = declared_contracts(policy, document)?;
     for contract in &tools {
@@ -470,6 +492,7 @@ fn check_policy(
         credentials,
         externals: externals(document).map(|(external, _)| external).collect(),
         tools,
+        tool_map,
         declarations: named_declarations(document),
     })
 }
@@ -651,6 +674,8 @@ struct PolicyBindings {
     externals: BTreeSet<NamedExternal>,
     /// The declared tool contracts, canonical and in declaration order.
     tools: Vec<String>,
+    /// The policy's own `[aliases.tool]` map.
+    tool_map: ToolMap,
     declarations: BTreeSet<NamedDeclaration>,
 }
 
@@ -1070,6 +1095,116 @@ fn check_named(policy: &Path, document: &Value) -> Result<(), PackageError> {
     Ok(())
 }
 
+/// The client tools each canonical tool `tool/<namespace>/<tool>` is bound to.
+type ToolMap = BTreeMap<String, Vec<String>>;
+
+/// One `[aliases.tool]` entry, in the shape the loader reads.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasTarget {
+    name: String,
+    #[serde(default)]
+    args: BTreeMap<String, String>,
+    #[serde(default, rename = "confined")]
+    _confined: bool,
+}
+
+/// A battery's `[aliases]` carries only `tool`, and binds canonical tools only to client
+/// tools in the namespaces it covers. Which server or host serves a namespace is the
+/// deployment's to say.
+fn check_tool_aliases(
+    policy: &Path,
+    document: &Value,
+    covered: &[String],
+    namespaces: &[Namespace],
+) -> Result<ToolMap, PackageError> {
+    let Some(aliases) = document.get("aliases") else {
+        return Ok(ToolMap::new());
+    };
+    let top_level = |field: &str| PackageError::PolicyTopLevel {
+        policy: policy.to_path_buf(),
+        field: field.to_owned(),
+    };
+    let aliases = aliases.as_table().ok_or_else(|| top_level("aliases"))?;
+    if let Some(field) = aliases.keys().find(|field| field.as_str() != "tool") {
+        return Err(top_level(&format!("aliases.{field}")));
+    }
+    let parsed: BTreeMap<String, BTreeMap<String, Vec<AliasTarget>>> = match aliases.get("tool") {
+        Some(tool) => tool.clone().try_into().map_err(|_| top_level("aliases.tool"))?,
+        None => BTreeMap::new(),
+    };
+    let mut map = ToolMap::new();
+    for (namespace, tools) in parsed {
+        if tools.is_empty() {
+            return Err(top_level(&format!("aliases.tool.{namespace}")));
+        }
+        for (tool, targets) in tools {
+            let field = format!("aliases.tool.{namespace}.{tool}");
+            // The loader refuses a target reading two canonical arguments as one.
+            let collapses =
+                |target: &AliasTarget| target.args.values().collect::<BTreeSet<_>>().len() != target.args.len();
+            if targets.is_empty() || targets.iter().any(collapses) {
+                return Err(top_level(&field));
+            }
+            map.insert(
+                format!("tool/{namespace}/{tool}"),
+                targets.into_iter().map(|target| target.name).collect(),
+            );
+        }
+    }
+    for target in map.values().flatten() {
+        if appa_runtime_api::CanonicalTool::parse(target).is_err() {
+            return Err(PackageError::PolicyAliasTarget {
+                policy: policy.to_path_buf(),
+                target: target.to_owned(),
+            });
+        }
+        if !covered.iter().any(|prefix| target.starts_with(prefix)) {
+            return Err(PackageError::PolicyForeignAliasTarget {
+                policy: policy.to_path_buf(),
+                target: target.to_owned(),
+                namespaces: namespaces
+                    .iter()
+                    .map(Namespace::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        }
+    }
+    check_single_claims(policy, &map)?;
+    Ok(map)
+}
+
+/// Each client tool has one canonical reading: the loader refuses a client tool two
+/// bindings name.
+fn check_single_claims(policy: &Path, map: &ToolMap) -> Result<(), PackageError> {
+    let mut claimed = BTreeSet::new();
+    match map.values().flatten().find(|target| !claimed.insert(*target)) {
+        Some(target) => Err(PackageError::PolicyAliasClaimedTwice {
+            policy: policy.to_path_buf(),
+            target: target.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// `tools` as composition lowers them through `map`: a canonical variant becomes one
+/// variant per client tool it is bound to, keeping whether it carries a selector.
+fn lowered_variants(tools: &[String], map: &ToolMap) -> Vec<String> {
+    tools
+        .iter()
+        .flat_map(|variant| {
+            let (tool, selector) = variant
+                .split_once('(')
+                .map_or((variant.as_str(), ""), |(tool, _)| (tool, "(…)"));
+            match map.get(tool) {
+                Some(targets) => targets.iter().map(|target| format!("{target}{selector}")).collect(),
+                None => vec![variant.clone()],
+            }
+        })
+        .collect()
+}
+
 /// The tool contract names a policy declares. Only `[[policy.tool]]` names a
 /// contract; the other declaration arrays name annotators, authorities and
 /// sanitizers, which are identifiers and belong to no namespace.
@@ -1168,6 +1303,51 @@ mod tests {
         assert!(matches!(
             validate_package(battery(&unscoped).path()),
             Err(PackageError::PolicyForeignContract { .. })
+        ));
+    }
+
+    #[test]
+    fn a_battery_maps_canonical_tools_only_onto_its_own_client_tools() {
+        let canonical = BATTERY_POLICY.replace("mcp/github/get_me", "tool/github/whoami");
+        assert!(validate_package(battery(&canonical).path()).is_ok());
+        let own = format!("[aliases.tool.coding]\nshell = [{{ name = \"mcp/github/run\" }}]\n{BATTERY_POLICY}");
+        assert!(validate_package(battery(&own).path()).is_ok());
+        let foreign = format!("[aliases.tool.coding]\nshell = [{{ name = \"mcp/other/run\" }}]\n{BATTERY_POLICY}");
+        assert!(matches!(
+            validate_package(battery(&foreign).path()),
+            Err(PackageError::PolicyForeignAliasTarget { .. })
+        ));
+        for client in ["mcp/github/run(a:b)", "tool/github/run"] {
+            let policy = format!("[aliases.tool.coding]\nshell = [{{ name = \"{client}\" }}]\n{BATTERY_POLICY}");
+            assert!(
+                matches!(
+                    validate_package(battery(&policy).path()),
+                    Err(PackageError::PolicyAliasTarget { .. })
+                ),
+                "{client}"
+            );
+        }
+        for malformed in [
+            "[aliases]\ntool = 42\n",
+            "[aliases.tool.coding]\nshell = []\n",
+            "[aliases.tool]\ncoding = {}\n",
+            "[aliases.tool.coding]\nshell = [{ name = 42 }]\n",
+            "[aliases.tool.coding]\nshell = [{ name = \"mcp/github/run\", args = { a = 1 } }]\n",
+            "[aliases.tool.coding]\nshell = [{ name = \"mcp/github/run\", args = { a = \"x\", b = \"x\" } }]\n",
+        ] {
+            let policy = format!("{malformed}{BATTERY_POLICY}");
+            assert!(
+                matches!(
+                    validate_package(battery(&policy).path()),
+                    Err(PackageError::PolicyTopLevel { .. })
+                ),
+                "{malformed}"
+            );
+        }
+        let host = format!("[aliases]\nhost = {{ github = [\"other\"] }}\n{BATTERY_POLICY}");
+        assert!(matches!(
+            validate_package(battery(&host).path()),
+            Err(PackageError::PolicyTopLevel { field, .. }) if field == "aliases.host"
         ));
     }
 
@@ -2208,6 +2388,37 @@ mod tests {
             Err(PackageError::ToolWithoutBareVariant { tool, .. }) if tool == "mcp/github/send"
         ));
         validate(&["send"], &["send(to:me)"]).unwrap();
+    }
+
+    #[test]
+    fn a_target_cannot_shadow_a_base_variant_it_reaches_through_the_base_map() {
+        let base = "[aliases.tool.github]\nlist = [{ name = \"mcp/github/list\" }]\n\n[policy]\nversion = 2\n\n\
+             [[policy.tool]]\nname = \"tool/github/list(owner:me)\"\ndelta = {}\n\n\
+             [[policy.tool]]\nname = \"tool/github/list\"\ndelta = {}\n";
+        let shadowing = format!("{MULTI_USER_POLICY}\n[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = {{}}\n");
+        assert!(matches!(
+            validate_package(targeted(base, &shadowing).path()),
+            Err(PackageError::TargetShadowsBase { tool, .. }) if tool == "mcp/github/list"
+        ));
+        validate_package(targeted(base, MULTI_USER_POLICY).path()).unwrap();
+
+        let native_first = base.replace(
+            "[[policy.tool]]\nname = \"tool/github/list(owner:me)\"",
+            "[[policy.tool]]\nname = \"mcp/github/list\"\ndelta = {}\n\n[[policy.tool]]\nname = \"tool/github/list(owner:me)\"",
+        );
+        assert!(matches!(
+            validate_package(targeted(&native_first, MULTI_USER_POLICY).path()),
+            Err(PackageError::UnreachableVariant { tool, .. }) if tool == "mcp/github/list"
+        ));
+
+        let claiming = format!(
+            "[aliases.tool.github]\nother = [{{ name = \"mcp/github/list\" }}]\n\n{MULTI_USER_POLICY}\n\
+             [[policy.tool]]\nname = \"tool/github/other\"\ndelta = {{}}\n"
+        );
+        assert!(matches!(
+            validate_package(targeted(base, &claiming).path()),
+            Err(PackageError::PolicyAliasClaimedTwice { target, .. }) if target == "mcp/github/list"
+        ));
     }
 
     /// A battery without targets is only ever composed whole, so it keeps its lookups
