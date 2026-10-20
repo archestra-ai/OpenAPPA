@@ -25,7 +25,7 @@ claude-code` includes both. A rule no map binds is inactive.
   stock `redact-secrets` sanitizer, which masks private-key blocks, tokens of
   well-known shapes, the AWS secret access key, passwords inside URLs, the
   value of any assignment whose key names a secret, and long high-entropy
-  runs, then returns the masked output to `public`: the model reads the masked
+  runs, then returns the masked output to `internal`: the model reads the masked
   text and the session keeps its label.
   The sanitizer carries no tags: it is offered for any withheld shell result
   the session cannot read as it is, including one the Annotator narrowed to

@@ -19,7 +19,7 @@ version = 2
 # A command naming a credential path narrows the session to `self`, the
 # requester. A client's map entry withholds the command's result (`confined = true`)
 # and the `redact-secrets` sanitizer masks every token before the
-# output reaches the model and returns the value to `public`: the session
+# output reaches the model and returns the value to `internal`: the session
 # keeps its label and the masked text is what the model reads. The `credentials`
 # tag records why a rule is here; the sanitizer is not scoped to it.
 [[policy.tool]]
@@ -465,7 +465,7 @@ name = "redact-secrets"
 on = ["tool_output"]
 
 [policy.sanitizer.permits]
-audience = { from = ["self"], to = ["public"] }
+audience = { from = ["self"], to = ["internal"] }
 
 [externals.sanitizers.redact-secrets]
 builtin = "redact-secrets"

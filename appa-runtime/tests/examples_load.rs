@@ -365,13 +365,18 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
 
     // A credential read is `self` data: the block offers the masker beside the plain
-    // narrowing and consults no person; the masked output is what reaches the model.
-    for command in [
+    // narrowing and consults no person; the masked output is what reaches the model. The
+    // masker returns it to `internal`, so the first one narrows the session from `public`
+    // and the model accepts that before it reads it; the later ones arrive as they are.
+    for (index, command) in [
         "cat .env",
         "cat .netrc",
         "cat ~/.ssh/id_ed25519",
         "cat /home/me/.aws/credentials",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let read = call("host/claude-code/Bash", "command", command);
         let blocked = propose(&runtime, read.clone()).await;
         let HookDecision::DenyCall {
@@ -407,8 +412,13 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
             },
         )
         .await;
-        let HookDecision::DeliverValue { value } = delivered else {
-            panic!("`{command}`'s output crosses through the masker, got {delivered:?}");
+        let value = if index == 0 {
+            accepted_narrowing_to_internal(&runtime, delivered).await
+        } else {
+            let HookDecision::DeliverValue { value } = delivered else {
+                panic!("`{command}`'s output crosses through the masker, got {delivered:?}");
+            };
+            value
         };
         assert_eq!(
             value,
@@ -674,10 +684,25 @@ command = ["/bin/sh", "annotator.sh"]
         },
     )
     .await;
-    let HookDecision::DeliverValue { value } = delivered else {
-        panic!("the output crosses through the masker, got {delivered:?}");
-    };
+    let value = accepted_narrowing_to_internal(&runtime, delivered).await;
     assert_eq!(value, "export OPENAI_API_KEY=[redacted-secret]\nalias ll='ls -l'\n");
+}
+
+/// The masker returns its output to `internal`, which narrows a `public` session: the
+/// result is staged behind that narrowing, and the model reads it once it accepts.
+async fn accepted_narrowing_to_internal(runtime: &Runtime, delivered: HookDecision) -> String {
+    let HookDecision::ReplaceOutput { output } = delivered else {
+        panic!("the masked output is staged behind the narrowing, got {delivered:?}");
+    };
+    assert!(
+        output.contains("public -> internal"),
+        "the staged output narrows the session to `internal`: {output}"
+    );
+    let accepted = runtime.execute_remedy(&actor(), last_offer(&output)).await;
+    let RemedyOutcome::Returned { value } = accepted else {
+        panic!("accepting the narrowing returns the masked output, got {accepted:?}");
+    };
+    value
 }
 
 /// A search inside a credential path is a read of it and narrows the session like the
