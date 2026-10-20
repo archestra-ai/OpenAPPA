@@ -235,7 +235,9 @@ pub(crate) const DELTA_AUDIENCE_RULE: &str = concat!(
     "`delta.audience` is who may read the bytes the call returns to the agent, never where the call sends ",
     "data. Decide it in two steps. First decide whether the result contains data at all. If the call returns ",
     "only an acknowledgement, an id, a URL or a status of its own action, it is `public`: ignore everything ",
-    "the call sent. A status the call reads about a resource — check states, a merge state, a run's progress ",
+    "the call sent. A call that sends all its output to a file and returns nothing also returns no data. ",
+    "A status the call reads about a resource — check states, a merge state, a run's progress, an HTTP ",
+    "status code, whether a port answers, a tool is installed or sudo needs a password ",
     "— is data about that resource and has that resource's readers. ",
     "Argument values are never part of the result: a file's contents, a message body or a commit message ",
     "travelling outward is not what comes back. Only if the result contains data, choose the narrowest ",
@@ -320,7 +322,8 @@ pub(crate) const DELTA_AUDIENCE_CRITERIA: DeltaAudienceCriteria = DeltaAudienceC
         "and no one else: credentials, tokens, private keys, a shell history or ",
         "environment dump, a local secret file, or personal mail — anything the ",
         "operator would not show even to a colleague. Secret values are `self`; credential ",
-        "names, masked or redacted values, and a summary of which secrets exist are not. ",
+        "names, masked or redacted values, a summary of which secrets exist, and selected ",
+        "environment variables that hold no secret value are not. ",
         "A file name alone does not show what the file holds."
     ),
 };
@@ -335,20 +338,24 @@ pub(crate) const DELTA_TRUST_CRITERIA: DeltaTrustCriteria = DeltaTrustCriteria {
     trusted: concat!(
         "The returned content was authored by the operator or produced by ",
         "deterministic computation over the operator's own inputs: reading the ",
-        "project's own source, running its tests, inspecting local git state, or a ",
+        "project's own source, the source of a dependency the project already installed, ",
+        "running its tests, inspecting local git state and the checkout's history, or a ",
         "first-party service under the operator's control. Text the call's context ",
         "shows was written only by the operator's collaborators is `trusted` too, ",
-        "wherever it is hosted. The operator's tools are ",
+        "wherever it is hosted, and so is a file in a repository the context shows the ",
+        "operator can push to. The operator's tools are ",
         "trusted too: what a compiler, a package manager, a build or a linter reports ",
-        "is `trusted`, whatever they downloaded to do it. `trusted` describes ",
-        "provenance, not factual correctness."
+        "is `trusted`, whatever they downloaded to do it, and so is the state of the ",
+        "clusters, containers and images the operator's configured `kubectl` or `docker` ",
+        "context reports. `trusted` describes provenance, not factual correctness."
     ),
     suspicious: concat!(
         "The returned content could have been authored or influenced by a party ",
         "outside the operator's control, so it could carry a prompt injection: a ",
         "fetched web page or search result, a downloaded document, an inbound ",
         "email, chat message or support ticket ",
-        "written by someone else, or the free-form output of another model or agent. ",
+        "written by someone else, the free-form output of another model or agent, or a ",
+        "running service's log, which records what its users sent. ",
         "The agent's own harness surfaces — loading a tool schema, invoking a skill, ",
         "reading its own scratch files — are not third-party content."
     ),
