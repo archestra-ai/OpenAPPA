@@ -110,6 +110,12 @@ const BATTERIES = [
     logo: "/images/batteries/xmemory.svg",
   },
   {
+    name: "Kubernetes",
+    description: "Rules for 25 config, core, and Helm tools; internal untrusted reads, viewer-only Secrets and kubeconfig, every write blocked.",
+    href: "/battery-kubernetes",
+    logo: "/images/batteries/kubernetes.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,

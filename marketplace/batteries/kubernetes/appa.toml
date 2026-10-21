@@ -1,0 +1,185 @@
+# Kubernetes battery: `containers/kubernetes-mcp-server` v0.0.67, its
+# default `config` and `core` toolsets and the optional `helm` toolset.
+#
+# The three toolsets register 25 tools. Seventeen read the cluster or the
+# kubeconfig; eight change the cluster or run code in it.
+#
+# Cluster objects, pod logs, node logs, and events carry text that workload
+# authors, container images, and the callers of exposed services wrote:
+# annotations, labels, log lines, event messages. That text reaches an
+# attacker, so every read enters `suspicious`. A cluster shows the same data
+# to every identity with the server's RBAC, so the audience is `internal`,
+# and a read's input must be sharable with `internal`.
+#
+# Three reads return credentials. `configuration_view` returns the
+# kubeconfig with its certificate and token data inlined. `resources_get`
+# and `resources_list` return a Secret's `data` for kind `Secret`, and
+# ConfigMaps often hold credentials too. These reads restrict the audience
+# to `self`. Kubernetes resolves a kind case-sensitively, so `kind:Secret`
+# and `kind:ConfigMap` match every call that can reach those objects. The
+# selector rules come before the unconditional rule for the tool, because
+# the first matching rule wins.
+#
+# Every write is `blocked`: no authority can permit it. A root rule runs
+# before these rules and can give a write a reviewed contract.
+#
+# The `kcp`, `kiali`, `kubevirt`, `netobserv`, and `tekton` toolsets are not
+# named here, so their tools stay blocked until a root rule names them.
+
+[policy]
+version = 2
+
+# --- kubeconfig: contexts and targets, internal ---
+
+[[policy.tool]]
+name = "mcp/kubernetes/configuration_contexts_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/targets_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- kubeconfig content: inlined credentials stay with the viewer ---
+
+[[policy.tool]]
+name = "mcp/kubernetes/configuration_view"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- cluster reads: attacker-reachable text, internal ---
+
+[[policy.tool]]
+name = "mcp/kubernetes/events_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/namespaces_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/projects_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/nodes_log"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/nodes_stats_summary"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/nodes_top"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_list_in_namespace"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_top"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_log"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/helm_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- generic resource reads: Secrets and ConfigMaps stay with the viewer ---
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_get(kind:Secret)"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_get(kind:ConfigMap)"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_list(kind:Secret)"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_list(kind:ConfigMap)"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- writes and code execution: blocked ---
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_create_or_update"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_delete"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/resources_scale"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_delete"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_exec"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/pods_run"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/helm_install"
+delta = {}
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/kubernetes/helm_uninstall"
+delta = {}
+requires = { attention = ["blocked"] }

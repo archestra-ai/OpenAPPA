@@ -1,0 +1,16 @@
+schema = 1
+name = "kubernetes"
+description = "Rules for the 25 tools of containers/kubernetes-mcp-server's config, core, and helm toolsets: internal untrusted cluster reads, viewer-only Secrets, ConfigMaps, and kubeconfig, and every write blocked."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent", "opencode"]
+namespaces = ["kubernetes"]
+helpers = []
+benefit = "Rules for the 25 tools of the Kubernetes MCP server's default and Helm toolsets: APPA keeps cluster reads internal, treats pod logs and events as suspicious, keeps Secrets, ConfigMaps, and the kubeconfig with the viewer, and blocks every write."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"
