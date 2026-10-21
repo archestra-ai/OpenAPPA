@@ -2,9 +2,9 @@
 //!
 //! The driver parses only `sslmode=disable|prefer|require` and refuses the other libpq TLS
 //! parameters, so a host could not pass the URL it gives libpq or node-postgres. This module
-//! takes those parameters out of the URL and applies them to the TLS connector. Verification
-//! stays on unless the URL turns it off: `prefer` and `require` check the chain and the host
-//! name, as `verify-full` does.
+//! takes those parameters out of the URL and applies them to the TLS connector. Every TLS
+//! connection checks the chain and the host name, as `verify-full` does: `prefer`, `require`
+//! and `verify-ca` are never weaker than that, and no mode turns verification off.
 
 use ::postgres::config::SslMode;
 use native_tls::{Certificate, TlsConnector};
@@ -38,17 +38,7 @@ impl Target {
     }
 }
 
-/// What a TLS connection checks about the server's certificate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Verification {
-    /// Chain and host name.
-    Full,
-    /// Chain only.
-    Chain,
-    Nothing,
-}
-
-/// The certificates a verified connection trusts.
+/// The certificates a TLS connection trusts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Roots {
     System,
@@ -60,7 +50,6 @@ enum Roots {
 struct Tls {
     /// `None` keeps the driver's own reading.
     mode: Option<SslMode>,
-    verification: Verification,
     roots: Roots,
 }
 
@@ -68,7 +57,6 @@ impl Default for Tls {
     fn default() -> Self {
         Self {
             mode: None,
-            verification: Verification::Full,
             roots: Roots::System,
         }
     }
@@ -87,17 +75,6 @@ impl Tls {
             builder.disable_built_in_roots(true);
             for certificate in certificates {
                 builder.add_root_certificate(certificate);
-            }
-        }
-        match self.verification {
-            Verification::Full => {}
-            Verification::Chain => {
-                builder.danger_accept_invalid_hostnames(true);
-            }
-            Verification::Nothing => {
-                builder
-                    .danger_accept_invalid_certs(true)
-                    .danger_accept_invalid_hostnames(true);
             }
         }
         builder.build().map_err(|e| PostgresError(e.to_string()))
@@ -120,18 +97,16 @@ fn split(url: &str) -> Result<(String, Tls), PostgresError> {
         let value = percent_decode_str(value).decode_utf8_lossy();
         match key {
             "sslmode" => {
-                (tls.mode, tls.verification) = match value.as_ref() {
-                    "disable" => (Some(SslMode::Disable), Verification::Full),
-                    "prefer" => (Some(SslMode::Prefer), Verification::Full),
-                    "require" | "verify-full" => (Some(SslMode::Require), Verification::Full),
-                    "verify-ca" => (Some(SslMode::Require), Verification::Chain),
-                    "no-verify" => (Some(SslMode::Require), Verification::Nothing),
+                tls.mode = Some(match value.as_ref() {
+                    "disable" => SslMode::Disable,
+                    "prefer" => SslMode::Prefer,
+                    "require" | "verify-ca" | "verify-full" => SslMode::Require,
                     other => {
                         return Err(PostgresError(format!(
-                            "unsupported sslmode {other}: expected disable, prefer, require, verify-ca, verify-full or no-verify"
+                            "unsupported sslmode {other}: expected disable, prefer, require, verify-ca or verify-full"
                         )));
                     }
-                }
+                })
             }
             "sslrootcert" => {
                 tls.roots = match value.as_ref() {
@@ -139,7 +114,7 @@ fn split(url: &str) -> Result<(String, Tls), PostgresError> {
                     path => Roots::File(path.to_owned()),
                 }
             }
-            // node-postgres's switch to libpq semantics; TLS here keeps verifying either way.
+            // node-postgres's switch to libpq semantics; TLS here verifies either way.
             "uselibpqcompat" => {}
             _ => kept.push(pair),
         }
@@ -155,12 +130,8 @@ fn split(url: &str) -> Result<(String, Tls), PostgresError> {
 mod tests {
     use super::*;
 
-    fn tls(mode: Option<SslMode>, verification: Verification, roots: Roots) -> Tls {
-        Tls {
-            mode,
-            verification,
-            roots,
-        }
+    fn tls(mode: Option<SslMode>, roots: Roots) -> Tls {
+        Tls { mode, roots }
     }
 
     #[test]
@@ -170,40 +141,27 @@ mod tests {
             (
                 "postgres://u:p@db/app?sslmode=disable",
                 "postgres://u:p@db/app",
-                tls(Some(SslMode::Disable), Verification::Full, Roots::System),
+                tls(Some(SslMode::Disable), Roots::System),
             ),
             (
                 "postgres://u:p@db/app?sslmode=require&application_name=web",
                 "postgres://u:p@db/app?application_name=web",
-                tls(Some(SslMode::Require), Verification::Full, Roots::System),
+                tls(Some(SslMode::Require), Roots::System),
             ),
             (
                 "postgresql://u:p@db/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fdb%2Fca.pem",
                 "postgresql://u:p@db/app",
-                tls(
-                    Some(SslMode::Require),
-                    Verification::Full,
-                    Roots::File("/etc/ssl/db/ca.pem".into()),
-                ),
+                tls(Some(SslMode::Require), Roots::File("/etc/ssl/db/ca.pem".into())),
             ),
             (
-                "postgres://u:p@db/app?connect_timeout=5&sslmode=verify-ca&sslrootcert=/ca.pem",
+                "postgres://u:p@db/app?connect_timeout=5&sslmode=verify-ca&uselibpqcompat=true&sslrootcert=/ca.pem",
                 "postgres://u:p@db/app?connect_timeout=5",
-                tls(
-                    Some(SslMode::Require),
-                    Verification::Chain,
-                    Roots::File("/ca.pem".into()),
-                ),
-            ),
-            (
-                "postgres://u:p@db/app?uselibpqcompat=true&sslmode=no-verify",
-                "postgres://u:p@db/app",
-                tls(Some(SslMode::Require), Verification::Nothing, Roots::System),
+                tls(Some(SslMode::Require), Roots::File("/ca.pem".into())),
             ),
             (
                 "postgres://u:p@db/app?sslrootcert=system",
                 "postgres://u:p@db/app",
-                tls(None, Verification::Full, Roots::System),
+                tls(None, Roots::System),
             ),
             (
                 "host=db user=u sslmode=require",
@@ -218,16 +176,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_sslmode_is_refused() {
-        assert!(split("postgres://db/app?sslmode=allow").is_err());
+    fn a_mode_that_skips_verification_is_refused() {
+        for mode in ["no-verify", "allow"] {
+            assert!(split(&format!("postgres://db/app?sslmode={mode}")).is_err(), "{mode}");
+        }
     }
 
     #[test]
     fn every_supported_url_reaches_a_driver_config() {
         for url in [
             "postgres://u:p@db/app?sslmode=verify-full",
-            "postgres://u:p@db/app?sslmode=verify-ca&uselibpqcompat=true",
-            "postgres://u:p@db/app?sslmode=no-verify",
+            "postgres://u:p@db/app?sslmode=verify-ca",
             "postgres://u:p@db/app?sslmode=prefer&connect_timeout=5",
         ] {
             assert!(Target::from_url(url).is_ok(), "{url}");
@@ -268,11 +227,11 @@ mod tests {
         let cases = [
             (format!("{url}?sslmode=verify-full&sslrootcert={root}"), true),
             (format!("{url}?sslmode=require&sslrootcert={root}"), true),
+            (format!("{url}?sslmode=verify-ca&sslrootcert={root}"), true),
             (format!("{url}?sslmode=require"), false),
             (format!("{url}?sslmode=verify-full&sslrootcert=system"), false),
             (format!("{by_address}?sslmode=verify-full&sslrootcert={root}"), false),
-            (format!("{by_address}?sslmode=verify-ca&sslrootcert={root}"), true),
-            (format!("{url}?sslmode=no-verify"), true),
+            (format!("{by_address}?sslmode=verify-ca&sslrootcert={root}"), false),
         ];
         for (url, expected) in cases {
             assert_eq!(connects(&url), expected, "{url}");
