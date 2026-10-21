@@ -323,3 +323,37 @@ async fn reading_a_run_narrows_the_session_to_internal_and_keeps_trust() {
         );
     }
 }
+
+/// `direction` selects the transfer's rule: a download only reads, an upload only writes.
+#[tokio::test]
+async fn a_transfer_direction_selects_its_rule() {
+    let transfer = |direction: &str| {
+        archestra(
+            "transfer_workspace_file",
+            serde_json::json!({
+                "task_id": RUN, "direction": direction, "path": "notes.md",
+                "local_path": "/tmp/notes.md", "size": 5, "sha256": "0".repeat(64),
+            }),
+        )
+    };
+
+    // A download requires nothing, so a team-only session runs it once narrowed.
+    let dir = tempfile::tempdir().unwrap();
+    let team = runtime(&dir).await;
+    narrowed_to_team_t1(&team).await;
+    let download = transfer("download");
+    let offer = offer_of(&propose(&team, download.clone()).await);
+    assert!(matches!(
+        team.execute_remedy(&actor(), offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(propose(&team, download).await, HookDecision::AllowCall { spawn: None });
+
+    // An upload adds no label, so a fresh session runs it without narrowing.
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = runtime(&dir).await;
+    assert_eq!(
+        propose(&fresh, transfer("upload")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+}

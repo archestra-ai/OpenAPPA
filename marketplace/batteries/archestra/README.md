@@ -44,7 +44,10 @@ A run and its workspace are one container the organization may read,
 since admins can open any run. What enters it must be sharable with
 `internal`, and what leaves it adds `internal` and keeps its trust. This
 holds on every host, including one whose calls carry no LLM Proxy proof
-and so cross no label of their own. The run's posts
+and so cross no label of their own. On such a host, data written into a run
+is read back with the run's trust, so suspicious data steered into an
+unbound run can return trusted; through the LLM Proxy, the run's return
+crossing labels it. The run's posts
 (`post_agent_run_message`, `post_agent_run_file`) have no rule here and
 fall to the deployment's annotator: a post reaches a messaging thread
 whose readers this source cannot list.

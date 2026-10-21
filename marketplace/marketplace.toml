@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.archestra]
 path = "batteries/archestra"
-digest = "sha256:2242586588cc3918cbc864c2db10e846d85900fa380861fb24347d58ac250721"
+digest = "sha256:f59ea96070e56d2755fe8b8aba95df2d72c5b410431fd5a97df61b4dc7d18072"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
