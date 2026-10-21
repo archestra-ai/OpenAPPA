@@ -7,7 +7,7 @@ sidebar: false
 breadcrumb: Archestra
 ---
 
-The Archestra battery covers the sharing tools of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
+The Archestra battery covers the sharing, discovery, reporting, and agent run tools of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/archestra).
 
@@ -28,6 +28,12 @@ This covers projects, apps, knowledge bases, knowledge connectors, plugins, agen
 ## Reporting
 
 `yell` files a guardrails report with the organization's admins. It is how an agent escalates a block, so it adds no label and requires nothing: no label the session picked up can refuse it.
+
+## Agent runs
+
+`start_agent_run`, `get_agent_run`, `steer_agent_run`, and `cancel_agent_run` add no label and require nothing. Archestra crosses a run's input and output itself. A start or a steer joins the session's label into the run before the run reads the message. A run's result reaches the session only as a value the run returned, and that value already carries the run's label. `list_agent_runs` adds `internal`, because it names the organization's agents, requesters, and channels.
+
+The workspace tools and the tools that post to a run's messaging thread have no rule in this battery. The deployment's annotator labels them.
 
 ## Audiences
 

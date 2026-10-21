@@ -49,6 +49,38 @@ delta = {}
 name = "mcp/archestra/yell"
 delta = {}
 
+# --- agent runs: Archestra crosses a run's input and output itself. A
+# start or steer joins this session's label into the run before the run
+# reads the message. A run's result reaches this session only as a value
+# the run returned, which already joined the run's label into this one, so
+# a second label would count it twice. A cancel returns only the run's
+# state. A list names the organization's agents, requesters, and channels.
+#
+# The workspace tools and the run's posts stay with the deployment's
+# annotator: a run's own session, or a client without a proof, reads its
+# workspace with no crossing, and a post reaches a messaging thread whose
+# readers no source here can list ---
+
+[[policy.tool]]
+name = "mcp/archestra/start_agent_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/get_agent_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/steer_agent_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/cancel_agent_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/list_agent_runs"
+delta = { audience = ["internal"] }
+
 # --- projects ---
 
 [[policy.tool]]

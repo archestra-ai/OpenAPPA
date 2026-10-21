@@ -183,3 +183,56 @@ async fn a_share_runs_only_when_everyone_it_reaches_may_already_read() {
         );
     }
 }
+
+/// A run's input and output cross through Archestra, which labels them itself, so the run
+/// tools add no label; a list of runs is the organization's own data.
+#[tokio::test]
+async fn run_tools_add_no_label_and_a_run_list_is_internal() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    let run = "00000000-0000-4000-8000-000000000001";
+    for tool in [
+        archestra(
+            "start_agent_run",
+            serde_json::json!({ "agent_id": "a", "message": "summarize the notes" }),
+        ),
+        archestra("get_agent_run", serde_json::json!({ "run_id": run })),
+        archestra(
+            "steer_agent_run",
+            serde_json::json!({ "run_id": run, "message": "also list owners" }),
+        ),
+        archestra("cancel_agent_run", serde_json::json!({ "run_id": run })),
+    ] {
+        let name = tool.tool.clone();
+        assert_eq!(
+            propose(&runtime, tool.clone()).await,
+            HookDecision::AllowCall { spawn: None },
+            "{name}"
+        );
+        ran(&runtime, tool).await;
+    }
+
+    // A list first narrows the session to the organization.
+    let list = archestra("list_agent_runs", serde_json::json!({ "agent_ids": ["a"] }));
+    let offer = offer_of(&propose(&runtime, list.clone()).await);
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, list.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, list).await;
+
+    // It stays trusted and within the organization, so an org-wide share still runs.
+    assert_eq!(
+        propose(
+            &runtime,
+            archestra("set_project_share", serde_json::json!({ "visibility": "organization" })),
+        )
+        .await,
+        HookDecision::AllowCall { spawn: None }
+    );
+}

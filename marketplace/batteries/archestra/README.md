@@ -1,7 +1,7 @@
 # Archestra battery
 
-Rules for the sharing tools of Archestra's built-in MCP server, plus the
-`archestra` audience source.
+Rules for the sharing, discovery, reporting, and agent run tools of
+Archestra's built-in MCP server, plus the `archestra` audience source.
 
 ## Files
 
@@ -21,6 +21,8 @@ wins:
 | `add_team_member` | the added member | `@archestra:user/$user` |
 | `search_tools`, `search_files`, `load_skill` | nothing: they list tools and files, and load a skill | nothing |
 | `yell` | nothing: it files a guardrails report, the way out of a block | nothing |
+| `start_agent_run`, `get_agent_run`, `steer_agent_run`, `cancel_agent_run` | nothing: Archestra joins this session's label into a run's input, and a run's result arrives already joined with the run's label | nothing |
+| `list_agent_runs` | adds `internal`: it names the organization's agents, requesters, and channels | nothing |
 
 Every widening share also requires `trusted` data. Values that keep a
 resource personal or private, and updates that send no scope and no
@@ -34,6 +36,13 @@ system's own ACLs, which this source cannot read, so such a connector
 must be sharable with anyone. Every rule of a tool declares its lists as
 arrays of strings, so a malformed list is refused rather than read as no
 list.
+
+The workspace tools (`read_workspace_file`, `transfer_workspace_file`,
+`write_workspace_file`) and the run's posts (`post_agent_run_message`,
+`post_agent_run_file`) have no rule here and fall to the deployment's
+annotator. A run's own session, or a client without a proof, reads its
+workspace with no crossing, and a post reaches a messaging thread whose
+readers this source cannot list.
 
 A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.
