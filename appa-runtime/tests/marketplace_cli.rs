@@ -956,6 +956,30 @@ fn a_first_install_includes_the_batteries_the_plugin_requires_and_a_reinstall_ke
     );
 }
 
+/// A reinstall that writes the default policy afresh includes the batteries
+/// the plugin requires, though the retained selection already lists them.
+#[test]
+fn a_reinstall_over_a_deleted_config_includes_the_batteries_the_plugin_requires() {
+    let source = tempfile::tempdir().unwrap();
+    let config = stage(source.path(), Some(&["github"]), &["github", "linear"]);
+    let config_name = config.to_str().unwrap();
+    let install = || {
+        let output = run(
+            source.path(),
+            &["plugin", "install", "kagent", "--config", config_name, "--json"],
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    install();
+    std::fs::remove_file(&config).unwrap();
+    install();
+
+    let listed = run(source.path(), &["battery", "list", "--config", config_name, "--json"]);
+    let document: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(document["result"]["packages"][0]["name"], "github");
+    assert_eq!(document["result"]["packages"][0]["included"], true);
+}
+
 /// Several batteries install as one operation; a binding names one battery's
 /// namespace, so it is refused with more than one before anything is written.
 #[test]

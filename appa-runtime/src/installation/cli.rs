@@ -689,8 +689,10 @@ pub fn install(mut args: Install) -> ExitCode {
         installation.retain(&acquired)?;
         let package = PackageName::parse(&name).map_err(invalid)?;
         // A bundle restores its own selection and a reinstall keeps the
-        // person's battery choices; only the plugin's first install brings the
-        // batteries its manifest requires and those whose program is on PATH.
+        // person's battery choices; only the plugin's first install, or one that
+        // writes the default policy afresh, brings the batteries its manifest
+        // requires and those whose program is on PATH.
+        let fresh_config = before.is_none();
         let mut included = Vec::new();
         let catalog = read_catalog(acquired.marketplace())?;
         let entry = catalog
@@ -714,7 +716,7 @@ pub fn install(mut args: Install) -> ExitCode {
             let first_install = !current
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains(&name));
-            if first_install {
+            if first_install || fresh_config {
                 included = plugin.batteries().to_vec();
                 let available = discover::batteries(acquired.marketplace(), &catalog, plugin.host())?;
                 let search = std::env::var_os("PATH").unwrap_or_default();
@@ -756,7 +758,9 @@ pub fn install(mut args: Install) -> ExitCode {
         }
         selection.set_generation(acquired.generation().clone());
         let mut text = text;
-        included.retain(|battery| !selection.batteries.contains(battery.as_str()));
+        if !fresh_config {
+            included.retain(|battery| !selection.batteries.contains(battery.as_str()));
+        }
         for battery in &included {
             selection.select(PackageKind::Battery, battery);
             text = edit::add_include(&text, &includes::battery_include(battery))?;

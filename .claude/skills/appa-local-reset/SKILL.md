@@ -1,6 +1,6 @@
 ---
 name: appa-local-reset
-description: Prepare a local test of the current OpenAPPA checkout — build the `appa` binary into ~/.local/bin, refresh the `appa-guide-test` Claude skill from the checkout's guide sources, and reset the local deployment (policy config, credential database, runtime database). Use when the user wants to try local APPA or appa-guide changes before release.
+description: Prepare a local test of the current OpenAPPA checkout — build the `appa` binary into ~/.local/bin, refresh the `appa-guide-test` Claude skill from the checkout's guide sources, and purge the local deployment. Use when the user wants to try local APPA or appa-guide changes before release.
 ---
 
 # appa-local-reset
@@ -43,27 +43,19 @@ reference file still points under `skills/appa-guide/`.
 
 ## 3. Reset the local deployment
 
-Start the next test from nothing: remove the policy config, the credential
-database, and the runtime database. Invoking this skill authorizes deleting
-exactly these files, nothing else.
+Start the next test from nothing with the installer's own start-over:
 
-1. Find the paths; do not assume them. The config and data directories come
-   from `installed_config_dir` and `installed_data_dir` in
-   `appa-runtime/src/init/paths.rs`, which honour `APPA_CONFIG_DIR` and
-   `APPA_DATA_DIR`. The credential database is the file
-   `CredentialStore::for_config` in `appa-runtime/src/credentials.rs` names
-   beside the config. The runtime database is the `--db` path
-   `appa-runtime/src/runtime_start.rs` gives the runtime it starts.
-2. Stop the runtime first, so no process holds the database open: run
-   `~/.local/bin/appa runtime stop`. Then check
-   `ps ax -o command | grep '[a]ppa runtime'`. If a runtime still serves
-   one of these files, stop and report it; do not delete under it.
-3. Delete the config file, the credential database, and the runtime database
-   with its SQLite side files (`-wal`, `-shm`). A missing file is fine. Leave
-   everything else in those directories: installed batteries, binaries,
-   logs, and settings.
+```
+~/.local/bin/appa plugin remove claude-code --purge --json
+```
 
-List the paths you deleted in the report.
+It stops the runtime and deletes the default deployment's config and data
+directories: policy, databases, logs, retained versions, and install state.
+Deleting only the config leaves the install state, so the next install is not
+a first install. Invoking this skill authorizes this purge, nothing else.
+
+Then check `ps ax -o command | grep '[a]ppa runtime'`. If a runtime still
+serves the purged deployment, report it.
 
 ## 4. Report
 
@@ -71,11 +63,13 @@ Say in a few short lines:
 
 - the binary version from step 1 and the branch or commit it was built from;
 - that `/appa-guide-test` now carries this checkout's guide;
-- the files step 3 deleted;
-- the next step to test the local installation:
+- the directories step 3 purged;
+- the next step to test the local installation, run from this checkout:
 
   ```
-  ! ~/.local/bin/appa plugin install claude-code
+  ! ~/.local/bin/appa plugin install claude-code --revision <full HEAD commit>
   ```
 
-  then start a new Claude Code session.
+  then start a new Claude Code session. Without `--revision`, the install
+  takes a published release, not this checkout. The revision exports
+  committed state only; uncommitted changes are not in it.
