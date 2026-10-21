@@ -9,9 +9,10 @@ reader.
 
 The folder contains:
 
-- `appa.toml`: the replay configuration, including the battery and two
-  tools that make the trust and audience changes observable; and
-- `huggingface-battery.appa`: the replay trace.
+- `appa.toml`: the replay configuration, which includes the battery; and
+- `huggingface-battery.appa`: the replay trace. It checks the trust and
+  audience changes with `appa/do_something`, which asks what the
+  trajectory allows without naming a tool.
 
 The trace names public repositories, so any read token replays it. The
 last block, commented out, reads a private repository: name one the

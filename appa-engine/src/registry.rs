@@ -87,6 +87,30 @@ impl ToolMatcher {
             }
         }
     }
+
+    /// The arguments whose pattern puts `*` inside a URL host, as in `https://*.example.com/*`.
+    /// `*` crosses `/`, `?` and `#`, so such a pattern matches any URL that merely contains the
+    /// rest of it.
+    fn url_host_wildcards(&self) -> impl Iterator<Item = &str> {
+        let clauses = match self {
+            ToolMatcher::Bare => None,
+            ToolMatcher::Arguments(ArgumentPatterns(clauses)) => Some(clauses),
+        };
+        clauses
+            .into_iter()
+            .flatten()
+            .filter(|(_, pattern)| wildcard_in_url_host(pattern))
+            .map(|(argument, _)| argument.as_str())
+    }
+}
+
+fn wildcard_in_url_host(pattern: &[PatternPart]) -> bool {
+    pattern.windows(2).any(|pair| match pair {
+        [PatternPart::Literal(literal), PatternPart::Wildcard] => literal
+            .rsplit_once("://")
+            .is_some_and(|(_, authority)| !authority.contains('/')),
+        _ => false,
+    })
 }
 
 fn wildcard_matches(pattern: &[PatternPart], value: &str) -> bool {
@@ -210,6 +234,88 @@ fn parse_tool_selector(authored: &str) -> Result<(ContractName, ToolMatcher), Lo
     Ok((ContractName::parse(tool), ToolMatcher::Arguments(clauses)))
 }
 
+/// Why an authored name cannot be respelled for another spelling of the same call.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RespellError {
+    #[error("malformed tool selector {0:?}")]
+    Malformed(String),
+    #[error("argument {0:?} is read but not mapped")]
+    Unmapped(String),
+    #[error("two arguments are mapped onto argument {0:?}")]
+    Collides(String),
+    #[error("{0:?} is not an argument name a selector or placeholder can spell")]
+    Unspellable(String),
+}
+
+/// Whether `name` reads back as one argument name in a selector clause and in a placeholder
+/// segment: non-empty, no delimiter of either grammar, and no leading placeholder mark.
+pub fn is_spellable_argument(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('$')
+        && !name
+            .chars()
+            .any(|c| matches!(c, '(' | ')' | ',' | ':' | '\\' | '/') || c.is_control())
+}
+
+pub(crate) fn respelled_argument(arguments: &BTreeMap<String, String>, argument: &str) -> Result<String, RespellError> {
+    let target = arguments
+        .get(argument)
+        .ok_or_else(|| RespellError::Unmapped(argument.to_string()))?;
+    if !is_spellable_argument(target) {
+        return Err(RespellError::Unspellable(target.clone()));
+    }
+    Ok(target.clone())
+}
+
+/// `authored` for the tool `tool`, each selector argument renamed through `arguments`: the
+/// same matcher over another tool's spelling of one call.
+pub fn respell_declaration(
+    authored: &str,
+    tool: &str,
+    arguments: &BTreeMap<String, String>,
+) -> Result<String, RespellError> {
+    let (_, matcher) = parse_tool_selector(authored).map_err(|_| RespellError::Malformed(authored.to_string()))?;
+    let ToolMatcher::Arguments(ArgumentPatterns(clauses)) = matcher else {
+        return Ok(tool.to_string());
+    };
+    let mut renamed = BTreeMap::new();
+    for (argument, pattern) in clauses {
+        let target = respelled_argument(arguments, &argument)?;
+        if renamed.insert(target.clone(), pattern).is_some() {
+            return Err(RespellError::Collides(target));
+        }
+    }
+    let clauses: Vec<String> = renamed
+        .iter()
+        .map(|(argument, pattern)| format!("{argument}:{}", spell_pattern(pattern)))
+        .collect();
+    Ok(format!("{tool}({})", clauses.join(",")))
+}
+
+fn spell_pattern(pattern: &[PatternPart]) -> String {
+    pattern
+        .iter()
+        .map(|part| match part {
+            PatternPart::Wildcard => "*".to_string(),
+            PatternPart::Literal(literal) => literal
+                .chars()
+                .flat_map(|c| match c {
+                    '*' | ')' | '\\' | ',' => vec!['\\', c],
+                    c => vec![c],
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The arguments of an authored declaration name whose pattern puts `*` inside a URL host. A
+/// malformed selector names none: loading refuses it on its own.
+pub fn url_host_wildcards(authored: &ToolName) -> Vec<String> {
+    parse_tool_selector(authored.as_str())
+        .map(|(_, matcher)| matcher.url_host_wildcards().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 pub(crate) fn contract_name(authored: &ToolName) -> Result<ContractName, LoadError> {
     parse_tool_selector(authored.as_str()).map(|(name, _)| name)
@@ -272,6 +378,13 @@ impl TrustChain {
 
     pub(crate) fn contains_rank(&self, trust: Trust) -> bool {
         (trust.rank() as usize) < self.ranks.len()
+    }
+
+    /// How a label held under this chain crosses to `arriving`, or `None` when both name the
+    /// same ranks in the same order.
+    pub(crate) fn crossing_to(&self, arriving: &TrustChain) -> Option<crate::label::TrustCrossing> {
+        let arriving: Vec<&str> = arriving.names().collect();
+        crate::label::TrustCrossing::between(self.names(), &arriving)
     }
 }
 
@@ -513,15 +626,15 @@ impl AnnotatorMandate {
         self.trust.contains(&trust)
     }
 
-    pub(crate) fn permits_clause(&self, clause: &Clause) -> bool {
+    pub fn permits_clause(&self, clause: &Clause) -> bool {
         self.audiences.permits_clause(clause)
     }
 
-    pub(crate) fn permits_mark(&self, mark: &MarkName) -> bool {
+    pub fn permits_mark(&self, mark: &MarkName) -> bool {
         self.marks.contains(mark)
     }
 
-    pub(crate) fn permits_effect(&self, effect: &EffectKind) -> bool {
+    pub fn permits_effect(&self, effect: &EffectKind) -> bool {
         self.effects.contains(effect)
     }
 }
@@ -1491,22 +1604,12 @@ impl Registry {
         }
     }
 
-    /// The declaration a persisted call names. The wildcard follows all explicit variants,
-    /// at ordinal zero for an undeclared name. Larger ordinals name no contract.
-    pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
-        match self.classify(name)? {
-            ToolKind::Declared => self
-                .matching_variants(name.clone())
-                .map(|(_, declaration)| declaration)
-                .chain(self.wildcard.iter())
-                .nth(id.ordinal()),
-            ToolKind::ProviderRun => None,
-            ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
-        }
-    }
-
+    /// The declaration this registry selects for a call, by its tool and arguments. A call
+    /// recorded at one policy revision is read at another, whose declarations stand in another
+    /// order: no record carries a selection, so each registry selects afresh.
     pub fn declaration(&self, call: &crate::value::ResolvedCall) -> Option<&ToolDeclaration> {
-        self.keyed_tool(call.tool(), call.declaration_id())
+        self.select_tool(call.tool(), call.arguments())
+            .map(|(_, declaration)| declaration)
     }
 
     /// The one annotation this call is judged under: its declaration's static annotation,
@@ -1573,9 +1676,17 @@ impl Registry {
         }
     }
 
-    pub(crate) fn selection_matches(&self, call: &crate::value::ResolvedCall) -> bool {
-        self.select_tool(call.tool(), call.arguments())
-            .is_some_and(|(selected, _)| selected == call.declaration_id())
+    /// The ordinal of the declaration this registry selects for `call`.
+    #[cfg(test)]
+    pub(crate) fn selected(&self, call: &crate::value::ResolvedCall) -> Option<ToolDeclarationId> {
+        self.select_tool(call.tool(), call.arguments()).map(|(id, _)| id)
+    }
+
+    /// Whether this registry selects one declaration for both calls.
+    pub(crate) fn selects_alike(&self, one: &crate::value::ResolvedCall, other: &crate::value::ResolvedCall) -> bool {
+        let selected =
+            |call: &crate::value::ResolvedCall| self.select_tool(call.tool(), call.arguments()).map(|(id, _)| id);
+        selected(one).is_some_and(|id| Some(id) == selected(other))
     }
 
     /// Whether a proposal naming this tool has a checkable declaration: written exactly, or
@@ -2751,6 +2862,32 @@ mod tests {
     }
 
     #[test]
+    fn a_wildcard_inside_a_url_host_is_flagged() {
+        let flagged = |name: &str| url_host_wildcards(&ToolName::new(name));
+        for name in [
+            "fetch(url:https://*.github.com/*)",
+            "fetch(url:https://api.*)",
+            "fetch(url:https://github.com*)",
+            "fetch(url:*://*)",
+        ] {
+            assert_eq!(flagged(name), ["url"], "{name}");
+        }
+        for name in [
+            "fetch(url:https://github.com/*)",
+            "fetch(url:https://www.google.com/search?*)",
+            "fetch(url:*)",
+            "read(path:*/.env*)",
+            "fetch",
+        ] {
+            assert!(flagged(name).is_empty(), "{name}");
+        }
+        assert_eq!(
+            flagged("fetch(url:https://github.com/*,mirror:http://*.example/*)"),
+            ["mirror"]
+        );
+    }
+
+    #[test]
     fn selector_grammar_and_unicode_wildcards_are_exact() {
         let parsed = |name| parse_tool_selector(name).map(|(_, matcher)| matcher);
         let arguments = |value| serde_json::json!({ "path": value });
@@ -2900,6 +3037,43 @@ mod tests {
     }
 
     #[test]
+    fn a_respelled_selector_matches_the_renamed_arguments_of_the_same_call() {
+        let arguments = BTreeMap::from([("command".to_string(), "cmd".to_string())]);
+        let authored = r"tool/coding/shell(command:*a\*b\)c\\d\,e*)";
+        let respelled = respell_declaration(authored, "host/codex/exec", &arguments).unwrap();
+        let (name, matcher) = parse_tool_selector(&respelled).unwrap();
+        assert_eq!(name, ContractName::Named(ToolName::new("host/codex/exec")));
+        let value = r"x a*b)c\d,e y";
+        assert!(matcher.matches(&serde_json::json!({ "cmd": value })));
+        assert!(!matcher.matches(&serde_json::json!({ "command": value })));
+        let (_, original) = parse_tool_selector(authored).unwrap();
+        assert!(original.matches(&serde_json::json!({ "command": value })));
+
+        assert_eq!(
+            respell_declaration("tool/coding/shell", "host/codex/exec", &BTreeMap::new()),
+            Ok("host/codex/exec".to_string())
+        );
+        assert_eq!(
+            respell_declaration("tool/coding/shell(path:x)", "host/codex/exec", &arguments),
+            Err(RespellError::Unmapped("path".to_string()))
+        );
+        let collapsing = BTreeMap::from([("a".to_string(), "z".to_string()), ("b".to_string(), "z".to_string())]);
+        assert_eq!(
+            respell_declaration("t(a:x,b:y)", "u", &collapsing),
+            Err(RespellError::Collides("z".to_string()))
+        );
+        assert!(matches!(
+            respell_declaration("t(a:x", "u", &arguments),
+            Err(RespellError::Malformed(_))
+        ));
+        let reshaping = BTreeMap::from([("a".to_string(), "x:prefix".to_string())]);
+        assert_eq!(
+            respell_declaration("t(a:*)", "u", &reshaping),
+            Err(RespellError::Unspellable("x:prefix".to_string()))
+        );
+    }
+
+    #[test]
     fn server_independent_names_match_only_concrete_mcp_tools() {
         let mut cfg = base();
         cfg.tools = declared(vec![tool("mcp/*/read")]);
@@ -2948,9 +3122,8 @@ mod tests {
             let (id, selected) = registry.select_tool(&actual, arguments.value()).unwrap();
             assert_eq!(id.ordinal(), 0);
             assert_eq!(selected.name().as_str(), names[0].split('(').next().unwrap());
-            let call = crate::value::ResolvedCall::new_keyed(actual.clone(), id, arguments);
+            let call = crate::value::ResolvedCall::new(actual.clone(), arguments);
             assert_eq!(registry.declaration(&call), Some(selected));
-            assert!(registry.selection_matches(&call));
             assert_eq!(registry.annotation_of(&call).unwrap().name, actual);
         }
         let mut cfg = base();
@@ -3027,11 +3200,6 @@ mod tests {
 
         let (_, exact) = registry.select_tool(&read, &serde_json::json!({})).unwrap();
         assert!(exact.declared().is_some(), "an exact declaration beats the wildcard");
-        assert!(
-            registry
-                .keyed_tool(&ghost, ToolDeclarationId::new(1).unwrap())
-                .is_none()
-        );
         assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_SPELLING));
         assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_SPELLING));
         assert!(
@@ -3068,13 +3236,12 @@ mod tests {
                 let (id, selected) = registry.select_tool(&name, arguments.value()).unwrap();
                 assert_eq!(id.ordinal(), 2);
                 assert_eq!(selected.annotator(), Some(&AnnotatorName::new("any")));
-                let call = crate::value::ResolvedCall::new_keyed(name.clone(), id, arguments);
+                let call = crate::value::ResolvedCall::new(name.clone(), arguments);
                 assert_eq!(registry.declaration(&call), Some(selected));
-                assert!(registry.selection_matches(&call));
                 let persisted = serde_json::to_value(&call).unwrap();
+                assert!(persisted.get("declaration").is_none(), "a call stores no selection");
                 let restored: crate::value::ResolvedCall = serde_json::from_value(persisted).unwrap();
                 assert_eq!(registry.declaration(&restored), Some(selected));
-                assert!(registry.selection_matches(&restored));
             }
             for (args, ordinal) in [
                 (serde_json::json!({"command":"git push"}), 0),
@@ -3084,7 +3251,6 @@ mod tests {
                 assert_eq!(id.ordinal(), ordinal);
                 assert!(selected.declared().is_some());
             }
-            assert!(registry.keyed_tool(&name, ToolDeclarationId::new(3).unwrap()).is_none());
         }
     }
 
@@ -3104,7 +3270,6 @@ mod tests {
         assert!(!registry.contains_tool(&literal));
         assert!(!registry.declared(&literal));
         assert!(registry.select_tool(&literal, &serde_json::json!({})).is_none());
-        assert!(registry.keyed_tool(&literal, ToolDeclarationId::default()).is_none());
         assert_eq!(
             registry.classify(&ToolName::new("ghost")),
             Some(ToolKind::Wildcard),
@@ -3139,7 +3304,6 @@ mod tests {
         assert_eq!(registry.classify(&ghost), None);
         assert!(!registry.contains_tool(&ghost));
         assert!(registry.select_tool(&ghost, &serde_json::json!({})).is_none());
-        assert!(registry.keyed_tool(&ghost, ToolDeclarationId::default()).is_none());
     }
 
     #[test]

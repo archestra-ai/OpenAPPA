@@ -478,7 +478,7 @@ impl Run<'_> {
                 Ok(Answered::Reply(feedback))
             }
             HookDecision::PassControl => self.execute_remedy(frame, &proposed).await,
-            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
+            HookDecision::Refuse { detail, .. } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
     }
@@ -551,7 +551,7 @@ impl Run<'_> {
         let context = match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::Ack => None,
             HookDecision::Context { text } => Some(text),
-            HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail, .. } => return Err(StopReason::Refused(detail)),
             other => return Err(unexpected("a child start", &other)),
         };
         Ok(Answered::Spawned {
@@ -585,14 +585,14 @@ impl Run<'_> {
                 };
                 match hooks::handle(&self.agent.runtime, echoed).await {
                     HookDecision::Ack => (spawn_closed(), self.returned(parent, Some(value)).await),
-                    HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+                    HookDecision::Refuse { detail, .. } => return Err(StopReason::Refused(detail)),
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
             }
             HookDecision::Block { reason } => self.unadmitted_return(parent, reason).await,
             // The return could not be judged; it is withheld like a blocked one and the
             // parent goes on. Only a refused lifecycle event ends the run.
-            HookDecision::Refuse { detail } => self.unadmitted_return(parent, withheld(&detail)).await,
+            HookDecision::Refuse { detail, .. } => self.unadmitted_return(parent, withheld(&detail)).await,
             other => return Err(unexpected("a child return", &other)),
         };
         // The spawn call closes with no body of its own: what the parent reads is the
@@ -702,7 +702,7 @@ impl Run<'_> {
                 .await;
                 Ok(reason)
             }
-            HookDecision::Refuse { detail } => {
+            HookDecision::Refuse { detail, .. } => {
                 let reason = withheld(&detail);
                 self.record(
                     frame,
@@ -856,7 +856,7 @@ impl Run<'_> {
     async fn expect_ack(&self, event: HookEvent) -> Result<(), StopReason> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::Ack => Ok(()),
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail, .. } => Err(StopReason::Refused(detail)),
             other => Err(unexpected("a lifecycle event", &other)),
         }
     }

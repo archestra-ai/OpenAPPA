@@ -57,39 +57,12 @@ pub(crate) fn policy(result: &Result<ToolCallDecision, EventError>, tool: &str, 
                 "appa.outcome" = outcome, "appa.offer.ids" = ?offers,
                 "appa.duration.seconds" = seconds }, "policy check completed");
         }
-        Err(error) => failure("policy_check", error_class(error)),
+        Err(error) => failure("policy_check", &error_class(error)),
     }
 }
 
-fn error_class(error: &EventError) -> &'static str {
-    match error {
-        EventError::Storage(_) => "storage",
-        EventError::UntrustedLog(_) => "untrusted_log",
-        EventError::PolicyUnavailable(_) => "policy_unavailable",
-        EventError::InventoryRefused(_) => "inventory_refused",
-        EventError::EngineInvariant(_) | EventError::UnexpectedDecision => "engine_invariant",
-        EventError::Contended { .. } => "contended",
-        EventError::ResolutionDiverged { .. } => "resolution_diverged",
-        EventError::AnnotationRefused { .. } => "annotation_refused",
-        EventError::UndeclaredTool { .. } => "undeclared_tool",
-        EventError::UndeclaredSpawn { .. } => "undeclared_spawn",
-        EventError::PeerMessageTooLarge { .. } => "peer_message",
-        EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => "principal",
-        EventError::CallOutstanding
-        | EventError::SpawnOutstanding
-        | EventError::FanOutOutstanding
-        | EventError::ChildDispatchOpen => "outstanding_call",
-        EventError::CallIdReused => "call_id_reused",
-        EventError::TrajectoryEnded => "trajectory_ended",
-        EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => "trajectory",
-        EventError::UnknownDispatch | EventError::OutcomeMismatch => "dispatch",
-        EventError::UnknownOffer | EventError::RemedyArguments { .. } => "remedy",
-        EventError::NotAChild
-        | EventError::FanOutUnkeyed
-        | EventError::SpawnNotTaken
-        | EventError::SpawnAmbiguous
-        | EventError::BindingMismatch => "spawn",
-    }
+fn error_class(error: &EventError) -> String {
+    spelling(&error.class())
 }
 
 fn failure(component: &'static str, class: &str) {
@@ -166,7 +139,14 @@ pub(crate) fn runtime_event(root: Option<&appa_runtime_api::TrajectoryId>, event
                 "appa.trajectory.root" = root, "appa.hook.event" = spelling(event),
                 "appa.outcome" = spelling(outcome) }, "hook completed");
         }
-        RuntimeEvent::Reload { .. } => {}
+        RuntimeEvent::PolicyPublished {
+            deployment, revision, ..
+        } => {
+            let deployment = name(deployment);
+            tracing::info!(target: "appa_telemetry", { "appa.event.name" = "appa.policy.published",
+                "appa.policy.id" = format!("{deployment}@{revision}"), "appa.policy.deployment" = deployment,
+                "appa.policy.revision" = revision }, "policy revision published");
+        }
     }
 }
 

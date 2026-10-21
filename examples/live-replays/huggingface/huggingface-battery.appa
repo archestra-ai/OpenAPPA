@@ -25,15 +25,15 @@ mcp/huggingface/hub_repo_details {
 }
 expect allow
 
-# Suspicious content cannot enter a tool that requires trusted input.
-mcp/shell/run_command {
-  command: "deploy"
+# Suspicious content cannot enter a call that requires trusted input.
+appa/do_something {
+  requires: {"trust": "trusted"}
 }
 expect deny
 
 # Public repository content can go to a public destination.
-mcp/mail/send {
-  to: "public"
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
 }
 expect allow
 
@@ -52,8 +52,8 @@ mcp/huggingface/hub_repo_search {
 expect allow
 
 # Narrowed content cannot go to a public destination.
-mcp/mail/send {
-  to: "public"
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
 }
 expect deny
 

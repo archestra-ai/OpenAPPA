@@ -1,6 +1,6 @@
 //! `PolicyBasis` — what makes an offer or a call approval current.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -173,8 +173,8 @@ impl BasisAdvance {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Versions {
     family: FamilyVersion,
-    flows: BTreeMap<TrajectoryId, FlowVersion>,
-    generations: BTreeMap<SubjectKey, SubjectGeneration>,
+    flows: imbl::OrdMap<TrajectoryId, FlowVersion>,
+    generations: imbl::OrdMap<SubjectKey, SubjectGeneration>,
 }
 
 impl Versions {

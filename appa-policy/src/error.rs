@@ -16,6 +16,8 @@ pub enum ConfigError {
     UnknownTrustRank { name: String, context: String },
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
+    #[error("bad requires in {context}: {reason}")]
+    BadRequires { context: String, reason: String },
     #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
     UnknownSanitizerPoint { token: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]

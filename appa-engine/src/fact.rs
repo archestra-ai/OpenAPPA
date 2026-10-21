@@ -7,9 +7,9 @@ use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::{Label, ReaderId};
-use crate::names::{AuthorityName, SanitizerName};
+use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::plan::PlanId;
-use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentity};
+use crate::profile::{DeploymentName, DeploymentProfile, PolicyFileKey, PolicyRevision};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
     ValueId,
@@ -88,6 +88,14 @@ impl ReturnPolicy {
         match self {
             ReturnPolicy::Void => None,
             ReturnPolicy::Crossing(crossing) => Some(crossing),
+        }
+    }
+
+    /// The policy under the trust chain a policy crossing arrives at. A crossing return's floor
+    /// is a requirement, so a rank the arriving chain lacks rises rather than drops.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        if let ReturnPolicy::Crossing(returned) = self {
+            returned.floor.cross_floor(crossing);
         }
     }
 }
@@ -189,6 +197,12 @@ pub struct ForkSnapshot {
 }
 
 impl ForkSnapshot {
+    /// The snapshot under the trust chain a policy crossing arrives at.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        self.base.cross_value(crossing);
+        self.seed.cross_value(crossing);
+    }
+
     /// Freeze a basis: the base plus every contributing source with its label at this
     /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to
     /// walk ancestry to be understood.
@@ -230,9 +244,10 @@ impl ForkSnapshot {
 /// family of its own after that point: nothing either side admits, emits, settles or denies later
 /// reaches the other, so a reservation carried over never settles in the root fork.
 ///
-/// [`crate::transition::EngineView::root_fork_origin`] freezes one from the parent family's
-/// validated view, and the runtime records it on the new root's opening record. A root fork has
-/// no prepared spawn, child start, or return contract; those belong to the same-family
+/// [`crate::engine::Engine::root_fork_origin`] freezes one from the parent family's
+/// validated view, its label expressed in the freezing engine's trust chain, and the runtime
+/// records it on the new root's opening record. A root fork has no prepared spawn, child start,
+/// or return contract; those belong to the same-family
 /// [`ForkSnapshot`] flow. A replay of the root fork's log never reads the parent family's log, so
 /// it takes the recorded origin as trusted log content and refuses only an origin that forks the
 /// root from itself.
@@ -299,15 +314,63 @@ pub enum CloseOutcome {
     Indeterminate,
 }
 
-/// The fields that open a root trajectory family.
+impl CloseOutcome {
+    /// Does this close release the dispatch's effect reservation? Only an indeterminate close
+    /// keeps it: the call may have executed.
+    pub(crate) fn settles_reservation(&self) -> bool {
+        match self {
+            CloseOutcome::Success { .. } | CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => true,
+            CloseOutcome::Indeterminate => false,
+        }
+    }
+}
+
+/// What released a call, pinned on its `DispatchOpened`: the call's resolved delta and tags under
+/// the policy revision that released it. The outcome reads them with the record's
+/// `proposed_effects`, so a result arriving after a later revision was published is labelled by
+/// the terms that released the call met with what the judging revision declares for it, and
+/// commits the effects the release reserved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTerms {
+    /// The call's delta, its placeholders bound to the call's arguments.
+    pub delta: crate::contract::Delta,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<TagName>,
+}
+
+impl ReleaseTerms {
+    /// The terms of `contract`, bound to the call it releases.
+    pub(crate) fn of(contract: &crate::contract::ToolAnnotation) -> ReleaseTerms {
+        ReleaseTerms {
+            delta: contract.delta.clone(),
+            tags: contract.tags.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ReleaseTerms {
+    /// No delta and no tags: the terms a fixture dispatch of a plain tool pins.
+    pub(crate) fn none() -> ReleaseTerms {
+        ReleaseTerms {
+            delta: crate::contract::Delta::NONE,
+            tags: Vec::new(),
+        }
+    }
+}
+
+/// The fields that open a root trajectory family. The family follows the deployment its opening
+/// names and decides at that deployment's head.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrajectoryOpening {
     pub trajectory: TrajectoryId,
-    pub dialect: PolicyDialectVersion,
     pub profile: DeploymentProfile,
-    pub policy_digest: PolicyIdentity,
+    /// The file of the revision that opened the family.
     pub policy_file_key: PolicyFileKey,
-    pub open_vectors: Vec<OpenVector>,
+    /// The deployment this family follows.
+    pub deployment: DeploymentName,
+    /// The policy revision that opened the family.
+    pub revision: PolicyRevision,
     /// Set when the root opened as a fork of another family's trajectory. Its label starts
     /// from the deployment's starting label folded with the origin's, and its effects,
     /// unsettled reservations and denials start as the origin's.
@@ -333,7 +396,6 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
-        declaration: crate::value::ToolDeclarationId,
         arguments: crate::params::CanonicalArguments,
         proposed_label: Label,
         /// The established bound this dispatch's result is received against, snapshotted here
@@ -353,6 +415,8 @@ pub enum Fact {
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,
+        /// The terms that released the call.
+        terms: ReleaseTerms,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,
@@ -520,6 +584,10 @@ pub enum Fact {
         trajectory: TrajectoryId,
         act: crate::basis::DecidedAct,
         advance: crate::basis::BasisAdvance,
+        /// The policy revision that decided this batch. Every engine writes it; a replay refuses a
+        /// decided batch that carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<PolicyRevision>,
     },
     ForkPrepared {
         trajectory: TrajectoryId,

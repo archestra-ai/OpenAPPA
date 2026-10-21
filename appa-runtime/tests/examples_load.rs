@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(unix)]
-use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{RemedyOutcome, Runtime};
 #[cfg(unix)]
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
 #[cfg(unix)]
-use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome};
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
 /// The policies a package directory ships, by the suffix every one of them
 /// carries. The package's own `appa-package.toml` manifest is not a policy.
@@ -85,10 +85,23 @@ fn the_live_replay_roots_open() {
     );
 }
 
+/// The `coding` battery, whose canonical tools the Claude Code battery binds, beside it in `dir`.
+#[cfg(unix)]
+fn with_the_coding_battery(dir: &Path) {
+    let battery_dir = dir.join("batteries/coding");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/coding/appa.toml"),
+        battery_dir.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
+}
+
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
 /// them: the default's rules run before the battery's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
+    with_the_coding_battery(dir.path());
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
@@ -104,7 +117,7 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let root = dir.path().join("appa.toml");
     std::fs::write(
         &root,
-        format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{default}"),
+        format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}"),
     )
     .expect("the initialized config includes the battery");
 
@@ -171,6 +184,7 @@ fn session_tool(rule: &toml::Value) -> bool {
 
 #[cfg(unix)]
 fn compiled(dir: &Path, root: &str, battery: &str) -> appa_policy::Config {
+    with_the_coding_battery(dir);
     let battery_dir = dir.join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
     std::fs::write(battery_dir.join("appa.toml"), battery).expect("the battery writes");
@@ -193,7 +207,7 @@ fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
         .expect("the initialized default is readable");
     let shipped = std::fs::read_to_string(repository.join("marketplace/batteries/claude-code/appa.toml"))
         .expect("the battery is readable");
-    let include = "include = [\"batteries/claude-code/appa.toml\"]\n\n";
+    let include = "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n";
 
     let mut battery: toml::Value = toml::from_str(&shipped).unwrap();
     let (moved, kept): (Vec<_>, Vec<_>) = battery["policy"]["tool"]
@@ -301,19 +315,6 @@ fn the_shipped_annotators_admit_every_audience_the_policy_writes() {
     }
 }
 
-/// The offer the feedback attributes to the `redact-secrets` sanitizer. An offer's
-/// `returns` describes a child's return only, so the feedback is where an output
-/// sanitizer's offer is named.
-#[cfg(unix)]
-fn masker_offer(feedback: &str) -> OfferId {
-    let line = feedback
-        .lines()
-        .skip_while(|line| !line.contains("sanitizer redact-secrets"))
-        .nth(1)
-        .unwrap_or_else(|| panic!("no redact-secrets offer in feedback: {feedback}"));
-    last_offer(line)
-}
-
 #[cfg(unix)]
 fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
@@ -324,9 +325,9 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling. A Bash call naming one narrows the trajectory to `self` and offers the stock
-/// masker, which returns the command's masked output to `public`. A Read narrows the
-/// trajectory to `self`, after which a public sink requires an exact-call human review.
+/// spelling. A Bash call naming one is blocked with only the narrowing to `self` offered:
+/// the battery declares no sanitizer. A Read narrows the trajectory to `self`, after which
+/// a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
@@ -350,55 +351,28 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
-    // A credential read is `self` data: the block offers the masker beside the plain
-    // narrowing and consults no person; the masked output is what reaches the model.
+    // A credential read is `self` data: the block offers only the narrowing to `self`
+    // and consults no person.
     for command in [
         "cat .env",
         "cat .netrc",
         "cat ~/.ssh/id_ed25519",
         "cat /home/me/.aws/credentials",
     ] {
-        let read = call("host/claude-code/Bash", "command", command);
-        let blocked = propose(&runtime, read.clone()).await;
+        let blocked = propose(&runtime, call("host/claude-code/Bash", "command", command)).await;
         let HookDecision::DenyCall {
             feedback,
             offers,
             review,
         } = blocked
         else {
-            panic!("`{command}` is blocked with the masker offered, got {blocked:?}");
+            panic!("`{command}` is blocked with the narrowing offered, got {blocked:?}");
         };
-        assert_eq!(offers.len(), 2, "`{command}` offers the narrowing and the masker");
+        assert_eq!(offers.len(), 1, "`{command}` offers only the narrowing: {feedback}");
         assert!(review.is_empty(), "`{command}` consults no person");
-        assert!(matches!(
-            runtime.execute_remedy(&actor(), masker_offer(&feedback)).await,
-            RemedyOutcome::Authorized { .. }
-        ));
-        assert_eq!(
-            propose(&runtime, read.clone()).await,
-            HookDecision::AllowCall { spawn: None }
-        );
-        let delivered = hooks::handle(
-            &runtime,
-            HookEvent::ToolResult {
-                actor: actor(),
-                call: read,
-                call_id: None,
-                outcome: ToolOutcome::Success {
-                    body: OutcomeBody::Available(
-                        "GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nREGION=eu-west-1\n"
-                            .to_string(),
-                    ),
-                },
-            },
-        )
-        .await;
-        let HookDecision::DeliverValue { value } = delivered else {
-            panic!("`{command}`'s output crosses through the masker, got {delivered:?}");
-        };
-        assert_eq!(
-            value,
-            "GITHUB_TOKEN=[redacted-secret]\nAWS_SECRET_ACCESS_KEY=[redacted-secret]\nREGION=eu-west-1\n"
+        assert!(
+            !feedback.contains("redact-secrets"),
+            "`{command}` offers no masker: {feedback}"
         );
     }
 
@@ -427,8 +401,8 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
     ran(&runtime, read).await;
 
-    // With the trajectory at `self`, a credential command needs no masker: it runs, and
-    // its confined result is kept as the tool returned it.
+    // With the trajectory at `self`, a credential command runs, and its confined result
+    // is kept as the tool returned it.
     let settled = call("host/claude-code/Bash", "command", "cat ~/.npmrc");
     assert_eq!(
         propose(&runtime, settled.clone()).await,
@@ -443,7 +417,21 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "an artifact is private to the requester until they share it"
     );
 
-    let publication = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
+    let search = propose(&runtime, call("host/claude-code/WebSearch", "query", "page.html")).await;
+    let HookDecision::DenyCall { offers, review, .. } = search else {
+        panic!("a search returns suspicious results, so it first asks to lower trust: {search:?}");
+    };
+    assert_eq!(
+        (offers.len(), review.len()),
+        (1, 0),
+        "only the search provider reads a query: a `self` trajectory searches after accepting lower trust, with no audience review"
+    );
+
+    let publication = propose(
+        &runtime,
+        call("host/claude-code/WebFetch", "url", "https://example.net/page.html"),
+    )
+    .await;
     let HookDecision::DenyCall { offers, review, .. } = publication else {
         panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
     };
@@ -485,11 +473,12 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
         claude_battery_dir.join("appa.toml"),
     )
     .expect("claude battery file is copied");
+    with_the_coding_battery(dir.path());
 
     let root_path = dir.path().join("appa.toml");
     std::fs::write(
         &root_path,
-        format!("include = [\"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
+        format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
     )
     .expect("the config includes both batteries");
 
@@ -552,13 +541,12 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     );
 }
 
-/// The battery's masker is not scoped to the static credential rules: a command the
-/// Annotator narrows to `self` is blocked with the same masker offered, and its masked
-/// output is what reaches the model. An Annotator's answer cannot tag a call, so a
-/// tagged sanitizer would never reach a command the static rules do not name.
+/// A command the Annotator narrows to `self` is blocked with only the narrowing offered,
+/// like a static credential rule: the battery declares no sanitizer. Once accepted, the
+/// command runs and its confined result is kept as the tool returned it.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
+async fn a_command_the_annotator_narrows_to_self_offers_only_the_narrowing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
@@ -567,6 +555,7 @@ async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
+    with_the_coding_battery(dir.path());
     std::fs::write(
         dir.path().join("annotator.sh"),
         "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"audience\":[\"self\"]},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
@@ -575,7 +564,7 @@ async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
     let root_path = dir.path().join("appa.toml");
     std::fs::write(
         &root_path,
-        r#"include = ["batteries/claude-code/appa.toml"]
+        r#"include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 
 [policy]
 version = 2
@@ -618,36 +607,19 @@ command = ["/bin/sh", "annotator.sh"]
     let read = call("host/claude-code/Bash", "command", "cat ~/.bashrc");
     let blocked = propose(&runtime, read.clone()).await;
     let HookDecision::DenyCall { feedback, offers, .. } = blocked else {
-        panic!("an annotated `self` command is blocked with the masker offered, got {blocked:?}");
+        panic!("an annotated `self` command is blocked with the narrowing offered, got {blocked:?}");
     };
-    assert_eq!(offers.len(), 2, "the narrowing and the masker are offered");
+    assert_eq!(offers.len(), 1, "only the narrowing is offered: {feedback}");
+    assert!(!feedback.contains("redact-secrets"), "no masker is offered: {feedback}");
     assert!(matches!(
-        runtime.execute_remedy(&actor(), masker_offer(&feedback)).await,
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
         propose(&runtime, read.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    let delivered = hooks::handle(
-        &runtime,
-        HookEvent::ToolResult {
-            actor: actor(),
-            call: read,
-            call_id: None,
-            outcome: ToolOutcome::Success {
-                body: OutcomeBody::Available(
-                    "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n"
-                        .to_string(),
-                ),
-            },
-        },
-    )
-    .await;
-    let HookDecision::DeliverValue { value } = delivered else {
-        panic!("the output crosses through the masker, got {delivered:?}");
-    };
-    assert_eq!(value, "export OPENAI_API_KEY=[redacted-secret]\nalias ll='ls -l'\n");
+    ran(&runtime, read).await;
 }
 
 /// A search inside a credential path is a read of it and narrows the session like the

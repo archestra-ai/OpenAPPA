@@ -12,3 +12,9 @@ setup = [
   "Bind each xmemory server you run: `appa battery install xmemory --server <instance-server> --server <admin-server>`.",
   "If you run only one of the two servers, bind only that one.",
 ]
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

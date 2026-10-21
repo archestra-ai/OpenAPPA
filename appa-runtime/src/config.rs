@@ -4,6 +4,7 @@
 
 pub mod aliases;
 pub mod edit;
+pub mod tool_aliases;
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -65,6 +66,9 @@ pub struct Config {
     /// ledger per root trajectory; it is not part of the stored policy bytes.
     pub file_tracking: Option<FileTrackingConfig>,
     included_batteries: Vec<String>,
+    /// Whether the deployment serves `appa/do_something`. Never read from the document: a
+    /// replay opts in with [`Config::with_do_something`], so no policy file can serve it.
+    pub(crate) do_something: crate::do_something::DoSomething,
 }
 
 /// What this deployment reports about itself, and to whom.
@@ -776,14 +780,18 @@ pub enum ConfigError {
     )]
     TargetPolicyIncluded { path: String },
     #[error(
+        "the root config includes {path:?}, a battery that does not support the {target} target; remove the include or set {BATTERY_TARGET_VARIABLE} to a target the battery lists under [battery.targets]"
+    )]
+    UnsupportedBatteryTarget { path: String, target: BatteryTarget },
+    #[error(
         "the root config includes {path:?}, which the host does not compose{}",
         reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
     )]
     UnresolvedInclude { path: String, reason: Option<String> },
     #[error("the document declares both [aliases] and [server_aliases]; bind mcp namespaces under aliases.mcp only")]
     MixedAliasSpellings,
-    #[error("[aliases] tool is not supported yet; alias namespaces under aliases.mcp or aliases.host")]
-    UnsupportedToolAliases,
+    #[error(transparent)]
+    ToolAlias(#[from] tool_aliases::ToolAliasError),
     #[error("included config {path} has unsupported top-level field {field:?}")]
     IncludedTopLevel { path: String, field: String },
     #[error("included config {path} cannot set policy field {field:?}")]
@@ -1219,113 +1227,67 @@ impl Config {
         target: BatteryTarget,
         keys: KeySource<'_>,
     ) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
-            path: path.display().to_string(),
-            source,
-        })?;
-        let root: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
-            path: path.display().to_string(),
-            source,
-        })?;
+        let text = std::fs::read_to_string(path).map_err(|source| unreadable(path, source))?;
+        let root: RawConfig = parse_toml(path, &text)?;
         let source_dir = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let source_dir = std::fs::canonicalize(source_dir).map_err(|source| ConfigError::Unreadable {
-            path: source_dir.display().to_string(),
-            source,
-        })?;
-        let mut document: toml::Value = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
-            path: path.display().to_string(),
-            source,
-        })?;
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("include");
+        let source_dir = std::fs::canonicalize(source_dir).map_err(|source| unreadable(source_dir, source))?;
+        let mut document: toml::Value = parse_toml(path, &text)?;
+        let table = document.as_table_mut().expect("RawConfig parsed the root as a table");
         // A credential of a battery's helper reaches the child through its own `command`
         // binding here, from this process's environment; the declaration a host keeps in
         // its document names a store this loader has nothing to ask.
-        if document
-            .as_table()
-            .expect("RawConfig parsed the root as a table")
-            .contains_key("credentials")
-        {
+        if table.contains_key("credentials") {
             return Err(ConfigError::FileRootField {
                 field: "credentials".to_string(),
             });
         }
+        // The reporting and file-tracking knobs are this machine's, not the policy's, and
+        // the packaging inputs are authored, not composed. They are read from the root
+        // file's own parse and dropped from the composed document, so the stored text — and
+        // with it the policy file key every opening binds to — is byte-identical whether or
+        // not the deployment set them.
+        let _ = &root.bundle.files;
+        for local in ["include", "reporting", "file_tracking", "bundle"] {
+            table.remove(local);
+        }
 
-        let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = declared_annotators(&root.policy);
-        let mut origins = root_command_origins(&root, &source_dir)?;
+        let mut composition = Composition::new(document)?;
+        composition.origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
-        let mut replaced_annotators = std::collections::BTreeSet::new();
         for authored in &root.include {
             let include = Path::new(authored);
             if include.is_absolute() {
                 return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
             }
             let include_path = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
-            let include_path = std::fs::canonicalize(&include_path).map_err(|source| ConfigError::Unreadable {
-                path: include_path.display().to_string(),
-                source,
-            })?;
-            if let Some(name) = crate::batteries::name_from_include(include) {
-                included_batteries.insert(name);
+            let include_path =
+                std::fs::canonicalize(&include_path).map_err(|source| unreadable(&include_path, source))?;
+            let battery = crate::batteries::name_from_include(include);
+            if let Some(name) = &battery {
+                included_batteries.insert(name.clone());
             }
             for policy_path in target_policies(include_path, target)? {
                 if !seen.insert(policy_path.clone()) {
                     return Err(ConfigError::DuplicateInclude { path: authored.clone() });
                 }
                 let included_text =
-                    std::fs::read_to_string(&policy_path).map_err(|source| ConfigError::Unreadable {
-                        path: policy_path.display().to_string(),
-                        source,
-                    })?;
-                let included: toml::Value =
-                    toml::from_str(&included_text).map_err(|source| ConfigError::Unparsable {
-                        path: policy_path.display().to_string(),
-                        source,
-                    })?;
-                compose_include(
-                    &mut document,
-                    included,
-                    &policy_path,
-                    root_version,
-                    &root_annotators,
-                    &mut replaced_annotators,
-                    &mut origins,
-                )?;
+                    std::fs::read_to_string(&policy_path).map_err(|source| unreadable(&policy_path, source))?;
+                let included = parse_toml(&policy_path, &included_text)?;
+                let origin = tool_aliases::MapOrigin::Battery(battery.clone().unwrap_or_else(|| authored.clone()));
+                composition.include(included, &policy_path, origin)?;
             }
         }
-
-        // The knob is this machine's, not the policy's. It is read from the root file's own
-        // parse and dropped from the composed document, so the stored text — and with it the
-        // policy file key every opening binds to — is byte-identical whether or not the
-        // deployment set it. Carrying the value forward explicitly is what keeps it from
-        // reverting to the default when the composed text is parsed back.
+        let (mut document, origins) = composition.finish()?;
+        // Carrying the local knobs forward explicitly is what keeps them from reverting to
+        // their defaults when the composed text is parsed back.
         let reporting = Reporting {
             agent_yell: root.reporting.agent_yell,
         };
         let file_tracking = root.file_tracking.clone();
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("reporting");
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("file_tracking");
-        // Keep authored packaging inputs out of the composed policy, just as
-        // reporting settings remain local to the deployment root.
-        let _ = &root.bundle.files;
-        document
-            .as_table_mut()
-            .expect("RawConfig parsed the root as a table")
-            .remove("bundle");
-
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
@@ -1433,23 +1395,13 @@ impl Config {
     }
 
     fn compose_hosted(
-        mut document: toml::Value,
+        document: toml::Value,
         batteries: &[HostedBattery<'_>],
         defaults: HostDefaults,
         keys: KeySource<'_>,
     ) -> Result<Config, ConfigError> {
-        let document_table = document.as_table_mut().expect("a TOML document parses as a table");
-        let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_version = policy_version(root_policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = declared_annotators(root_policy);
-        // Composition appends included externals to the root's table, so an absent one
-        // is the empty table it would be in a file loaded with none.
-        document_table
-            .entry("externals")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        let mut composition = Composition::new(document)?;
         let mut included_batteries = std::collections::BTreeSet::new();
-        let mut replaced_annotators = std::collections::BTreeSet::new();
-        let mut origins = BTreeMap::new();
         for battery in batteries {
             if !included_batteries.insert(battery.name.to_string()) {
                 return Err(ConfigError::DuplicateInclude {
@@ -1457,22 +1409,13 @@ impl Config {
                 });
             }
             for policy in battery.target.into_iter().chain([battery.base]) {
-                let included: toml::Value = toml::from_str(policy).map_err(|source| ConfigError::Unparsable {
-                    path: battery.name.to_string(),
-                    source,
-                })?;
+                let included = parse_toml(Path::new(battery.name), policy)?;
                 refuse_ungranted_credentials(battery, &included)?;
-                compose_include(
-                    &mut document,
-                    included,
-                    Path::new(battery.name),
-                    root_version,
-                    &root_annotators,
-                    &mut replaced_annotators,
-                    &mut origins,
-                )?;
+                let origin = tool_aliases::MapOrigin::Battery(battery.name.to_string());
+                composition.include(included, Path::new(battery.name), origin)?;
             }
         }
+        let (mut document, _) = composition.finish()?;
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         let timeout_ms = i64::try_from(defaults.consult_timeout.as_millis()).map_err(|_| {
             ConfigError::UnrepresentableHostDefault {
@@ -1539,8 +1482,9 @@ impl Config {
         &self.policy
     }
 
-    /// Pin host observations beside the authored policy in the same stored snapshot.
-    /// No process-local alias map is needed to reopen or replay this session.
+    /// This configuration with `inventory` embedded in its policy file as `[appa_inventory]`: the
+    /// composed file a root that opens with an inventory is bound to, from which every revision
+    /// the family follows reads the inventory back.
     pub(crate) fn with_inventory(&self, inventory: appa_runtime_api::inventory::ToolInventory) -> Result<Self, String> {
         let mut document: toml::Value =
             toml::from_str(std::str::from_utf8(self.policy.bytes()).map_err(|error| error.to_string())?)
@@ -1558,6 +1502,16 @@ impl Config {
         );
         config.inventory = inventory;
         Ok(config)
+    }
+
+    /// This configuration serving `appa/do_something`, the call a replay trace proposes to ask
+    /// what the trajectory allows without naming a tool. Only a replay opts in: a deployment
+    /// that serves agents never does.
+    pub fn with_do_something(self) -> Config {
+        Config {
+            do_something: crate::do_something::DoSomething::Served,
+            ..self
+        }
     }
 
     pub fn included_batteries(&self) -> &[String] {
@@ -1666,6 +1620,7 @@ impl Config {
             reporting,
             file_tracking,
             included_batteries,
+            do_something: crate::do_something::DoSomething::Refused,
             externals: Externals {
                 timeout: Duration::from_millis(timeout_ms),
                 review_timeout: Duration::from_millis(review_timeout_ms),
@@ -1910,7 +1865,7 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
         return Ok(vec![include_path]);
     };
     let is_base = std::fs::canonicalize(dir.join(battery.base.as_str())).is_ok_and(|base| base == include_path);
-    match (is_base, &battery.targets) {
+    match (is_base, battery.targets.policies()) {
         (true, _) => (),
         (false, Some(_)) => {
             return Err(ConfigError::TargetPolicyIncluded {
@@ -1919,22 +1874,39 @@ fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<P
         }
         (false, None) => return Ok(vec![include_path]),
     }
+    if !battery.targets.supports(target) {
+        return Err(ConfigError::UnsupportedBatteryTarget {
+            path: include_path.display().to_string(),
+            target,
+        });
+    }
     battery
         .compose_order(target)
         .into_iter()
         .map(|policy| {
             let policy_path = dir.join(policy.as_str());
-            std::fs::canonicalize(&policy_path).map_err(|source| ConfigError::Unreadable {
-                path: policy_path.display().to_string(),
-                source,
-            })
+            std::fs::canonicalize(&policy_path).map_err(|source| unreadable(&policy_path, source))
         })
         .collect()
 }
 
+fn unreadable(path: &Path, source: std::io::Error) -> ConfigError {
+    ConfigError::Unreadable {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+fn parse_toml<T: serde::de::DeserializeOwned>(path: &Path, text: &str) -> Result<T, ConfigError> {
+    toml::from_str(text).map_err(|source| ConfigError::Unparsable {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
 /// Every `token_env` a battery's externals name is one the host granted it. Shapes
 /// other than a table of tables are left to composition, which refuses them.
-fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Value) -> Result<(), ConfigError> {
+fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Table) -> Result<(), ConfigError> {
     let sections = included
         .get("externals")
         .and_then(toml::Value::as_table)
@@ -1970,173 +1942,208 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Va
     Ok(())
 }
 
-fn compose_include(
-    root: &mut toml::Value,
-    included: toml::Value,
-    include_path: &Path,
-    root_version: i64,
-    root_annotators: &std::collections::BTreeSet<String>,
-    replaced_annotators: &mut std::collections::BTreeSet<String>,
-    origins: &mut BTreeMap<String, PathBuf>,
-) -> Result<(), ConfigError> {
-    let display = include_path.display().to_string();
-    let mut included = included.as_table().expect("a TOML document is always a table").clone();
-    for field in included.keys() {
-        if !matches!(field.as_str(), "policy" | "externals") {
+/// A root document with fragments composing under it, and what composing them has
+/// recorded: the command origins and the tool maps the fragments carry.
+struct Composition {
+    document: toml::Value,
+    version: i64,
+    root_annotators: std::collections::BTreeSet<String>,
+    replaced_annotators: std::collections::BTreeSet<String>,
+    origins: BTreeMap<String, PathBuf>,
+    tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
+}
+
+impl Composition {
+    fn new(mut document: toml::Value) -> Result<Composition, ConfigError> {
+        let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
+        let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
+        let root_annotators = declared_annotators(policy);
+        // Fragments append their externals to the root's table, so an absent one is the
+        // empty table a root file without fragment externals holds.
+        let table = document.as_table_mut().expect("a TOML document parses as a table");
+        table
+            .entry("externals")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        Ok(Composition {
+            document,
+            version,
+            root_annotators,
+            replaced_annotators: std::collections::BTreeSet::new(),
+            origins: BTreeMap::new(),
+            tool_maps: Vec::new(),
+        })
+    }
+
+    fn include(
+        &mut self,
+        mut fragment: toml::Table,
+        path: &Path,
+        origin: tool_aliases::MapOrigin,
+    ) -> Result<(), ConfigError> {
+        let display = path.display().to_string();
+        let refused = |field: String| ConfigError::IncludedTopLevel {
+            path: display.clone(),
+            field,
+        };
+        if let Some(field) = fragment
+            .keys()
+            .find(|field| !matches!(field.as_str(), "policy" | "externals" | "aliases"))
+        {
+            return Err(refused(field.clone()));
+        }
+        // A fragment may map its own client tools onto canonical ones; which server or host
+        // serves a namespace stays the deployment's to say.
+        let maps = match fragment.remove("aliases") {
+            None => None,
+            Some(toml::Value::Table(mut aliases)) => {
+                let maps = aliases.remove("tool");
+                if let Some(field) = aliases.keys().next() {
+                    return Err(refused(format!("aliases.{field}")));
+                }
+                maps.map(tool_aliases::parse).transpose()?
+            }
+            Some(_) => return Err(refused("aliases".to_string())),
+        };
+        self.merge_policy(&mut fragment, path, &display)?;
+        self.merge_externals(fragment, path, &display)?;
+        self.tool_maps.extend(maps.map(|maps| (origin, maps)));
+        Ok(())
+    }
+
+    fn merge_policy(&mut self, fragment: &mut toml::Table, path: &Path, display: &str) -> Result<(), ConfigError> {
+        let refused = |field: String| ConfigError::IncludedPolicyField {
+            path: display.to_string(),
+            field,
+        };
+        let mut included_policy = fragment
+            .remove("policy")
+            .and_then(|value| value.as_table().cloned())
+            .ok_or_else(|| ConfigError::IncludedTopLevel {
+                path: display.to_string(),
+                field: "policy".to_string(),
+            })?;
+        let found_version = included_policy
+            .get("version")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| refused("version".to_string()))?;
+        if found_version != self.version {
+            return Err(ConfigError::IncludedVersion {
+                path: display.to_string(),
+                root: self.version,
+                found: found_version,
+            });
+        }
+
+        let root_policy = self
+            .document
+            .get_mut("policy")
+            .and_then(toml::Value::as_table_mut)
+            .expect("a composition's root policy is a table");
+        if let Some(deployment) = included_policy.remove("deployment") {
+            compose_included_confinement(root_policy, &included_policy, deployment, path)?;
+        }
+        for (field, value) in included_policy {
+            if field == "version" {
+                continue;
+            }
+            if !matches!(field.as_str(), "tool" | "annotator" | "authority" | "sanitizer") {
+                return Err(refused(field));
+            }
+            let toml::Value::Array(mut declarations) = value else {
+                return Err(refused(field));
+            };
+            if field == "annotator" {
+                // An Annotator is one named policy component, not an ordered matcher. The root
+                // may replace one included default so a deployment can own its trusted hint and
+                // mandate without editing a battery. A second included declaration with that
+                // name remains in the composed policy, where normal duplicate validation refuses
+                // it instead of silently choosing between two batteries.
+                declarations.retain(|declaration| {
+                    let Some(name) = declaration_name(declaration) else {
+                        return true;
+                    };
+                    !(self.root_annotators.contains(name) && self.replaced_annotators.insert(name.to_string()))
+                });
+            }
+            let Some(destination) = root_policy
+                .entry(field.clone())
+                .or_insert_with(|| toml::Value::Array(Vec::new()))
+                .as_array_mut()
+            else {
+                return Err(refused(field));
+            };
+            destination.append(&mut declarations);
+        }
+        Ok(())
+    }
+
+    fn merge_externals(&mut self, mut fragment: toml::Table, path: &Path, display: &str) -> Result<(), ConfigError> {
+        let Some(included_externals) = fragment.remove("externals") else {
+            return Ok(());
+        };
+        let toml::Value::Table(included_externals) = included_externals else {
             return Err(ConfigError::IncludedTopLevel {
-                path: display,
-                field: field.clone(),
+                path: display.to_string(),
+                field: "externals".to_string(),
             });
-        }
-    }
-
-    let included_policy = included
-        .remove("policy")
-        .and_then(|value| value.as_table().cloned())
-        .ok_or_else(|| ConfigError::IncludedTopLevel {
-            path: display.clone(),
-            field: "policy".to_string(),
-        })?;
-    let found_version = included_policy
-        .get("version")
-        .and_then(toml::Value::as_integer)
-        .ok_or_else(|| ConfigError::IncludedPolicyField {
-            path: display.clone(),
-            field: "version".to_string(),
-        })?;
-    if found_version != root_version {
-        return Err(ConfigError::IncludedVersion {
-            path: display,
-            root: root_version,
-            found: found_version,
-        });
-    }
-
-    let root_table = root.as_table_mut().expect("a TOML document is always a table");
-    let root_policy = root_table
-        .get_mut("policy")
-        .and_then(toml::Value::as_table_mut)
-        .expect("RawConfig requires a policy table");
-    let mut included_policy = included_policy;
-    if let Some(deployment) = included_policy.remove("deployment") {
-        compose_included_confinement(root_policy, &included_policy, deployment, include_path)?;
-    }
-    for (field, value) in included_policy {
-        if field == "version" {
-            continue;
-        }
-        if !matches!(field.as_str(), "tool" | "annotator" | "authority" | "sanitizer") {
-            return Err(ConfigError::IncludedPolicyField {
-                path: include_path.display().to_string(),
-                field,
-            });
-        }
-        let mut declarations = value
-            .as_array()
-            .cloned()
-            .ok_or_else(|| ConfigError::IncludedPolicyField {
-                path: include_path.display().to_string(),
-                field: field.clone(),
+        };
+        let root_externals = self
+            .document
+            .get_mut("externals")
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| ConfigError::RootField {
+                field: "externals".to_string(),
             })?;
-        if field == "annotator" {
-            // An Annotator is one named policy component, not an ordered matcher. The root
-            // may replace one included default so a deployment can own its trusted hint and
-            // mandate without editing a battery. A second included declaration with that
-            // name remains in the composed policy, where normal duplicate validation refuses
-            // it instead of silently choosing between two batteries.
-            declarations.retain(|declaration| {
-                let Some(name) = declaration_name(declaration) else {
-                    return true;
-                };
-                !(root_annotators.contains(name) && replaced_annotators.insert(name.to_string()))
-            });
-        }
-        let destination = root_policy
-            .entry(field.clone())
-            .or_insert_with(|| toml::Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or_else(|| ConfigError::IncludedPolicyField {
-                path: include_path.display().to_string(),
-                field,
-            })?;
-        destination.append(&mut declarations);
-    }
-
-    let Some(included_externals) = included.remove("externals") else {
-        return Ok(());
-    };
-    let included_externals = included_externals
-        .as_table()
-        .ok_or_else(|| ConfigError::IncludedTopLevel {
-            path: include_path.display().to_string(),
-            field: "externals".to_string(),
-        })?;
-    let root_externals = root_table
-        .get_mut("externals")
-        .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| ConfigError::RootField {
-            field: "externals".to_string(),
-        })?;
-    for (section_name, entries) in included_externals {
-        // The one profile a fragment may carry: the `jev` key reaches only the TypeSafe API,
-        // so a battery that routes tools to Jev can ship the profile its annotator reads.
-        // The profile composes per field, so the root can tune the limits of a battery's.
-        if section_name == JEV_SECTION {
-            let fields = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
-                path: include_path.display().to_string(),
+        let origin = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        for (section_name, entries) in included_externals {
+            let refused = || ConfigError::IncludedExternalsField {
+                path: display.to_string(),
                 field: section_name.clone(),
-            })?;
+            };
+            // The one profile a fragment may carry: the `jev` key reaches only the TypeSafe
+            // API, so a battery that routes tools to Jev can ship the profile its annotator
+            // reads. The profile composes per field, so the root can tune its limits.
+            let section = match section_name.as_str() {
+                JEV_SECTION => None,
+                name => Some(Section::parse(name).ok_or_else(refused)?),
+            };
+            let toml::Value::Table(entries) = entries else {
+                return Err(refused());
+            };
             let destination = root_externals
-                .entry(JEV_SECTION.to_string())
+                .entry(section_name.clone())
                 .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
                 .as_table_mut()
                 .ok_or_else(|| ConfigError::RootField {
-                    field: format!("externals.{JEV_SECTION}"),
+                    field: format!("externals.{section_name}"),
                 })?;
-            for (field, value) in fields {
-                if destination.contains_key(field) {
-                    return Err(ConfigError::DuplicateJevProfile {
-                        path: include_path.display().to_string(),
-                        field: field.clone(),
+            for (name, entry) in entries {
+                if destination.contains_key(&name) {
+                    let path = display.to_string();
+                    return Err(match section {
+                        None => ConfigError::DuplicateJevProfile { path, field: name },
+                        Some(_) => ConfigError::DuplicateExternal {
+                            path,
+                            section: section_name.clone(),
+                            name,
+                        },
                     });
                 }
-                destination.insert(field.clone(), value.clone());
+                if let Some(section) = section {
+                    self.origins.insert(section.origin_key(&name), origin.clone());
+                }
+                destination.insert(name, entry);
             }
-            continue;
         }
-        let Some(section) = Section::parse(section_name) else {
-            return Err(ConfigError::IncludedExternalsField {
-                path: include_path.display().to_string(),
-                field: section_name.clone(),
-            });
-        };
-        let entries = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
-            path: include_path.display().to_string(),
-            field: section_name.clone(),
-        })?;
-        let destination = root_externals
-            .entry(section_name.clone())
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-            .as_table_mut()
-            .ok_or_else(|| ConfigError::RootField {
-                field: format!("externals.{section_name}"),
-            })?;
-        for (name, entry) in entries {
-            if destination.contains_key(name) {
-                return Err(ConfigError::DuplicateExternal {
-                    path: include_path.display().to_string(),
-                    section: section_name.clone(),
-                    name: name.clone(),
-                });
-            }
-            destination.insert(name.clone(), entry.clone());
-            origins.insert(
-                section.origin_key(name),
-                include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
-            );
-        }
+        Ok(())
     }
-    Ok(())
+
+    fn finish(self) -> Result<(toml::Value, BTreeMap<String, PathBuf>), ConfigError> {
+        let mut document = self.document;
+        let aliases = aliases::of_document(&document)?;
+        tool_aliases::lower(&mut document, self.tool_maps, &aliases)?;
+        Ok((document, self.origins))
+    }
 }
 
 /// The one deployment setting a fragment may carry: `confined_results` over tools the
@@ -2337,7 +2344,9 @@ fn resolve_audience_bindings(
         }
     }
     // A roster exists for the providers that send it their lookups, and every key belongs
-    // to one of them: a key under any other prefix could never be asked.
+    // to one of them: a key under any other prefix could never be asked. An empty roster
+    // maps nobody and holds no such key, so it may stand ready in a root one target names it
+    // from (a battery's multi-user target) and another does not.
     for (name, binding) in &bindings {
         let AudienceImplementation::Readers(readers) = &binding.implementation else {
             continue;
@@ -2347,7 +2356,7 @@ fn resolve_audience_bindings(
             .filter(|(_, other)| other.lookup.as_deref() == Some(name))
             .map(|(provider, _)| provider.as_str())
             .collect();
-        if routed.is_empty() {
+        if routed.is_empty() && !readers.is_empty() {
             return Err(ConfigError::ReadersWithoutLookup { name: name.clone() });
         }
         if let Some(member) = readers.keys().find(|member| {
@@ -3096,6 +3105,8 @@ mod tests {
             parse(&with(roster)),
             Err(ConfigError::ReadersWithoutLookup { .. })
         ));
+        parse(&with("[externals.audience.people]\nreaders = {}\n"))
+            .expect("an empty roster no lookup names maps nobody and stands ready");
         let chained = format!(
             "{source}[externals.audience.people]\ncommand = [\"python3\", \"people.py\"]\nlookup = \"github\"\n"
         );
@@ -3267,6 +3278,12 @@ mod tests {
 
         let token = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = \"APPA_X\"\n");
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
+
+        let no_tokens = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = []\n");
+        assert!(matches!(
+            parse(&no_tokens),
+            Err(ConfigError::ImplementationChoice { .. })
+        ));
 
         let command_and_url =
             format!("{MINIMAL}\n[externals.sanitizers.pii]\nurl = \"https://a.example\"\ncommand = [\"x\"]\n");
@@ -4107,7 +4124,11 @@ mod tests {
         ));
         assert!(matches!(
             hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[aliases]\nhost = { x = [\"y\"] }\n")]),
-            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases"
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases.host"
+        ));
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[aliases]\nmcp = { x = [\"y\"] }\n")]),
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "aliases.mcp"
         ));
         assert!(matches!(
             hosted_composed(
@@ -4444,8 +4465,29 @@ mod tests {
         .expect("write nested include");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedTopLevel { .. })));
 
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write version mismatch");
+        // A fragment's version is judged before its externals.
+        let battery = |version| format!("externals = 3\n[policy]\nversion = {version}\n");
+        std::fs::write(dir.path().join("battery.toml"), battery(1)).expect("write version mismatch");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
+        std::fs::write(dir.path().join("battery.toml"), battery(2)).expect("write malformed externals");
+        let refused = Config::load(&root);
+        assert!(matches!(refused, Err(ConfigError::IncludedTopLevel { field, .. }) if field == "externals"));
+    }
+
+    #[test]
+    fn a_root_policy_version_is_judged_before_its_command_metadata() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let load = |version: &str| {
+            let text = format!(
+                "{BUNDLE_ROOT}[externals.annotators.root]\ncommand = ['root']\n\
+                 [appa_composed.command_cwd]\n'sanitizers.other' = '/elsewhere'\n"
+            );
+            std::fs::write(&root, text.replace("version=2", &format!("version={version}"))).expect("write root");
+            Config::load(&root)
+        };
+        assert!(matches!(load("'two'"), Err(ConfigError::InvalidPolicyVersion)));
+        assert!(matches!(load("2"), Err(ConfigError::InvalidComposedMetadata { .. })));
     }
 
     /// Per section: a fragment may add named entries and nothing else; the same name in

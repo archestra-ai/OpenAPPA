@@ -5,7 +5,7 @@
 //! recommendations** (`Redispatch` — call another tool first, then re-propose; `Fork` — advisory
 //! only). The security claim lives here: an **empty** set of executable plans *and* direct
 //! redispatches is a *proof* that the block is unliftable — relative to the implemented remedy
-//! subset, read at the current stage against registered configuration and recorded denials
+//! subset, read at the current stage against registered configuration and recorded denials.
 //! An empty list is a proof, not a shrug.
 //!
 //! **A redispatch clears its gap directly or is not offered**. A plan for a failed
@@ -191,10 +191,20 @@ impl ExecutableRemedyPlan {
     /// gap and settles no narrowing, so a plan pairing it with anything is not one this engine
     /// enumerates.
     pub fn hop(&self) -> Option<&SanitizerName> {
-        match self.steps.as_slice() {
-            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
-            _ => None,
-        }
+        hop_of(&self.steps, &self.required)
+    }
+
+    /// Does executing this plan consult `authority`? The one home of the predicate: a
+    /// denial consumes every offered plan naming the denying authority for this rendered call.
+    pub fn names_authority(&self, authority: &AuthorityName) -> bool {
+        self.required.iter().any(|required| &required.authority == authority)
+    }
+}
+
+fn hop_of<'a>(steps: &'a [RemedyStep], required: &[RequiredRuling]) -> Option<&'a SanitizerName> {
+    match steps {
+        [RemedyStep::Derive(sanitizer)] if required.is_empty() => Some(sanitizer),
+        _ => None,
     }
 }
 
@@ -239,14 +249,6 @@ impl RemedyPlan {
             RemedyPlan::Executable(plan) => Some(plan),
             RemedyPlan::Redispatch(_) => None,
         }
-    }
-}
-
-impl ExecutableRemedyPlan {
-    /// Does executing this plan consult `authority`? The one home of the predicate: a
-    /// denial consumes every offered plan naming the denying authority for this rendered call.
-    pub fn names_authority(&self, authority: &AuthorityName) -> bool {
-        self.required.iter().any(|required| &required.authority == authority)
     }
 }
 
@@ -318,10 +320,6 @@ impl PlannedBlock {
     }
 }
 
-/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
-/// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
-/// the one `plans` list; fork advice is separate and never a remedy.
-/// See the module docs for the direct-clearing model.
 /// One refused call as planning receives it: the call, the contract its check resolved,
 /// the block that check found, and the stage and role it was found at. The contract is
 /// carried rather than looked up again — an empty plan set is read as a proof that the
@@ -334,6 +332,10 @@ pub(crate) struct BlockedCall<'a> {
     pub(crate) role: CallRole,
 }
 
+/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
+/// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
+/// the one `plans` list; fork advice is separate and never a remedy.
+/// See the module docs for the direct-clearing model.
 pub(crate) fn plan(
     registry: &Registry,
     views: &Views,
@@ -389,7 +391,14 @@ pub(crate) fn plan(
                 Some(_) => FloorStanding::Below,
             },
             sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
-            preserving_output: preserving_output_offered(registry, contract, &current, &plans, context),
+            preserving_output: preserving_output_offered(
+                registry,
+                contract,
+                &call.output_label(contract, &current),
+                &current,
+                &plans,
+                context,
+            ),
         }),
     };
     let narrowing_impact = raw.narrowing.as_ref().and_then(|narrowing| {
@@ -442,6 +451,7 @@ fn narrowing_impact(
             registry,
             label,
             annotation,
+            &annotation.output_label(),
             block.narrowing.as_ref(),
             floor,
             &context,
@@ -452,14 +462,7 @@ fn narrowing_impact(
             // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
             gaps.iter().fold(true, |all, gap| {
                 let held = registry.authorities().iter().fold(false, |held, authority| {
-                    match gap_cover(authority, gap, &annotation.tags, &context) {
-                        Evaluation::Holds => true,
-                        Evaluation::Fails => held,
-                        Evaluation::Needs(needed) => {
-                            needs.absorb(needed);
-                            held
-                        }
-                    }
+                    held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
                 });
                 all && held
             })
@@ -589,6 +592,7 @@ pub(crate) fn enumerate_plans(
             registry,
             current,
             contract,
+            &call.output_label(contract, current),
             block.narrowing.as_ref(),
             floor,
             context,
@@ -597,7 +601,10 @@ pub(crate) fn enumerate_plans(
         // An ordinary call declares no return policy; a marked spawn declares exactly one.
         let returns: Vec<Option<ReturnRoute>> = match role {
             CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, floor, kind).into_iter().map(Some).collect(),
+            CallRole::MarkedSpawn(kind) => return_options(registry, current, floor, kind)
+                .into_iter()
+                .map(Some)
+                .collect(),
         };
         for required in assignments {
             for settlement in &settlements {
@@ -652,6 +659,26 @@ impl NeededAtoms {
         self.0.extend(needed.needed);
     }
 
+    /// Does the read hold? An undecided read is absorbed and counts as not holding.
+    fn holds(&mut self, evaluation: Evaluation) -> bool {
+        match evaluation {
+            Evaluation::Holds => true,
+            Evaluation::Fails => false,
+            Evaluation::Needs(needed) => {
+                self.absorb(needed);
+                false
+            }
+        }
+    }
+
+    /// The read's answer. An undecided read is absorbed and answers nothing.
+    fn take<T>(&mut self, read: Result<Option<T>, MembershipNeeded>) -> Option<T> {
+        read.unwrap_or_else(|needed| {
+            self.absorb(needed);
+            None
+        })
+    }
+
     pub(crate) fn refuse_if_any(self) -> Result<(), MembershipNeeded> {
         if self.0.is_empty() {
             Ok(())
@@ -670,10 +697,7 @@ struct PlanCandidate {
 
 impl PlanCandidate {
     fn hop(&self) -> Option<&SanitizerName> {
-        match self.steps.as_slice() {
-            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
-            _ => None,
-        }
+        hop_of(&self.steps, &self.required)
     }
 }
 
@@ -902,14 +926,7 @@ fn enumerate_assignments(
         let competent: Vec<&AuthorityName> = registry
             .authorities()
             .iter()
-            .filter(|authority| match gap_cover(authority, gap, tags, context) {
-                Evaluation::Holds => true,
-                Evaluation::Fails => false,
-                Evaluation::Needs(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            })
+            .filter(|authority| needs.holds(gap_cover(authority, gap, tags, context)))
             .map(|authority| &authority.name)
             .collect();
         if competent.is_empty() {
@@ -957,7 +974,7 @@ fn enumerate_assignments(
 /// residual its relabel cannot shed. These choices are mutually exclusive. A block with no
 /// narrowing settles nothing. The settlement carries *what* is settled; [`enumerate_plans`]
 /// composes it into the canonical step order.
-pub(crate) enum NarrowingSettlement {
+enum NarrowingSettlement {
     Nothing,
     Accept(Narrowing),
     Withhold,
@@ -969,11 +986,13 @@ pub(crate) enum NarrowingSettlement {
 /// output sanitizer in registry name order. A block with no narrowing yields one empty settlement,
 /// so the caller's cross product still produces the plain authority plans. A narrowing below the
 /// floor keeps every other plan and loses only the acceptance: the child cannot take what its
-/// parent will not receive.
-pub(crate) fn narrowing_remedies(
+/// parent will not receive. `output` is the label the call returns, which a sanitizer derives from.
+#[allow(clippy::too_many_arguments)]
+fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolAnnotation,
+    output: &Label,
     narrowing: Option<&Narrowing>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
@@ -992,9 +1011,8 @@ pub(crate) fn narrowing_remedies(
     if !contract.emits.is_empty() {
         settlements.push(NarrowingSettlement::Withhold);
     }
-    let output = contract.output_label();
-    for sanitizer in applicable_output_sanitizers(registry, contract, &output, context, needs) {
-        if sanitized_commit(current, &output, sanitizer).is_none() {
+    for (sanitizer, _) in output_derivations(registry.sanitizers(), &contract.tags, output, context, needs) {
+        if sanitized_commit(current, output, sanitizer).is_none() {
             continue;
         }
         settlements.push(NarrowingSettlement::Sanitize(sanitizer.name.clone()));
@@ -1006,7 +1024,7 @@ pub(crate) fn narrowing_remedies(
 /// substitution replaces the arguments only, so a hop is offered where its derived label, met
 /// with what the call forwards, clears a recipient — exactly as the check reads it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn input_hops(
+fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
     reads: check::CallReads<'_>,
@@ -1031,14 +1049,9 @@ pub(crate) fn input_hops(
         .filter(|sanitizer| {
             // An undecided admission or clearing joins the aggregate refusal instead of
             // shrinking the menu.
-            match sanitizer.derive_input(&released, &contract.tags, context) {
-                Ok(Some(derived)) => clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs),
-                Ok(None) => false,
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            }
+            needs
+                .take(sanitizer.derive_input(&released, &contract.tags, context))
+                .is_some_and(|derived| clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs))
         })
         .map(|sanitizer| sanitizer.name.clone())
         .collect()
@@ -1059,38 +1072,27 @@ pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome)
 
 fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>, needs: &mut NeededAtoms) -> bool {
     gaps.iter().any(|gap| match gap {
-        Gap::Includes { recipients } => match derived.covers(recipients, context) {
-            Evaluation::Holds => true,
-            Evaluation::Fails => false,
-            Evaluation::Needs(needed) => {
-                needs.absorb(needed);
-                false
-            }
-        },
+        Gap::Includes { recipients } => needs.holds(derived.covers(recipients, context)),
         _ => false,
     })
 }
 
-fn applicable_output_sanitizers<'r>(
-    registry: &'r Registry,
-    contract: &ToolAnnotation,
-    output: &Label,
+/// Each of `sanitizers` other than the reserved attestation that derives an output from
+/// `label`, with that derivation. An undecided derivation is absorbed into `needs`.
+fn output_derivations<'r>(
+    sanitizers: impl Iterator<Item = &'r Sanitizer>,
+    tags: &[TagName],
+    label: &Label,
     context: &MembershipContext<'_>,
     needs: &mut NeededAtoms,
-) -> Vec<&'r Sanitizer> {
-    registry
-        .sanitizers()
+) -> impl Iterator<Item = (&'r Sanitizer, Label)> {
+    sanitizers
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(
-            |sanitizer| match sanitizer.derive_output(output, &contract.tags, context) {
-                Ok(derived) => derived.is_some(),
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            },
-        )
-        .collect()
+        .filter_map(move |sanitizer| {
+            needs
+                .take(sanitizer.derive_output(label, tags, context))
+                .map(|derived| (sanitizer, derived))
+        })
 }
 
 /// The established bound a sanitized dispatch of `contract` would commit at `current`, when such
@@ -1132,25 +1134,17 @@ pub(crate) fn confined_stage(
     candidate: &Label,
     residual: &Narrowing,
     lineage: &SanitizerLineage,
-    floor: Option<&Floor>,
+    views: &Views,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
     let mut needs = NeededAtoms::default();
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    let hops = registry
+    let unspent = registry
         .sanitizers()
-        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(
-            |sanitizer| match sanitizer.derive_output(candidate, &contract.tags, context) {
-                Ok(derived) => derived.is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived)),
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            },
-        );
-    for sanitizer in hops {
+        .filter(|sanitizer| !lineage.contains(&sanitizer.name));
+    let hops = output_derivations(unspent, &contract.tags, candidate, context, &mut needs)
+        .filter(|(_, derived)| confined_hop_helps(receiving, candidate, derived));
+    for (sanitizer, _) in hops {
         plans.push(ExecutableRemedyPlan {
             id: PlanId(plans.len() as u32),
             steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
@@ -1158,7 +1152,7 @@ pub(crate) fn confined_stage(
         });
     }
     needs.refuse_if_any()?;
-    if floor.is_none_or(|floor| floor.holds(&residual.to)) {
+    if floor_of(registry, views).is_none_or(|floor| floor.holds(&residual.to)) {
         plans.push(ExecutableRemedyPlan {
             id: PlanId(plans.len() as u32),
             steps: vec![RemedyStep::Accept(residual.clone())],
@@ -1225,11 +1219,14 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// The return routes a marked spawn may declare here: the bare floor, then in registry name order
 /// the reserved attestation when it is registered and every untagged output sanitizer, then no
 /// return. Under a floor, a sanitizer whose mandate lands below it is not offered — the
-/// grandchild's return could never cross the child. A fan-out spawn is not offered the
+/// grandchild's return could never cross the child. The attestation is offered only where
+/// `current` covers its trust rank, the condition its declaration is checked against, so no
+/// offered route is one the declaration then refuses. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
 /// declaration checks once and a fan-out's later children need not meet.
-pub(crate) fn return_options(
+fn return_options(
     registry: &Registry,
+    current: &Label,
     floor: Option<&Floor>,
     kind: crate::transition::SpawnKind,
 ) -> Vec<ReturnRoute> {
@@ -1238,7 +1235,10 @@ pub(crate) fn return_options(
         registry
             .sanitizers()
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
-            .filter(|sanitizer| kind == crate::transition::SpawnKind::Single || !sanitizer.name.is_attest_schema())
+            .filter(|sanitizer| {
+                !sanitizer.name.is_attest_schema()
+                    || (kind == crate::transition::SpawnKind::Single && attest_fits(&sanitizer.transition, current))
+            })
             .filter(|sanitizer| {
                 floor.is_none_or(|floor| {
                     Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
@@ -1256,13 +1256,13 @@ pub(crate) fn return_options(
 fn preserving_output_offered(
     registry: &Registry,
     contract: &ToolAnnotation,
+    output: &Label,
     current: &Label,
     plans: &[RemedyPlan],
     context: &MembershipContext<'_>,
 ) -> bool {
     let unanswered = Expansions::default();
     let context = MembershipContext::new(context.within, context.providers, &unanswered);
-    let output = contract.output_label();
     plans
         .iter()
         .filter_map(RemedyPlan::executable)
@@ -1272,7 +1272,7 @@ fn preserving_output_offered(
         })
         .any(|sanitizer| {
             sanitizer
-                .derive_output(&output, &contract.tags, &context)
+                .derive_output(output, &contract.tags, &context)
                 .is_ok_and(|derived| derived.is_some_and(|derived| current.combine(&derived) == *current))
         })
 }
@@ -1292,15 +1292,11 @@ fn preserving_return_exists(
     context: &MembershipContext<'_>,
 ) -> bool {
     let unchanged = Floor::new(current.clone(), None);
-    return_options(registry, floor, crate::transition::SpawnKind::Single)
+    return_options(registry, current, floor, crate::transition::SpawnKind::Single)
         .into_iter()
         .filter_map(|route| match route {
             ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
             ReturnRoute::Raw | ReturnRoute::Void => None,
-        })
-        .filter(|sanitizer| {
-            !sanitizer.name.is_attest_schema()
-                || attest_ceiling(&sanitizer.transition).is_some_and(|ceiling| current.meets_floor(ceiling))
         })
         .any(|sanitizer| {
             sanitizer
@@ -1357,16 +1353,11 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     }
     match &policy.sanitizer {
         None => Ok(()),
-        Some(ReturnSanitizer::Attest(_)) => {
-            let registered = registry
-                .sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
-                .ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
-            let ceiling = attest_ceiling(&registered.transition).ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
-            match current.meets_floor(ceiling) {
-                true => Ok(()),
-                false => Err(ReturnPolicyRefusal::AttestUnavailable),
-            }
-        }
+        Some(ReturnSanitizer::Attest(_)) => match registry.sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
+        {
+            Some(registered) if attest_fits(&registered.transition, &current) => Ok(()),
+            _ => Err(ReturnPolicyRefusal::AttestUnavailable),
+        },
         // The reserved route attests a shape: naming it without one would take the
         // generic sanitizer path, which validates nothing.
         Some(ReturnSanitizer::Named(name)) if name.is_attest_schema() => Err(ReturnPolicyRefusal::RouteMismatch),
@@ -1377,31 +1368,34 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     }
 }
 
-/// The trust rank the reserved `attest-schema` builtin raises a return to. Its precondition is
-/// a fork-time fact: the parent's label at the fork covers this rank, because the answer cannot
-/// come back cleaner than the context that asked. Load validation refuses an audience mandate on
-/// the reserved name, so an audience transition here attests nothing.
-pub(crate) fn attest_ceiling(transition: &DeclaredTransition) -> Option<crate::label::Trust> {
+/// Does `label` cover the trust rank the reserved `attest-schema` builtin, registered with
+/// `transition`, raises a return to? Its precondition is a fork-time fact: the parent's label at
+/// the fork covers this rank, because the answer cannot come back cleaner than the context that
+/// asked. Load validation refuses an audience mandate on the reserved name, so an audience
+/// transition here attests nothing.
+pub(crate) fn attest_fits(transition: &DeclaredTransition, label: &Label) -> bool {
     match transition {
-        DeclaredTransition::Trust { to, .. } => Some(*to),
-        DeclaredTransition::Audience { .. } => None,
+        DeclaredTransition::Trust { to, .. } => label.meets_floor(*to),
+        DeclaredTransition::Audience { .. } => false,
     }
 }
 
-/// The established contribution a bound output sanitizer's first derivation would make, resolved
-/// here at dispatch. `None` where the sanitizer is unregistered or does not apply to
-/// this output at all. Resolved rather than left to a later registry read because a mandate group
-/// resolves at application time, so what the binding promised is fixed now and recorded.
+/// The established contribution a bound output sanitizer's first derivation would make from the
+/// released call's `output` label, resolved here at dispatch. `None` where the sanitizer is
+/// unregistered or does not apply to this output at all. Resolved rather than left to a later
+/// registry read because a mandate group resolves at application time, so what the binding
+/// promised is fixed now and recorded.
 pub(crate) fn bound_contribution(
     registry: &Registry,
     contract: &ToolAnnotation,
+    output: &Label,
     sanitizer: &SanitizerName,
     context: &MembershipContext<'_>,
 ) -> Result<Option<Label>, MembershipNeeded> {
     let Some(sanitizer) = registry.sanitizer(sanitizer) else {
         return Ok(None);
     };
-    sanitizer.derive_output(&contract.output_label(), &contract.tags, context)
+    sanitizer.derive_output(output, &contract.tags, context)
 }
 
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the
@@ -1571,16 +1565,83 @@ mod tests {
         tools.into_iter().map(ToolDeclaration::Declared).collect()
     }
 
+    fn plain_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            forwards: Delta::NONE,
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
+        RegistryConfig {
+            annotators: vec![],
+            trust_chain: chain(),
+            tools: declared(tools),
+            authorities: vec![],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig::default(),
+        }
+    }
+
+    fn requiring(name: &str, requires: Requires) -> ToolAnnotation {
+        ToolAnnotation {
+            requires,
+            ..plain_tool(name)
+        }
+    }
+
+    fn gated(name: &str, label: LabelRequirements) -> ToolAnnotation {
+        requiring(
+            name,
+            Requires {
+                label,
+                ..Requires::default()
+            },
+        )
+    }
+
+    fn floor(trust: Trust) -> LabelRequirements {
+        LabelRequirements {
+            trust_floor: Some(trust),
+            audience: vec![],
+        }
+    }
+
+    fn mandated(name: &str, mandate: Mandate) -> Authority {
+        Authority {
+            name: AuthorityName::new(name),
+            mandate,
+            scope: Scope::default(),
+            hint: None,
+        }
+    }
+
+    fn trusted_up_to(name: &str, ceiling: Trust) -> Authority {
+        mandated(
+            name,
+            Mandate {
+                trust_ceiling: Some(ceiling),
+                ..Mandate::default()
+            },
+        )
+    }
+
+    fn registry(tools: Vec<ToolAnnotation>, authorities: Vec<Authority>, sanitizers: Vec<Sanitizer>) -> Registry {
+        build(RegistryConfig {
+            authorities,
+            sanitizers,
+            ..config(tools)
+        })
+    }
+
     fn opened(label: Label) -> Fact {
         crate::profile::opening_at(traj(), label)
-    }
-
-    fn known(trust: Trust, audience: Audience) -> Label {
-        Label::new(trust, audience)
-    }
-
-    fn established(trust: Trust, audience: Audience) -> Label {
-        Label::new(trust, audience)
     }
 
     fn plan_of(registry: &Registry, log: &[Fact], call: &ResolvedCall) -> PlannedBlock {
@@ -1624,25 +1685,13 @@ mod tests {
     #[test]
     fn an_input_hop_does_not_stand_in_for_the_redispatch_that_clears_a_prior_gap() {
         let emitter = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("backup"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool("backup")
         };
         let partner = Audience::restricted([ReaderId::new("partner")]);
-        let wipe = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wipe"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let wipe = requiring(
+            "wipe",
+            Requires {
                 label: LabelRequirements {
                     trust_floor: None,
                     audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
@@ -1652,28 +1701,19 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
                 ..Requires::default()
             },
-        };
+        );
         let internal = Audience::restricted([ReaderId::new("insider")]);
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![emitter, wipe]),
-            authorities: vec![],
-            sanitizers: vec![Sanitizer {
-                name: SanitizerName::new("redact"),
-                on: SanitizerPoints {
-                    input: true,
-                    output: false,
-                },
-                transition: DeclaredTransition::Audience {
+        let registry = registry(
+            vec![emitter, wipe],
+            vec![],
+            vec![input_sanitizer(
+                "redact",
+                DeclaredTransition::Audience {
                     from_includes: DeclaredAudience::literal(internal.clone()),
                     to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
                 },
-                scope: Scope::default(),
-                hint: None,
-            }],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+            )],
+        );
         let log = vec![opened(Label::new(TRUSTED, internal))];
 
         let planned = plan_of(&registry, &log, &call("wipe", json!({})));
@@ -1702,13 +1742,7 @@ mod tests {
         let widened = Audience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]);
         let partner = DeclaredAudience::restricted([ReaderId::new("partner")]);
         let share = |forwards: Delta| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("share"),
-            tags: vec![],
-            delta: Delta::NONE,
             forwards,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1716,28 +1750,20 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool("share")
         };
         let registry_with = |tool: ToolAnnotation| {
-            build(RegistryConfig {
-                trust_chain: chain(),
-                tools: declared(vec![tool]),
-                authorities: vec![],
-                sanitizers: vec![Sanitizer {
-                    name: SanitizerName::new("redact"),
-                    on: SanitizerPoints {
-                        input: true,
-                        output: false,
-                    },
-                    transition: DeclaredTransition::Audience {
+            registry(
+                vec![tool],
+                vec![],
+                vec![input_sanitizer(
+                    "redact",
+                    DeclaredTransition::Audience {
                         from_includes: DeclaredAudience::literal(internal.clone()),
                         to: DeclaredAudience::literal(widened.clone()),
                     },
-                    scope: Scope::default(),
-                    hint: None,
-                }],
-                audience: crate::audience::AudienceConfig::default(),
-                annotators: vec![],
-            })
+                )],
+            )
         };
         let insider_only = Delta {
             trust: None,
@@ -1783,13 +1809,7 @@ mod tests {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let internal = Audience::restricted([ReaderId::new("insider")]);
         let annotation = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1799,23 +1819,17 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool("wire")
         };
-        let redact = Sanitizer {
-            name: SanitizerName::new("redact"),
-            on: SanitizerPoints {
-                input: true,
-                output: false,
-            },
-            transition: DeclaredTransition::Audience {
+        let redact = input_sanitizer(
+            "redact",
+            DeclaredTransition::Audience {
                 from_includes: DeclaredAudience::literal(internal.clone()),
                 to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
             },
-            scope: Scope::default(),
-            hint: None,
-        };
+        );
         let log = vec![opened(Label::new(TRUSTED, internal))];
         let registry = build(RegistryConfig {
-            trust_chain: chain(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("wire"),
                 tags: vec![],
@@ -1823,9 +1837,7 @@ mod tests {
                 parameters: crate::params::test_string_argument_schema("to"),
                 annotator: crate::names::AnnotatorName::new("classifier"),
             }],
-            authorities: vec![],
             sanitizers: vec![redact],
-            audience: crate::audience::AudienceConfig::default(),
             annotators: vec![crate::registry::AnnotatorDeclaration {
                 name: crate::names::AnnotatorName::new("classifier"),
                 trust: None,
@@ -1833,6 +1845,7 @@ mod tests {
                 marks: None,
                 effects: None,
             }],
+            ..config(vec![])
         });
         let unpinned = call("wire", json!({ "to": "insider" }));
         let call = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
@@ -1867,16 +1880,20 @@ mod tests {
         }
     }
 
+    fn input_sanitizer(name: &str, transition: DeclaredTransition) -> Sanitizer {
+        Sanitizer {
+            on: SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            ..output_sanitizer(name, transition)
+        }
+    }
+
     fn reader(name: &str, delta: Delta) -> ToolAnnotation {
         ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
-            tags: vec![],
             delta,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires::default(),
+            ..plain_tool(name)
         }
     }
 
@@ -1917,11 +1934,10 @@ mod tests {
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![crm, tracker]),
-            authorities: vec![],
-            sanitizers: vec![
+        let registry = registry(
+            vec![crm, tracker],
+            vec![],
+            vec![
                 output_sanitizer(
                     "declassify",
                     DeclaredTransition::Audience {
@@ -1937,10 +1953,8 @@ mod tests {
                     },
                 ),
             ],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
 
         let planned = plan_of(&registry, &log, &call("crm", json!({})));
         assert_eq!(sanitize_offers(&planned), ["declassify".to_string()]);
@@ -1974,7 +1988,6 @@ mod tests {
         pinned.parameters = crate::params::test_string_argument_schema("room");
         let finance = Audience::restricted([ReaderId::new("finance")]);
         let registry = build(RegistryConfig {
-            trust_chain: chain(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("lookup"),
                 tags: vec![],
@@ -1982,7 +1995,6 @@ mod tests {
                 parameters: crate::params::test_string_argument_schema("room"),
                 annotator: crate::names::AnnotatorName::new("directory"),
             }],
-            authorities: vec![],
             sanitizers: vec![
                 output_sanitizer(
                     "declassify",
@@ -1999,7 +2011,6 @@ mod tests {
                     },
                 ),
             ],
-            audience: crate::audience::AudienceConfig::default(),
             annotators: vec![crate::registry::AnnotatorDeclaration {
                 name: crate::names::AnnotatorName::new("directory"),
                 trust: None,
@@ -2007,8 +2018,9 @@ mod tests {
                 marks: None,
                 effects: None,
             }],
+            ..config(vec![])
         });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let unpinned = call("lookup", json!({ "room": "insider" }));
         let call = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
             crate::names::AnnotatorName::new("directory"),
@@ -2039,30 +2051,25 @@ mod tests {
             },
         );
         publish.requires.attention = vec![MarkName::new("signoff")];
-        let steward = Authority {
-            name: AuthorityName::new("steward"),
-            mandate: Mandate {
+        let steward = mandated(
+            "steward",
+            Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![publish]),
-            authorities: vec![steward],
-            sanitizers: vec![output_sanitizer(
+        );
+        let registry = registry(
+            vec![publish],
+            vec![steward],
+            vec![output_sanitizer(
                 "declassify",
                 DeclaredTransition::Audience {
                     from_includes: DeclaredAudience::literal(internal()),
                     to: DeclaredAudience::literal(Audience::public()),
                 },
             )],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("publish", json!({})));
 
         let executables: Vec<_> = planned.plans.iter().filter_map(RemedyPlan::executable).collect();
@@ -2100,35 +2107,21 @@ mod tests {
     #[test]
     fn a_direct_emitter_is_offered_without_path_verification() {
         let backup = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("backup"),
-            tags: vec![],
             delta: Delta {
                 trust: Some(SUSPICIOUS),
                 audience: None,
             },
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool("backup")
         };
-        let wipe = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wipe"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+        let wipe = requiring(
+            "wipe",
+            Requires {
+                label: floor(TRUSTED),
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-        };
+        );
         let scrub = output_sanitizer(
             "scrub",
             DeclaredTransition::Trust {
@@ -2136,17 +2129,10 @@ mod tests {
                 to: TRUSTED,
             },
         );
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
 
         let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
-        let without = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![backup.clone(), wipe.clone()]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let without = registry(vec![backup.clone(), wipe.clone()], vec![], vec![]);
         let planned = plan_of(&without, &log, &call("wipe", json!({})));
         assert!(
             planned.is_curable(),
@@ -2154,14 +2140,7 @@ mod tests {
         );
         assert_eq!(planned.plans, expected);
 
-        let with = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![backup, wipe]),
-            authorities: vec![],
-            sanitizers: vec![scrub],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let with = registry(vec![backup, wipe], vec![], vec![scrub]);
         assert_eq!(
             plan_of(&with, &log, &call("wipe", json!({}))).plans,
             expected,
@@ -2172,44 +2151,26 @@ mod tests {
     #[test]
     fn one_tool_clearing_several_gaps_is_one_offer_with_the_complete_claim() {
         let a = Audience::restricted([ReaderId::new("a")]);
-        let send = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let send = requiring(
+            "send",
+            Requires {
                 history: vec![
                     HistoryRequirement::Prior(EffectKind::new("backup.done")),
                     HistoryRequirement::Prior(EffectKind::new("receipt")),
                 ],
                 ..Requires::default()
             },
-        };
+        );
         let fixer = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("fixer"),
-            tags: vec![],
             delta: Delta {
                 trust: None,
                 audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a))),
             },
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool("fixer")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![send, fixer]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![send, fixer], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(
             planned.plans,
@@ -2225,40 +2186,10 @@ mod tests {
 
     #[test]
     fn authorize_plan_clears_a_trust_floor_gap() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
-        let officer = Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        let tool = gated("wire", floor(TRUSTED));
+        let officer = trusted_up_to("officer", TRUSTED);
+        let registry = registry(vec![tool], vec![officer], vec![]);
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(planned.is_curable());
         assert_eq!(
@@ -2269,50 +2200,28 @@ mod tests {
 
     #[test]
     fn alternative_authorities_yield_one_plan_per_assignment() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+        let tool = requiring(
+            "wire",
+            Requires {
+                label: floor(TRUSTED),
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-        };
-        let officer = |name: &str| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let attester = Authority {
-            name: AuthorityName::new("attester"),
-            mandate: Mandate {
+        );
+        let officer = |name: &str| trusted_up_to(name, TRUSTED);
+        let attester = mandated(
+            "attester",
+            Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer("officer-a"), officer("officer-b"), attester],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        );
+        let registry = registry(
+            vec![tool],
+            vec![officer("officer-a"), officer("officer-b"), attester],
+            vec![],
+        );
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         let floor = Gap::TrustFloor {
             required: TRUSTED,
@@ -2361,40 +2270,14 @@ mod tests {
 
     #[test]
     fn a_weaker_authority_registered_later_still_leads_the_menu() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
-        let officer = |name: &str, ceiling: Trust| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(ceiling),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
+        let tool = gated("wire", floor(TRUSTED));
+        let officer = |name: &str, ceiling: Trust| trusted_up_to(name, ceiling);
         let registry = build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
-            tools: declared(vec![tool]),
             authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
+            ..config(vec![tool])
         });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["officer"], vec!["executive"]]);
         assert_eq!(exec(&planned.plans[0]).id, PlanId::new(0));
@@ -2403,37 +2286,27 @@ mod tests {
 
     #[test]
     fn reader_ceilings_order_by_inclusion_and_public_is_maximal() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::restricted([ReaderId::new("hr")]),
-                    ))],
+        let tool = gated(
+            "send",
+            LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::restricted([ReaderId::new("hr")]),
+                ))],
+            },
+        );
+        let desk = |name: &str, ceiling: Audience| {
+            mandated(
+                name,
+                Mandate {
+                    reader_ceiling: Some(DeclaredAudience::literal(ceiling)),
+                    ..Mandate::default()
                 },
-                ..Requires::default()
-            },
+            )
         };
-        let desk = |name: &str, ceiling: Audience| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                reader_ceiling: Some(DeclaredAudience::literal(ceiling)),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![
+        let registry = registry(
+            vec![tool],
+            vec![
                 desk("global", Audience::public()),
                 desk(
                     "wide",
@@ -2441,55 +2314,38 @@ mod tests {
                 ),
                 desk("exact", Audience::restricted([ReaderId::new("hr")])),
             ],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
+            vec![],
+        );
+        let log = vec![opened(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["exact"], vec!["wide"], vec!["global"]]);
     }
 
     #[test]
     fn a_trust_floor_block_reads_no_group_a_reader_ceiling_writes() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+        let tool = gated("send", floor(TRUSTED));
+        let desk = |name: &str, trust: Trust| {
+            mandated(
+                name,
+                Mandate {
+                    trust_ceiling: Some(trust),
+                    reader_ceiling: Some(DeclaredAudience::Union(
+                        crate::label::Clause::new(
+                            [],
+                            [crate::label::GroupRef::Named(crate::names::GroupName::new("team"))],
+                            [],
+                        )
+                        .expect("a group clause"),
+                    )),
+                    ..Mandate::default()
                 },
-                ..Requires::default()
-            },
-        };
-        let desk = |name: &str, trust: Trust| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(trust),
-                reader_ceiling: Some(DeclaredAudience::Union(
-                    crate::label::Clause::new(
-                        [],
-                        [crate::label::GroupRef::Named(crate::names::GroupName::new("team"))],
-                        [],
-                    )
-                    .expect("a group clause"),
-                )),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
+            )
         };
         let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
             authorities: vec![desk("desk", TRUSTED)],
-            sanitizers: vec![],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: crate::names::ProviderName::new("slack"),
@@ -2508,9 +2364,9 @@ mod tests {
                 }],
                 ..crate::audience::AudienceConfig::default()
             },
-            annotators: vec![],
+            ..config(vec![tool])
         });
-        let log = vec![opened(known(Trust::new(0), Audience::public()))];
+        let log = vec![opened(Label::new(Trust::new(0), Audience::public()))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["desk"]]);
         assert!(plan_atoms(&registry, exec(&planned.plans[0])).is_empty());
@@ -2548,14 +2404,9 @@ mod tests {
 
         fn tool(name: &str, tool_tags: &[&str], delta: Delta) -> ToolAnnotation {
             ToolAnnotation {
-                description: Some("A test tool.".to_string()),
-                name: ToolName::new(name),
                 tags: tags(tool_tags),
                 delta,
-                parameters: crate::params::ToolParameters::open(),
-                forwards: Delta::NONE,
-                emits: EffectSet::default(),
-                requires: Requires::default(),
+                ..plain_tool(name)
             }
         }
 
@@ -2606,18 +2457,6 @@ mod tests {
                 }],
             };
             let config = RegistryConfig {
-                trust_chain: chain(),
-                tools: declared(vec![
-                    tool("send", &["mail"], Delta::NONE),
-                    tool(
-                        "note",
-                        &[],
-                        Delta {
-                            trust: None,
-                            audience: Some(DeltaAudience::Static(group("press"))),
-                        },
-                    ),
-                ]),
                 authorities: vec![
                     authority("desk", "team", &["mail"]),
                     authority("far", "press", &["unrelated"]),
@@ -2638,7 +2477,17 @@ mod tests {
                     groups: vec![named("team"), named("legal"), named("press")],
                     ..crate::audience::AudienceConfig::default()
                 },
-                annotators: vec![],
+                ..config(vec![
+                    tool("send", &["mail"], Delta::NONE),
+                    tool(
+                        "note",
+                        &[],
+                        Delta {
+                            trust: None,
+                            audience: Some(DeltaAudience::Static(group("press"))),
+                        },
+                    ),
+                ])
             };
             let profile = DeploymentProfile::declare(ProfileDeclaration {
                 confined_results: confined_results.iter().map(|name| ToolName::new(*name)).collect(),
@@ -2660,8 +2509,8 @@ mod tests {
             RawBlock {
                 requirement_gaps: gaps,
                 narrowing: narrowing.then(|| Narrowing {
-                    from: known(TRUSTED, Audience::public()),
-                    to: known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+                    from: Label::new(TRUSTED, Audience::public()),
+                    to: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
                 }),
             }
         }
@@ -2748,27 +2597,18 @@ mod tests {
 
     #[test]
     fn an_undecided_mandate_refuses_enumeration_with_its_atom_never_a_smaller_menu() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::restricted([ReaderId::new("hr")]),
-                    ))],
-                },
-                ..Requires::default()
+        let tool = gated(
+            "send",
+            LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::restricted([ReaderId::new("hr")]),
+                ))],
             },
-        };
-        let team_desk = Authority {
-            name: AuthorityName::new("desk"),
-            mandate: Mandate {
+        );
+        let team_desk = mandated(
+            "desk",
+            Mandate {
                 reader_ceiling: Some(DeclaredAudience::Union(
                     crate::label::Clause::new(
                         [],
@@ -2779,23 +2619,16 @@ mod tests {
                 )),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let global = Authority {
-            name: AuthorityName::new("global"),
-            mandate: Mandate {
+        );
+        let global = mandated(
+            "global",
+            Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
+        );
         let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
             authorities: vec![team_desk, global],
-            sanitizers: vec![],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: crate::names::ProviderName::new("slack"),
@@ -2814,9 +2647,12 @@ mod tests {
                 }],
                 ..crate::audience::AudienceConfig::default()
             },
-            annotators: vec![],
+            ..config(vec![tool])
         });
-        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
+        let log = vec![opened(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
         let proposal = call("send", json!({}));
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
@@ -2865,41 +2701,32 @@ mod tests {
 
     #[test]
     fn waiver_sets_order_by_inclusion_ignoring_vector_order_and_duplicates() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let tool = requiring(
+            "wire",
+            Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("spend"))],
                 ..Requires::default()
             },
+        );
+        let waiver = |name: &str, kinds: Vec<&str>| {
+            mandated(
+                name,
+                Mandate {
+                    waivers: kinds.into_iter().map(EffectKind::new).collect(),
+                    ..Mandate::default()
+                },
+            )
         };
-        let waiver = |name: &str, kinds: Vec<&str>| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                waivers: kinds.into_iter().map(EffectKind::new).collect(),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![
+        let registry = registry(
+            vec![tool],
+            vec![
                 waiver("broad", vec!["notify", "spend"]),
                 waiver("narrow", vec!["spend", "spend"]),
             ],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+            vec![],
+        );
         let log = vec![
-            opened(known(TRUSTED, Audience::public())),
+            opened(Label::new(TRUSTED, Audience::public())),
             committed_effect(EffectKind::new("spend")),
         ];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2922,52 +2749,37 @@ mod tests {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
-            proposed_label: established(TRUSTED, Audience::public()),
-            receiving: established(TRUSTED, Audience::public()),
+            proposed_label: Label::new(TRUSTED, Audience::public()),
+            receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: annotation.emits.clone(),
             annotation: None,
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: crate::fact::ReleaseTerms::none(),
         }
     }
 
     #[test]
     fn a_reservation_caused_no_prior_gap_enumerates_its_waiver_plans() {
-        let guard = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("guard"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let guard = requiring(
+            "guard",
+            Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
                 ..Requires::default()
             },
-        };
-        let keeper = Authority {
-            name: AuthorityName::new("keeper"),
-            mandate: Mandate {
+        );
+        let keeper = mandated(
+            "keeper",
+            Mandate {
                 waivers: vec![EffectKind::new("email.sent")],
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![guard]),
-            authorities: vec![keeper],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        );
+        let registry = registry(vec![guard], vec![keeper], vec![]);
         let log = vec![
-            opened(known(TRUSTED, Audience::public())),
+            opened(Label::new(TRUSTED, Audience::public())),
             open_reservation("send", &["email.sent"]),
         ];
         let planned = plan_of(&registry, &log, &call("guard", json!({})));
@@ -2977,49 +2789,31 @@ mod tests {
 
     #[test]
     fn a_reservation_at_the_emitters_own_block_does_not_suppress_the_offer() {
-        let delete = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let delete = requiring(
+            "delete_db",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-        };
+        );
         let backup = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("backup"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("lock"))],
                 ..Requires::default()
             },
+            ..plain_tool("backup")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![delete, backup]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let registry = registry(vec![delete, backup], vec![], vec![]);
         let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
-        let clear = vec![opened(known(TRUSTED, Audience::public()))];
+        let clear = vec![opened(Label::new(TRUSTED, Audience::public()))];
         assert_eq!(
             plan_of(&registry, &clear, &call("delete_db", json!({}))).plans,
             expected
         );
 
         let reserved = vec![
-            opened(known(TRUSTED, Audience::public())),
+            opened(Label::new(TRUSTED, Audience::public())),
             open_reservation("locker", &["lock"]),
         ];
         assert_eq!(
@@ -3030,37 +2824,27 @@ mod tests {
 
     #[test]
     fn crossing_ceilings_are_incomparable_and_keep_enumeration_order() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::restricted([ReaderId::new("hr")]),
-                    ))],
+        let tool = gated(
+            "send",
+            LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::restricted([ReaderId::new("hr")]),
+                ))],
+            },
+        );
+        let desk = |name: &str, ceiling: Audience| {
+            mandated(
+                name,
+                Mandate {
+                    reader_ceiling: Some(DeclaredAudience::literal(ceiling)),
+                    ..Mandate::default()
                 },
-                ..Requires::default()
-            },
+            )
         };
-        let desk = |name: &str, ceiling: Audience| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                reader_ceiling: Some(DeclaredAudience::literal(ceiling)),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![
+        let registry = registry(
+            vec![tool],
+            vec![
                 desk(
                     "legal",
                     Audience::restricted([ReaderId::new("hr"), ReaderId::new("legal")]),
@@ -3070,57 +2854,46 @@ mod tests {
                     Audience::restricted([ReaderId::new("hr"), ReaderId::new("audit")]),
                 ),
             ],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
+            vec![],
+        );
+        let log = vec![opened(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["legal"], vec!["audit"]]);
     }
 
     #[test]
     fn multi_gap_dominance_orders_the_menu_and_crossing_assignments_keep_enumeration_order() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::restricted([ReaderId::new("hr")]),
-                    ))],
+        let tool = gated(
+            "send",
+            LabelRequirements {
+                trust_floor: Some(TRUSTED),
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::restricted([ReaderId::new("hr")]),
+                ))],
+            },
+        );
+        let officer = |name: &str, ceiling: Trust, readers: Audience| {
+            mandated(
+                name,
+                Mandate {
+                    trust_ceiling: Some(ceiling),
+                    reader_ceiling: Some(DeclaredAudience::literal(readers)),
+                    ..Mandate::default()
                 },
-                ..Requires::default()
-            },
-        };
-        let officer = |name: &str, ceiling: Trust, readers: Audience| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(ceiling),
-                reader_ceiling: Some(DeclaredAudience::literal(readers)),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
+            )
         };
         let registry = build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
-            tools: declared(vec![tool]),
             authorities: vec![
                 officer("strong", Trust::new(2), Audience::public()),
                 officer("weak", TRUSTED, Audience::restricted([ReaderId::new("hr")])),
             ],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
+            ..config(vec![tool])
         });
-        let log = vec![opened(known(
+        let log = vec![opened(Label::new(
             SUSPICIOUS,
             Audience::restricted([ReaderId::new("intern")]),
         ))];
@@ -3138,54 +2911,24 @@ mod tests {
 
     #[test]
     fn a_hint_never_changes_the_presented_order() {
-        let tool = || ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
+        let tool = || gated("wire", floor(TRUSTED));
         let officer = |name: &str, hint: Option<Hint>| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
             hint,
+            ..trusted_up_to(name, TRUSTED)
         };
-        let plain = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool()]),
-            authorities: vec![officer("a", None), officer("b", None)],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let hinted = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool()]),
-            authorities: vec![
+        let plain = registry(vec![tool()], vec![officer("a", None), officer("b", None)], vec![]);
+        let hinted = registry(
+            vec![tool()],
+            vec![
                 officer("a", None),
                 officer(
                     "b",
                     Some(Hint::new("the fast lane — prefer this desk").expect("a short hint")),
                 ),
             ],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+            vec![],
+        );
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let call = call("wire", json!({}));
         assert_eq!(
             assigned(&plan_of(&plain, &log, &call)),
@@ -3202,52 +2945,22 @@ mod tests {
     }
 
     fn two_officer_registry() -> Registry {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
-        let officer = |name: &str| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer("officer-a"), officer("officer-b")],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        })
+        let tool = gated("wire", floor(TRUSTED));
+        let officer = |name: &str| trusted_up_to(name, TRUSTED);
+        registry(vec![tool], vec![officer("officer-a"), officer("officer-b")], vec![])
     }
 
     #[test]
     fn a_denied_authority_is_excluded_and_the_surviving_sibling_keeps_its_id() {
         let registry = two_officer_registry();
         let wire = call("wire", json!({"amount": 5}));
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let offered = plan_of(&registry, &log, &wire);
         assert_eq!(assigned(&offered), vec![vec!["officer-a"], vec!["officer-b"]]);
         let sibling = exec(&offered.plans[1]).clone();
 
         let log = vec![
-            opened(known(SUSPICIOUS, Audience::public())),
+            opened(Label::new(SUSPICIOUS, Audience::public())),
             denial(&wire, "officer-a"),
         ];
         let filtered = plan_of(&registry, &log, &wire);
@@ -3261,7 +2974,7 @@ mod tests {
         let registry = two_officer_registry();
         let denied_call = call("wire", json!({"amount": 5}));
         let log = vec![
-            opened(known(SUSPICIOUS, Audience::public())),
+            opened(Label::new(SUSPICIOUS, Audience::public())),
             denial(&denied_call, "officer-a"),
         ];
         assert_eq!(
@@ -3276,41 +2989,14 @@ mod tests {
 
     #[test]
     fn a_sole_denied_authority_makes_the_block_terminally_planless() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
-        let officer = Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let tool = gated("wire", floor(TRUSTED));
+        let officer = trusted_up_to("officer", TRUSTED);
+        let registry = registry(vec![tool], vec![officer], vec![]);
         let wire = call("wire", json!({}));
-        let log = vec![opened(known(SUSPICIOUS, Audience::public())), denial(&wire, "officer")];
+        let log = vec![
+            opened(Label::new(SUSPICIOUS, Audience::public())),
+            denial(&wire, "officer"),
+        ];
         let planned = plan_of(&registry, &log, &wire);
         assert!(planned.plans.is_empty());
         assert!(!planned.is_curable());
@@ -3318,111 +3004,55 @@ mod tests {
 
     #[test]
     fn a_target_denial_does_not_suppress_the_direct_redispatch() {
-        let target = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+        let target = requiring(
+            "send",
+            Requires {
+                label: floor(TRUSTED),
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
                 ..Requires::default()
             },
-        };
+        );
         let emitter = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("emitter"),
-            tags: vec![],
-            delta: crate::contract::Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool("emitter")
         };
-        let officer = Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![target, emitter]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let officer = trusted_up_to("officer", TRUSTED);
+        let registry = registry(vec![target, emitter], vec![officer], vec![]);
         let send = call("send", json!({}));
         let expected = vec![redispatch("emitter", vec![Gap::Prior(EffectKind::new("receipt"))])];
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         assert_eq!(plan_of(&registry, &log, &send).plans, expected);
 
-        let log = vec![opened(known(SUSPICIOUS, Audience::public())), denial(&send, "officer")];
+        let log = vec![
+            opened(Label::new(SUSPICIOUS, Audience::public())),
+            denial(&send, "officer"),
+        ];
         assert_eq!(plan_of(&registry, &log, &send).plans, expected);
     }
 
     #[test]
     fn a_denial_recorded_for_the_named_tools_own_call_does_not_remove_the_offer() {
-        let target = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let target = requiring(
+            "send",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
                 ..Requires::default()
             },
-        };
+        );
         let emitter = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("emitter"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+                label: floor(TRUSTED),
                 ..Requires::default()
             },
+            ..plain_tool("emitter")
         };
-        let gate = Authority {
-            name: AuthorityName::new("gate"),
-            mandate: Mandate {
-                trust_ceiling: Some(TRUSTED),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![target, emitter]),
-            authorities: vec![gate],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+        let gate = trusted_up_to("gate", TRUSTED);
+        let registry = registry(vec![target, emitter], vec![gate], vec![]);
         let send = call("send", json!({}));
         let null_rendering = ResolvedCall::new(ToolName::new("emitter"), crate::params::test_arguments(&json!({})));
         let log = vec![
-            opened(known(SUSPICIOUS, Audience::public())),
+            opened(Label::new(SUSPICIOUS, Audience::public())),
             denial(&null_rendering, "gate"),
         ];
         let planned = plan_of(&registry, &log, &send);
@@ -3434,37 +3064,24 @@ mod tests {
 
     #[test]
     fn a_duplicated_requirement_entry_is_one_gap_and_mints_no_permuted_duplicates() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let tool = requiring(
+            "wire",
+            Requires {
                 attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
                 ..Requires::default()
             },
+        );
+        let attester = |name: &str| {
+            mandated(
+                name,
+                Mandate {
+                    attends: Attends::Named(vec![MarkName::new("signoff")]),
+                    ..Mandate::default()
+                },
+            )
         };
-        let attester = |name: &str| Authority {
-            name: AuthorityName::new(name),
-            mandate: Mandate {
-                attends: Attends::Named(vec![MarkName::new("signoff")]),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![attester("a"), attester("b")],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![tool], vec![attester("a"), attester("b")], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 2);
         for plan in &planned.plans {
@@ -3478,42 +3095,24 @@ mod tests {
 
     #[test]
     fn one_authority_covering_both_gaps_is_one_grouped_ruling() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
+        let tool = requiring(
+            "wire",
+            Requires {
+                label: floor(TRUSTED),
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-        };
-        let officer = Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
+        );
+        let officer = mandated(
+            "officer",
+            Mandate {
                 trust_ceiling: Some(TRUSTED),
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        );
+        let registry = registry(vec![tool], vec![officer], vec![]);
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 1);
         assert_eq!(exec(&planned.plans[0]).required.len(), 1);
@@ -3526,31 +3125,9 @@ mod tests {
 
     #[test]
     fn no_competent_authority_is_terminal() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(SUSPICIOUS, Audience::public()))];
+        let tool = gated("wire", floor(TRUSTED));
+        let registry = registry(vec![tool], vec![], vec![]);
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
@@ -3562,13 +3139,7 @@ mod tests {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
         let tool = |name: &str, tags: &[&str], recipients: Vec<RecipientSpec>| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
             tags: tags.iter().map(|tag| TagName::new(*tag)).collect(),
-            delta: Delta::NONE,
-            forwards: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -3576,15 +3147,15 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool(name)
         };
         let to_alice = || vec![RecipientSpec::Static(alice())];
         let emitting = |mut tool: ToolAnnotation, effect: &str| {
             tool.emits = EffectSet::new([EffectKind::new(effect)]).expect("one effect");
             tool
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![
+        let registry = registry(
+            vec![
                 {
                     let mut fetch = emitting(tool("fetch", &[], vec![]), "consumed");
                     fetch.delta.audience = Some(DeltaAudience::Static(insider()));
@@ -3612,8 +3183,8 @@ mod tests {
                     vec![RecipientSpec::Placeholder("to".to_string())],
                 ),
                 tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
-            ]),
-            authorities: vec![Authority {
+            ],
+            vec![Authority {
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3624,7 +3195,7 @@ mod tests {
                 },
                 hint: None,
             }],
-            sanitizers: vec![Sanitizer {
+            vec![Sanitizer {
                 name: SanitizerName::new("scrub"),
                 on: SanitizerPoints {
                     input: true,
@@ -3639,10 +3210,8 @@ mod tests {
                 },
                 hint: None,
             }],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         assert_eq!(
             plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
             Some(NarrowingImpact {
@@ -3657,8 +3226,8 @@ mod tests {
         );
         let parts = crate::label::TestContext::default();
         let trust_only = Narrowing {
-            from: known(TRUSTED, Audience::public()),
-            to: known(SUSPICIOUS, Audience::public()),
+            from: Label::new(TRUSTED, Audience::public()),
+            to: Label::new(SUSPICIOUS, Audience::public()),
         };
         assert!(
             narrowing_impact(
@@ -3673,7 +3242,10 @@ mod tests {
             .is_none_or(|impact| impact.recipient_checked.is_empty()),
             "a narrowing that keeps the audience moves no recipient check"
         );
-        let narrowed = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("insider")])))];
+        let narrowed = vec![opened(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("insider")]),
+        ))];
         assert_eq!(
             plan_of(&registry, &narrowed, &call("post", json!({}))).narrowing_impact,
             None,
@@ -3686,13 +3258,8 @@ mod tests {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || Audience::restricted([ReaderId::new("insider")]);
         let tool = |name: &str, trust: Option<Trust>| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
             tags: vec![TagName::new("mail")],
             delta: Delta { trust, audience: None },
-            forwards: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -3700,10 +3267,10 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool(name)
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![
+        let registry = registry(
+            vec![
                 tool("post", None),
                 tool("lookup", Some(SUSPICIOUS)),
                 tool("audit", None),
@@ -3712,8 +3279,8 @@ mod tests {
                     spent.requires.history = vec![HistoryRequirement::NoPrior(EffectKind::new("spent"))];
                     spent
                 },
-            ]),
-            authorities: vec![Authority {
+            ],
+            vec![Authority {
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3724,13 +3291,11 @@ mod tests {
                 },
                 hint: None,
             }],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
+            vec![],
+        );
         let narrowing = Narrowing {
-            from: known(TRUSTED, Audience::public()),
-            to: known(TRUSTED, insider()),
+            from: Label::new(TRUSTED, Audience::public()),
+            to: Label::new(TRUSTED, insider()),
         };
         let parts = crate::label::TestContext::default();
         let impact = |floor: Option<&Floor>| {
@@ -3755,7 +3320,7 @@ mod tests {
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
         assert_eq!(
-            impact(Some(&Floor::new(known(TRUSTED, insider()), None))),
+            impact(Some(&Floor::new(Label::new(TRUSTED, insider()), None))),
             Some(NarrowingImpact {
                 tools: 3,
                 sign_off: 1,
@@ -3769,36 +3334,23 @@ mod tests {
     #[test]
     fn acceptance_plan_for_pure_narrowing() {
         let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("get"),
-            tags: vec![],
             delta: Delta {
                 trust: None,
                 audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
                     "insider",
                 )]))),
             },
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires::default(),
+            ..plain_tool("get")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![tool], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("get", json!({})));
         assert!(planned.is_curable());
         assert_eq!(
             exec(&planned.plans[0]).steps,
             vec![RemedyStep::Accept(Narrowing {
-                from: established(TRUSTED, Audience::public()),
-                to: established(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+                from: Label::new(TRUSTED, Audience::public()),
+                to: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             })]
         );
         assert_eq!(
@@ -3815,37 +3367,19 @@ mod tests {
     #[test]
     fn prior_gap_cured_by_a_redispatch() {
         let delete = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("db.deleted")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
+            ..plain_tool("delete_db")
         };
         let backup = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("backup"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool("backup")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![delete, backup]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![delete, backup], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
@@ -3856,38 +3390,23 @@ mod tests {
 
     #[test]
     fn prior_gap_with_multiple_emitters_surfaces_every_curative_redispatch() {
-        let delete = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let delete = requiring(
+            "delete_db",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-        };
+        );
         let backup = |name: &str| ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
-            requires: Requires::default(),
+            ..plain_tool(name)
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![delete, backup("backup_full"), backup("backup_fast")]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(
+            vec![delete, backup("backup_full"), backup("backup_fast")],
+            vec![],
+            vec![],
+        );
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         let curative: Vec<&ToolName> = planned
@@ -3906,26 +3425,14 @@ mod tests {
 
     #[test]
     fn an_emitters_own_unmet_static_includes_does_not_gate_the_offer() {
-        let delete = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let delete = requiring(
+            "delete_db",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-        };
+        );
         let backup = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("backup"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3936,16 +3443,13 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool("backup")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![delete, backup]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("insider")])))];
+        let registry = registry(vec![delete, backup], vec![], vec![]);
+        let log = vec![opened(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("insider")]),
+        ))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert_eq!(
             planned.plans,
@@ -3955,26 +3459,15 @@ mod tests {
 
     #[test]
     fn a_placeholder_bearing_emitter_is_advertised_like_any_other() {
-        let archive = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("archive"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let archive = requiring(
+            "archive",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
                 ..Requires::default()
             },
-        };
+        );
         let send = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3983,16 +3476,10 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            ..plain_tool("send")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![archive, send]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![archive, send], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("archive", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
@@ -4003,28 +3490,15 @@ mod tests {
 
     #[test]
     fn prior_gap_without_emitter_is_terminal() {
-        let delete = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let delete = requiring(
+            "delete_db",
+            Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![delete]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let registry = registry(vec![delete], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(!planned.is_curable());
     }
@@ -4032,17 +3506,12 @@ mod tests {
     #[test]
     fn attention_gap_routes_by_mark_not_scope() {
         let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            ..plain_tool("wire")
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -4055,15 +3524,8 @@ mod tests {
             },
             hint: None,
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![tool], vec![officer], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(
             exec(&planned.plans[0]).steps,
@@ -4073,87 +3535,51 @@ mod tests {
 
     #[test]
     fn attention_with_wrong_mark_is_terminal() {
-        let tool = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let tool = requiring(
+            "wire",
+            Requires {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-        };
-        let officer = Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
+        );
+        let officer = mandated(
+            "officer",
+            Mandate {
                 attends: Attends::Named(vec![MarkName::new("other")]),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![tool]),
-            authorities: vec![officer],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let registry = registry(vec![tool], vec![officer], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
     }
 
     #[test]
     fn a_catch_all_authority_remedies_any_mark_but_leaves_blocked_terminal() {
-        let wire = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("wire"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        let wire = requiring(
+            "wire",
+            Requires {
                 attention: vec![MarkName::new("sentry-review")],
                 ..Requires::default()
             },
-        };
-        let denied = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("denied"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: EffectSet::default(),
-            requires: Requires {
+        );
+        let denied = requiring(
+            "denied",
+            Requires {
                 attention: vec![MarkName::new(MarkName::BLOCKED)],
                 ..Requires::default()
             },
-        };
-        let anyone = Authority {
-            name: AuthorityName::new("anyone"),
-            mandate: Mandate {
+        );
+        let anyone = mandated(
+            "anyone",
+            Mandate {
                 attends: Attends::Any,
                 ..Mandate::default()
             },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![wire, denied]),
-            authorities: vec![anyone],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        );
+        let registry = registry(vec![wire, denied], vec![anyone], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let reviewed = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(
             exec(&reviewed.plans[0]).steps,
@@ -4166,40 +3592,23 @@ mod tests {
     #[test]
     fn a_mutual_prerequisite_cycle_does_not_gate_the_direct_offer() {
         let a = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("a"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("ka")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
                 ..Requires::default()
             },
+            ..plain_tool("a")
         };
         let b = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("b"),
-            tags: vec![],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            forwards: Delta::NONE,
             emits: EffectSet::new([EffectKind::new("kb")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
                 ..Requires::default()
             },
+            ..plain_tool("b")
         };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: declared(vec![a, b]),
-            authorities: vec![],
-            sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
-            annotators: vec![],
-        });
-        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let registry = registry(vec![a, b], vec![], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("a", json!({})));
         assert_eq!(
             planned.plans,
@@ -4406,7 +3815,7 @@ mod tests {
             prop::collection::btree_set(small_effect(), 0..2),
         )
             .prop_map(|(trust, audience, effects)| State {
-                label: established(trust, audience),
+                label: Label::new(trust, audience),
                 effects,
                 reservations: BTreeSet::new(),
             })
@@ -4438,6 +3847,110 @@ mod tests {
         })
     }
 
+    fn rekeyed(
+        tools: Vec<ToolAnnotation>,
+        authorities: Vec<Authority>,
+        sanitizers: Vec<Sanitizer>,
+    ) -> (Vec<ToolAnnotation>, Vec<Authority>, Vec<Sanitizer>) {
+        let tools = tools
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut t)| {
+                t.name = ToolName::new(format!("t{i}"));
+                t
+            })
+            .collect();
+        let authorities = authorities
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mut a)| {
+                a.name = AuthorityName::new(format!("a{i}"));
+                if a.mandate.is_empty() { None } else { Some(a) }
+            })
+            .collect();
+        let sanitizers = sanitizers
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut s)| {
+                s.name = SanitizerName::new(format!("s{i}"));
+                s
+            })
+            .collect();
+        (tools, authorities, sanitizers)
+    }
+
+    /// `None` when the draw exceeds the planner cap.
+    fn loaded(
+        tools: Vec<ToolAnnotation>,
+        authorities: Vec<Authority>,
+        sanitizers: Vec<Sanitizer>,
+    ) -> Result<Option<Registry>, TestCaseError> {
+        let built = Registry::build_covered(RegistryConfig {
+            authorities,
+            sanitizers,
+            ..config(tools)
+        });
+        if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+            return Ok(None);
+        }
+        prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
+        Ok(built.ok())
+    }
+
+    struct GeneratedBlock<'r> {
+        contract: &'r ToolAnnotation,
+        raw: RawBlock,
+        planned: PlannedBlock,
+    }
+
+    /// The plan for the `target`-th generated tool's call in `state`; `None` when the call does not block.
+    fn planned_block<'r>(registry: &'r Registry, state: &State, target: usize) -> Option<GeneratedBlock<'r>> {
+        let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
+        let contract = registry
+            .tool(&target)
+            .expect("target is modulo the re-keyed tool count")
+            .declared()
+            .expect("generated tools are declared");
+        let call = synthetic_call(contract);
+        let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+        let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+        let parts = crate::label::TestContext::default();
+        let raw = check::evaluate_state(
+            contract,
+            &state.partial(),
+            &has_committed,
+            &has_reserved,
+            check::CallReads::Resolved(&call),
+            &CallStage::default(),
+            &parts.context(),
+        )
+        .expect("literal audiences leave nothing undecided");
+        if raw.requirement_gaps.is_empty() && raw.narrowing.is_none() {
+            return None;
+        }
+        let mut log = vec![opened(state.label.clone())];
+        for kind in &state.effects {
+            log.push(committed_effect(kind.clone()));
+        }
+        let projection = Projection::build(&log, log.len() as u64);
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let planned = plan(
+            registry,
+            &views,
+            BlockedCall {
+                call: &call,
+                contract,
+                raw: &raw,
+                stage: &CallStage::default(),
+                role: CallRole::Ordinary,
+            },
+            &parts.context(),
+        )
+        .expect("literal audiences leave nothing undecided");
+        Some(GeneratedBlock { contract, raw, planned })
+    }
+
     proptest! {
         #[test]
         fn planner_agrees_with_reference_oracle(
@@ -4447,75 +3960,13 @@ mod tests {
             state in a_state(),
             target in 0usize..3,
         ) {
-            let tools: Vec<_> = tools.into_iter().enumerate().map(|(i, mut t)| {
-                t.name = ToolName::new(format!("t{i}"));
-                t
-            }).collect();
-            let authorities: Vec<_> = authorities.into_iter().enumerate().filter_map(|(i, mut a)| {
-                a.name = AuthorityName::new(format!("a{i}"));
-                if a.mandate.is_empty() { None } else { Some(a) }
-            }).collect();
-            let sanitizers: Vec<_> = sanitizers.into_iter().enumerate().map(|(i, mut s)| {
-                s.name = SanitizerName::new(format!("s{i}"));
-                s
-            }).collect();
-
-            let built = Registry::build_covered(RegistryConfig {
-                trust_chain: chain(),
-                tools: declared(tools),
-                authorities,
-                sanitizers,
-                audience: crate::audience::AudienceConfig::default(),
-                annotators: vec![],
-            });
-            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+            let (tools, authorities, sanitizers) = rekeyed(tools, authorities, sanitizers);
+            let Some(registry) = loaded(tools, authorities, sanitizers)? else {
                 return Ok(());
-            }
-            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
-            let registry = built.unwrap();
-
-            let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
-            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count").declared().expect("generated tools are declared");
-            let call = synthetic_call(contract);
-
-            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-            let parts = crate::label::TestContext::default();
-            let eval = check::evaluate_state(
-                contract,
-                &state.partial(),
-                &has_committed,
-                &has_reserved,
-                check::CallReads::Resolved(&call),
-                &CallStage::default(),
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
-            if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
+            };
+            let Some(GeneratedBlock { raw, planned, .. }) = planned_block(&registry, &state, target) else {
                 return Ok(());
-            }
-            let raw = eval;
-
-            let mut log = vec![opened(state.label.clone())];
-            for kind in &state.effects {
-                log.push(committed_effect(kind.clone()));
-            }
-            let projection = Projection::build(&log, log.len() as u64);
-            let trajectory = traj();
-            let views = projection.view(&trajectory);
-            let planned = plan(
-                &registry,
-                &views,
-                BlockedCall {
-                    call: &call,
-                    contract,
-                    raw: &raw,
-                    stage: &CallStage::default(),
-                    role: CallRole::Ordinary,
-                },
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
+            };
 
             let coverable = raw
                 .requirement_gaps
@@ -4549,72 +4000,13 @@ mod tests {
             state in a_state(),
             target in 0usize..3,
         ) {
-            let tools: Vec<_> = tools.into_iter().enumerate().map(|(i, mut t)| {
-                t.name = ToolName::new(format!("t{i}"));
-                t
-            }).collect();
-            let authorities: Vec<_> = authorities.into_iter().enumerate().filter_map(|(i, mut a)| {
-                a.name = AuthorityName::new(format!("a{i}"));
-                if a.mandate.is_empty() { None } else { Some(a) }
-            }).collect();
-            let sanitizers: Vec<_> = sanitizers.into_iter().enumerate().map(|(i, mut s)| {
-                s.name = SanitizerName::new(format!("s{i}"));
-                s
-            }).collect();
-            let built = Registry::build_covered(RegistryConfig {
-                trust_chain: chain(),
-                tools: declared(tools),
-                authorities,
-                sanitizers,
-                audience: crate::audience::AudienceConfig::default(),
-                annotators: vec![],
-            });
-            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+            let (tools, authorities, sanitizers) = rekeyed(tools, authorities, sanitizers);
+            let Some(registry) = loaded(tools, authorities, sanitizers)? else {
                 return Ok(());
-            }
-            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
-            let registry = built.unwrap();
-
-            let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
-            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count").declared().expect("generated tools are declared");
-            let call = synthetic_call(contract);
-            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-            let parts = crate::label::TestContext::default();
-            let eval = check::evaluate_state(
-                contract,
-                &state.partial(),
-                &has_committed,
-                &has_reserved,
-                check::CallReads::Resolved(&call),
-                &CallStage::default(),
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
-            if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
+            };
+            let Some(GeneratedBlock { contract, planned, .. }) = planned_block(&registry, &state, target) else {
                 return Ok(());
-            }
-            let raw = eval;
-            let mut log = vec![opened(state.label.clone())];
-            for kind in &state.effects {
-                log.push(committed_effect(kind.clone()));
-            }
-            let projection = Projection::build(&log, log.len() as u64);
-            let trajectory = traj();
-            let views = projection.view(&trajectory);
-            let planned = plan(
-                &registry,
-                &views,
-                BlockedCall {
-                    call: &call,
-                    contract,
-                    raw: &raw,
-                    stage: &CallStage::default(),
-                    role: CallRole::Ordinary,
-                },
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
+            };
 
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
@@ -4694,69 +4086,14 @@ mod tests {
             state in a_state(),
             target in 0usize..3,
         ) {
-            let tools: Vec<_> = tools.into_iter().enumerate().map(|(i, mut t)| {
-                t.name = ToolName::new(format!("t{i}"));
-                t
-            }).collect();
-            let authorities: Vec<_> = authorities.into_iter().enumerate().filter_map(|(i, mut a)| {
-                a.name = AuthorityName::new(format!("a{i}"));
-                if a.mandate.is_empty() { None } else { Some(a) }
-            }).collect();
-            let built = Registry::build_covered(RegistryConfig {
-                trust_chain: chain(),
-                tools: declared(tools),
-                authorities: authorities.clone(),
-                sanitizers: vec![],
-                audience: crate::audience::AudienceConfig::default(),
-                annotators: vec![],
-            });
-            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+            let (tools, authorities, _) = rekeyed(tools, authorities, Vec::new());
+            let Some(registry) = loaded(tools, authorities.clone(), Vec::new())? else {
                 return Ok(());
-            }
-            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
-            let registry = built.unwrap();
-
-            let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
-            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count").declared().expect("generated tools are declared");
-            let call = synthetic_call(contract);
-            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+            };
+            let Some(GeneratedBlock { contract, raw, planned }) = planned_block(&registry, &state, target) else {
+                return Ok(());
+            };
             let parts = crate::label::TestContext::default();
-            let eval = check::evaluate_state(
-                contract,
-                &state.partial(),
-                &has_committed,
-                &has_reserved,
-                check::CallReads::Resolved(&call),
-                &CallStage::default(),
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
-            if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
-                return Ok(());
-            }
-            let raw = eval;
-
-            let mut log = vec![opened(state.label.clone())];
-            for kind in &state.effects {
-                log.push(committed_effect(kind.clone()));
-            }
-            let projection = Projection::build(&log, log.len() as u64);
-            let trajectory = traj();
-            let views = projection.view(&trajectory);
-            let planned = plan(
-                &registry,
-                &views,
-                BlockedCall {
-                    call: &call,
-                    contract,
-                    raw: &raw,
-                    stage: &CallStage::default(),
-                    role: CallRole::Ordinary,
-                },
-                &parts.context(),
-            )
-            .expect("literal audiences leave nothing undecided");
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
                 let scoped = authority.scope.covers(&contract.tags);

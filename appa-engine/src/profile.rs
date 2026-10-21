@@ -1,8 +1,8 @@
 //! The deployment profile: the policy file's `[deployment]` coverage declaration as the engine
-//! holds it, the policy × profile validation matrix, the derived open vectors, and the versioned
-//! policy identity.
+//! holds it, the policy × profile validation matrix, and the policy identity.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,8 +15,7 @@ use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChai
 use crate::value::ToolName;
 
 /// How a tool executes relative to the engine's release: a component consumes the
-/// release before execution (`Enforced`), execution is assumed faithful (`Assumed`, an open
-/// vector), or the provider runs the tool inside the inference call (`ProviderRun` — an ingestion
+/// release before execution (`Enforced`), execution is assumed faithful (`Assumed`), or the provider runs the tool inside the inference call (`ProviderRun` — an ingestion
 /// surface, not a checkable call).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,23 +35,12 @@ pub enum BindingMode {
 }
 
 /// How an allowed provider surface is handled: mediated through the ordinary admission
-/// machinery, or declared an open vector. A surface the declaration does not list is refused.
+/// machinery, or declared open: its results reach the model unchecked. A surface the declaration does not list is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceMode {
     Mediated,
     Open,
-}
-
-/// One capability the deployment leaves uncovered, derived canonically from the normalized
-/// declaration and the registered tool set — never a caller-supplied acknowledgement list.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum OpenVector {
-    AssumedExecutor { tool: ToolName },
-    ProviderRunDispatch { tool: ToolName },
-    AssumedExecutorRule { rule: ToolName },
-    ProviderRunRule { rule: ToolName },
-    OpenProviderSurface { surface: SurfaceName },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,19 +227,52 @@ pub fn neutral_starting_label(chain: &TrustChain) -> Label {
     Label::new(top, crate::label::Audience::public())
 }
 
-/// The version of the policy configuration dialect a policy file was written in, carried on the
-/// durable opening record. Never part of the policy identity: normalization already
-/// erases source syntax.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyDialectVersion(u32);
+/// Where one policy stands in its deployment's sequence. A deployment's first published policy
+/// is revision 1, and every publish moves the head to the next revision. A family log stamps each
+/// batch with the revision that decided it, and replay judges the batch under that revision's
+/// policy, so a later publish never changes what an earlier record meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PolicyRevision(NonZeroU64);
 
-impl PolicyDialectVersion {
-    pub const fn new(version: u32) -> Self {
-        PolicyDialectVersion(version)
+impl PolicyRevision {
+    pub const FIRST: PolicyRevision = PolicyRevision::new(1);
+
+    /// Construct a positive revision supplied by a validated caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `revision` is zero. Storage reads validate before calling this constructor.
+    pub const fn new(revision: u64) -> Self {
+        match NonZeroU64::new(revision) {
+            Some(revision) => PolicyRevision(revision),
+            None => panic!("a policy revision is positive"),
+        }
     }
 
-    pub const fn value(self) -> u32 {
-        self.0
+    pub const fn value(self) -> u64 {
+        self.0.get()
+    }
+
+    /// The revision a publish over this one produces.
+    ///
+    /// Publishes advance stored heads, which are positive SQL `bigint` values. Their successor
+    /// fits in `u64`; a successor beyond SQL's range is refused by the store's positive constraint.
+    ///
+    /// # Panics
+    ///
+    /// Panics at `u64::MAX`, which no stored head can contain.
+    pub const fn next(self) -> Self {
+        match self.value().checked_add(1) {
+            Some(revision) => PolicyRevision::new(revision),
+            None => panic!("a stored policy revision is below u64::MAX"),
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -263,8 +284,33 @@ impl PolicyDialectVersion {
 pub struct DeploymentPolicy {
     pub registry: RegistryConfig,
     pub planner_cap: PlannerCap,
-    pub dialect: PolicyDialectVersion,
     pub profile: ProfileDeclaration,
+}
+
+/// The name of a deployment: a policy line that advances through policy revisions. A standalone
+/// runtime serves one; an embedding host serves one per tenant. A family that follows a line names
+/// it on its opening record.
+///
+/// This is an opaque host identifier, compared byte for byte and stored unchanged. It has no
+/// policy syntax or display-name constraints; the host chooses identifiers suitable for its UI.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeploymentName(String);
+
+impl DeploymentName {
+    pub fn new(name: impl Into<String>) -> DeploymentName {
+        DeploymentName(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DeploymentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The key of a stored policy file: the SHA-256 of its exact bytes, lowercase hex.
@@ -283,50 +329,21 @@ impl PolicyFileKey {
     }
 }
 
-/// The policy identity a durable opening records: a domain-separated SHA-256 digest over the
-/// RFC 8785 canonical bytes of the identity document — the normalized engine-visible policy and
-/// deployment declaration. The document is field-aware: it names every included field explicitly,
-/// preserves the semantic sequences (the trust chain's rank order, authority registration order),
-/// sorts true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
-///
-/// The domain tag names the identity algorithm, and an opening records the digest the algorithm
-/// of the engine that opened it gave its policy. [`PolicyIdentity::of_registry`] computes the
-/// current algorithm. An engine also recognizes what [`PolicyIdentity::earlier_of_registry`]
-/// computes, so a trajectory an earlier engine opened still reopens under the same policy after
-/// the identity document changes. A change to the identity document keeps the replaced algorithm
-/// there. Drop an earlier algorithm only once no host keeps a trajectory that it opened.
+/// The policy identity: a domain-separated SHA-256 digest over the RFC 8785 canonical bytes of
+/// the identity document — the normalized engine-visible policy and deployment declaration. The
+/// document is field-aware: it names every included field explicitly, preserves the semantic
+/// sequences (the trust chain's rank order, authority registration order), sorts true maps and
+/// sets, and excludes source syntax, runtime bindings, `[limits]`, and hints. Two policy files
+/// with one identity decide every call alike. A family's opening record carries the identity of
+/// the policy it opened under, and an engine reopens the family only while it recognises that
+/// digest ([`crate::engine::Engine::recognizes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyIdentity(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl PolicyIdentity {
     /// The identity under the current algorithm, `appa:policy-identity:v2`.
     pub(crate) fn of_registry(registry: &Registry) -> Self {
-        Self::digest(
-            b"appa:policy-identity:v2",
-            &identity_document_from_registry(registry, true),
-        )
-    }
-
-    /// The identities earlier identity algorithms give this policy. `appa:policy-identity:v1`
-    /// is the current document without `forwards`, which v1 did not know. A policy where a rule
-    /// declares `forwards` has no v1 identity: no v1 engine compiled such a policy, so no opening
-    /// a v1 engine recorded names it.
-    pub(crate) fn earlier_of_registry(registry: &Registry) -> Vec<Self> {
-        let forwards_nothing = registry
-            .semantic_tools()
-            .filter_map(|(_, declaration)| match declaration {
-                ToolDeclaration::Declared(tool) => Some(tool),
-                ToolDeclaration::Annotated { .. } => None,
-            })
-            .chain(registry.provider_run_annotations())
-            .all(|tool| tool.forwards == crate::contract::Delta::NONE);
-        if !forwards_nothing {
-            return Vec::new();
-        }
-        vec![Self::digest(
-            b"appa:policy-identity:v1",
-            &identity_document_from_registry(registry, false),
-        )]
+        Self::digest(b"appa:policy-identity:v2", &identity_document_from_registry(registry))
     }
 
     fn digest(tag: &[u8], document: &serde_json::Value) -> Self {
@@ -345,11 +362,10 @@ impl PolicyIdentity {
     }
 }
 
-/// The identity document. `with_forwards` is `false` only for the v1 algorithm, which predates
-/// the `forwards` rule field.
-fn identity_document_from_registry(registry: &Registry, with_forwards: bool) -> serde_json::Value {
+/// The identity document.
+fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
     let render_annotation = |matcher: &crate::registry::ToolMatcher, tool: &ToolAnnotation| {
-        let mut rendered = serde_json::json!({
+        serde_json::json!({
             "name": tool.name,
             "matcher": matcher,
             "tags": sorted_set(&tool.tags),
@@ -364,14 +380,7 @@ fn identity_document_from_registry(registry: &Registry, with_forwards: bool) -> 
                 "history": sorted_set(&tool.requires.history),
                 "attention": sorted_set(&tool.requires.attention),
             },
-        });
-        if !with_forwards {
-            rendered
-                .as_object_mut()
-                .expect("a rendered annotation is an object")
-                .remove("forwards");
-        }
-        rendered
+        })
     };
     let render = |matcher: &crate::registry::ToolMatcher, declaration: &ToolDeclaration| match declaration {
         ToolDeclaration::Declared(tool) => render_annotation(matcher, tool),
@@ -500,43 +509,10 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
     })
 }
 
-/// Derive the open vectors from the normalized declaration and the registered tool set:
-/// one per assumed executor, one per allowed provider-run dispatch, one per `open` provider
-/// surface, in canonical order.
-pub(crate) fn derive_open_vectors<'a>(
-    profile: &'a DeploymentProfile,
-    tools: impl Iterator<Item = &'a ToolName>,
-) -> Vec<OpenVector> {
-    let mut vectors = Vec::new();
-    let tools: BTreeSet<_> = tools.chain(profile.executor_exceptions.keys()).collect();
-    for tool in tools {
-        match profile.executor_class(tool) {
-            ExecutorClass::Enforced => {}
-            ExecutorClass::Assumed if tool.is_name_selector() => {
-                vectors.push(OpenVector::AssumedExecutorRule { rule: tool.clone() })
-            }
-            ExecutorClass::ProviderRun if tool.is_name_selector() => {
-                vectors.push(OpenVector::ProviderRunRule { rule: tool.clone() })
-            }
-            ExecutorClass::Assumed => vectors.push(OpenVector::AssumedExecutor { tool: tool.clone() }),
-            ExecutorClass::ProviderRun => vectors.push(OpenVector::ProviderRunDispatch { tool: tool.clone() }),
-        }
-    }
-    for (surface, mode) in profile.provider_surfaces() {
-        if mode == SurfaceMode::Open {
-            vectors.push(OpenVector::OpenProviderSurface {
-                surface: surface.clone(),
-            });
-        }
-    }
-    vectors.sort();
-    vectors
-}
-
 /// The pure policy × profile validation matrix (run by the loader through
 /// [`crate::engine::Engine::open`]): a policy construct that names an engine behavior the
 /// deployment cannot perform is a load error, and the error names the missing coverage. Weaker
-/// choices load and surface as open vectors instead.
+/// choices load.
 pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclaration) -> Result<(), LoadError> {
     let profile = registry.profile();
     let chain = registry.trust_chain();
@@ -628,20 +604,12 @@ pub(crate) fn covering_profile(config: &RegistryConfig) -> DeploymentProfile {
 }
 
 /// A synthetic opening record for a raw-fold test fixture: `trajectory` opens as a
-/// root at `starting_label` under a no-coverage profile. It carries no engine's identity, so it
+/// root at `starting_label` under a no-coverage profile. No engine judges its deployment, so it
 /// belongs only in logs the transition validator never judges — `Projection::build` fixtures. A
 /// validated log opens through `Engine::open_trajectory` instead.
 #[cfg(test)]
 pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label: Label) -> crate::fact::Fact {
     let chain = TrustChain::new(vec!["a".to_string(), "b".to_string()]);
-    let config = RegistryConfig {
-        trust_chain: chain.clone(),
-        tools: Vec::new(),
-        annotators: Vec::new(),
-        authorities: Vec::new(),
-        sanitizers: Vec::new(),
-        audience: crate::audience::AudienceConfig::default(),
-    };
     let profile = DeploymentProfile::declare(ProfileDeclaration {
         starting_label,
         ..ProfileDeclaration::no_coverage(&chain)
@@ -649,11 +617,10 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
     .expect("an established starting label declares");
     crate::fact::Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
         trajectory,
-        dialect: PolicyDialectVersion::new(1),
-        policy_digest: identity_of(&config, &profile),
         profile,
         policy_file_key: PolicyFileKey::of(b"fixture"),
-        open_vectors: Vec::new(),
+        deployment: DeploymentName::new("fixture"),
+        revision: PolicyRevision::FIRST,
         forked_from: None,
         principal: None,
     })
@@ -692,6 +659,15 @@ mod tests {
     use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AnnotatorName, AuthorityName, SanitizerName, TagName};
+
+    #[test]
+    fn a_policy_revision_refuses_zero_in_external_data() {
+        assert!(serde_json::from_str::<PolicyRevision>("0").is_err());
+        assert!(serde_json::from_str::<PolicyRevision>("-1").is_err());
+        let revision: PolicyRevision = serde_json::from_str("1").unwrap();
+        assert_eq!(revision, PolicyRevision::FIRST);
+        assert_eq!(serde_json::to_string(&revision).unwrap(), "1");
+    }
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".into(), "trusted".into()])
@@ -761,7 +737,6 @@ mod tests {
         Engine::open(DeploymentPolicy {
             registry: cfg,
             planner_cap: PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
             profile: declaration,
         })
     }
@@ -937,20 +912,15 @@ mod tests {
         let engine = open(cfg.clone(), profile).unwrap();
         assert!(engine.profile().confines_result(&actual));
         assert_eq!(engine.profile().executor_class(&actual), ExecutorClass::Assumed);
-        assert_eq!(
-            engine.open_vectors(),
-            vec![OpenVector::AssumedExecutorRule { rule: rule.clone() }]
-        );
+        assert_eq!(engine.profile().executor_class(&rule), ExecutorClass::Assumed);
 
         let mut profile = covering_declaration(&cfg);
         profile
             .executor_exceptions
             .insert(actual.clone(), ExecutorClass::Assumed);
         let engine = open(cfg, profile).unwrap();
-        assert_eq!(
-            engine.open_vectors(),
-            vec![OpenVector::AssumedExecutor { tool: actual }]
-        );
+        assert_eq!(engine.profile().executor_class(&actual), ExecutorClass::Assumed);
+        assert_eq!(engine.profile().executor_class(&rule), ExecutorClass::Enforced);
     }
 
     #[test]
@@ -972,12 +942,7 @@ mod tests {
             Some(crate::registry::ToolKind::ProviderRun)
         );
         assert!(engine.registry().provider_run_annotation(&actual).is_some());
-        assert_eq!(
-            engine.open_vectors(),
-            vec![OpenVector::ProviderRunRule {
-                rule: ToolName::new("mcp/*/read")
-            }]
-        );
+        assert_eq!(engine.profile().executor_class(&actual), ExecutorClass::ProviderRun);
     }
 
     #[test]
@@ -1027,7 +992,6 @@ mod tests {
         let engine = Engine::open(DeploymentPolicy {
             registry: cfg.clone(),
             planner_cap: PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
             profile: declaration.clone(),
         })
         .unwrap();
@@ -1036,10 +1000,8 @@ mod tests {
             &neutral_starting_label(&cfg.trust_chain)
         );
         assert_eq!(
-            engine.open_vectors(),
-            vec![OpenVector::AssumedExecutor {
-                tool: ToolName::new("fetch")
-            }]
+            engine.profile().executor_class(&ToolName::new("fetch")),
+            ExecutorClass::Assumed
         );
         let mut with_sanitizer = cfg;
         with_sanitizer.sanitizers = vec![output_sanitizer("redactor")];
@@ -1047,7 +1009,6 @@ mod tests {
             Engine::open(DeploymentPolicy {
                 registry: with_sanitizer,
                 planner_cap: PlannerCap::default(),
-                dialect: PolicyDialectVersion::new(1),
                 profile: declaration,
             }),
             Err(LoadError::OutputSanitizerUncovered { .. })
@@ -1075,7 +1036,6 @@ mod tests {
             Engine::open(DeploymentPolicy {
                 registry: cfg.clone(),
                 planner_cap: PlannerCap::new(cap).expect("nonzero"),
-                dialect: PolicyDialectVersion::new(1),
                 profile: declaration,
             })
         };
@@ -1178,7 +1138,6 @@ mod tests {
             Engine::open(DeploymentPolicy {
                 registry: cfg.clone(),
                 planner_cap: PlannerCap::new(cap).expect("nonzero"),
-                dialect: PolicyDialectVersion::new(1),
                 profile: declaration,
             })
         };
@@ -1223,44 +1182,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<DeploymentProfile>(&wire).unwrap(), profile);
         let corrupt = wire.replace(r#""trust":1"#, r#""trust":"bogus""#);
         assert!(serde_json::from_str::<DeploymentProfile>(&corrupt).is_err());
-    }
-
-    #[test]
-    fn vectors_derive_one_per_weak_choice_in_canonical_order() {
-        let cfg = config(vec![tool("a_search"), tool("fetch"), tool("send")]);
-        let mut declaration = covering_declaration(&cfg);
-        declaration
-            .executor_exceptions
-            .insert(ToolName::new("send"), ExecutorClass::Assumed);
-        provider_run(&mut declaration, "a_search");
-        declaration
-            .provider_surfaces
-            .insert(SurfaceName::new("web_search"), SurfaceMode::Open);
-        declaration
-            .provider_surfaces
-            .insert(SurfaceName::new("file_search"), SurfaceMode::Mediated);
-        let engine = open(cfg, declaration).unwrap();
-        assert_eq!(
-            engine.open_vectors(),
-            vec![
-                OpenVector::AssumedExecutor {
-                    tool: ToolName::new("send")
-                },
-                OpenVector::ProviderRunDispatch {
-                    tool: ToolName::new("a_search")
-                },
-                OpenVector::OpenProviderSurface {
-                    surface: SurfaceName::new("web_search")
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_fully_enforced_deployment_derives_no_vectors() {
-        let cfg = config(vec![tool("fetch")]);
-        let engine = open(cfg.clone(), covering_declaration(&cfg)).unwrap();
-        assert_eq!(engine.open_vectors(), vec![]);
     }
 
     fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentity {
@@ -1357,7 +1278,7 @@ mod tests {
     fn an_annotator_mandate_renders_its_audience_vocabulary_in_the_identity_document() {
         let rendered = |cfg: &RegistryConfig| -> Vec<String> {
             let engine = open(cfg.clone(), covering_declaration(cfg)).expect("the fixture opens");
-            let document = identity_document_from_registry(engine.registry(), true);
+            let document = identity_document_from_registry(engine.registry());
             document["annotators"][0]["audiences"]
                 .as_array()
                 .expect("a mandate renders its audiences as an array")
@@ -1425,47 +1346,6 @@ mod tests {
             identity(&explicit, &covering_profile(&explicit)),
             identity(&with_group, &covering_profile(&with_group))
         );
-    }
-
-    /// v1 is the current document without `forwards`. A policy that forwards nothing has one
-    /// v1 identity, which moves with every other edit; a policy that declares `forwards` has
-    /// none, since no v1 engine compiled such a policy.
-    #[test]
-    fn the_v1_identity_covers_every_field_but_forwards() {
-        let earlier = |cfg: &RegistryConfig| {
-            let built = crate::registry::Registry::build(
-                cfg.clone(),
-                crate::registry::PlannerCap::default(),
-                covering_profile(cfg),
-            )
-            .expect("a fixture configuration builds");
-            PolicyIdentity::earlier_of_registry(&built)
-        };
-        let cfg = config(vec![tool("fetch")]);
-        let [v1] = earlier(&cfg)[..] else {
-            panic!("a policy that forwards nothing has one v1 identity")
-        };
-        assert_ne!(v1, identity(&cfg, &covering_profile(&cfg)));
-
-        let delta_edit = config(vec![{
-            let mut t = tool("fetch");
-            t.delta = Delta {
-                trust: Some(Trust::new(0)),
-                audience: None,
-            };
-            t
-        }]);
-        assert_ne!(earlier(&delta_edit), vec![v1], "v1 still covers delta");
-
-        let forwards_edit = config(vec![{
-            let mut t = tool("fetch");
-            t.forwards = Delta {
-                trust: Some(Trust::new(0)),
-                audience: None,
-            };
-            t
-        }]);
-        assert_eq!(earlier(&forwards_edit), vec![], "no v1 policy declares forwards");
     }
 
     #[test]
@@ -1551,7 +1431,7 @@ mod tests {
         let base = identity(&viewer_only, &profile);
 
         let engine = open(viewer_only.clone(), covering_declaration(&viewer_only)).expect("the fixture opens");
-        let document = identity_document_from_registry(engine.registry(), true);
+        let document = identity_document_from_registry(engine.registry());
         assert_eq!(
             document["audience"]["sources"],
             serde_json::json!([{ "provider": "slack", "templates": [{ "template": "viewer", "feeds": "self" }] }])

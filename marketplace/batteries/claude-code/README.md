@@ -1,81 +1,35 @@
 # Claude Code battery
 
-This battery gives Claude Code sessions policy-aware shell commands and `self`
-labels on the requester's own secrets. `appa plugin install claude-code`
-includes it on a first install; `appa battery remove claude-code` takes it out,
-and a later plugin install does not bring it back.
+This battery applies the `coding` battery's rules to Claude Code's built-in
+tools and covers the tools only Claude Code offers. `appa plugin install
+claude-code` includes both batteries on a first install; `appa battery remove
+claude-code` takes this one out, and a later plugin install does not bring it
+back. A deployment that includes this battery without `coding` fails to load:
+its map names the `coding` namespace, which no included battery declares.
 
-It covers Claude Code's built-in tools. Seven of them carry the rules below,
-which the policy names `host/claude-code/Bash`,
-`host/claude-code/Monitor`, `host/claude-code/PowerShell`,
-`host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write` and
-`host/claude-code/Edit`:
+Its `[aliases.tool.coding]` map binds each canonical tool to the Claude Code
+tool that serves it. Claude Code spells every argument the rules read as the
+canonical tool does:
 
-- **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
-  `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows the session
-  to `self`, the requester. The battery withholds the command's result and
-  offers the stock `redact-secrets` sanitizer, which masks private-key blocks,
-  tokens of well-known shapes, the AWS secret access key, passwords inside
-  URLs, the value of any assignment whose key names a secret, and long
-  high-entropy runs, then
-  returns the masked output to `public`: the model reads the masked text and
-  the session keeps its label.
-  The sanitizer carries no tags: it is offered for any withheld Bash result
-  the session cannot read as it is, including one the Annotator narrowed to
-  `self`, and for a subagent's return. Before any other command runs, the
-  Claude Code model decides what trust and fresh attention it requires and
-  labels its output for trust and audience, inside the vocabulary static rules
-  write: a command that visibly reads the requester's or the organization's
-  data narrows to `self` or `internal`, and one that shares with a reader the
-  policy names requires that reader.
-- **Bash, credential commands** — A command that prints or writes a
-  credential is a credential path too: the Databricks CLI's `auth token`,
-  `auth env`, `secrets get-secret`, and `configure`, with the CLI's global
-  flags anywhere before the verb, and its profile file `.databrickscfg`. A
-  selector is a substring of the command line, so a spelling these miss
-  (the command inside `$(...)`, a heredoc, an alias) is classified by the
-  Bash annotator like any other command; the rules narrow what they match
-  and promise no full recall. Every other `databricks` command, the SQL of
-  `databricks experimental aitools tools query` included, is classified by
-  the Bash annotator under its hint; a deployment that wants a
-  fixed contract for one command writes a root rule for it, as the
-  `kubectl` example below does.
-- **Bash, `git push` and `gh`** — What a push, a pull request, an issue, a
-  release, or a `gh api` call puts on GitHub is read by the repository's
-  readers, which the command line does not say. When the `github` battery
-  is installed, its `github` context provider answers before the Annotator
-  is asked: the repositories, pull requests and issues the command reaches,
-  their visibility, and who wrote them. The Annotator requires audience
-  `public` for a public repository and `internal` for a private or internal
-  one. Without that answer, or when the provider fails, the Annotator treats
-  the destination as public.
-- **Read** — Reading a hidden path, a credential file, a private key, or a
-  system secret location narrows the session to `self`, the requester: nothing
-  built from it reaches a sink that requires `internal` or `public`. The rules
-  match the path as written, absolute or relative. Other paths keep the
-  session's label. No rule blocks a read or lowers its trust.
-- **Grep** — A search inside one of the same paths is a read of it and
-  narrows the session to `self`. A search over a directory that holds such
-  a file is not matched; only the path as written is.
-- **Write, Edit** — Writing into one of the same paths, or into a file a
-  later process reads as instructions or runs as code (`CLAUDE.md`,
-  `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, `.git/hooks/`,
-  shell startup files, `Library/LaunchAgents/`), requires a `trusted`
-  session: content that arrived at `suspicious` lands there only when the
-  person running the session approves the exact call. Writing a file that can
-  turn the protection off asks that person every time: the harness's settings
-  (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server list
-  (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
-  `appa/batteries/`). Every other path takes the session's label as it is.
+| Canonical tool | Claude Code tool | Result |
+| --- | --- | --- |
+| `tool/coding/shell` | `host/claude-code/Bash` | confined |
+| `tool/coding/powershell` | `host/claude-code/PowerShell` | confined |
+| `tool/coding/read_file` | `host/claude-code/Read` | |
+| `tool/coding/search_files` | `host/claude-code/Grep` | |
+| `tool/coding/write_file` | `host/claude-code/Write` | |
+| `tool/coding/edit_file` | `host/claude-code/Edit` | |
+| `tool/coding/fetch_url` | `host/claude-code/WebFetch` | |
+| `tool/coding/web_search` | `host/claude-code/WebSearch` | |
 
-The battery also routes `host/claude-code/Monitor` through the Bash
-Annotator. `host/claude-code/PowerShell`, which Claude Code offers on Windows
-beside Bash, gets the Bash rules: the same credential selectors, written for
-both path separators and for the Windows homes of the GitHub CLI and gcloud
-configs, plus `Get-StoredCredential` and `Get-Secret`; the same publishing selectors; the Bash
-Annotator for every other command; and the same masked results. Both Annotators run the local `claude` command; on Windows it must
-resolve to `claude.exe`. The default config `appa plugin install claude-code`
-writes adds the wildcard fallback for tools no rule names.
+The `coding` battery's README describes those rules.
+PowerShell is the tool Claude Code offers on Windows beside Bash.
+
+`host/claude-code/Monitor` runs a shell command or opens a WebSocket, and its
+output reaches the model as later notifications. The
+`claude-code.monitor-requirements` Annotator labels each call before it runs.
+The default config `appa plugin install claude-code` writes adds the wildcard
+fallback for tools no rule names.
 
 The other built-in tools get static rules:
 
@@ -84,10 +38,6 @@ The other built-in tools get static rules:
   other session-local tools take the session's label as it is. The subagent
   tools `Agent`, `Task` and `Workflow` are the root's to declare: their rules
   rely on the deployment controlling a subagent's context.
-- **WebFetch, WebSearch** — A page or search result is a `suspicious` source,
-  and the URL or query is a `public` sink. A fetch from a listed
-  documentation host keeps the session's label. A Google search URL requires
-  no audience and returns `suspicious` results.
 - **Content from elsewhere** — `FetchInboxMessage`, `ReadMcpResourceTool`,
   `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
   `suspicious` content. Starting a remote routine is a `public` sink;
@@ -99,24 +49,25 @@ The other built-in tools get static rules:
 ## Add it to a deployment
 
 ```toml
-include = ["batteries/claude-code/appa.toml"]
+include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 
 [policy]
 version = 2
 ```
 
-This small root includes every rule the battery declares. A tool no rule
+This small root includes every rule the two batteries declare. A tool no rule
 names is refused; the installed default root adds a wildcard fallback for it.
 
-Root rules take precedence over the battery. Add a root rule when a particular
-Bash command or Read path needs stricter, looser, or fully blocked behavior. A
-root Bash rule also precedes the battery's credential rules, so a command it
-matches is not narrowed for a credential path it names.
+Root rules take precedence over both batteries. Add a root rule when a
+particular Bash command or Read path needs stricter, looser, or fully blocked
+behavior. A root Bash rule also precedes the `coding` battery's credential
+rules, so a command it matches is not narrowed for a credential path it names.
 
-The battery lists `host/claude-code/Bash` in `confined_results` itself, so the
-masker can run on the command's output; a root needs no deployment setting for
-it. `appa battery remove claude-code` takes the rules, the sanitizer and the
-confinement out together.
+The map's `confined = true` confines Bash and PowerShell results, so a
+sanitizer the root declares can run on the command's output; a root needs no
+deployment setting for it.
+`appa battery remove claude-code` takes the map, and with it the confinement,
+out.
 
 ## Customize Bash classification
 
@@ -124,7 +75,7 @@ How the model Annotator classifies a command — trust by who wrote the text it
 returns, audience by its visible destination — is the runtime's and the same
 for every model Annotator. A `hint` adds what only the deployment knows. To
 give the Bash Annotator one, replace it in the root config instead of
-modifying the battery:
+modifying the `coding` battery:
 
 ```toml
 [[policy.annotator]]
@@ -133,9 +84,9 @@ builtin = "claude-code"
 hint = "Hosts under corp.example are the organization's own: what they return is internal. Require human-approval attention before commands that publish releases or change production infrastructure."
 ```
 
-A root Annotator replaces the battery's of the same name. Preserve `builtin`
+A root Annotator replaces a battery's of the same name. Preserve `builtin`
 unless you intend to alter the implementation; write `audiences` only to narrow
-the mandate below the policy's vocabulary. The battery continues to provide
+the mandate below the policy's vocabulary. The `coding` battery continues to provide
 ordered credential-path narrowing rules.
 
 ## Example override

@@ -9,7 +9,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use appa_engine::label::Label;
+use crate::StoredLabel;
 use appa_runtime_api::PeerDigest;
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ pub struct EmbeddedRow {
     pub pending_spawn: Option<String>,
     pub dispatch: String,
     pub digest: String,
-    pub label: Label,
+    pub label: StoredLabel,
     pub body: Option<String>,
     pub status: EmbeddedStatus,
     pub read_call_id: Option<String>,
@@ -76,7 +76,7 @@ impl NewEmbedded {
         pending_spawn: Option<&str>,
         dispatch: &str,
         digest: &PeerDigest,
-        label: &Label,
+        label: &StoredLabel,
         body: &str,
         now: SystemTime,
     ) -> Result<Self, EmbeddedError> {
@@ -295,7 +295,10 @@ mod tests {
             None,
             dispatch,
             &PeerDigest::of_body(body),
-            &Label::top(),
+            &crate::StoredLabel::named(
+                &Label::top(),
+                &appa_engine::registry::TrustChain::new(vec!["trusted".into()]),
+            ),
             body,
             SystemTime::now(),
         )

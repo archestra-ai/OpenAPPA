@@ -126,3 +126,10 @@ max_body_bytes = 65536
 
 [externals.authorities.oncall]
 builtin = "hitl"
+
+# The github battery's multi-user target, which this shared runtime composes
+# (`APPA_BATTERY_TARGET=multi-user`), sends its member lookups to this roster.
+# Empty, it maps nobody: no GitHub account counts as a reader until the
+# operator maps `github:<id>` to a person here.
+[externals.audience.host-members]
+readers = {}

@@ -29,6 +29,19 @@ fn runtime(dir: &tempfile::TempDir, policy: &str, bindings: &str) -> Runtime {
     Runtime::open_in_memory(config, None).expect("the deployment opens in memory")
 }
 
+/// [`runtime`], serving `appa/do_something` as `appa replay` does.
+fn serving(dir: &tempfile::TempDir, policy: &str, bindings: &str) -> Runtime {
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, format!("[policy]\nversion = 2\n{policy}{EXTERNALS}{bindings}")).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    Runtime::open_in_memory(config.with_do_something(), None).expect("the deployment opens in memory")
+}
+
+/// An `appa/do_something` step whose `requires` is the given JSON object.
+fn do_something(requires: &str, expect: &str) -> String {
+    format!("appa/do_something {{\n  requires: {requires}\n}}\nexpect {expect}\n\n")
+}
+
 fn trace(name: &str, text: &str) -> Trace {
     parse(Path::new(name), text).expect("the trace parses")
 }
@@ -43,10 +56,28 @@ fn rendered(reports: &[TraceReport]) -> (String, Summary) {
     (String::from_utf8(out).expect("utf-8"), summary)
 }
 
-const PASSED: StepOutcome = StepOutcome::Passed { taken: None };
+const ALLOWED: StepOutcome = StepOutcome::Passed {
+    got: Got::Allowed,
+    taken: None,
+};
+const DENIED: StepOutcome = StepOutcome::Passed {
+    got: Got::Blocked(BTreeSet::new()),
+    taken: None,
+};
 
 fn taken(kind: OfferKind) -> StepOutcome {
-    StepOutcome::Passed { taken: Some(kind) }
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind.clone()])),
+        taken: Some(kind),
+    }
+}
+
+/// A step that passed on an offer it did not take.
+fn offered(kind: OfferKind) -> StepOutcome {
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind])),
+        taken: None,
+    }
 }
 
 /// An email leaves the company; a deploy needs a backup that never comes.
@@ -74,8 +105,8 @@ async fn one_allow_and_one_deny_pass() {
         trace("deny.appa", "mcp/ops/deploy {}\nexpect deny\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
-    assert_eq!(outcomes(&reports[1]), vec![(1, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &ALLOWED)]);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
     let (text, summary) = rendered(&reports);
     assert_eq!(
         text,
@@ -126,9 +157,60 @@ async fn a_narrowing_read_denies_the_later_email() {
     let reports = run(&runtime, &traces).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED), (11, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED), (11, &ALLOWED)]
     );
     assert_eq!(reports[1].verdict(), Verdict::Ok);
+}
+
+fn observed(got: Got, taken: Option<OfferKind>) -> StepOutcome {
+    StepOutcome::Observed { got, taken }
+}
+
+/// Steps without `expect` report what they got and never end the file. The HR read is
+/// accepted as `expect allow` would; the email it denies takes nothing; the post still runs.
+/// A denied call never ran, so its narrowing `delta` does not land on the trajectory.
+#[tokio::test]
+async fn observed_steps_report_and_never_end_the_file() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let policy = format!(
+        "{NARROWING_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = {{ effects = {{ contains = [\"backup.completed\"] }} }}\ndelta = {{ audience = [\"hr\"] }}\n"
+    );
+    let runtime = runtime(&dir, &policy, "");
+    let email = "mcp/mail/send {\n  to: \"x@other.com\"\n}\n";
+    let traces = [
+        trace(
+            "observe.appa",
+            &format!(
+                "mcp/files/read {{\n  path: \"/hr/salaries.csv\"\n}}\n{email}mcp/slack/post_message {{\n  text: \"reviewed\"\n}}\n{email}expect deny\n"
+            ),
+        ),
+        trace("unlanded.appa", &format!("mcp/ops/deploy {{}}\n{email}")),
+    ];
+    let reports = run(&runtime, &traces).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (
+                1,
+                &observed(
+                    Got::Blocked(BTreeSet::from([OfferKind::Accept])),
+                    Some(OfferKind::Accept)
+                )
+            ),
+            (4, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (7, &observed(Got::Allowed, None)),
+            (10, &DENIED),
+        ]
+    );
+    assert_eq!(
+        outcomes(&reports[1]),
+        vec![
+            (1, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (2, &observed(Got::Allowed, None)),
+        ]
+    );
+    let (_, summary) = rendered(&reports);
+    assert_eq!((summary.ok, summary.exit_code()), (2, std::process::ExitCode::SUCCESS));
 }
 
 /// A wipe needs a person's sign-off; a deploy needs a backup that never comes.
@@ -173,7 +255,7 @@ async fn an_authority_offer_is_taken_as_approved() {
         trace("wipe-other.appa", "mcp/ops/wipe {}\nexpect authority cto\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &DENIED)]);
     assert_eq!(outcomes(&reports[1]), vec![(1, &taken(approver()))]);
     assert!(matches!(
         &reports[2].steps[0].outcome,
@@ -392,7 +474,7 @@ async fn a_bound_annotator_decides_the_step() {
     let reports = run(&runtime, &[trace("annotated.appa", text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED)]
     );
 
     *answer.lock().unwrap() = false;
@@ -402,6 +484,214 @@ async fn a_bound_annotator_decides_the_step() {
         "{:?}",
         reports[0]
     );
+}
+
+/// `appa/do_something` asks what the trajectory allows: public before the HR read, and only
+/// HR after it. The steps that ask change nothing, so the real email after them is judged
+/// as if they had not been proposed.
+#[tokio::test]
+async fn do_something_asks_what_the_trajectory_allows() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = serving(&dir, NARROWING_POLICY, "");
+    let public = r#"{"audience": {"contains": ["public"]}}"#;
+    let text = [
+        do_something(public, "allow"),
+        "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\n".to_string(),
+        do_something(public, "deny"),
+        do_something(r#"{"audience": {"contains": ["hr"]}}"#, "allow"),
+        "mcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect deny\n".to_string(),
+    ]
+    .concat();
+    let reports = run(&runtime, &[trace("private.appa", &text)]).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (1, &ALLOWED),
+            (6, &taken(OfferKind::Accept)),
+            (11, &DENIED),
+            (16, &ALLOWED),
+            (21, &DENIED),
+        ]
+    );
+
+    let regressed = serving(
+        &tempfile::tempdir().expect("a temp dir"),
+        &NARROWING_POLICY.replace("delta = { audience = [\"hr\"] }", "delta = {}"),
+        "",
+    );
+    let reports = run(&regressed, &[trace("private.appa", &text)]).await;
+    let (rendered, _) = rendered(&reports);
+    assert!(
+        rendered.contains("private.appa:11: appa/do_something: got allow, want deny\n"),
+        "{rendered}"
+    );
+}
+
+/// A matching offer passes the step without being taken, so the same question gets the same
+/// offer again, and a real call afterwards still needs its own approval or rewrite.
+#[tokio::test]
+async fn do_something_never_takes_its_offer() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = serving(&dir, ATTENTION_POLICY, "");
+    let signoff = r#"{"attention": ["signoff"]}"#;
+    let text = [
+        do_something(signoff, "authority approver"),
+        do_something(signoff, "authority"),
+        "mcp/ops/wipe {}\nexpect authority approver\n".to_string(),
+    ]
+    .concat();
+    let reports = run(&runtime, &[trace("signoff.appa", &text)]).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (1, &offered(approver())),
+            (6, &offered(approver())),
+            (11, &taken(approver()))
+        ]
+    );
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = serving(&dir, REDACTION_POLICY, REDACTOR_BINDING);
+    let text = [
+        "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\n".to_string(),
+        do_something(r#"{"audience": {"contains": ["public"]}}"#, "sanitizer redactor"),
+        "mcp/reports/export {\n  body: \"salaries\"\n}\nexpect sanitizer redactor\n".to_string(),
+    ]
+    .concat();
+    let reports = run(&runtime, &[trace("export.appa", &text)]).await;
+    let redactor = OfferKind::Sanitizer {
+        name: "redactor".into(),
+    };
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (1, &taken(OfferKind::Accept)),
+            (6, &offered(redactor.clone())),
+            (11, &taken(redactor))
+        ]
+    );
+}
+
+/// Trust is asked the same way: a `trusted` floor holds until suspicious content arrives.
+#[tokio::test]
+async fn do_something_asks_about_trust() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let policy = "\n[[policy.tool]]\nname = \"mcp/web/fetch\"\ndelta = { trust = \"suspicious\" }\n";
+    let runtime = serving(&dir, policy, "");
+    let trusted = r#"{"trust": "trusted"}"#;
+    let text = [
+        do_something(trusted, "allow"),
+        "mcp/web/fetch {\n  url: \"https://example.com\"\n}\nexpect allow\n\n".to_string(),
+        do_something(trusted, "deny"),
+    ]
+    .concat();
+    let reports = run(&runtime, &[trace("trust.appa", &text)]).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![(1, &ALLOWED), (6, &taken(OfferKind::Accept)), (11, &DENIED)]
+    );
+}
+
+/// A requirement nothing can lift is a plain deny, as for a declared tool.
+#[tokio::test]
+async fn do_something_is_denied_when_nothing_is_offered() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = serving(&dir, ATTENTION_POLICY, "");
+    let text = do_something(r#"{"effects": {"contains": ["backup.completed"]}}"#, "deny");
+    let reports = run(&runtime, &[trace("backup.appa", &text)]).await;
+    assert_eq!(outcomes(&reports[0]), vec![(1, &DENIED)]);
+}
+
+/// A requirement the policy cannot state is a step that cannot run, never a deny that would
+/// pass `expect deny`.
+#[tokio::test]
+async fn a_requirement_the_policy_cannot_state_cannot_run() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = serving(&dir, ATTENTION_POLICY, "");
+    for (requires, says) in [
+        (r#"{"trust": "vetted"}"#, "unknown trust rank \"vetted\""),
+        (r#"{"attention": ["legal"]}"#, "no attention mark legal"),
+        (r#"{"effects": {"contains": ["audited"]}}"#, "no effect audited"),
+        (
+            r#"{"audience": {"contains": ["@nobody"]}}"#,
+            "names an audience the policy does not",
+        ),
+        (r#"{"audience": {"contains": ["$to"]}}"#, "names a call argument"),
+        (
+            r#"{"audiences": {"contains": ["public"]}}"#,
+            "unknown field `audiences`",
+        ),
+    ] {
+        let reports = run(&runtime, &[trace("refused.appa", &do_something(requires, "deny"))]).await;
+        assert!(
+            matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(detail) if detail.contains(says)),
+            "{requires}: {:?}",
+            reports[0].steps[0].outcome
+        );
+    }
+}
+
+/// A deployment that does not serve `appa/do_something` refuses the name, even where a
+/// wildcard covers every other undeclared call: the wildcard's annotator is never asked.
+#[tokio::test]
+async fn only_a_serving_deployment_decides_do_something() {
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = asked.clone();
+    let router = Router::new().route(
+        "/annotate",
+        post(move |_body: String| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                serde_json::json!({
+                    "version": 1,
+                    "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [] }
+                })
+                .to_string()
+            }
+        }),
+    );
+    let url = format!("{}/annotate", serve(router).await);
+    let policy =
+        "\n[[policy.annotator]]\nname = \"classifier\"\n\n[[policy.tool]]\nname = \"*\"\nannotator = \"classifier\"\n";
+    let binding = format!("\n[externals.annotators.classifier]\nurl = \"{url}\"\n");
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = runtime(&dir, policy, &binding);
+    let text = do_something(r#"{"audience": {"contains": ["public"]}}"#, "allow");
+    let reports = run(&runtime, &[trace("unserved.appa", &text)]).await;
+    assert!(
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(detail) if detail.contains("appa/do_something")),
+        "{:?}",
+        reports[0].steps[0].outcome
+    );
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// `appa/do_something` and its Annotator are the runtime's own: a policy declaring either is
+/// refused, whether or not the deployment serves it.
+#[test]
+fn a_policy_cannot_declare_do_something() {
+    for policy in [
+        "\n[[policy.tool]]\nname = \"appa/do_something\"\ndelta = {}\n",
+        "\n[[policy.annotator]]\nname = \"appa/do_something\"\n\n[[policy.tool]]\nname = \"mcp/web/fetch\"\nannotator = \"appa/do_something\"\n\n[externals.annotators.\"appa/do_something\"]\nurl = \"http://127.0.0.1:9/annotate\"\n",
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, format!("[policy]\nversion = 2\n{policy}{EXTERNALS}")).expect("the fixture writes");
+        let refused = |config: Config| {
+            Runtime::open_in_memory(config, None)
+                .err()
+                .map(|error| error.to_string())
+        };
+        let config = Config::load(&path).expect("the fixture validates");
+        for opened in [refused(config.clone()), refused(config.with_do_something())] {
+            assert!(
+                opened
+                    .as_deref()
+                    .is_some_and(|error| error.contains("reserved") && error.contains("appa/do_something")),
+                "{policy}: {opened:?}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -422,8 +712,8 @@ async fn every_shipped_example_passes() {
     assert!(dirs.len() >= 7, "the shipped examples were found: {dirs:?}");
     for dir in dirs {
         let config = Config::load(&dir.join("appa.toml")).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
-        let runtime =
-            Runtime::open_in_memory(config, None).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+        let runtime = Runtime::open_in_memory(config.with_do_something(), None)
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
         let files = collect(std::slice::from_ref(&dir)).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
         let traces: Vec<Trace> = files
             .iter()

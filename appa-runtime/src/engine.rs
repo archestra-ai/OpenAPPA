@@ -54,7 +54,7 @@ use appa_engine::names::MarkName;
 use appa_engine::plan::{
     ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
 };
-use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
+use appa_engine::profile::{DeploymentName, PolicyFileKey as EnginePolicyFileKey};
 use appa_engine::projection::Views;
 use appa_engine::registry::{Registry, TrustChain};
 use appa_engine::shape::{ReturnMismatch, ReturnShape};
@@ -397,6 +397,8 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
     fn from(refusal: &TransitionRefusal) -> Self {
         match refusal {
             TransitionRefusal::Unopened => ReplayRefusalClass("unopened"),
+            TransitionRefusal::NoRevision => ReplayRefusalClass("no_revision"),
+            TransitionRefusal::ForeignRevision => ReplayRefusalClass("foreign_revision"),
             TransitionRefusal::UnrequestedEvidence { .. } => ReplayRefusalClass("unrequested_evidence"),
             TransitionRefusal::Opening(opening) => opening.into(),
             TransitionRefusal::ForeignTrajectory => ReplayRefusalClass("foreign_trajectory"),
@@ -405,7 +407,6 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::DigestMismatch => ReplayRefusalClass("digest_mismatch"),
             TransitionRefusal::DispatchReopened => ReplayRefusalClass("dispatch_reopened"),
             TransitionRefusal::WrongOccurrence => ReplayRefusalClass("wrong_occurrence"),
-            TransitionRefusal::UnreleasedDispatch => ReplayRefusalClass("unreleased_dispatch"),
             TransitionRefusal::DispatchNotOpen => ReplayRefusalClass("dispatch_not_open"),
             TransitionRefusal::RepeatCheckpoint => ReplayRefusalClass("repeat_checkpoint"),
             TransitionRefusal::ContradictedSuccess => ReplayRefusalClass("contradicted_success"),
@@ -482,17 +483,11 @@ impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalC
             appa_engine::transition::OpeningTransitionRefusal::WrongTrajectory { .. } => {
                 ReplayRefusalClass("opening_wrong_trajectory")
             }
-            appa_engine::transition::OpeningTransitionRefusal::UnsupportedDialect { .. } => {
-                ReplayRefusalClass("opening_unsupported_dialect")
-            }
-            appa_engine::transition::OpeningTransitionRefusal::DigestMismatch => {
-                ReplayRefusalClass("opening_digest_mismatch")
-            }
             appa_engine::transition::OpeningTransitionRefusal::ProfileMismatch => {
                 ReplayRefusalClass("opening_profile_mismatch")
             }
-            appa_engine::transition::OpeningTransitionRefusal::VectorMismatch => {
-                ReplayRefusalClass("opening_vector_mismatch")
+            appa_engine::transition::OpeningTransitionRefusal::DeploymentMismatch => {
+                ReplayRefusalClass("opening_deployment_mismatch")
             }
             appa_engine::transition::OpeningTransitionRefusal::SelfFork => ReplayRefusalClass("opening_self_fork"),
             appa_engine::transition::OpeningTransitionRefusal::MalformedPrincipal { .. } => {
@@ -556,6 +551,10 @@ pub enum EngineRefusal {
     },
     #[error("the opening does not match the deciding policy: {detail}")]
     OpeningMismatch { detail: String, class: ReplayRefusalClass },
+    /// The log holds a batch decided at a later policy revision than the engine deciding now:
+    /// the deployment moved past the revision this event was read under.
+    #[error("the log was decided at policy revision {revision}, later than the revision deciding now")]
+    PolicyMoved { revision: u64 },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
     #[error("the trajectory has ended")]
@@ -576,6 +575,10 @@ pub enum EngineRefusal {
     /// policy cannot read. Nothing is appended; the offer stands.
     #[error("{detail}")]
     Arguments { detail: String },
+    /// The runtime could not read the annotation a call carries from its own arguments, as it
+    /// does for `appa/do_something`. Nothing is judged and nothing is appended.
+    #[error("annotator={annotator} error={reason}")]
+    Annotation { annotator: String, reason: String },
 }
 
 impl EngineRefusal {
@@ -588,6 +591,7 @@ impl EngineRefusal {
     pub(crate) fn class(&self) -> ReplayRefusalClass {
         match self {
             EngineRefusal::UntrustedLog { class, .. } | EngineRefusal::OpeningMismatch { class, .. } => *class,
+            EngineRefusal::PolicyMoved { .. } => ReplayRefusalClass("policy_moved"),
             EngineRefusal::Invariant { .. } => ReplayRefusalClass("invariant"),
             EngineRefusal::Ended => ReplayRefusalClass("ended"),
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
@@ -597,6 +601,7 @@ impl EngineRefusal {
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
             EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
             EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
+            EngineRefusal::Annotation { .. } => ReplayRefusalClass("annotation"),
         }
     }
 }
@@ -690,12 +695,6 @@ pub enum DispatchOutcome {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Opened {
-    pub policy_file_key: String,
-    pub policy_digest: appa_engine::profile::PolicyIdentity,
-}
-
 /// Where a trajectory stands in its family's log, as [`RuntimeEngine::liveness`]
 /// reads it: never opened, still taking events, or ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -716,53 +715,61 @@ pub struct OpenDispatch {
     pub bytes: Vec<u8>,
 }
 
-/// The engine deciding one family's events: the engine of the
-/// deployment now serving when the root's stored policy file is that
-/// deployment's, or the engine compiled from the root's own stored
-/// bytes. Resolved per event and borrowed for it; the
-/// process keeps at most one engine per distinct policy file.
-pub enum PolicyEngine<'a> {
-    Resident(&'a RuntimeEngine),
-    Retired(std::sync::Arc<RuntimeEngine>),
+/// The engines judging one family's events: the engine deciding at its deployment's head
+/// revision — the serving deployment's own, or one compiled from the head's file with the
+/// family's opening inventory — and the replay-only engines of every earlier revision the
+/// family's log was decided under. Resolved per event and borrowed for it. Only the deciding
+/// engine decides or frames a consult; an earlier engine validates the batches its revision
+/// decided and nothing else.
+pub struct PolicyEngine<'a> {
+    deciding: Deciding<'a>,
+    earlier: Vec<std::sync::Arc<RuntimeEngine>>,
 }
 
-impl PolicyEngine<'_> {
-    pub(crate) fn engine(&self) -> &RuntimeEngine {
-        match self {
-            PolicyEngine::Resident(engine) => engine,
-            PolicyEngine::Retired(engine) => engine,
+enum Deciding<'a> {
+    Resident(&'a RuntimeEngine),
+    Compiled(std::sync::Arc<RuntimeEngine>),
+}
+
+impl<'a> PolicyEngine<'a> {
+    pub(crate) fn resident(engine: &'a RuntimeEngine, earlier: Vec<std::sync::Arc<RuntimeEngine>>) -> Self {
+        PolicyEngine {
+            deciding: Deciding::Resident(engine),
+            earlier,
         }
     }
 
-    /// The policy identity of the deciding engine, lowercase hex — what
-    /// a root's opening record names when this engine opens it.
+    pub(crate) fn compiled(engine: std::sync::Arc<RuntimeEngine>, earlier: Vec<std::sync::Arc<RuntimeEngine>>) -> Self {
+        PolicyEngine {
+            deciding: Deciding::Compiled(engine),
+            earlier,
+        }
+    }
+
+    /// The engine deciding at the head.
+    pub(crate) fn engine(&self) -> &RuntimeEngine {
+        match &self.deciding {
+            Deciding::Resident(engine) => engine,
+            Deciding::Compiled(engine) => engine,
+        }
+    }
+
+    /// The family's working view, each batch judged under the revision that decided it; see
+    /// [`RuntimeEngine::rebuild_view`].
+    pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
+        let earlier: Vec<&Engine> = self.earlier.iter().map(|engine| &engine.engine).collect();
+        self.engine().rebuild_view(log, &earlier)
+    }
+
+    /// Render the family's recorded decisions; see [`RuntimeEngine::audit`].
+    pub(crate) fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
+        let earlier: Vec<&Engine> = self.earlier.iter().map(|engine| &engine.engine).collect();
+        self.engine().audit(log, &earlier)
+    }
+
+    /// The policy identity of the deciding engine, lowercase hex.
     pub fn identity_hex(&self) -> String {
         hex(self.engine().engine.identity().bytes())
-    }
-
-    /// Whether an opening record's digest names the deciding engine's policy, under the
-    /// current identity algorithm or an earlier one ([`appa_engine::engine::Engine::recognizes`]).
-    pub fn recognizes(&self, digest: &appa_engine::profile::PolicyIdentity) -> bool {
-        self.engine().engine.recognizes(digest)
-    }
-}
-
-/// What a root's opening record binds it to: the policy file it
-/// opened under and the identity that file must still compile to. `None`
-/// when the log does not open with its opening record, which the trust
-/// gate refuses in full a moment later. Read before the deciding engine
-/// is known, because it is what names it.
-pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
-    match log.facts().first() {
-        Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
-            policy_digest,
-            policy_file_key,
-            ..
-        })) => Some(Opened {
-            policy_file_key: policy_file_key.as_str().to_string(),
-            policy_digest: *policy_digest,
-        }),
-        _ => None,
     }
 }
 
@@ -770,9 +777,8 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
 /// registry-backed decision core, plus the reads of one rebuilt view
 /// the runtime needs to route an event. It owns every judgment and
 /// every fact; the runtime holds no engine state, and offers are the
-/// engine's own durable facts. A family decides under the policy its
-/// root opened with, so the deciding engine arrives per event as a
-/// [`PolicyEngine`], which a configuration reload does not change.
+/// engine's own durable facts. A family decides at its deployment's head
+/// revision, so the deciding engine arrives per event as a [`PolicyEngine`].
 pub struct RuntimeEngine {
     engine: Engine,
     /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
@@ -780,7 +786,7 @@ pub struct RuntimeEngine {
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
     /// How the deployment this engine decides for names tools, so feedback that tells the
     /// model to run one names it the way that model's harness dispatches it. A property of
-    /// the deployment, not of the policy: a retired engine decides under the same one.
+    /// the deployment, not of the policy: an engine of any revision carries the same one.
     naming: ToolNaming,
     /// The views this engine built last, one per family; see [`RuntimeEngine::rebuild_view`].
     views: HeldViews,
@@ -822,8 +828,8 @@ impl HeldViews {
     /// `log`'s view, advanced from a held view of a prefix of `log` through the batches the
     /// log accepted since. `None` when no held view describes a prefix of `log`, or a batch
     /// is refused: the caller then rebuilds from the whole log.
-    fn advanced(&self, engine: &Engine, log: &Log) -> Option<EngineView> {
-        let (mut view, basis) = {
+    fn advanced(&self, engine: &Engine, log: &Log, earlier: &[&Engine]) -> Option<EngineView> {
+        let (view, basis) = {
             let held = self.held();
             let found = held.views.get(log.root())?;
             let same_prefix = found.basis <= log.basis()
@@ -834,10 +840,7 @@ impl HeldViews {
             }
             (found.view.clone(), found.basis)
         };
-        for batch in log.batches_after(basis)? {
-            engine.admit_batch(&mut view, batch.to_vec()).ok()?;
-        }
-        Some(view)
+        engine.extend(view, &log.stamped_after(basis)?, earlier).ok()
     }
 
     fn keep(&self, log: &Log, view: &EngineView) {
@@ -845,10 +848,10 @@ impl HeldViews {
         // The family was used now, whether or not this view replaces the held one.
         held.order.retain(|family| family != log.root());
         held.order.push_back(log.root().clone());
-        if !held
+        if held
             .views
             .get(log.root())
-            .is_some_and(|found| found.basis > log.basis())
+            .is_none_or(|found| found.basis <= log.basis())
         {
             let fresh = HeldView {
                 view: view.clone(),
@@ -913,11 +916,30 @@ impl RuntimeEngine {
         }
     }
 
-    /// The opening of a fresh root: this engine's opening batch bound to the
-    /// exact bytes of the policy file the root opens under. It takes
-    /// the bytes, not a key, because the key on the opening record is the
-    /// engine's own type and is derived here — at the one boundary that names
-    /// the engine crate.
+    /// This engine deciding at `revision` of `deployment`: the same policy, stamping every batch
+    /// it seals with `revision`. It holds no view of the engine it was made from.
+    pub(crate) fn at(&self, deployment: &DeploymentName, revision: u64) -> RuntimeEngine {
+        RuntimeEngine {
+            engine: self
+                .engine
+                .clone()
+                .at(deployment.clone(), appa_engine::profile::PolicyRevision::new(revision)),
+            annotators: self.annotators.clone(),
+            naming: self.naming,
+            views: HeldViews::default(),
+        }
+    }
+
+    /// The policy revision this engine decides at, and stamps every batch it seals with; `None`
+    /// for a deployment that serves no line yet.
+    pub(crate) fn revision(&self) -> Option<u64> {
+        self.engine.revision().map(|revision| revision.value())
+    }
+
+    /// The opening of a fresh root: this engine's opening batch bound to the exact bytes of the
+    /// policy file the root opens under, and — for an engine deciding at a revision — naming the
+    /// deployment and revision the family follows. It takes the bytes, not a key, because the key
+    /// on the opening record is the engine's own type and is derived here.
     pub fn root_opening(
         &self,
         trajectory: &TrajectoryId,
@@ -944,35 +966,37 @@ impl RuntimeEngine {
             .map(ValidatedFactBatch::into_unsealed)
     }
 
-    /// What an independent conversation-root fork of `trajectory` carries over from this view.
-    /// `None` when the family never opened the trajectory or it has ended.
+    /// What an independent conversation-root fork of `trajectory` carries over from this view,
+    /// in this engine's trust chain. `None` when the family never opened the trajectory or it
+    /// has ended.
     pub(crate) fn root_fork_origin(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<RootForkOrigin> {
-        view.root_fork_origin(trajectory)
+        self.engine.root_fork_origin(view, trajectory)
     }
 
-    /// Refuse one root's log before it is trusted, including the
-    /// opening gate: the log's first record must be this root's opening under
-    /// exactly the deciding engine's policy. The root is the log's own, so a
-    /// view cannot be built against a log it does not describe.
+    /// Refuse one root's log before it is trusted, including the opening gate: the log's first
+    /// record must be this root's opening. Each batch is judged under the revision that decided
+    /// it: this engine's own batches by this engine, earlier ones by the engine of their
+    /// revision in `earlier`. The root is the log's own, so a view cannot be built against a log
+    /// it does not describe.
     ///
     /// A family's last view is held, and a later log that still holds that view's records is
     /// validated only from where the view stands, batch by batch, through the validator a sealed
     /// batch passes. That view equals the one a replay of the whole log builds; anything the
     /// advance refuses is judged by that whole replay instead.
-    pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
-        let view = match self.views.advanced(&self.engine, log) {
+    pub(crate) fn rebuild_view(&self, log: &Log, earlier: &[&Engine]) -> Result<EngineView, EngineRefusal> {
+        let view = match self.views.advanced(&self.engine, log, earlier) {
             Some(view) => {
                 // Every debug test build checks the advance against a whole replay.
                 #[cfg(all(test, debug_assertions))]
                 assert_eq!(
                     view,
-                    self.validated(log.facts().to_vec(), log.root(), log.basis())
+                    self.validated(log, earlier)
                         .expect("a whole replay accepts every log an advance accepts"),
                     "an advanced view equals the view a replay of the whole log builds"
                 );
                 view
             }
-            None => self.validated(log.facts().to_vec(), log.root(), log.basis())?,
+            None => self.validated(log, earlier)?,
         };
         self.views.keep(log, &view);
         Ok(view)
@@ -1157,21 +1181,60 @@ impl RuntimeEngine {
         self.engine.fork_of(view, child)
     }
 
-    fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
-        self.engine.view(family, facts, revision).map_err(|error| {
-            // The class is taken from the variant, not from the message: by the next
-            // line the discriminant is gone and only prose is left.
-            let class = ReplayRefusalClass::from(&error);
-            match error {
-                TransitionRefusal::Unopened | TransitionRefusal::Opening(_) => EngineRefusal::OpeningMismatch {
+    /// A view of `facts`, every batch of them decided at this engine's revision, for tests that
+    /// build a log record by record.
+    #[cfg(test)]
+    fn viewed(&self, facts: Vec<Fact>, family: &TrajectoryId, position: u64) -> Result<EngineView, TransitionRefusal> {
+        self.engine.view(family, facts, position)
+    }
+
+    fn validated(&self, log: &Log, earlier: &[&Engine]) -> Result<EngineView, EngineRefusal> {
+        use appa_engine::engine::ReplayRefusal;
+        let error = match self.engine.replay(log.root(), &log.stamped_batches(), earlier) {
+            Ok(view) => return Ok(view),
+            // The runtime replayed through an engine it placed at no revision: its bug, not the
+            // log's.
+            Err(error @ ReplayRefusal::Transition(TransitionRefusal::NoRevision)) => {
+                return Err(EngineRefusal::Invariant {
                     detail: error.to_string(),
-                    class,
-                },
-                error => EngineRefusal::UntrustedLog {
-                    detail: error.to_string(),
-                    class,
-                },
+                });
             }
+            Err(ReplayRefusal::Transition(error)) => error,
+            Err(error @ ReplayRefusal::Unstamped { .. }) => {
+                return Err(EngineRefusal::UntrustedLog {
+                    detail: error.to_string(),
+                    class: ReplayRefusalClass("unstamped_batch"),
+                });
+            }
+            Err(ReplayRefusal::NewerRevision { batch, .. }) => {
+                return Err(EngineRefusal::PolicyMoved {
+                    revision: batch.value(),
+                });
+            }
+            Err(error @ ReplayRefusal::PolicyUnavailable { .. }) => {
+                return Err(EngineRefusal::Invariant {
+                    detail: error.to_string(),
+                });
+            }
+            Err(error @ ReplayRefusal::RevisionRegressed { .. }) => {
+                return Err(EngineRefusal::UntrustedLog {
+                    detail: error.to_string(),
+                    class: ReplayRefusalClass("revision_regressed"),
+                });
+            }
+        };
+        // The class is taken from the variant, not from the message: by the next
+        // line the discriminant is gone and only prose is left.
+        let class = ReplayRefusalClass::from(&error);
+        Err(match error {
+            TransitionRefusal::Unopened | TransitionRefusal::Opening(_) => EngineRefusal::OpeningMismatch {
+                detail: error.to_string(),
+                class,
+            },
+            error => EngineRefusal::UntrustedLog {
+                detail: error.to_string(),
+                class,
+            },
         })
     }
 
@@ -1179,12 +1242,13 @@ impl RuntimeEngine {
     /// matching of provider-run tools. `None` when the call cannot canonicalize — an
     /// unknown tool or schema-invalid arguments never match a dispatched
     /// call, whose bytes the engine validated.
+    /// The canonical bytes of `call`'s arguments, as a dispatch records them. They depend on the
+    /// arguments alone, so a call released under an earlier revision still matches its dispatch
+    /// after the head stops declaring its tool or changes its schema.
     pub(crate) fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
-            .ok()?;
-        Some(resolved.canonical_arguments().canonical_bytes().to_vec())
+        appa_engine::params::CanonicalArguments::parse(call.arguments.get().as_bytes())
+            .ok()
+            .map(|arguments| arguments.canonical_bytes().to_vec())
     }
 
     pub(crate) fn file_dispatch(
@@ -1229,6 +1293,11 @@ impl RuntimeEngine {
         })
     }
 
+    /// The trust chain this engine's labels rank against.
+    pub(crate) fn trust_chain(&self) -> &appa_engine::registry::TrustChain {
+        self.engine.registry().trust_chain()
+    }
+
     /// The label by name: each dimension as chain names and reader ids.
     pub(crate) fn render_label(&self, label: &Label) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
@@ -1257,13 +1326,11 @@ impl RuntimeEngine {
 
     /// Render the family's recorded decisions from its persisted log. Like
     /// [`RuntimeEngine::trajectory_status`], a projection read.
-    pub(crate) fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
-        let facts = log.facts().to_vec();
-        // The validator takes the records; this read keeps its own copy of
-        // them, which is why the audit — and only the audit — clones a log.
-        self.validated(facts.clone(), log.root(), log.basis())?;
+    pub(crate) fn audit(&self, log: &Log, earlier: &[&Engine]) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
+        self.validated(log, earlier)?;
+        let facts = log.facts();
         let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
-        for fact in &facts {
+        for fact in facts {
             if let Fact::ForkPrepared {
                 fork,
                 snapshot,
@@ -1278,7 +1345,7 @@ impl RuntimeEngine {
             }
         }
         let mut entries = Vec::new();
-        for fact in &facts {
+        for fact in facts {
             let event = match fact {
                 Fact::ForkOpened { fork, .. } => match prepared.get(fork) {
                     Some((parent, seed)) => match self.render_label(seed) {
@@ -1449,6 +1516,13 @@ impl RuntimeEngine {
         if let Some(batch) = replay {
             return self.replay_response(view, trajectory, call, &batch, spawn, entropy, presentation);
         }
+        // `appa/do_something` is decided only by the deployment that declares it: a wildcard
+        // never covers it, so a deployment that does not serve it refuses the name.
+        if call.tool == crate::do_something::NAME && !crate::do_something::is_served(self.engine.registry()) {
+            return Err(EngineRefusal::UndeclaredTool {
+                tool: call.tool.clone(),
+            });
+        }
         let resolved = match self
             .engine
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
@@ -1464,9 +1538,12 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
-            Ok(answers) => answers,
-            Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+        let CallAnswers { annotation } = match self.do_something_pin(&resolved) {
+            Some(pin) => CallAnswers { annotation: Some(pin?) },
+            None => match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
+                Ok(answers) => answers,
+                Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+            },
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
@@ -1555,12 +1632,12 @@ impl RuntimeEngine {
                 detail: "a bound call's recorded batch holds more than its one proposal".to_string(),
             });
         };
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+        // The repeat must name the recorded call byte for byte. It is matched on its arguments
+        // alone: the head need not still declare the tool the decision released.
+        let arguments = appa_engine::params::CanonicalArguments::parse(call.arguments.get().as_bytes())
             .map_err(|_| EngineRefusal::CallIdReused)?;
-        if proposal.tool() != resolved.tool()
-            || proposal.canonical_arguments().canonical_bytes() != resolved.canonical_arguments().canonical_bytes()
+        if proposal.tool().as_str() != call.tool
+            || proposal.canonical_arguments().canonical_bytes() != arguments.canonical_bytes()
         {
             return Err(EngineRefusal::CallIdReused);
         }
@@ -1985,8 +2062,12 @@ impl RuntimeEngine {
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
-                    Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
-                        Some(declaration @ ToolDeclaration::Annotated { .. }) => {
+                    Ok(rewritten) => match (
+                        self.engine.registry().declaration(&rewritten),
+                        self.do_something_pin(&rewritten),
+                    ) {
+                        (_, Some(pin)) => Some(pin?),
+                        (Some(declaration @ ToolDeclaration::Annotated { .. }), None) => {
                             match self.annotation_for(&views, declaration, &rewritten, cwd, evidence) {
                                 Ok(annotation) => Some(annotation),
                                 Err(Resolution(requests)) => {
@@ -2479,6 +2560,19 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    /// The annotation an `appa/do_something` call carries, read from its own arguments; `None`
+    /// for any other call. A requirement it cannot read refuses the call outright.
+    fn do_something_pin(&self, resolved: &ResolvedCall) -> Option<Result<PinnedAnnotation, EngineRefusal>> {
+        let registry = self.engine.registry();
+        let annotator = registry.declaration(resolved)?.annotator()?;
+        crate::do_something::is_annotator(annotator).then(|| {
+            crate::do_something::pin(registry, resolved).map_err(|reason| EngineRefusal::Annotation {
+                annotator: annotator.as_str().to_string(),
+                reason,
+            })
+        })
+    }
+
     /// Every answer a call must carry before it is proposed, from the evidence gathered so
     /// far, or the consult still owed: the produced annotation for an Annotated declaration.
     /// A declared call owes nothing here — the symbolic audiences its contract reads
@@ -2592,6 +2686,7 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         Ok(declaration
             .annotator()
+            .filter(|annotator| !crate::do_something::is_annotator(annotator))
             .map(|annotator| self.annotation_request(annotator, declaration, &resolved, cwd)))
     }
 
@@ -4555,7 +4650,7 @@ mod tests {
 
     fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
         let opening = engine.root_opening(trajectory, b"policy", None);
-        engine.validated(opening, trajectory, 1).expect("the opening validates")
+        engine.viewed(opening, trajectory, 1).expect("the opening validates")
     }
 
     #[test]
@@ -4570,10 +4665,11 @@ mod tests {
         "#,
         )
         .expect("the read policy compiles");
-        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored)
+            .at(&appa_engine::profile::DeploymentName::new("default"), 1);
         let trajectory = TrajectoryId::new("file-delivery-retry");
         let mut facts = engine.root_opening(&trajectory, b"policy", None);
-        let view = engine.validated(facts.clone(), &trajectory, 1).unwrap();
+        let view = engine.viewed(facts.clone(), &trajectory, 1).unwrap();
         let id = super::ProposalBatchId::new("recorded-file-call");
         let bytes = br#"{"path":"fixture.txt"}"#;
         let original = engine
@@ -4608,7 +4704,7 @@ mod tests {
         };
         assert_eq!(released.len(), 1);
         facts.extend_from_slice(original.append.as_ref().unwrap().facts());
-        let view = engine.validated(facts, &trajectory, 2).unwrap();
+        let view = engine.viewed(facts, &trajectory, 2).unwrap();
         let call = ProposedCall {
             tool: "read".into(),
             arguments: serde_json::value::RawValue::from_string(String::from_utf8(bytes.to_vec()).unwrap()).unwrap(),
@@ -4673,6 +4769,7 @@ mod tests {
 
     fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
         RuntimeEngine::from_policy(policy, ToolNaming::AsAuthored)
+            .at(&appa_engine::profile::DeploymentName::new("default"), 1)
     }
 
     #[test]
@@ -4684,7 +4781,8 @@ mod tests {
         let trajectory = TrajectoryId("t".to_string());
         let opening = engine.root_opening(&trajectory, b"policy", None);
         let view = engine
-            .validated(opening.clone(), &trajectory, 1)
+            .engine
+            .view(&trajectory, opening.clone(), 1)
             .expect("the opening validates");
         let call = ProposedCall {
             tool: "lookup".to_string(),
@@ -4748,7 +4846,8 @@ mod tests {
         let recorded = decided.append.expect("the answered proposal is decided and recorded");
         let log = [opening, recorded].concat();
         let view = engine
-            .validated(log, &trajectory, 2)
+            .engine
+            .view(&trajectory, log, 2)
             .expect("the decided log validates");
 
         let again = propose(&view, Vec::new());

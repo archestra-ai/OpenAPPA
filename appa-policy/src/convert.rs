@@ -12,7 +12,7 @@ use appa_engine::label::{Audience, DeclaredAudience, Label, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, SurfaceName, TagName};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{BindingMode, ExecutorClass, ProfileDeclaration, neutral_starting_label};
-use appa_engine::registry::{AudienceVocabulary, LoadError, MAX_HINT_CHARS, TrustChain};
+use appa_engine::registry::{AudienceVocabulary, LoadError, MAX_HINT_CHARS, TrustChain, url_host_wildcards};
 use appa_engine::value::ToolName;
 
 use crate::error::ConfigError;
@@ -117,6 +117,12 @@ impl RawTool {
             self.name = format!("{id}{selector}");
         }
         let ctx = || format!("tool {}", self.name);
+        for argument in url_host_wildcards(&ToolName::new(self.name.clone())) {
+            tracing::warn!(
+                "{}: `*` inside the URL host of `{argument}` matches any URL that contains the rest of the pattern; end the host with `/` and list each subdomain",
+                ctx()
+            );
+        }
         refuse_inline_binding("tool", &self.name, self.implementation.as_ref())?;
         let parameters = match &self.parameters {
             Some(authored) => ToolParameters::compile(authored).map_err(|source| ConfigError::ToolParameters {
@@ -357,6 +363,18 @@ pub fn parse_delta(
         audience: audience.map(<[String]>::to_vec),
     }
     .convert(chain, context)
+}
+
+/// One `requires` table in the spelling a tool contract takes, read from JSON rather than
+/// TOML — for requirements a runtime reads at its own boundary, such as the argument of
+/// `appa replay`'s `appa/do_something`. The same keys and conversions apply as in a contract.
+pub fn parse_requires(value: &serde_json::Value, chain: &TrustChain, context: &str) -> Result<Requires, ConfigError> {
+    serde_json::from_value::<RawRequires>(value.clone())
+        .map_err(|error| ConfigError::BadRequires {
+            context: context.to_string(),
+            reason: error.to_string(),
+        })?
+        .convert(chain, context)
 }
 
 pub(crate) fn refuse_inline_binding(

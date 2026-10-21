@@ -185,7 +185,8 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
             .chain(
                 battery
                     .targets
-                    .iter()
+                    .policies()
+                    .into_iter()
                     .flat_map(|targets| targets.iter().flat_map(|(_, target_policy)| &target_policy.audiences)),
             )
             .collect();
@@ -422,7 +423,7 @@ mod tests {
                     readiness: None,
                     setup: None,
                 };
-                battery.targets = Some(TargetPolicies {
+                battery.targets = crate::Targets::Split(TargetPolicies {
                     single_user: target_policy.clone(),
                     multi_user: target_policy,
                 });

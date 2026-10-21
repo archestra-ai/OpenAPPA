@@ -5,8 +5,8 @@ use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
 use appa_engine::names::AnnotatorName;
-use appa_engine::profile::{DeploymentPolicy, PolicyDialectVersion, ProfileDeclaration};
-use appa_engine::registry::{AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
+use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
+use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
 use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
@@ -24,7 +24,7 @@ const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
 #[derive(Clone, Debug)]
 pub struct Config {
     engine: Engine,
-    registry_config: RegistryConfig,
+    policy: DeploymentPolicy,
     boundary_label: Label,
     /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
@@ -121,12 +121,12 @@ impl Config {
             sanitizers,
             audience,
         };
-        let engine = Engine::open(DeploymentPolicy {
-            registry: registry_config.clone(),
+        let policy = DeploymentPolicy {
+            registry: registry_config,
             planner_cap,
-            dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
             profile,
-        })?;
+        };
+        let engine = Engine::open(policy.clone())?;
 
         let boundary_atoms: Vec<_> = boundary_label.audience.symbolic_atoms().into_iter().collect();
         engine
@@ -140,7 +140,7 @@ impl Config {
 
         Ok(Config {
             engine,
-            registry_config,
+            policy,
             boundary_label,
             annotators,
             deployment_tools,
@@ -158,7 +158,26 @@ impl Config {
     }
 
     pub fn registry_config(&self) -> &RegistryConfig {
-        &self.registry_config
+        &self.policy.registry
+    }
+
+    /// This policy with one more Annotated tool and the Annotator it names, reopened so every
+    /// load lint runs over the result. For a tool the runtime itself declares beside the
+    /// authored policy, such as `appa replay`'s `appa/do_something`; the policy identity
+    /// then covers the added declarations.
+    pub fn with_annotated_tool(
+        &self,
+        tool: ToolDeclaration,
+        annotator: AnnotatorDeclaration,
+    ) -> Result<Config, ConfigError> {
+        let mut policy = self.policy.clone();
+        policy.registry.tools.push(tool);
+        policy.registry.annotators.push(annotator);
+        Ok(Config {
+            engine: Engine::open(policy.clone())?,
+            policy,
+            ..self.clone()
+        })
     }
 
     /// Every tool a `[deployment]` field names, as authored, paired with the field's

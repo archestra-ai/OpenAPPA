@@ -19,12 +19,12 @@ members = [
     "website-chat-playground",
     "bench/corp-agent",
 ]
-exclude = ["bench/corp-systems"]
+exclude = ["bench/corp-systems", "scripts/mixed-version"]
 
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.34.0"
+version = "0.37.0"
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -67,6 +67,8 @@ sha2 = "0.11"
 thiserror = "2"
 toml = "1"
 tracing = "0.1"
+imbl = "=7.0.2"
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "process"] }
 # 0.13 is the version rig-core speaks: one reqwest in the graph rather than two
 # whole HTTP stacks. `rustls-no-provider` leaves the crypto provider to `rustls`

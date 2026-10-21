@@ -44,8 +44,16 @@ _NAMESPACE_MARK = "__NS__"
 _CORE = frozenset(string.ascii_letters + string.digits + "_-")
 _SEPARATOR = frozenset(".:/")
 # One segment of a wire spelling: a run that starts and ends on a core
-# character and is maximal over them.
-_SEGMENT_RUN = r"[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?"
+# character, crossing a dot only into a core character, so names like
+# ``a..b`` are refused at validation below. ``/`` and ``:`` never occur
+# inside a segment.
+_SEGMENT_RUN = r"[A-Za-z0-9_-](?:(?:[-A-Za-z0-9_]|[.](?=[A-Za-z0-9_-]))*[A-Za-z0-9_-])?"
+# The scan run spans ``/``-joined segments too, but crosses every
+# separator — ``.``, ``:``, ``/`` — only into a core character, so a
+# ``..`` or ``//`` glue run never absorbs into the spelling. Flat
+# ``C+(?:S C+)*`` shape keeps the matcher on the fast char-class path
+# with no lookahead backtracking on long runs.
+_SCAN_RUN = r"[A-Za-z0-9_-]+(?:[.:/][A-Za-z0-9_-]+)*"
 # One segment of a canonical tool id, as the runtime admits it. It is
 # the run's own grammar anchored, so every name the inventory accepts
 # is a name ``despell`` can match back: a boundary period would end the
@@ -57,12 +65,11 @@ _SEGMENT = re.compile(rf"^{_SEGMENT_RUN}$")
 # backtracks over each identifier it fails to close, which is quadratic
 # in one long colon-free run — and a tool result is enough to carry one.
 _CLASSES = ("mcp", "agent", "builtin", "gate", wire.CONTROL_TOOL.split(":", 1)[0])
-# A wire spelling as it stands in a runtime string: two or three
-# segments, ``class:name`` or ``class:namespace/name``. The inventory
-# alone decides which candidate is a spelling it gave out, and
-# ``despell`` replaces one only where the identifier continues on
-# neither side.
-_SPELLED = re.compile(rf"(?:{'|'.join(_CLASSES)}):{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
+# A wire spelling as it stands in a runtime string — ``class:name`` or
+# ``class:namespace/name``, matched as one run. The inventory alone
+# decides which candidate is a spelling it gave out, and ``despell``
+# replaces one only where the identifier continues on neither side.
+_SPELLED = re.compile(rf"(?:{'|'.join(_CLASSES)}):{_SCAN_RUN}")
 
 
 def _char(text: str, index: int) -> str:
@@ -187,6 +194,9 @@ class ToolInventory:
         side, so ``mcp:demo/list`` inside ``mcp:demo/list/extra`` names
         no tool this inventory gave out and stands, while the period
         that ends the sentence after one is punctuation and is kept.
+        Separator dots the scan absorbs do not glue a whole spelling to
+        what follows either: ``gate:x..y`` despells to the name of
+        ``gate:x`` plus ``..y``.
         """
 
         def replace(match: re.Match[str]) -> str:

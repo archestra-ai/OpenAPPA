@@ -56,6 +56,7 @@ mod builtins;
 pub mod child_process;
 mod consult;
 mod consult_process;
+mod do_something;
 mod elicit;
 mod engine;
 mod events;

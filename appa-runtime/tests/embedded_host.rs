@@ -11,6 +11,8 @@ use appa_eventlog::{Backend, LogStore};
 use appa_runtime::api::{OpenError, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
+#[cfg(feature = "daemon")]
+use appa_runtime::replay;
 use appa_runtime_api::{
     Actor, Adapter, AdapterName, CanonicalTool, HookDecision, HookEvent, IdentifiedTool, ParseRefusal, ProposedCall,
     TrajectoryId,
@@ -394,4 +396,79 @@ async fn a_target_policy_variant_decides_before_the_base() {
             "{target:?}: {decision:?}"
         );
     }
+}
+
+/// A host replays its traces under its own adapter. Opened for replay, every authority is
+/// answered in process as `appa replay` answers it, so a step that expects `hitl` takes the
+/// offer and the trace goes on. A runtime opened for live calls asks `hitl` itself, which
+/// no person reaches from a replay.
+#[cfg(feature = "daemon")]
+#[tokio::test]
+async fn a_host_replay_takes_an_authority_offer_as_approved() {
+    const SIGNOFF: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/ops/wipe"
+requires = { attention = ["signoff"] }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/ops/list"
+delta = {}
+
+[[policy.authority]]
+name = "hitl"
+
+[policy.authority.permits]
+attention = ["signoff"]
+
+[externals.authorities.hitl]
+builtin = "hitl"
+"#;
+    let config = || {
+        Config::hosted(SIGNOFF, HostDefaults::new(Duration::from_millis(5000), 65_536), |_| {
+            None
+        })
+        .expect("the hosted document loads")
+    };
+    let trace = replay::parse(
+        std::path::Path::new("signoff.appa"),
+        "mcp/ops/wipe {}\nexpect authority hitl\n\nmcp/ops/list {}\nexpect allow\n",
+    )
+    .expect("the trace parses");
+
+    let replaying = Runtime::open_in_memory_as(config(), None, adapter()).expect("the replay deployment opens");
+    let report = &replay::run(&replaying, std::slice::from_ref(&trace)).await[0];
+    assert_eq!(report.verdict(), replay::Verdict::Ok, "{:?}", report.steps);
+    assert_eq!(report.steps.len(), 2);
+
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let live = Runtime::open_with_store_as(config(), store, None, adapter()).expect("the runtime opens");
+    let report = &replay::run(&live, std::slice::from_ref(&trace)).await[0];
+    assert!(
+        matches!(&report.steps[0].outcome, replay::StepOutcome::CannotRun(detail) if detail.contains("hitl")),
+        "{:?}",
+        report.steps
+    );
+}
+
+/// The replay deployment refuses an adapter without a control-tool spelling, as a live one does.
+#[test]
+fn a_host_replay_refuses_an_adapter_that_spells_no_control_tool() {
+    let unspelled = Adapter {
+        spell: |canonical| (!canonical.is_control()).then(|| spell(canonical)).flatten(),
+        ..adapter()
+    };
+    let config = Config::hosted(
+        "[policy]\nversion = 2\n",
+        HostDefaults::new(Duration::from_millis(5000), 65_536),
+        |_| None,
+    )
+    .expect("the hosted document loads");
+    assert!(matches!(
+        Runtime::open_in_memory_as(config, None, unspelled),
+        Err(OpenError::UnspelledControlTool)
+    ));
 }

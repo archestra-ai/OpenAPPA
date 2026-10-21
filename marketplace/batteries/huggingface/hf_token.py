@@ -58,12 +58,40 @@ def hub_root(environ):
     return (environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")
 
 
-def token_path(environ):
+def home_dir(environ, windows: bool) -> "str | None":
+    """Return the user's home directory from *environ*, or None if not found.
+
+    On Windows the canonical variables are USERPROFILE and HOMEDRIVE+HOMEPATH;
+    HOME is consulted last as a fallback.  On POSIX only HOME is used.
+    """
+    if windows:
+        userprofile = environ.get("USERPROFILE", "")
+        if userprofile:
+            return userprofile
+        drive = environ.get("HOMEDRIVE", "")
+        path = environ.get("HOMEPATH", "")
+        if drive or path:
+            return drive + path
+        # Fall through to HOME as a last resort (e.g. Git-bash on Windows)
+        home = environ.get("HOME", "")
+        return home if home else None
+    else:
+        home = environ.get("HOME", "")
+        return home if home else None
+
+
+def token_path(environ, windows: bool = os.name == "nt"):
     if path := environ.get("HF_TOKEN_PATH"):
         return Path(path)
     if home := environ.get("HF_HOME"):
         return Path(home) / "token"
-    cache = environ.get("XDG_CACHE_HOME") or Path(environ.get("HOME") or "/nonexistent") / ".cache"
+    cache = environ.get("XDG_CACHE_HOME")
+    if not cache:
+        home = home_dir(environ, windows)
+        if home is None:
+            cache = "/nonexistent"
+        else:
+            cache = str(Path(home) / ".cache")
     return Path(cache) / "huggingface" / "token"
 
 

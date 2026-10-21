@@ -17,6 +17,8 @@ Keep each battery and its annotator scripts together:
 batteries/
 |-- claude-code/
 |   `-- appa.toml
+|-- coding/
+|   `-- appa.toml
 `-- slack/
     |-- appa.toml
     `-- audience-source.py
@@ -26,6 +28,7 @@ To include batteries in your config, list them in `appa.toml`:
 
 ```toml
 include = [
+  "./batteries/coding/appa.toml",
   "./batteries/claude-code/appa.toml",
   "./batteries/slack/appa.toml",
 ]
@@ -197,6 +200,7 @@ Define tool rules and Annotator customizations in the root config. Root tool rul
 
 ```toml
 include = [
+  "./batteries/coding/appa.toml",
   "./batteries/claude-code/appa.toml",
   "./batteries/slack/appa.toml",
 ]

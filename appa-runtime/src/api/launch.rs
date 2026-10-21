@@ -123,7 +123,7 @@ impl Runtime {
         let deployment = self.inner.deployment();
         self.inner.append_host_with(family, |log| {
             let policy = self.inner.resolve_policy(&deployment, log)?;
-            let view = policy.engine().rebuild_view(log).map_err(EventError::from)?;
+            let view = policy.rebuild_view(log).map_err(EventError::from)?;
             Ok(match policy.engine().is_quiescent(&view) {
                 true => (
                     Some(HostObservation::LaunchMoved {

@@ -197,17 +197,19 @@ fn every_package_directory_is_named_by_the_marketplace() {
 fn every_battery_composes_into_each_host_it_declares() {
     let root = marketplace_root();
     let manifest = manifest();
+    // The host's default policy, and the batteries its plugin installs beside it.
     let default_policy = |host: Host| match host {
         // AppenCode is source-distributed, without a marketplace plugin package.
-        Host::OpenCode => repository().join("integrations/opencode/appa.toml"),
+        Host::OpenCode => (repository().join("integrations/opencode/appa.toml"), Vec::new()),
         _ => manifest
             .packages
             .iter()
             .find_map(
                 |entry| match validate_package(&root.join(entry.path.as_str())).ok()?.role {
-                    Role::Plugin(adapter) if adapter.host() == host => {
-                        Some(root.join(entry.path.as_str()).join(adapter.default_policy().as_str()))
-                    }
+                    Role::Plugin(adapter) if adapter.host() == host => Some((
+                        root.join(entry.path.as_str()).join(adapter.default_policy().as_str()),
+                        adapter.batteries().iter().map(ToString::to_string).collect(),
+                    )),
                     _ => None,
                 },
             )
@@ -224,15 +226,27 @@ fn every_battery_composes_into_each_host_it_declares() {
             // includes it by a relative path, which is the only shape the
             // loader accepts. The composition is that arrangement.
             let composed = tempfile::tempdir().expect("a temp dir is creatable");
+            let (seed, plugin_batteries) = default_policy(*host);
+            let mut includes = Vec::new();
+            for name in plugin_batteries
+                .iter()
+                .filter(|name| name.as_str() != entry.name.as_str())
+            {
+                let plugin_battery = manifest
+                    .packages
+                    .iter()
+                    .find(|other| other.name.as_str() == name.as_str())
+                    .expect("the plugin's batteries ship in the marketplace");
+                copy_tree(&root.join(plugin_battery.path.as_str()), &composed.path().join(name));
+                includes.push(format!("\"{name}/appa.toml\""));
+            }
             let installed = composed.path().join(entry.name.as_str());
             copy_tree(&directory, &installed);
-            let seed = std::fs::read_to_string(default_policy(*host)).expect("the adapter ships its default policy");
+            includes.push(format!("\"{}/{}\"", entry.name, battery.base));
+            let seed = std::fs::read_to_string(seed).expect("the adapter ships its default policy");
             let path = composed.path().join("appa.toml");
-            std::fs::write(
-                &path,
-                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.base),
-            )
-            .expect("the composed config is writable");
+            std::fs::write(&path, format!("include = [{}]\n{seed}", includes.join(", ")))
+                .expect("the composed config is writable");
 
             Config::load(&path)
                 .unwrap_or_else(|error| panic!("{} validates but does not compose into {host}: {error}", entry.path));
@@ -271,7 +285,11 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
         };
         let installed = tempfile::tempdir().expect("a temp dir is creatable");
         copy_tree(&directory, installed.path());
-        let targets = battery.targets.iter().flat_map(|targets| targets.iter());
+        let targets = battery
+            .targets
+            .policies()
+            .into_iter()
+            .flat_map(|targets| targets.iter());
         for file in std::iter::once(&battery.base).chain(targets.map(|(_, target)| &target.policy)) {
             let policy: toml::Value = toml::from_str(
                 &std::fs::read_to_string(installed.path().join(file.as_str())).expect("the battery policy reads"),
@@ -886,4 +904,36 @@ fn probe_loads(fragment: &str, with_helper: bool) -> bool {
         std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
     }
     loads_beside_a_root(package.path())
+}
+
+/// A battery that lists only the single-user target loads its base under that
+/// target, and a multi-user deployment refuses it.
+#[test]
+fn a_battery_loads_only_under_the_targets_it_lists() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        package.path().join("appa-package.toml"),
+        "schema = 1\nname = \"probe\"\ndescription = \"a single-user battery\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\n\n[battery.targets.single-user]\npolicy = \"appa.toml\"\n",
+    )
+    .expect("the manifest is writable");
+    std::fs::write(
+        package.path().join("appa.toml"),
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n",
+    )
+    .expect("the base is writable");
+    validate_package(package.path()).expect("the package validates");
+
+    let (_deployment, root) = deployment_including(package.path(), &["appa.toml"]);
+    let loaded = Config::load_for_target(&root, &[], BatteryTarget::SingleUser).expect("single-user loads");
+    assert_eq!(loaded.tool_names(), ["mcp/probe/read"]);
+    assert!(matches!(
+        Config::load_for_target(&root, &[], BatteryTarget::MultiUser),
+        Err(ConfigError::UnsupportedBatteryTarget {
+            target: BatteryTarget::MultiUser,
+            ..
+        })
+    ));
 }

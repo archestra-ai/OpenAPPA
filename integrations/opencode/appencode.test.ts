@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import appencode from './appencode'
+import { REFUSAL_CLASSES } from './refusal'
 
 // Drive the exported plugin with the published V2 SDK and host-shaped events.
 async function host(url: string, directory: string, sessionID = 'ses_test', session: object = {}) {
@@ -78,7 +79,10 @@ async function fixture(reply: (event: any) => unknown = event => ({
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const event = await request.json()
     events.push(event)
-    return Response.json(reply(event))
+    const answer = reply(event) as { decision?: unknown } | Response | null
+    if (answer instanceof Response) return answer
+    // The runtime answers a refuse with 409 and every other decision with 200.
+    return Response.json(answer, { status: answer?.decision === 'refuse' ? 409 : 200 })
   } })
   return { ...await host(server.url.toString(), tmpdir()), events }
 }
@@ -159,6 +163,29 @@ describe('published V2 hook contract', () => {
       error: new Tool.Error({ message: 'PRIVATE', metadata: { secret: 'PRIVATE' }, error: new Error('PRIVATE') }) })
     expect(JSON.stringify(result.error)).not.toContain('PRIVATE')
     await expect(plugin.before('write')).rejects.toThrow('Runtime unavailable')
+  })
+
+  test('the refusal classes are the runtime\'s exactly', async () => {
+    const listed = (await readFile(resolve(import.meta.dir, '../../appa-runtime-api/refusal-classes.txt'), 'utf8'))
+      .split('\n').filter(Boolean)
+    expect<string[]>([...REFUSAL_CLASSES]).toEqual(listed)
+  })
+
+  test('a refuse stops dispatch and surfaces its detail only under a class the runtime spells', async () => {
+    const detail = 'REFUSAL-DETAIL'
+    for (const [fields, surfaced] of [
+      [{ class: 'policy_moved' }, true],
+      [{}, false],
+      [{ class: 'disk' }, false],
+      [{ class: 'policy_moved', status: 200 }, false],
+    ] as const) {
+      const { status, ...rest } = { status: 409, ...fields }
+      const plugin = await fixture(() => Response.json({ protocol: 1, decision: 'refuse', detail, ...rest }, { status }))
+      const error = await plugin.before('write').then(() => undefined, (error: Error) => error)
+      expect(error).toBeInstanceOf(Error)
+      expect(error!.message.includes(detail)).toBe(surfaced)
+      server!.stop(true)
+    }
   })
 
   test('invalid replies refuse dispatch and withhold results', async () => {

@@ -1,0 +1,16 @@
+# A fresh trajectory is public.
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
+}
+expect allow
+
+mcp/slack/read_channel {
+  channel_id: "C0123456789"
+}
+expect allow
+
+# Channel content cannot reach the public.
+appa/do_something {
+  requires: {"audience": {"contains": ["public"]}}
+}
+expect deny

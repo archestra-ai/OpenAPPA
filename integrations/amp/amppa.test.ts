@@ -138,7 +138,10 @@ describe('decision enforcement', () => {
     [{ protocol: 1, decision: 'unknown' }, 200],
     [{ protocol: 1, decision: 'deny_call' }, 200],
     [{ protocol: 1, decision: 'allow_call' }, 500],
+    [{ protocol: 1, decision: 'refuse', class: 'storage', detail: 'Store unavailable.' }, 409],
     [{ protocol: 1, decision: 'refuse', detail: 'Store unavailable.' }, 409],
+    [{ protocol: 1, decision: 'refuse', class: 'disk', detail: 'Store unavailable.' }, 409],
+    [{ protocol: 1, decision: 'ack' }, 409],
     [{ error: 'malformed event' }, 409],
     [null, 200],
   ])('invalid or refused replies cannot release calls or results %#', async (reply, status) => {
@@ -149,6 +152,27 @@ describe('decision enforcement', () => {
     })
     expect(result.status).toBe('error')
     expect(JSON.stringify(result)).not.toContain('PRIVATE')
+  })
+
+  test('a refuse surfaces its detail only under a class the runtime spells', async () => {
+    const listed = (await readFile(resolve(import.meta.dir, '../../appa-runtime-api/refusal-classes.txt'), 'utf8'))
+      .split('\n').filter(Boolean)
+    const detail = 'REFUSAL-DETAIL'
+    for (const refusalClass of listed) {
+      const plugin = fixture({ protocol: 1, decision: 'refuse', class: refusalClass, detail }, 409)
+      const { action, message } = await plugin.emit('tool.call', call('Read'))
+      expect(action).toBe('error')
+      expect(message).toContain(detail)
+      expect(message).toContain(refusalClass)
+      server!.stop(true)
+    }
+    for (const [outside, status] of [[{}, 409], [{ class: 'disk' }, 409], [{ class: listed[0].toUpperCase() }, 409], [{ class: listed[0] }, 200]] as const) {
+      const plugin = fixture({ protocol: 1, decision: 'refuse', detail, ...outside }, status)
+      const { action, message } = await plugin.emit('tool.call', call('Read'))
+      expect(action).toBe('error')
+      expect(message).not.toContain(detail)
+      server!.stop(true)
+    }
   })
 
   test('connection loss cancels startup, stops dispatch and withholds the result', async () => {

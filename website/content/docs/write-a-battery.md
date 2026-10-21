@@ -99,6 +99,32 @@ Declare in the battery's `README.md` what a root config adds around it: the auth
 
 The test suite composes every battery into each host it declares to make sure the shipped batteries work together.
 
+## Declare the deployment targets
+
+A deployment runs one target. `single-user` serves one person with that
+person's own token. `multi-user` serves many people with one shared token,
+such as a GitHub App installation token. List each target the battery
+supports under `[battery.targets]`:
+
+```toml
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"
+```
+
+`policy` names the battery's base to load the base alone for that target.
+Leave out a target that the battery does not support. A deployment of that
+target refuses the battery. Leave out
+`multi-user` when the helpers need each person's own token, for example
+because the provider shows each person only what that person can read.
+
+When a target needs other helpers, `policy` names that target's own file,
+such as `multi-user.toml`. That file loads before the base.
+
+A battery without `[battery.targets]` supports both targets.
+
 ## Declare local setup checks
 
 The existing `appa-package.toml` also describes the prerequisites that the readiness check tests.

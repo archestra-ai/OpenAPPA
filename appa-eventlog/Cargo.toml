@@ -18,12 +18,13 @@ postgres-native-tls = { version = "0.5", optional = true }
 native-tls = { version = "0.2", optional = true }
 ring = { version = "0.17", optional = true }
 base64 = { version = "0.22", optional = true }
+percent-encoding = { version = "2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [features]
-postgres = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls", "dep:ring", "dep:base64"]
+postgres = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls", "dep:ring", "dep:base64", "dep:percent-encoding"]
 # The fail points the runtime's own tests drive: a commit that rolls back in
 # place of committing, and a foreign writer that wins the compare-and-swap.
 # A dev-dependency enables it, so it is absent from every non-test build.

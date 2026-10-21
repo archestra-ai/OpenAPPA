@@ -7,6 +7,7 @@ import { Tool } from '@opencode/schema/tool'
 import { Cause, Effect, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { refusal } from './refusal'
 import { configuration, guide } from './setup'
 
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
@@ -52,10 +53,13 @@ export default Plugin.define({
         redirect: 'error',
       })
       const reply = await response.json()
-      if (!reply || reply.protocol !== 1 || typeof reply.decision !== 'string') {
-        throw new Error('[appencode] Invalid runtime reply. Check --adapter opencode and the runtime logs.')
+      const invalid = new Error('[appencode] Invalid runtime reply. Check --adapter opencode and the runtime logs.')
+      if (!reply || reply.protocol !== 1 || typeof reply.decision !== 'string') throw invalid
+      if (reply.decision === 'refuse') {
+        const refused = refusal(reply)
+        if (!refused || response.status !== 409) throw invalid
+        throw new Error(`[appencode] ${refused.detail} (${refused.class})`)
       }
-      if (reply.decision === 'refuse') throw new Error(`[appencode] ${text(reply, 'detail')}`)
       if (!response.ok) throw new Error(`[appencode] Runtime returned HTTP ${response.status}.`)
       return reply
     }
@@ -71,7 +75,7 @@ export default Plugin.define({
         await childHistory(sessionID)
         return { actor: { root: child.root, child: sessionID }, context: child.context }
       }
-      // Reopening preserves the runtime's pinned policy and Label. No Label lives here.
+      // Reopening resumes the runtime's family, which holds the Label. No Label lives here.
       const actor: Actor = { root: sessionID }
       const started = await post('session_start', actor)
       if (started.decision !== 'ack' && started.decision !== 'context') {

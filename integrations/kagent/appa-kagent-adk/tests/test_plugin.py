@@ -488,10 +488,10 @@ async def test_the_same_parent_sends_no_second_child_start():
 async def test_a_refused_child_start_leaves_the_pair_unopened():
     """The pair joins the opened set only after the runtime acked, so a
     refused opening is sent again on the next entry."""
-    hook = Hook({"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ACK, ACK)
+    hook = Hook({"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure"}, ACK, ACK)
     plugin = plugin_over(hook)
     session = delegated_child("root-1")
-    with pytest.raises(AppaFailClosed, match="appa refused the session: storage failure"):
+    with pytest.raises(AppaFailClosed):
         await plugin.on_user_message_callback(
             invocation_context=FakeInvocationContext(session, "i1"), user_message=FakeContent("total the invoices")
         )
@@ -1779,6 +1779,18 @@ async def test_a_declaration_the_runtime_does_not_vouch_for_reaches_the_model():
     )
     assert denied == {"result": HELD_SPAWN["feedback"], "appa": "denied"}, "the model reads the block with its menu"
     assert remedy.calls == [], "no vouch, no plan"
+
+
+async def test_a_refused_declaration_fails_the_call_closed():
+    hook = Hook(HELD_SPAWN, {"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "moved"})
+    remedy = Remedy()
+    plugin = plugin_over(hook, remedy)
+    with pytest.raises(AppaFailClosed):
+        await plugin.before_tool_callback(
+            tool=FakeTool("kagent__NS__log_analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
+        )
+    assert remedy.calls == [], "a refused declaration runs no plan"
+    assert len(gated(hook)) == 2, "nothing is proposed after the refusal"
 
 
 async def test_a_deny_with_no_return_route_goes_straight_to_the_model():

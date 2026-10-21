@@ -1,7 +1,9 @@
 //! The root's `[aliases]` table: for each tool family, the namespaces a policy's rules
 //! name, bound to the identities this deployment reports in that family. An `mcp` alias
 //! binds a server namespace to configured connections; a `host` alias binds an included
-//! battery's host namespace to the host that serves its tools here.
+//! battery's host namespace to the host that serves its tools here. A `tool` alias binds a
+//! canonical tool to client tools; composition lowers it (`tool_aliases`), so it never
+//! reaches a stored document.
 
 use std::collections::BTreeMap;
 
@@ -57,7 +59,9 @@ pub(super) struct RawAliases {
     mcp: NamespaceBindings,
     #[serde(default)]
     host: NamespaceBindings,
-    tool: Option<toml::Value>,
+    /// Read here so its shape is checked with the rest; composition lowers it away.
+    #[serde(default, rename = "tool")]
+    _tool: super::tool_aliases::ToolMaps,
 }
 
 /// The aliases a document declares under either spelling: `[aliases]`, or a top-level
@@ -65,8 +69,7 @@ pub(super) struct RawAliases {
 pub(super) fn admit(aliases: Option<RawAliases>, legacy: Option<NamespaceBindings>) -> Result<Aliases, ConfigError> {
     match (aliases, legacy) {
         (Some(_), Some(_)) => Err(ConfigError::MixedAliasSpellings),
-        (Some(RawAliases { tool: Some(_), .. }), None) => Err(ConfigError::UnsupportedToolAliases),
-        (Some(RawAliases { mcp, host, tool: None }), None) => Ok(Aliases { mcp, host }),
+        (Some(RawAliases { mcp, host, .. }), None) => Ok(Aliases { mcp, host }),
         (None, Some(mcp)) => Ok(Aliases {
             mcp,
             host: NamespaceBindings::new(),
@@ -119,13 +122,14 @@ mod tests {
     }
 
     #[test]
-    fn host_aliases_are_their_own_family_and_tool_aliases_are_refused() {
+    fn host_aliases_are_their_own_family_and_tool_aliases_are_checked_for_shape() {
         let aliases = read("[aliases]\nhost = { claude-code = ['archestra'] }\n").unwrap();
         assert!(aliases.of(AliasFamily::Mcp).is_empty());
         assert_eq!(aliases.of(AliasFamily::Host)["claude-code"], vec!["archestra"]);
+        assert!(read("[aliases.tool.coding]\nshell = [{ name = 'host/claude-code/Bash' }]\n").is_ok());
         assert!(matches!(
             read("[aliases]\ntool = { Read = ['read_file'] }\n"),
-            Err(ConfigError::UnsupportedToolAliases)
+            Err(ConfigError::UnparsablePolicy { .. })
         ));
         assert!(matches!(
             read("[aliases]\nagent = {}\n"),

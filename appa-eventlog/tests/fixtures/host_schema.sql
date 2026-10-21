@@ -40,6 +40,24 @@ CREATE TABLE openappa_policy_files (
     bytes bytea NOT NULL
 );
 
+-- One row per deployment. Its head is the policy revision every decided append is fenced at:
+-- an append share-locks the row, and a publish moves the head by updating it.
+CREATE TABLE openappa_deployments (
+    name text PRIMARY KEY,
+    head bigint NOT NULL,
+    CONSTRAINT openappa_deployments_head_positive CHECK (head > 0)
+);
+
+CREATE TABLE openappa_policy_revisions (
+    deployment text NOT NULL REFERENCES openappa_deployments (name),
+    revision bigint NOT NULL,
+    hash text NOT NULL REFERENCES openappa_policy_files (hash),
+    published_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT openappa_policy_revisions_pk PRIMARY KEY (deployment, revision),
+    CONSTRAINT openappa_policy_revisions_revision_positive CHECK (revision > 0)
+);
+CREATE INDEX openappa_policy_revisions_key_idx ON openappa_policy_revisions (deployment, hash, revision);
+
 CREATE TABLE openappa_sessions (
     actor text PRIMARY KEY,
     root text NOT NULL,

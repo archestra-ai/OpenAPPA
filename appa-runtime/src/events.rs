@@ -86,9 +86,13 @@ pub(crate) enum RuntimeEvent {
         outcome: ControlOutcome,
         duration_ms: u64,
     },
-    /// The deployment was reloaded. `changed` is false when the new policy composed to the
-    /// same key, which is the common case and worth distinguishing.
-    Reload { policy_key: String, changed: bool },
+    /// A policy was published as the head of a deployment line, the revision every family of
+    /// the line decides at from then on.
+    PolicyPublished {
+        deployment: String,
+        revision: u64,
+        policy_key: String,
+    },
     /// A store operation failed. The class is closed and carries nothing of the failure; see
     /// [`appa_eventlog::StoreErrorClass`].
     StoreError {
@@ -297,7 +301,9 @@ impl RecordedEvent {
                 RuntimeEvent::Control { call, .. } => match call {
                     ControlCall::Remedy { offer, .. } => offer.len(),
                 },
-                RuntimeEvent::Reload { policy_key, .. } => policy_key.len(),
+                RuntimeEvent::PolicyPublished {
+                    deployment, policy_key, ..
+                } => deployment.len() + policy_key.len(),
                 RuntimeEvent::StoreError { .. } => 0,
             }
     }

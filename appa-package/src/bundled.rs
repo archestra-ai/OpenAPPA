@@ -67,7 +67,8 @@ mod tests {
             for policy in std::iter::once(&declared.base).chain(
                 declared
                     .targets
-                    .iter()
+                    .policies()
+                    .into_iter()
                     .flat_map(|targets| targets.iter().map(|(_, target_policy)| &target_policy.policy)),
             ) {
                 assert!(
