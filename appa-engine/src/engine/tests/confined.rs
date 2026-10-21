@@ -1,5 +1,100 @@
 use super::*;
 
+/// A result whose release bound an output sanitizer that a later revision no longer registers
+/// is withheld at that revision: the binding refuses the raw body, nothing remains to sanitize
+/// it, and no derivation is asked for — whether or not the earlier revision checkpointed it.
+#[test]
+fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
+    let redactor = crate::authority::Sanitizer {
+        name: crate::names::SanitizerName::new("redactor"),
+        on: crate::authority::SanitizerPoints {
+            input: false,
+            output: true,
+        },
+        transition: crate::authority::DeclaredTransition::Trust {
+            from_floor: SUSPICIOUS,
+            to: TRUSTED,
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    let fetch = read_tool(
+        "fetch",
+        Delta {
+            trust: Some(SUSPICIOUS),
+            audience: None,
+        },
+    );
+    let at = |sanitizers: Vec<crate::authority::Sanitizer>, revision: u64| {
+        open_engine(RegistryConfig {
+            annotators: vec![],
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: declared(vec![fetch.clone()]),
+            authorities: vec![],
+            sanitizers,
+            audience: crate::audience::AudienceConfig::default(),
+        })
+        .at(DeploymentName::new("default"), PolicyRevision::new(revision))
+    };
+    let first = at(vec![redactor], 1);
+    let second = at(vec![], 2);
+    let call = call("fetch", json!({}));
+    let (log, dispatch) = released_under_output_sanitizer(&first, vec![opened(&first)], &call);
+    let raw = ValueBody::new("page bytes");
+    let report = ToolReport {
+        dispatch: dispatch.clone(),
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Available(raw.clone()),
+        },
+        evidence: Vec::new(),
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    };
+    let under_second = |batches: &[(u64, &[Fact])]| {
+        let batches: Vec<StampedBatch<'_>> = batches
+            .iter()
+            .map(|(revision, facts)| StampedBatch {
+                revision: Some(PolicyRevision::new(*revision)),
+                facts,
+            })
+            .collect();
+        second.replay(&traj(), &batches, &[&first]).expect("the log replays")
+    };
+    let withheld = |decision: &EngineDecision| {
+        decision.follow_up
+            == FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: None,
+                withheld: true,
+            })
+    };
+
+    let closed = second
+        .handle(&under_second(&[(1, &log)]), EngineEvent::Outcome(report.clone()))
+        .expect("the outcome decides");
+    assert!(withheld(&closed), "{:?}", closed.follow_up);
+    let close = appended_facts(closed);
+    assert!(!close.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+    let after = under_second(&[(1, &log), (2, &close)]);
+    let again = second
+        .handle(&after, EngineEvent::Outcome(report.clone()))
+        .expect("a repeat replays the close");
+    assert!(again.append.is_none() && withheld(&again));
+
+    let checkpoint = appended_facts(
+        first
+            .handle(&viewing(&first, &log), EngineEvent::Outcome(report.clone()))
+            .expect("the first revision checkpoints and asks for the derivation"),
+    );
+    let closed = second
+        .handle(
+            &under_second(&[(1, &log), (1, &checkpoint)]),
+            EngineEvent::Outcome(report),
+        )
+        .expect("the checkpointed outcome decides at the later revision");
+    assert!(withheld(&closed), "{:?}", closed.follow_up);
+    under_second(&[(1, &log), (1, &checkpoint), (2, &appended_facts(closed))]);
+}
+
 #[test]
 fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
     let redactor = crate::authority::Sanitizer {
@@ -232,9 +327,9 @@ fn file_redacting_engine() -> Engine {
     Engine::open(DeploymentPolicy {
         registry: cfg,
         planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
         profile,
     })
+    .map(placed)
     .unwrap()
 }
 
@@ -861,4 +956,43 @@ fn stray_evidence(offer: crate::value::OfferId) -> crate::execute::AuthorityEvid
             trajectory_label: Label::new(Trust::new(0), Audience::public()),
         },
     }
+}
+
+/// A bound output sanitizer derives from a success's bytes; a failure's body has no
+/// derivation to cross through, so it closes the dispatch without entering the trajectory.
+#[test]
+fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
+    let e = file_redacting_engine();
+    let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+    let body = ValueBody::new("ENOENT");
+    let report = || {
+        EngineEvent::Outcome(ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: ToolOutcome::FailureWithBody { body: body.clone() },
+            evidence: Vec::new(),
+            offer_nonce: nonce(),
+            audience: crate::audience::AudienceEvidence::default(),
+        })
+    };
+    let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
+        admitted: None,
+        withheld: true,
+    });
+
+    let closed = e.handle(&viewing(&e, &log), report()).expect("the failure closes");
+    assert_eq!(closed.follow_up, withheld);
+    let facts = appended_facts(closed);
+    assert!(facts.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: crate::fact::CloseOutcome::FailureWithBody { observed },
+            ..
+        } if observed == &crate::value::RawResultDigest::of(body.as_str().as_bytes())
+    )));
+    assert!(!facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+    let log = [log, facts].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+
+    let again = e.handle(&viewing(&e, &log), report()).expect("the repeat answers");
+    assert_eq!((again.append, again.follow_up), (None, withheld));
 }

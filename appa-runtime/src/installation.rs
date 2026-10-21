@@ -1272,7 +1272,10 @@ mod tests {
         assert_eq!(
             required,
             BTreeMap::from([
-                ("claude-code".to_owned(), vec!["claude-code".to_owned()]),
+                (
+                    "claude-code".to_owned(),
+                    vec!["coding".to_owned(), "claude-code".to_owned()]
+                ),
                 ("kagent".to_owned(), vec![]),
                 ("opencode".to_owned(), vec!["opencode".to_owned()]),
             ])

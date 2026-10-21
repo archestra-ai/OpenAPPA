@@ -69,7 +69,6 @@ pub(crate) fn opened_dispatch(
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
-        declaration: call.declaration_id(),
         arguments: call.canonical_arguments().clone(),
         proposed_label: current.combine(&call.output_label(contract, &current)),
         receiving: current.clone(),
@@ -78,6 +77,7 @@ pub(crate) fn opened_dispatch(
         file_basis: call.file_basis().cloned(),
         evidence: act.pinned().clone(),
         subject,
+        terms: crate::fact::ReleaseTerms::of(contract),
     };
     (dispatch, fact)
 }
@@ -230,7 +230,8 @@ pub(crate) fn compose_batch<'a>(
             //
             // A derivation's label is a claim about the bytes, so where several stand for the same
             // bytes the call clears if any of them covers it: it is judged under each in subject
-            // order and takes the first that clears, else it blocks under the first.
+            // order and takes the first that clears. Failing those, it releases at the default
+            // stage if that clears, taking none, else it blocks under the first.
             let stages: Vec<(crate::basis::SubjectKey, CallStage)> = match role {
                 CallRole::MarkedSpawn(_) => Vec::new(),
                 CallRole::Ordinary => staged(&views, call, &taken)
@@ -258,12 +259,16 @@ pub(crate) fn compose_batch<'a>(
                 }
             }
             let (takes, outcome) = match judged {
-                Some((subject, outcome)) => (Some(subject), outcome),
-                None => (
-                    None,
-                    check::evaluate(&contract, &views, call, &CallStage::default(), role, &context)
-                        .map_err(ComposeRefusal::MembershipNeeded)?,
-                ),
+                Some((subject, CheckOutcome::Allow)) => (Some(subject), CheckOutcome::Allow),
+                blocked => {
+                    let unstaged = check::evaluate(&contract, &views, call, &CallStage::default(), role, &context)
+                        .map_err(ComposeRefusal::MembershipNeeded)?;
+                    match (blocked, unstaged) {
+                        (_, CheckOutcome::Allow) => (None, CheckOutcome::Allow),
+                        (Some((subject, outcome)), CheckOutcome::Block(_)) => (Some(subject), outcome),
+                        (None, outcome) => (None, outcome),
+                    }
+                }
             };
             let consumes = match outcome {
                 CheckOutcome::Allow => None,

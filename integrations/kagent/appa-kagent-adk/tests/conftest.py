@@ -161,7 +161,8 @@ class Hook:
                 raise answer
             if isinstance(answer, int):
                 return httpx.Response(answer, json={"error": "scripted"})
-            return httpx.Response(200, json=answer)
+            # The runtime answers a refuse with 409 and every other decision with 200.
+            return httpx.Response(409 if answer.get("decision") == "refuse" else 200, json=answer)
 
         return httpx.MockTransport(handle)
 

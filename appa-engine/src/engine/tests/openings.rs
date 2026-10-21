@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn the_opening_batch_carries_the_identity_and_derived_vectors() {
+fn the_opening_batch_names_the_deployment_and_revision_it_opened_at() {
     let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
     let t = traj();
     let key = crate::profile::PolicyFileKey::of(b"the policy file");
@@ -9,15 +9,19 @@ fn the_opening_batch_carries_the_identity_and_derived_vectors() {
         .open_trajectory(&t, key.clone(), None)
         .expect("a fresh root's opening seals");
     assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
+    assert_eq!(
+        batch.revision(),
+        e.revision(),
+        "the opening is stamped at the engine's revision"
+    );
     match batch.facts() {
         [
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
-                dialect,
                 profile,
-                policy_digest,
                 policy_file_key,
-                open_vectors,
+                deployment,
+                revision,
                 forked_from,
                 principal,
             }),
@@ -26,16 +30,53 @@ fn the_opening_batch_carries_the_identity_and_derived_vectors() {
             assert_eq!(principal, &None, "an opening no host named a principal for has none");
             assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
             assert_eq!(trajectory, &t);
-            assert_eq!(*dialect, PolicyDialectVersion::new(1));
             assert_eq!(profile, e.profile());
-            assert_eq!(*policy_digest, e.identity());
-            assert_eq!(open_vectors, &e.open_vectors());
-            assert_eq!(open_vectors.len(), 1);
+            assert_eq!(Some(deployment), e.deployment());
+            assert_eq!(Some(*revision), e.revision());
         }
         other => panic!("expected exactly the opening record, got {other:?}"),
     }
     let wire = serde_json::to_string(batch.facts()).unwrap();
     assert_eq!(serde_json::from_str::<Vec<Fact>>(&wire).unwrap(), batch.facts());
+}
+
+#[test]
+fn an_engine_at_no_revision_opens_and_judges_nothing() {
+    let placed = engine(vec![plain_tool("send")]);
+    let compiled = Engine::open(DeploymentPolicy {
+        registry: test_config(vec![plain_tool("send"), plain_tool("spawn")]),
+        planner_cap: crate::registry::PlannerCap::default(),
+        profile: crate::profile::covering_declaration(&test_config(vec![plain_tool("send"), plain_tool("spawn")])),
+    })
+    .expect("the policy compiles");
+    assert_eq!(compiled.revision(), None);
+    let key = crate::profile::PolicyFileKey::of(b"policy");
+    assert_eq!(
+        compiled.open_trajectory(&traj(), key, None).map(|_| ()),
+        Err(TransitionRefusal::NoRevision)
+    );
+    let log = opening_log(&placed);
+    let view = placed
+        .view(&traj(), log.clone(), 1)
+        .expect("the placed engine judges its own opening");
+    assert!(compiled.view(&traj(), log.clone(), 1).is_err());
+    assert_eq!(
+        compiled
+            .replay(
+                &traj(),
+                &[crate::engine::StampedBatch {
+                    revision: placed.revision(),
+                    facts: &log,
+                }],
+                &[],
+            )
+            .map(|_| ()),
+        Err(crate::engine::ReplayRefusal::Transition(TransitionRefusal::NoRevision))
+    );
+    assert!(matches!(
+        compiled.handle(&view, batch_on(&traj(), "b", Vec::new(), Vec::new(), None)),
+        Err(TransitionError::NoRevision)
+    ));
 }
 
 #[test]
@@ -71,72 +112,36 @@ fn cold_replay_verifies_the_opening_strictly() {
         }))
     );
 
-    let mutated = |mutate: &dyn Fn(&mut Fact)| {
+    let mutated = |mutate: &dyn Fn(&mut crate::fact::TrajectoryOpening)| {
         let mut fact = opening.clone();
-        mutate(&mut fact);
+        if let Fact::TrajectoryOpened(opening) = &mut fact {
+            mutate(opening);
+        }
         replay(&t, vec![fact])
     };
     assert_eq!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { dialect, .. }) = fact {
-                *dialect = PolicyDialectVersion::new(9);
-            }
-        }),
-        Err(TransitionRefusal::Opening(
-            OpeningTransitionRefusal::UnsupportedDialect { found: 9 }
-        ))
-    );
-    assert_eq!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
-                let other = engine(vec![plain_tool("send")]);
-                *policy_digest = other.identity();
-            }
-        }),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
-    );
-    // An opening an earlier engine recorded carries the identity its algorithm gave this
-    // policy, and names this policy as surely as the current identity does.
-    let earlier = *e
-        .earlier_identities()
-        .first()
-        .expect("a policy that forwards nothing has a v1 identity");
-    assert_ne!(earlier, e.identity(), "the algorithms differ in their domain tag");
-    assert!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
-                *policy_digest = earlier;
-            }
-        })
-        .is_ok(),
-        "the v1 identity of this policy reopens its trajectory"
-    );
-    assert_eq!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
-                let other = engine(vec![plain_tool("send")]);
-                *policy_digest = other.earlier_identities()[0];
-            }
-        }),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch)),
-        "the v1 identity of another policy does not"
-    );
-    assert_eq!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { profile, .. }) = fact {
-                let other = engine(vec![plain_tool("send")]);
-                *profile = other.profile().clone();
-            }
-        }),
+        mutated(&|opening| opening.profile = engine(vec![plain_tool("send")]).profile().clone()),
         Err(TransitionRefusal::Opening(OpeningTransitionRefusal::ProfileMismatch))
     );
+    // An engine at a revision judges only an opening of its deployment at that revision.
     assert_eq!(
-        mutated(&|fact| {
-            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { open_vectors, .. }) = fact {
-                open_vectors.clear();
-            }
-        }),
-        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::VectorMismatch))
+        mutated(&|opening| opening.deployment = DeploymentName::new("elsewhere")),
+        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
+    );
+    assert_eq!(
+        mutated(&|opening| opening.revision = opening.revision.next()),
+        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
+    );
+    let line = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let followed = line
+        .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
+        .expect("the opening seals")
+        .into_unsealed();
+    assert!(line.view(&t, followed.clone(), 1).is_ok());
+    let other_revision = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(3));
+    assert_eq!(
+        other_revision.view(&t, followed, 1).map(|_| ()),
+        Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DeploymentMismatch))
     );
 }
 
@@ -149,8 +154,8 @@ fn viewing_root(e: &Engine, root: &TrajectoryId, log: &[Fact]) -> EngineView {
 /// The whole log of `fork`, an independent root fork of `parent` where `view` stands: its
 /// one opening record.
 fn root_fork_log(e: &Engine, view: &EngineView, parent: &TrajectoryId, fork: &TrajectoryId) -> Vec<Fact> {
-    let origin = view
-        .root_fork_origin(parent)
+    let origin = e
+        .root_fork_origin(view, parent)
         .expect("an open trajectory can be root-forked");
     e.open_root_fork(fork, crate::profile::PolicyFileKey::of(b"policy"), origin)
         .expect("a fork of another family's trajectory seals")
@@ -268,7 +273,10 @@ fn a_root_fork_carries_its_parent_familys_effects_and_unsettled_reservations() {
 
     // The origin holds each kind once, however often the family committed it, and keeps
     // what is committed apart from what is only reserved.
-    let origin = |log: &[Fact]| viewing(&e, log).root_fork_origin(&parent).expect("the parent is open");
+    let origin = |log: &[Fact]| {
+        e.root_fork_origin(&viewing(&e, log), &parent)
+            .expect("the parent is open")
+    };
     let just_k = EffectSet::new([k.clone()]).unwrap();
     assert_eq!(origin(&committed_twice).effects, just_k);
     assert!(origin(&committed_twice).reservations.is_empty());
@@ -302,7 +310,9 @@ fn a_root_fork_starts_at_the_forked_trajectorys_label_while_it_is_open() {
     assert_ne!(label(&child), label(&root), "the root narrowed after the spawn");
     assert_ne!(label(&child), fresh, "the child inherited the root's earlier narrowing");
 
-    let origin = view.root_fork_origin(&child).expect("a live child can be root-forked");
+    let origin = e
+        .root_fork_origin(&view, &child)
+        .expect("a live child can be root-forked");
     assert!(origin.is_from(&root, &child));
     let fork = TrajectoryId::new("fork");
     let forked = root_fork_log(&e, &view, &child, &fork);
@@ -314,17 +324,17 @@ fn a_root_fork_starts_at_the_forked_trajectorys_label_while_it_is_open() {
         label(&child)
     );
 
-    assert_eq!(view.root_fork_origin(&TrajectoryId::new("stranger")), None);
+    assert_eq!(e.root_fork_origin(&view, &TrajectoryId::new("stranger")), None);
     let ended = e
         .handle(&view, child_report(&log, &child, ChildSubmission::Void))
         .expect("a void return ends the child");
     let ended = viewing(&e, &[log, appended_facts(ended)].concat());
     assert_eq!(
-        ended.root_fork_origin(&child),
+        e.root_fork_origin(&ended, &child),
         None,
         "an ended child cannot be root-forked"
     );
-    assert!(ended.root_fork_origin(&root).is_some(), "its root still can");
+    assert!(e.root_fork_origin(&ended, &root).is_some(), "its root still can");
 }
 
 /// A root fork's opening names another family. The engine seals no opening whose origin forks the
@@ -336,13 +346,13 @@ fn a_root_fork_opening_that_forks_the_root_from_itself_is_refused() {
     let e = batch_engine();
     let child = TrajectoryId::new("child");
     let view = viewing(&e, &spawn_family(&e, &child));
-    let own = view.root_fork_origin(&traj()).expect("the root can be root-forked");
-    let childs = view.root_fork_origin(&child).expect("the child can be root-forked");
-    let key = crate::profile::PolicyFileKey::of(b"policy");
+    let own = e.root_fork_origin(&view, &traj()).expect("the root can be root-forked");
+    let childs = e.root_fork_origin(&view, &child).expect("the child can be root-forked");
     let self_fork = Err(TransitionRefusal::Opening(OpeningTransitionRefusal::SelfFork));
 
     let sealed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
-        e.open_root_fork(root, key.clone(), origin.clone()).map(|_| ())
+        e.open_root_fork(root, crate::profile::PolicyFileKey::of(b"policy"), origin.clone())
+            .map(|_| ())
     };
     assert_eq!(sealed(&traj(), &own), self_fork);
     assert_eq!(sealed(&child, &childs), self_fork);
@@ -417,7 +427,7 @@ fn a_root_folds_from_its_openings_starting_label() {
         starting
     );
     assert_eq!(Projection::build(&[opened(&e)], 1).view(&t).current_label(), starting);
-    let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
+    let mut advanced = EngineView::validated(Projection::empty(0), &e, t.clone());
     advanced
         .advance(
             &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)

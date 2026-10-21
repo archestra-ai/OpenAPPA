@@ -16,7 +16,7 @@ The OpenAPPA plugin checks tool calls before dispatch and checks returned values
 
 - **Enforce policy:** Denied actions stop immediately. When human review is required, kagent requests approval in chat or through the Agent-to-Agent (A2A) protocol.
 - **Isolate subagents:** Subagent outputs are validated against policy before the parent agent can see them.
-- **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New policies apply automatically to new chats.
+- **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New chats follow its published policy revisions. A policy change reaches their next tool call.
 
 The plugin runs inside the Python or Go agent image. The separate `appa-runtime` chart owns policy evaluation and storage. The `appa-kagent-demo` chart supplies demo agents, fixture tools, and an inert policy template; it does not own the shared runtime. Batteries supply policy defaults, not agent runtimes or MCP servers.
 
@@ -42,7 +42,7 @@ export OPENAI_API_KEY="your-api-key"
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.34.0 # x-release-please-version
+APPA_VERSION=0.37.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -200,7 +200,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.34.0 # x-release-please-version
+APPA_VERSION=0.37.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa
@@ -305,6 +305,14 @@ When `APPA_ENABLED` is true, all tool calls route through OpenAPPA (failing clos
 
 Agents sharing an `APPA_RUNTIME_URL` share a policy. To give agent groups distinct policies, deploy separate `appa-runtime` releases, each with its own service URL.
 
+## Runtime upgrades
+
+The runtime chart uses one replica with the `Recreate` strategy, so an upgrade restarts it. With persistence enabled, stored chats resume from the same PVC.
+
+The SQLite database uses schema 9. Supported existing databases upgrade in place and retain their trajectories. An image without schema 9 support refuses that database; changing the image does not downgrade its schema. Preserve the PVC and use a compatible runtime.
+
+Pause policy and battery changes until the replacement runtime is ready.
+
 ## Manage policy with appa-guide
 
 Use `appa-guide` in chat to inspect and modify policies conversationally:
@@ -315,7 +323,7 @@ Use `appa-guide` in chat to inspect and modify policies conversationally:
 - **`refresh batteries`**: Updates included battery definitions (requires persistence).
 - **`diagnose the OpenAPPA integration`**: Runs read-only health checks on connectivity and configuration.
 
-The guide publishes and reloads the approved policy through the runtime's management tools. New chats use the reloaded policy; existing chats keep the policy they started with. The guide confirms once the policy is published and reloaded.
+The guide publishes and reloads the approved policy through the runtime's management tools. Every chat uses it for its next tool call. The guide confirms once the policy is published and reloaded.
 
 ## Troubleshooting
 

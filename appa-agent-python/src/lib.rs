@@ -8,8 +8,8 @@ use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, 
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
-    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, RefusalClass,
+    SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -25,6 +25,7 @@ const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OFFER_ARGUMENT: &str = "offer_id";
+const REFUSAL_CLASS: &str = "refusal_class";
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
@@ -151,6 +152,33 @@ struct SessionInner {
     _store: tempfile::TempDir,
 }
 
+/// Why a session operation failed: the runtime refused the event under a
+/// class the caller can branch on, or the session refused the operation.
+#[derive(Debug)]
+enum Failure {
+    Refused { class: RefusalClass, detail: String },
+    Session(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Session(message)
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Refused { detail, .. } => f.write_str(detail),
+            Failure::Session(message) => f.write_str(message),
+        }
+    }
+}
+
+fn failed<T>(message: String) -> Result<T, Failure> {
+    Err(Failure::Session(message))
+}
+
 impl SessionInner {
     fn open(
         policy_toml: &str,
@@ -159,7 +187,7 @@ impl SessionInner {
         bridge_url: Option<&str>,
         externals_toml: Option<&str>,
         spawn_tool: Option<&str>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Failure> {
         let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
@@ -169,7 +197,7 @@ impl SessionInner {
         // rerouting the host's tool.
         for name in tools.iter().map(ToolInput::name).chain(spawn_tool) {
             if is_reserved_tool_name(name) {
-                return Err(format!("{name} is a reserved control tool name; rename the host tool"));
+                return failed(format!("{name} is a reserved control tool name; rename the host tool"));
             }
         }
         let policy = compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?;
@@ -246,7 +274,7 @@ impl SessionInner {
     /// per trajectory and refuses a second one on the same trajectory, so
     /// the parent's spawn and a child's own call are independent slots and
     /// neither blocks the other.
-    fn slot(&mut self, child: Option<&TrajectoryId>) -> Result<&mut Option<Pending>, String> {
+    fn slot(&mut self, child: Option<&TrajectoryId>) -> Result<&mut Option<Pending>, Failure> {
         match child {
             None => Ok(&mut self.pending),
             Some(id) => {
@@ -257,10 +285,10 @@ impl SessionInner {
     }
 
     /// The dispatch slot and the spawn of a branch that has not returned.
-    fn live_mut(&mut self, child: &TrajectoryId) -> Result<(&mut Option<Pending>, &ProposedCall), String> {
+    fn live_mut(&mut self, child: &TrajectoryId) -> Result<(&mut Option<Pending>, &ProposedCall), Failure> {
         match self.children.get_mut(child) {
-            None => Err(format!("no child branch {} is open in this session", child.0)),
-            Some(ChildBranch::Spent) => Err(format!("the child branch {} has already returned", child.0)),
+            None => failed(format!("no child branch {} is open in this session", child.0)),
+            Some(ChildBranch::Spent) => failed(format!("the child branch {} has already returned", child.0)),
             Some(ChildBranch::Live { pending, spawn, .. }) => Ok((pending, spawn)),
         }
     }
@@ -277,10 +305,10 @@ impl SessionInner {
         })
     }
 
-    fn refuse_closing_a_spawn(&self) -> Result<(), String> {
+    fn refuse_closing_a_spawn(&self) -> Result<(), Failure> {
         match self.spawn_owed_by() {
             None => Ok(()),
-            Some(child) => Err(format!(
+            Some(child) => failed(format!(
                 "the pending call is the spawn of child branch {}; end the branch with finish instead",
                 child.0
             )),
@@ -294,9 +322,9 @@ impl SessionInner {
         }
     }
 
-    fn event(&self, event: HookEvent) -> Result<HookDecision, String> {
+    fn event(&self, event: HookEvent) -> Result<HookDecision, Failure> {
         match self.tokio.block_on(hooks::handle(&self.runtime, event)) {
-            HookDecision::Refuse { detail } => Err(detail),
+            HookDecision::Refuse { class, detail } => Err(Failure::Refused { class, detail }),
             decision => Ok(decision),
         }
     }
@@ -308,9 +336,9 @@ impl SessionInner {
         arguments_json: &str,
         spawn: bool,
         call_id: Option<&str>,
-    ) -> Result<Decision, String> {
+    ) -> Result<Decision, Failure> {
         if self.closed {
-            return Err("the session is closed".to_string());
+            return failed("the session is closed".to_string());
         }
         // A spent branch is refused here rather than at the runtime, so a
         // caller holding a stale handle gets the lifecycle fault it made and
@@ -321,34 +349,34 @@ impl SessionInner {
         match call_id {
             Some(call_id) => {
                 if child.is_some() || spawn {
-                    return Err("identified calls support ordinary root tools only".to_string());
+                    return failed("identified calls support ordinary root tools only".to_string());
                 }
                 if call_id.is_empty() {
-                    return Err("call_id must not be empty".to_string());
+                    return failed("call_id must not be empty".to_string());
                 }
                 if self.pending.is_some() {
-                    return Err("an unidentified call is already pending; report its outcome first".to_string());
+                    return failed("an unidentified call is already pending; report its outcome first".to_string());
                 }
                 if self.identified.contains_key(call_id) {
-                    return Err("call_id is already pending".to_string());
+                    return failed("call_id is already pending".to_string());
                 }
             }
             None => {
                 if child.is_none() && !self.identified.is_empty() {
-                    return Err("identified calls are already pending; report their outcomes first".to_string());
+                    return failed("identified calls are already pending; report their outcomes first".to_string());
                 }
                 if self.holds_call(child) {
-                    return Err("a call is already pending; report its outcome first".to_string());
+                    return failed("a call is already pending; report its outcome first".to_string());
                 }
             }
         }
         if arguments_json.len() > MAX_REQUEST_BODY_BYTES {
-            return Err("tool arguments exceed the native request limit".to_string());
+            return failed("tool arguments exceed the native request limit".to_string());
         }
         let arguments = serde_json::value::RawValue::from_string(arguments_json.to_string())
             .map_err(|error| format!("invalid arguments JSON: {error}"))?;
         if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(arguments.get()).is_err() {
-            return Err("tool arguments must be a JSON object".to_string());
+            return failed("tool arguments must be a JSON object".to_string());
         }
         let call = ProposedCall {
             tool: canonical_tool_name(tool).to_string(),
@@ -378,7 +406,7 @@ impl SessionInner {
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),
-            other => Err(format!("the runtime answered a proposed call with {other:?}")),
+            other => failed(format!("the runtime answered a proposed call with {other:?}")),
         }
     }
 
@@ -411,7 +439,7 @@ impl SessionInner {
         arguments_json: &str,
         spawn: bool,
         call_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Failure> {
         encode(match self.decide(child, tool, arguments_json, spawn, call_id)? {
             Decision::Blocked { feedback, .. } => CheckResponse::Blocked { feedback },
             Decision::Control { reply } => CheckResponse::Control { reply },
@@ -423,9 +451,11 @@ impl SessionInner {
         })
     }
 
-    fn dispatch(&mut self, tool: &str, arguments_json: &str) -> Result<String, String> {
+    fn dispatch(&mut self, tool: &str, arguments_json: &str) -> Result<String, Failure> {
         let Some(bridge_url) = self.bridge_url.clone() else {
-            return Err("dispatch requires a bridge URL; use check and report for framework-owned tools".to_string());
+            return failed(
+                "dispatch requires a bridge URL; use check and report for framework-owned tools".to_string(),
+            );
         };
         match self.decide(None, tool, arguments_json, false, None)? {
             Decision::Blocked { feedback, .. } => encode(DispatchResponse::Blocked { feedback }),
@@ -445,7 +475,7 @@ impl SessionInner {
         content: Option<&str>,
         error: bool,
         call_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Failure> {
         let outcome = match error {
             true => ToolOutcome::Failure {
                 message: "the harness reported a failed tool call".to_string(),
@@ -467,7 +497,7 @@ impl SessionInner {
         child: Option<&TrajectoryId>,
         outcome: ToolOutcome,
         call_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Failure> {
         if child.is_none() {
             self.refuse_closing_a_spawn()?;
         }
@@ -476,7 +506,7 @@ impl SessionInner {
                 .identified
                 .remove(call_id)
                 .ok_or_else(|| "no call with that call_id is pending".to_string())?,
-            Some(_) => return Err("identified calls support ordinary root tools only".to_string()),
+            Some(_) => return failed("identified calls support ordinary root tools only".to_string()),
             None => self
                 .slot(child)?
                 .take()
@@ -508,7 +538,7 @@ impl SessionInner {
                 (output, DeliveryDisposition::Sealed)
             }
             HookDecision::Block { reason } => (reason, DeliveryDisposition::Sealed),
-            other => return Err(format!("the runtime answered a tool outcome with {other:?}")),
+            other => return failed(format!("the runtime answered a tool outcome with {other:?}")),
         };
         encode(DispatchResponse::Delivered {
             content,
@@ -518,7 +548,7 @@ impl SessionInner {
         })
     }
 
-    fn abandon(&mut self, child: Option<&TrajectoryId>, call_id: Option<&str>) -> Result<(), String> {
+    fn abandon(&mut self, child: Option<&TrajectoryId>, call_id: Option<&str>) -> Result<(), Failure> {
         if child.is_none() {
             self.refuse_closing_a_spawn()?;
         }
@@ -527,7 +557,7 @@ impl SessionInner {
                 .identified
                 .remove(call_id)
                 .ok_or_else(|| "no call with that call_id is pending".to_string())?,
-            Some(_) => return Err("identified calls support ordinary root tools only".to_string()),
+            Some(_) => return failed("identified calls support ordinary root tools only".to_string()),
             None => self
                 .slot(child)?
                 .take()
@@ -546,12 +576,12 @@ impl SessionInner {
     /// `binding` is the fork the spawn released; a harness whose child-start
     /// signal names no spawn call passes `None` and the runtime ties the
     /// child to the family's one spawn in flight.
-    fn open_child(&mut self, child: TrajectoryId, binding: Option<&str>) -> Result<Option<String>, String> {
+    fn open_child(&mut self, child: TrajectoryId, binding: Option<&str>) -> Result<Option<String>, Failure> {
         if self.closed {
-            return Err("the session is closed".to_string());
+            return failed("the session is closed".to_string());
         }
         if self.children.contains_key(&child) {
-            return Err(format!("the child branch {} is already open in this session", child.0));
+            return failed(format!("the child branch {} is already open in this session", child.0));
         }
         let spawn = self
             .pending
@@ -571,7 +601,7 @@ impl SessionInner {
         })? {
             HookDecision::Ack => None,
             HookDecision::Context { text } => Some(text),
-            other => return Err(format!("the runtime answered a child start with {other:?}")),
+            other => return failed(format!("the runtime answered a child start with {other:?}")),
         };
         self.children.insert(
             child,
@@ -595,13 +625,13 @@ impl SessionInner {
         child: TrajectoryId,
         arguments_json: &str,
         return_schema: Option<serde_json::Value>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Failure> {
         let tool = self
             .spawn_tool
             .clone()
             .ok_or_else(|| "this session declares no spawn tool, so it opens no child branches".to_string())?;
         if self.children.contains_key(&child) {
-            return Err(format!("the child branch {} is already open in this session", child.0));
+            return failed(format!("the child branch {} is already open in this session", child.0));
         }
         let decision = match self.decide(None, &tool, arguments_json, true, None)? {
             Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
@@ -630,7 +660,7 @@ impl SessionInner {
                     Ok(_) => String::new(),
                     Err(error) => format!("; its dispatch stayed open: {error}"),
                 };
-                Err(format!(
+                failed(format!(
                     "the spawn of {} released no fork binding; the deployment does not control child context{unclosed}",
                     call.tool
                 ))
@@ -657,7 +687,7 @@ impl SessionInner {
         &self,
         offers: &[OfferedRemedy],
         return_schema: Option<serde_json::Value>,
-    ) -> Result<Option<ProposedCall>, String> {
+    ) -> Result<Option<ProposedCall>, Failure> {
         if !offers.iter().any(|offer| offer.returns.is_some()) {
             return Ok(None);
         }
@@ -668,7 +698,7 @@ impl SessionInner {
             None => OfferedReturn::AsSpoken,
         };
         let Some(offer) = offers.iter().find(|offer| offer.returns.as_ref() == Some(&route)) else {
-            return Err(format!(
+            return failed(format!(
                 "the policy registers no `{ATTEST_SCHEMA}` sanitizer, so the child's return cannot be attested \
                  against a schema"
             ));
@@ -683,16 +713,16 @@ impl SessionInner {
             arguments,
         )) {
             RemedyOutcome::Authorized { call } => Ok(Some(call)),
-            RemedyOutcome::Declined { presentation } => Err(format!(
+            RemedyOutcome::Declined { presentation } => failed(format!(
                 "the return declaration was not taken: {}",
                 presentation.feedback
             )),
-            RemedyOutcome::NoAnswer { feedback } => Err(format!("the return declaration was not taken: {feedback}")),
+            RemedyOutcome::NoAnswer { feedback } => failed(format!("the return declaration was not taken: {feedback}")),
             RemedyOutcome::Refused { reason } => {
-                Err(format!("the return declaration was refused: {}", reason.detail()))
+                failed(format!("the return declaration was refused: {}", reason.detail()))
             }
             RemedyOutcome::Returned { .. } => {
-                Err("the return declaration answered with something other than an approval".to_string())
+                failed("the return declaration answered with something other than an approval".to_string())
             }
         }
     }
@@ -703,13 +733,13 @@ impl SessionInner {
     /// harness returns on the child's behalf, which crosses it. The spawn's
     /// result then closes the parent's dispatch with the crossed value, and
     /// the branch is spent.
-    fn finish_child(&mut self, child: &TrajectoryId, value: Option<String>) -> Result<String, String> {
+    fn finish_child(&mut self, child: &TrajectoryId, value: Option<String>) -> Result<String, Failure> {
         if self.closed {
-            return Err("the session is closed".to_string());
+            return failed("the session is closed".to_string());
         }
         let (pending, spawn) = self.live_mut(child)?;
         if pending.is_some() {
-            return Err(format!(
+            return failed(format!(
                 "the child branch {} holds an open call; report or abandon it before returning",
                 child.0
             ));
@@ -720,11 +750,11 @@ impl SessionInner {
             HookDecision::Ack => (value, ReturnDisposition::Crossed),
             HookDecision::ChildReturn { value } => match self.stop(child, Some(value.clone()))? {
                 HookDecision::Ack => (Some(value), ReturnDisposition::Substituted),
-                other => return Err(format!("the runtime answered the echoed return with {other:?}")),
+                other => return failed(format!("the runtime answered the echoed return with {other:?}")),
             },
             // A held return keeps the branch live: the child may return again.
             HookDecision::Block { reason } => return encode(ReturnResponse::Blocked { feedback: reason }),
-            other => return Err(format!("the runtime answered a child return with {other:?}")),
+            other => return failed(format!("the runtime answered a child return with {other:?}")),
         };
         let decision = self.event(HookEvent::SpawnResult {
             actor: self.actor(None),
@@ -752,11 +782,11 @@ impl SessionInner {
                 }
             }
             HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
-            other => return Err(format!("the runtime answered a spawn result with {other:?}")),
+            other => return failed(format!("the runtime answered a spawn result with {other:?}")),
         })
     }
 
-    fn stop(&self, child: &TrajectoryId, value: Option<String>) -> Result<HookDecision, String> {
+    fn stop(&self, child: &TrajectoryId, value: Option<String>) -> Result<HookDecision, Failure> {
         self.event(HookEvent::ChildEnd {
             root: self.trajectory.clone(),
             child: child.clone(),
@@ -764,16 +794,16 @@ impl SessionInner {
         })
     }
 
-    fn close(&mut self) -> Result<(), String> {
+    fn close(&mut self) -> Result<(), Failure> {
         if self.pending.is_some() || !self.identified.is_empty() {
-            return Err("cannot close while a call is pending".to_string());
+            return failed("cannot close while a call is pending".to_string());
         }
         if let Some(live) = self
             .children
             .iter()
             .find(|(_, branch)| matches!(branch, ChildBranch::Live { .. }))
         {
-            return Err(format!("cannot close while the child branch {} is live", live.0.0));
+            return failed(format!("cannot close while the child branch {} is live", live.0.0));
         }
         self.closed = true;
         Ok(())
@@ -877,8 +907,9 @@ fn compose_policy(
     Ok(policy)
 }
 
-fn encode(response: impl Serialize) -> Result<String, String> {
-    serde_json::to_string(&response).map_err(|error| format!("could not encode the response: {error}"))
+fn encode(response: impl Serialize) -> Result<String, Failure> {
+    serde_json::to_string(&response)
+        .map_err(|error| Failure::Session(format!("could not encode the response: {error}")))
 }
 
 fn loopback_client() -> Result<reqwest::Client, String> {
@@ -1006,11 +1037,34 @@ fn return_schema_value(return_schema: Option<&Bound<'_, PyAny>>) -> PyResult<Opt
         .transpose()
 }
 
-fn with<T>(inner: &Arc<Mutex<SessionInner>>, act: impl FnOnce(&mut SessionInner) -> Result<T, String>) -> PyResult<T> {
+fn with<T>(inner: &Arc<Mutex<SessionInner>>, act: impl FnOnce(&mut SessionInner) -> Result<T, Failure>) -> PyResult<T> {
     let mut inner = inner
         .lock()
         .map_err(|_| AppaError::new_err("the session lock is poisoned"))?;
-    act(&mut inner).map_err(AppaError::new_err)
+    act(&mut inner).map_err(raised)
+}
+
+/// The `AppaError` a failure raises. A refusal carries its class as
+/// `refusal_class`, the serde spelling; any other failure leaves the
+/// class attribute's `None`.
+fn raised(failure: Failure) -> PyErr {
+    match failure {
+        Failure::Session(message) => AppaError::new_err(message),
+        Failure::Refused { class, detail } => Python::attach(|py| {
+            let error = AppaError::new_err(detail);
+            match error.value(py).setattr(REFUSAL_CLASS, spelling(class)) {
+                Ok(()) => error,
+                Err(unset) => unset,
+            }
+        }),
+    }
+}
+
+fn spelling(class: RefusalClass) -> String {
+    match serde_json::to_value(class) {
+        Ok(serde_json::Value::String(spelling)) => spelling,
+        _ => unreachable!("a unit variant serializes as its serde name"),
+    }
 }
 
 #[pyclass(module = "appa_agent_python")]
@@ -1044,7 +1098,7 @@ impl Session {
             externals_toml,
             spawn_tool,
         )
-        .map_err(AppaError::new_err)?;
+        .map_err(raised)?;
         Ok(Session {
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -1128,7 +1182,7 @@ impl Session {
         let child = TrajectoryId(child_id.to_string());
         with(&self.inner, |inner| match inner.children.contains_key(&child) {
             true => Ok(()),
-            false => Err(format!("no child branch {child_id} is open in this session")),
+            false => failed(format!("no child branch {child_id} is open in this session")),
         })?;
         Ok(self.branch(child))
     }
@@ -1219,7 +1273,9 @@ impl ChildSession {
 fn appa_agent_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Session>()?;
     module.add_class::<ChildSession>()?;
-    module.add("AppaError", module.py().get_type::<AppaError>())?;
+    let error = module.py().get_type::<AppaError>();
+    error.setattr(REFUSAL_CLASS, module.py().None())?;
+    module.add("AppaError", error)?;
     module.add("BINDING_IDENTITY", BINDING_IDENTITY)?;
     Ok(())
 }
@@ -1255,11 +1311,11 @@ delta    = {}
     }
 
     impl SessionInner {
-        fn root_check(&mut self, tool: &str, arguments_json: &str) -> Result<String, String> {
+        fn root_check(&mut self, tool: &str, arguments_json: &str) -> Result<String, Failure> {
             self.check(None, tool, arguments_json, false, None)
         }
 
-        fn root_report(&mut self, content: Option<&str>, error: bool) -> Result<String, String> {
+        fn root_report(&mut self, content: Option<&str>, error: bool) -> Result<String, Failure> {
             self.report(None, content, error, None)
         }
     }
@@ -1377,7 +1433,7 @@ delta    = {}
         let mut session = session(None);
         session.root_check("publish", r#"{"text":"x"}"#).unwrap();
         let error = session.root_check("publish", r#"{"text":"y"}"#).unwrap_err();
-        assert!(error.contains("already pending"), "got: {error}");
+        assert!(error.to_string().contains("already pending"), "got: {error}");
     }
 
     #[test]
@@ -1607,7 +1663,7 @@ trust = { from = "suspicious", to = "trusted" }
         let error = session
             .finish_child(&child(), Some(r#"{"status":"verified"}"#.to_string()))
             .unwrap_err();
-        assert!(error.contains("open call"), "got: {error}");
+        assert!(error.to_string().contains("open call"), "got: {error}");
         assert!(session.pending.is_some(), "the parent's spawn is still owed an outcome");
 
         session.report(Some(&child()), Some("posted"), false, None).unwrap();
@@ -1628,9 +1684,9 @@ trust = { from = "suspicious", to = "trusted" }
         assert_eq!(kind(&session.spawn_child(child(), "{}", schema()).unwrap()), "opened");
 
         let reported = session.root_report(Some("done"), false).unwrap_err();
-        assert!(reported.contains("finish"), "got: {reported}");
+        assert!(reported.to_string().contains("finish"), "got: {reported}");
         let abandoned = session.abandon(None, None).unwrap_err();
-        assert!(abandoned.contains("finish"), "got: {abandoned}");
+        assert!(abandoned.to_string().contains("finish"), "got: {abandoned}");
 
         assert_eq!(
             kind(
@@ -1653,9 +1709,9 @@ trust = { from = "suspicious", to = "trusted" }
         let error = session
             .check(Some(&child()), "read_external", "{}", false, None)
             .unwrap_err();
-        assert!(error.contains("already returned"), "got: {error}");
+        assert!(error.to_string().contains("already returned"), "got: {error}");
         let error = session.finish_child(&child(), None).unwrap_err();
-        assert!(error.contains("already returned"), "got: {error}");
+        assert!(error.to_string().contains("already returned"), "got: {error}");
     }
 
     #[test]
@@ -1667,7 +1723,7 @@ trust = { from = "suspicious", to = "trusted" }
             assert_eq!(answered["kind"], "returned", "{value:?}");
             assert!(answered["value"].is_null(), "{value:?}: got {answered}");
             let error = session.finish_child(&child(), None).unwrap_err();
-            assert!(error.contains("already returned"), "got: {error}");
+            assert!(error.to_string().contains("already returned"), "got: {error}");
         }
     }
 
@@ -1675,14 +1731,14 @@ trust = { from = "suspicious", to = "trusted" }
     fn a_session_that_names_no_spawn_tool_opens_no_child() {
         let mut session = session(None);
         let error = session.spawn_child(child(), "{}", None).unwrap_err();
-        assert!(error.contains("no spawn tool"), "got: {error}");
+        assert!(error.to_string().contains("no spawn tool"), "got: {error}");
     }
 
     #[test]
     fn a_child_start_needs_a_spawn_of_its_own() {
         let mut session = child_session();
         let error = session.open_child(child(), None).unwrap_err();
-        assert!(error.contains("no spawn call is pending"), "got: {error}");
+        assert!(error.to_string().contains("no spawn call is pending"), "got: {error}");
     }
 
     #[test]

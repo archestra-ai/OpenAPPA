@@ -19,12 +19,12 @@ members = [
     "website-chat-playground",
     "bench/corp-agent",
 ]
-exclude = ["bench/corp-systems"]
+exclude = ["bench/corp-systems", "scripts/mixed-version"]
 
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.34.0"
+version = "0.37.0"
 
 [workspace.lints.rust]
 dead_code = "deny"

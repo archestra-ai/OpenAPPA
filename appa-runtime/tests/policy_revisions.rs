@@ -1,0 +1,715 @@
+//! Every family follows its deployment's current policy revision. These cases pin the runtime
+//! behaviour a publish must keep: a call already running finishes under the terms its release
+//! pinned met with the head's, a committed decision replays after a publish, a restarted runtime
+//! replays a family across revisions without the earlier revisions' externals, and a publish by
+//! another process fences this one until it serves the new head.
+
+mod common;
+use common::{last_offer, raw};
+
+use std::path::Path;
+use std::sync::Arc;
+
+use appa_eventlog::{Backend, DeploymentName, LogStore};
+use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::{config::Config, hooks};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, RefusalClass, ToolOutcome, TrajectoryId,
+};
+
+const EXTERNALS: &str = "[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n";
+
+/// A policy over the default trust chain with `tools` as its tool rules.
+fn policy(tools: &str) -> String {
+    format!("[policy]\nversion = 2\n{tools}\n{EXTERNALS}")
+}
+
+fn write(dir: &Path, text: &str) -> Config {
+    let path = dir.join("appa.toml");
+    std::fs::write(&path, text).expect("the policy writes");
+    Config::load(&path).expect("the policy validates")
+}
+
+fn open(dir: &Path, text: &str) -> Arc<Runtime> {
+    Arc::new(Runtime::open(write(dir, text), dir.join("appa.db"), None).expect("the deployment opens"))
+}
+
+fn root(name: &str) -> TrajectoryId {
+    TrajectoryId(name.to_string())
+}
+
+fn actor(root: &TrajectoryId) -> Actor {
+    Actor {
+        root: root.clone(),
+        child: None,
+    }
+}
+
+fn call(tool: &str, n: u32) -> ProposedCall {
+    ProposedCall {
+        tool: tool.to_string(),
+        arguments: raw(serde_json::json!({ "n": n })),
+        cwd: None,
+    }
+}
+
+async fn start(runtime: &Arc<Runtime>, root: &TrajectoryId) {
+    let started = hooks::handle(
+        runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+        },
+    )
+    .await;
+    assert_eq!(started, HookDecision::Ack);
+}
+
+async fn propose(runtime: &Arc<Runtime>, root: &TrajectoryId, call: ProposedCall, id: &str) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(root),
+            call,
+            call_id: Some(id.to_string()),
+            spawn: None,
+            prompt: None,
+            ruling: None,
+        },
+    )
+    .await
+}
+
+async fn report(runtime: &Arc<Runtime>, root: &TrajectoryId, call: ProposedCall, id: &str) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolResult {
+            actor: actor(root),
+            call,
+            call_id: Some(id.to_string()),
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available("the result".to_string()),
+            },
+        },
+    )
+    .await
+}
+
+/// Propose `call`, accepting the one remedy its block offers when it is blocked, and return once
+/// it is released.
+async fn released(runtime: &Arc<Runtime>, root: &TrajectoryId, call: ProposedCall, id: &str) {
+    let decision = propose(runtime, root, call.clone(), id).await;
+    if let HookDecision::DenyCall { feedback, .. } = &decision {
+        let accepted = runtime.execute_remedy(&actor(root), last_offer(feedback)).await;
+        assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+        let again = propose(runtime, root, call, &format!("{id}-accepted")).await;
+        assert!(allowed(&again), "{again:?}");
+    } else {
+        assert!(allowed(&decision), "{decision:?}");
+    }
+}
+
+fn allowed(decision: &HookDecision) -> bool {
+    matches!(decision, HookDecision::AllowCall { .. })
+}
+
+fn trust(runtime: &Runtime, root: &TrajectoryId) -> String {
+    runtime.status(root).expect("the session has a status").trust
+}
+
+fn moved(decision: &HookDecision) -> bool {
+    matches!(decision, HookDecision::Refuse { detail, .. } if detail.contains("moved to policy revision"))
+}
+
+/// A result reported after a publish is labelled by the meet of the terms its release pinned and
+/// the head's: the head can tighten what a running call returns.
+#[tokio::test]
+async fn a_running_calls_result_takes_a_tighter_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = open(dir.path(), &policy("[[policy.tool]]\nname = \"fetch\"\n"));
+    let id = root("tightened");
+    start(&runtime, &id).await;
+    released(&runtime, &id, call("fetch", 1), "c1").await;
+
+    runtime
+        .reload(write(
+            dir.path(),
+            &policy("[[policy.tool]]\nname = \"fetch\"\ndelta = { trust = \"suspicious\" }\n"),
+        ))
+        .expect("the revision publishes");
+    assert_eq!(report(&runtime, &id, call("fetch", 1), "c1").await, HookDecision::Ack);
+    assert_eq!(trust(&runtime, &id), "suspicious", "the head's terms label the result");
+}
+
+/// The head never loosens what a release promised: a result the release declared suspicious stays
+/// suspicious under a head that declares the tool clean.
+#[tokio::test]
+async fn a_running_calls_result_keeps_its_release_terms_under_a_looser_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = open(
+        dir.path(),
+        &policy("[[policy.tool]]\nname = \"fetch\"\ndelta = { trust = \"suspicious\" }\n"),
+    );
+    let id = root("loosened");
+    start(&runtime, &id).await;
+    released(&runtime, &id, call("fetch", 1), "c1").await;
+
+    runtime
+        .reload(write(dir.path(), &policy("[[policy.tool]]\nname = \"fetch\"\n")))
+        .expect("the revision publishes");
+    report(&runtime, &id, call("fetch", 1), "c1-accepted").await;
+    assert_eq!(
+        trust(&runtime, &id),
+        "suspicious",
+        "the release's terms still bound the result"
+    );
+}
+
+/// A result reported after a publish dropped its tool is admitted under the terms its release
+/// pinned; a new call of the dropped tool is refused.
+#[tokio::test]
+async fn a_running_call_finishes_after_its_tool_is_dropped() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = open(
+        dir.path(),
+        &policy("[[policy.tool]]\nname = \"fetch\"\n[[policy.tool]]\nname = \"notes\"\n"),
+    );
+    let id = root("dropped");
+    start(&runtime, &id).await;
+    released(&runtime, &id, call("fetch", 1), "c1").await;
+
+    runtime
+        .reload(write(dir.path(), &policy("[[policy.tool]]\nname = \"notes\"\n")))
+        .expect("the revision publishes");
+    assert_eq!(report(&runtime, &id, call("fetch", 1), "c1").await, HookDecision::Ack);
+    assert_eq!(trust(&runtime, &id), "trusted");
+    assert!(matches!(
+        propose(&runtime, &id, call("fetch", 2), "c2").await,
+        HookDecision::Refuse { detail, .. } if detail.contains("fetch")
+    ));
+    assert!(allowed(&propose(&runtime, &id, call("notes", 3), "c3").await));
+}
+
+/// A hook the harness retries after its decision committed replays that decision, even when a
+/// publish since dropped the tool: the retry asks again about a decision already made.
+#[tokio::test]
+async fn a_retried_hook_replays_its_committed_decision_after_a_publish() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = open(dir.path(), &policy("[[policy.tool]]\nname = \"notes\"\n"));
+    let id = root("retried");
+    start(&runtime, &id).await;
+    assert!(allowed(&propose(&runtime, &id, call("notes", 1), "c1").await));
+
+    runtime
+        .reload(write(dir.path(), &policy("")))
+        .expect("the revision publishes");
+    let retried = propose(&runtime, &id, call("notes", 1), "c1").await;
+    assert!(
+        allowed(&retried),
+        "the retried hook replays the committed release: {retried:?}"
+    );
+    assert_eq!(report(&runtime, &id, call("notes", 1), "c1").await, HookDecision::Ack);
+}
+
+/// Reloading the bytes the head already names publishes nothing.
+#[tokio::test]
+async fn reloading_the_heads_own_bytes_publishes_no_revision() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let text = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime = open(dir.path(), &text);
+    let first = runtime.reload(write(dir.path(), &text)).expect("the reload runs");
+    assert!(!first.changed);
+    let edited = runtime
+        .reload(write(dir.path(), &policy("")))
+        .expect("the edit publishes");
+    assert!(edited.changed);
+    assert_eq!(edited.policy_revision, first.policy_revision + 1);
+    let same = runtime.reload(write(dir.path(), &policy(""))).expect("the reload runs");
+    assert!(!same.changed);
+    assert_eq!(same.policy_revision, edited.policy_revision);
+}
+
+/// Processes serving one deployment from identical bytes — pods booting one release — publish one
+/// revision between them, and each decides at it.
+#[tokio::test]
+async fn runtimes_booting_identical_bytes_share_one_revision() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let text = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let one = open(dir.path(), &text);
+    let other = open(dir.path(), &text);
+    let probe = |runtime: &Arc<Runtime>| runtime.reload(write(dir.path(), &text)).expect("the reload runs");
+    assert_eq!(probe(&one).policy_revision, 1);
+    assert_eq!(probe(&other).policy_revision, 1);
+    let id = root("shared");
+    start(&one, &id).await;
+    assert!(allowed(&propose(&other, &id, call("notes", 1), "c1").await));
+}
+
+/// A publish by another process fences this one: its decisions refuse, retryably, and commit
+/// nothing until it serves the new head — then the family decides at it.
+#[tokio::test]
+async fn a_publish_by_another_process_fences_until_this_one_serves_the_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let stale = open(dir.path(), &first);
+    let id = root("fenced");
+    start(&stale, &id).await;
+
+    let next = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    let publisher = open(dir.path(), &next);
+    assert_eq!(
+        publisher
+            .reload(write(dir.path(), &next))
+            .expect("the reload runs")
+            .policy_revision,
+        2
+    );
+
+    let refused = propose(&stale, &id, call("notes", 1), "c1").await;
+    assert!(moved(&refused), "{refused:?}");
+    assert!(allowed(&propose(&publisher, &id, call("fetch", 2), "c2").await));
+
+    stale.reload(write(dir.path(), &next)).expect("the head's bytes load");
+    assert!(allowed(&propose(&stale, &id, call("notes", 3), "c3").await));
+}
+
+/// A host serving each tenant through a view pinned to its line's head, from two runtimes on one
+/// store: once the other runtime publishes past the pin, the pinned view refuses retryably and
+/// commits nothing. Publishing the head's bytes again publishes nothing, and the call retried
+/// through a view pinned to it decides at the head.
+#[tokio::test]
+async fn a_view_pinned_behind_its_lines_head_refuses_until_its_host_pins_the_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let base = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let pod = || {
+        Arc::new(
+            Runtime::open_with_store(write(dir.path(), &base), Arc::clone(&store), None)
+                .expect("the base deployment opens"),
+        )
+    };
+    let (one, other) = (pod(), pod());
+    let line = DeploymentName::new("tenant");
+    let pin = |runtime: &Arc<Runtime>, text: &str| {
+        let prepared = runtime
+            .prepare_deployment(write(dir.path(), text))
+            .expect("the tenant's policy loads");
+        let published = runtime.publish(&line, &prepared).expect("the policy publishes");
+        (published.revision(), Arc::new(runtime.pinned(&published)))
+    };
+
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let (revision, stale) = pin(&one, &first);
+    assert_eq!(revision, 1);
+    let id = root("tenant-conversation");
+    start(&stale, &id).await;
+    assert!(allowed(&propose(&stale, &id, call("notes", 1), "c1").await));
+    assert_eq!(report(&stale, &id, call("notes", 1), "c1").await, HookDecision::Ack);
+
+    let next = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    assert_eq!(pin(&other, &next).0, 2, "the other runtime publishes the next revision");
+
+    let before = store.log(&id).expect("the family reads");
+    let refused = propose(&stale, &id, call("notes", 2), "c2").await;
+    assert!(moved(&refused), "{refused:?}");
+    let after = store.log(&id).expect("the family reads");
+    assert_eq!(after.facts().len(), before.facts().len(), "nothing commits");
+    assert_eq!(after.host_records().len(), before.host_records().len());
+
+    let (revision, head) = pin(&one, &next);
+    assert_eq!(revision, 2, "the head's own bytes publish nothing");
+    assert!(allowed(&propose(&head, &id, call("notes", 2), "c2").await));
+    assert!(
+        allowed(&propose(&head, &id, call("fetch", 3), "c3").await),
+        "the family decides at the head"
+    );
+}
+
+/// A host read the head to rebuild its serving view, but another pod published before the
+/// host pinned it. Pinning the stored revision must never publish the old file over that head.
+#[tokio::test]
+async fn pinning_a_stored_revision_never_publishes_over_a_newer_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let pod = || {
+        Arc::new(
+            Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None)
+                .expect("the base deployment opens"),
+        )
+    };
+    let (one, other) = (pod(), pod());
+    let line = DeploymentName::new("frozen-tenant");
+    let prepared = one
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the first policy prepares");
+    let published = one.publish(&line, &prepared).expect("the first policy publishes");
+    let id = root("frozen-conversation");
+    let view = Arc::new(one.pinned(&published));
+    start(&view, &id).await;
+    let observed = store.head(&line).expect("the head reads").expect("the line exists");
+
+    let next = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    let newer = other
+        .prepare_deployment(write(dir.path(), &next))
+        .expect("the next policy prepares");
+    other.publish(&line, &newer).expect("another pod advances the head");
+    let expected = store.head(&line).expect("the newer head reads");
+
+    let pinned = one
+        .at_revision(&line, &prepared, observed.revision)
+        .expect("the observed revision pins");
+    assert_eq!(
+        store.head(&line).expect("the head reads"),
+        expected,
+        "pinning never publishes"
+    );
+    assert_eq!(pinned.revision(), observed.revision.value());
+    let before = store.log(&id).expect("the family reads");
+    let stale = Arc::new(one.pinned(&pinned));
+    let refused = propose(&stale, &id, call("notes", 1), "stale").await;
+    assert!(moved(&refused), "{refused:?}");
+    let after = store.log(&id).expect("the family reads");
+    assert_eq!(after.facts().len(), before.facts().len(), "a stale pin commits nothing");
+}
+
+#[test]
+fn pinning_requires_the_stored_revisions_policy_file_and_never_creates_a_line() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime = Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None)
+        .expect("the base deployment opens");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the policy prepares");
+    let line = DeploymentName::new("existing");
+    runtime.publish(&line, &prepared).expect("the policy publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let pinned = runtime
+        .at_revision(&line, &prepared, head.revision)
+        .expect("the matching file pins");
+    assert_eq!(pinned.revision(), head.revision.value());
+
+    let different = policy("[[policy.tool]]\nname = \"fetch\"\n");
+    let different = runtime
+        .prepare_deployment(write(dir.path(), &different))
+        .expect("the different policy prepares");
+    assert!(matches!(
+        runtime.at_revision(&line, &different, head.revision),
+        Err(appa_runtime::api::OpenError::PolicyRevisionMismatch { .. })
+    ));
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head.clone()));
+
+    let absent = DeploymentName::new("absent");
+    assert!(runtime.at_revision(&absent, &prepared, head.revision).is_err());
+    assert!(store.head(&absent).expect("the absent head reads").is_none());
+    assert!(runtime.at_revision(&line, &prepared, head.revision.next()).is_err());
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head));
+}
+
+/// A host validates policy inputs against one observed head. Another publisher winning
+/// afterwards must make the host read its inputs again, never restore the retired bytes.
+#[test]
+fn conditional_publication_refuses_a_stale_head_without_restoring_retired_bytes() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime =
+        Runtime::open_with_store(write(dir.path(), &first), Arc::clone(&store), None).expect("the runtime opens");
+    let line = DeploymentName::new("conditional");
+    let stale = runtime
+        .prepare_deployment(write(dir.path(), &first))
+        .expect("the first policy prepares");
+    let first = runtime
+        .publish_if_head(&line, &stale, None)
+        .expect("the first policy publishes");
+    let observed = store.head(&line).expect("the head reads").expect("the line exists");
+    let strict = runtime
+        .prepare_deployment(write(dir.path(), &policy("")))
+        .expect("the strict policy prepares");
+    runtime
+        .publish_if_head(&line, &strict, Some(observed.revision))
+        .expect("the strict policy publishes");
+    let current = store.head(&line).expect("the head reads").expect("the line exists");
+    for expected in [None, Some(observed.revision)] {
+        assert!(matches!(
+            runtime.publish_if_head(&line, &stale, expected),
+            Err(appa_runtime::api::OpenError::PolicyHeadMoved { head: Some(head), .. })
+                if head == current.revision
+        ));
+        assert_eq!(store.head(&line).expect("the head reads"), Some(current.clone()));
+    }
+    assert_eq!(current.revision.value(), first.revision() + 1);
+}
+
+#[test]
+fn conditional_publication_reuses_matching_bytes_only_at_the_expected_head() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let text = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime =
+        Runtime::open_with_store(write(dir.path(), &text), Arc::clone(&store), None).expect("the runtime opens");
+    let line = DeploymentName::new("conditional");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &text))
+        .expect("the policy prepares");
+    let absent = store.head(&line).expect("the head reads");
+    assert!(absent.is_none());
+    let first = runtime
+        .publish_if_head(&line, &prepared, None)
+        .expect("the first revision publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let same = runtime
+        .publish_if_head(&line, &prepared, Some(head.revision))
+        .expect("the matching policy reuses the head");
+    assert_eq!(first.revision(), same.revision());
+    assert_eq!(store.head(&line).expect("the head reads"), Some(head));
+    assert!(matches!(
+        runtime.publish_if_head(&line, &prepared, None),
+        Err(appa_runtime::api::OpenError::PolicyHeadMoved { .. })
+    ));
+    let missing = DeploymentName::new("missing");
+    assert!(matches!(
+        runtime.publish_if_head(&missing, &prepared, Some(appa_engine::profile::PolicyRevision::FIRST)),
+        Err(appa_runtime::api::OpenError::PolicyHeadMoved { head: None, .. })
+    ));
+    assert!(store.head(&missing).expect("the head reads").is_none());
+}
+
+/// Both publishers have validated against the same revision. At most one may replace it,
+/// even when they enter the runtime concurrently.
+#[test]
+fn competing_conditional_publishers_cannot_retry_over_the_winner() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("the store opens"));
+    let text = policy("");
+    let runtime = Arc::new(
+        Runtime::open_with_store(write(dir.path(), &text), Arc::clone(&store), None).expect("the runtime opens"),
+    );
+    let line = DeploymentName::new("competing");
+    let prepared = runtime
+        .prepare_deployment(write(dir.path(), &text))
+        .expect("the initial policy prepares");
+    runtime
+        .publish_if_head(&line, &prepared, None)
+        .expect("the initial policy publishes");
+    let head = store.head(&line).expect("the head reads").expect("the line exists");
+    let barrier = std::sync::Barrier::new(2);
+    let candidates: Vec<_> = ["notes", "fetch"]
+        .iter()
+        .map(|tool| {
+            runtime
+                .prepare_deployment(write(
+                    dir.path(),
+                    &policy(&format!("[[policy.tool]]\nname = \"{tool}\"\n")),
+                ))
+                .expect("the candidate prepares")
+        })
+        .collect();
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|prepared| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    runtime.publish_if_head(&line, prepared, Some(head.revision))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("the publisher returns"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(appa_runtime::api::OpenError::PolicyHeadMoved { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .head(&line)
+            .expect("the head reads")
+            .expect("the line exists")
+            .revision,
+        head.revision.next()
+    );
+}
+
+/// Two lines that publish the same bytes at the same revision numbers keep their own engines: a
+/// compiled engine carries its line, and a family's opening is judged against it, so the second
+/// line's families decide after a publish, and fork, exactly as the first line's do.
+#[tokio::test]
+async fn lines_publishing_the_same_bytes_keep_their_own_engines() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let base = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let runtime = open(dir.path(), &base);
+    let first = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let second = policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n");
+    for tenant in ["tenant-a", "tenant-b"] {
+        let line = DeploymentName::new(tenant);
+        let pin = |text: &str| {
+            let prepared = runtime
+                .prepare_deployment(write(dir.path(), text))
+                .expect("the tenant's policy loads");
+            Arc::new(runtime.pinned(&runtime.publish(&line, &prepared).expect("the policy publishes")))
+        };
+        let head = pin(&first);
+        let id = root(&format!("{tenant}-conversation"));
+        start(&head, &id).await;
+        assert!(allowed(&propose(&head, &id, call("notes", 1), "c1").await));
+
+        let head = pin(&second);
+        let decided = propose(&head, &id, call("fetch", 2), "c2").await;
+        assert!(allowed(&decided), "{tenant}: {decided:?}");
+        let forked = head.open_root_fork(&id, &id, &root(&format!("{tenant}-fork")));
+        assert!(forked.is_ok(), "{tenant}: {forked:?}");
+    }
+}
+
+/// A family whose opening names no deployment — one a runtime opened before live policy
+/// revisions, or a host's snapshot view opened pinned — is refused at its next event under its own
+/// class, whatever its log holds after the opening, and a retry is refused again. A new family
+/// opens and decides.
+#[tokio::test]
+async fn a_legacy_opening_is_refused_with_legacy_family() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let notes = policy("[[policy.tool]]\nname = \"notes\"\n");
+    let legacy = root("legacy");
+    {
+        let runtime = open(dir.path(), &notes);
+        start(&runtime, &legacy).await;
+        assert!(allowed(&propose(&runtime, &legacy, call("notes", 1), "c1").await));
+        assert_eq!(
+            report(&runtime, &legacy, call("notes", 1), "c1").await,
+            HookDecision::Ack
+        );
+    }
+    {
+        let store = rusqlite::Connection::open(dir.path().join("appa.db")).expect("the database reopens");
+        let stored: Vec<u8> = store
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                [legacy.0.as_str()],
+                |row| row.get(0),
+            )
+            .expect("the opening reads");
+        let mut opening: serde_json::Value = serde_json::from_slice(&stored).expect("the opening is JSON");
+        let fields = opening[0]["TrajectoryOpened"]
+            .as_object_mut()
+            .expect("the opening record is an object");
+        fields.remove("deployment");
+        fields.remove("revision");
+        store
+            .execute(
+                "UPDATE logs SET facts = ?2 WHERE root = ?1 AND seq = 0",
+                rusqlite::params![legacy.0.as_str(), serde_json::to_vec(&opening).expect("serializes")],
+            )
+            .expect("the opening is rewritten as one that names no deployment");
+    }
+
+    let runtime = open(dir.path(), &notes);
+    for id in ["c2", "c3"] {
+        match propose(&runtime, &legacy, call("notes", 2), id).await {
+            HookDecision::Refuse { class, detail } => {
+                assert_eq!(class, RefusalClass::LegacyFamily);
+                assert_eq!(
+                    detail,
+                    "this trajectory family was opened before live policy revisions; open a new one"
+                );
+            }
+            other => panic!("a legacy family is refused: {other:?}"),
+        }
+    }
+    let fresh = root("fresh");
+    start(&runtime, &fresh).await;
+    assert!(allowed(&propose(&runtime, &fresh, call("notes", 1), "f1").await));
+}
+
+/// A runtime restarted under a later policy replays a family across the revisions that decided
+/// it, without those revisions' externals: an earlier revision only replays and consults nothing.
+#[tokio::test]
+async fn a_restarted_runtime_replays_across_revisions_without_their_externals() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let signed = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "publish"
+requires = { attention = ["signoff"] }
+
+[[policy.authority]]
+name = "operator"
+permits = { attention = ["signoff"] }
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.authorities.operator]
+builtin = "approve"
+"#;
+    let id = root("restarted");
+    {
+        let runtime = open(dir.path(), signed);
+        start(&runtime, &id).await;
+        let blocked = propose(&runtime, &id, call("publish", 1), "c1").await;
+        let HookDecision::DenyCall { feedback, .. } = &blocked else {
+            panic!("the call waits for its signoff: {blocked:?}")
+        };
+        assert!(matches!(
+            runtime.execute_remedy(&actor(&id), last_offer(feedback)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert!(allowed(&propose(&runtime, &id, call("publish", 1), "c1-signed").await));
+        assert_eq!(
+            report(&runtime, &id, call("publish", 1), "c1-signed").await,
+            HookDecision::Ack
+        );
+    }
+
+    let runtime = open(dir.path(), &policy("[[policy.tool]]\nname = \"publish\"\n"));
+    assert_eq!(trust(&runtime, &id), "trusted", "the family replays");
+    assert!(
+        allowed(&propose(&runtime, &id, call("publish", 2), "c2").await),
+        "the head needs no signoff and no authority"
+    );
+}
+
+/// An independent root fork of a following family follows the same deployment: a publish reaches
+/// parent and fork alike.
+#[tokio::test]
+async fn a_root_fork_follows_its_parents_deployment() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = open(
+        dir.path(),
+        &policy("[[policy.tool]]\nname = \"notes\"\n[[policy.tool]]\nname = \"fetch\"\n"),
+    );
+    let parent = root("parent");
+    start(&runtime, &parent).await;
+    assert!(allowed(&propose(&runtime, &parent, call("notes", 1), "c1").await));
+    let fork = root("fork");
+    runtime
+        .open_root_fork(&parent, &parent, &fork)
+        .expect("the parent can be forked");
+
+    runtime
+        .reload(write(dir.path(), &policy("[[policy.tool]]\nname = \"fetch\"\n")))
+        .expect("the revision publishes");
+    for id in [&parent, &fork] {
+        assert!(matches!(
+            propose(&runtime, id, call("notes", 2), "c2").await,
+            HookDecision::Refuse { detail, .. } if detail.contains("notes")
+        ));
+        assert!(allowed(&propose(&runtime, id, call("fetch", 3), "c3").await));
+    }
+}

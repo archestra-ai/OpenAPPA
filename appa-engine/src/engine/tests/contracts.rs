@@ -167,7 +167,10 @@ fn resolve_call_owns_tool_lookup_scanning_and_schema_binding() {
     let ghost = covered
         .resolve_call(ToolName::new("ghost"), br#"{}"#)
         .expect("the wildcard covers the name");
-    assert_eq!(ghost.declaration_id(), crate::value::ToolDeclarationId::default());
+    assert_eq!(
+        covered.registry.selected(&ghost),
+        Some(crate::value::ToolDeclarationId::default())
+    );
 }
 
 #[test]
@@ -188,7 +191,7 @@ fn ordered_selectors_choose_once_before_schema_validation() {
         .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt","token":"ok"}"#)
         .unwrap();
     assert_eq!(
-        selected.declaration_id(),
+        e.registry.selected(&selected).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     assert!(
@@ -200,12 +203,12 @@ fn ordered_selectors_choose_once_before_schema_validation() {
     );
     let overlap = e.resolve_call(ToolName::new("read"), br#"{"path":"public"}"#).unwrap();
     assert_eq!(
-        overlap.declaration_id(),
+        e.registry.selected(&overlap).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     let fallback = e.resolve_call(ToolName::new("read"), br#"{}"#).unwrap();
     assert_eq!(
-        fallback.declaration_id(),
+        e.registry.selected(&fallback).unwrap(),
         crate::value::ToolDeclarationId::new(2).unwrap()
     );
     let no_fallback = engine(vec![plain_tool("read(path:secret*)")]);
@@ -258,7 +261,7 @@ fn wildcard_fallback_does_not_bypass_a_matched_contract_schema() {
     let shell = ToolName::new("builtin:shell");
     let fallback = e.resolve_call(shell.clone(), br#"{"command":"ls"}"#).unwrap();
     assert_eq!(
-        fallback.declaration_id(),
+        e.registry.selected(&fallback).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     assert_eq!(
@@ -272,15 +275,11 @@ fn wildcard_fallback_does_not_bypass_a_matched_contract_schema() {
     let matched = e
         .resolve_call(shell, br#"{"command":"git push","token":"ok"}"#)
         .unwrap();
-    assert_eq!(matched.declaration_id(), crate::value::ToolDeclarationId::default());
-    assert!(
-        !e.registry
-            .selection_matches(&fallback.substituting(matched.canonical_arguments().clone()))
+    assert_eq!(
+        e.registry.selected(&matched).unwrap(),
+        crate::value::ToolDeclarationId::default()
     );
-    assert!(
-        !e.registry
-            .selection_matches(&matched.substituting(fallback.canonical_arguments().clone()))
-    );
+    assert!(!e.registry.selects_alike(&fallback, &matched));
 }
 
 #[test]
@@ -290,7 +289,7 @@ fn a_substitution_that_selects_another_ordered_contract_is_a_new_call_under_it()
         .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
         .unwrap();
     assert_eq!(
-        selected.declaration_id(),
+        e.registry.selected(&selected).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     let rewrite = |body: &str| substituted_call(&e.registry, &selected, &ValueBody::new(body), None);
@@ -298,16 +297,17 @@ fn a_substitution_that_selects_another_ordered_contract_is_a_new_call_under_it()
     // Arguments that select another declaration render a new call under it: the selected
     // ordinal, nothing carried.
     let fresh = rewrite(r#"{"path":"safe.txt"}"#).expect("a new call under declaration 0");
-    assert_eq!(fresh.declaration_id(), crate::value::ToolDeclarationId::new(0).unwrap());
-    assert!(fresh.annotation().is_none());
-    assert!(
-        !e.registry
-            .selection_matches(&selected.substituting(fresh.canonical_arguments().clone()))
+    assert_eq!(
+        e.registry.selected(&fresh).unwrap(),
+        crate::value::ToolDeclarationId::new(0).unwrap()
     );
+    assert!(fresh.annotation().is_none());
+    assert!(!e.registry.selects_alike(&selected, &fresh));
 
     // Arguments that stay in the declaration render the substitution.
     let kept = rewrite(r#"{"path":"other-private.txt"}"#).expect("the substitution");
-    assert_eq!(kept, selected.substituting(kept.canonical_arguments().clone()));
+    assert!(e.registry.selects_alike(&kept, &selected));
+    assert!(kept.annotation().is_none());
 
     // Arguments no declaration selects, or that fail the selected schema, mint nothing.
     assert!(matches!(
@@ -430,7 +430,9 @@ fn rewrite(
     })
 }
 
+/// The declaration `e` selects for the call the batch opened, its reserved effects and its pin.
 fn opened_contract_of(
+    e: &Engine,
     facts: &[Fact],
 ) -> (
     crate::value::ToolDeclarationId,
@@ -441,11 +443,18 @@ fn opened_contract_of(
         .iter()
         .find_map(|fact| match fact {
             Fact::DispatchOpened {
-                declaration,
+                tool,
+                arguments,
                 proposed_effects,
                 annotation,
                 ..
-            } => Some((*declaration, proposed_effects.clone(), annotation.clone())),
+            } => Some((
+                e.registry
+                    .selected(&ResolvedCall::new(tool.clone(), arguments.clone()))
+                    .expect("the opened call selects a declaration"),
+                proposed_effects.clone(),
+                annotation.clone(),
+            )),
             _ => None,
         })
         .expect("the rewrite dispatches")
@@ -462,7 +471,7 @@ fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_c
     let e = ordered_read_engine(&["auditor", "legal"]);
     let proposal = read_of(&e, "private/q3.md");
     assert_eq!(
-        proposal.declaration_id(),
+        e.registry.selected(&proposal).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     let log = vec![opened(&e)];
@@ -489,7 +498,7 @@ fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_c
     .expect("the hop runs");
     let approved = approved_by(&hopped);
     assert_eq!(
-        approved.declaration_id(),
+        e.registry.selected(&approved).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     assert_eq!(approved.annotation(), Some(&answer));
@@ -498,7 +507,7 @@ fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_c
 
     let facts = taken(&e, &log, "b2", &approved);
     assert_eq!(
-        opened_contract_of(&facts),
+        opened_contract_of(&e, &facts),
         (
             crate::value::ToolDeclarationId::new(0).unwrap(),
             EffectSet::default(),
@@ -508,42 +517,22 @@ fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_c
     );
     assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
 
-    // Replay holds the record to the same rule: the persisted declaration is the one the
-    // arguments select, and the tool is the one the sanitizer rewrote — another tool's open
-    // declaration is no place to land.
+    // Replay holds the record to the same rule: the tool is the one the sanitizer rewrote —
+    // another tool's open declaration is no place to land.
     let derived_at = log
         .iter()
         .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
         .expect("the hop derived a candidate");
-    for (forged_call, refusal) in [
-        (
-            ResolvedCall::new_keyed(
-                ToolName::new("note"),
-                crate::value::ToolDeclarationId::new(0).unwrap(),
-                approved.canonical_arguments().clone(),
-            ),
-            TransitionRefusal::ForgedLabel,
-        ),
-        (
-            ResolvedCall::new_keyed(
-                ToolName::new("read"),
-                crate::value::ToolDeclarationId::new(1).unwrap(),
-                approved.canonical_arguments().clone(),
-            ),
-            TransitionRefusal::SanitizerUnapplicable,
-        ),
-    ] {
-        let mut forged = log.clone();
-        let Fact::CandidateDerived {
-            derived: DerivedCandidate::Call { call, .. },
-            ..
-        } = &mut forged[derived_at]
-        else {
-            unreachable!("found above")
-        };
-        *call = forged_call;
-        assert_eq!(e.validate_replay(&forged), Err(refusal));
-    }
+    let mut forged = log.clone();
+    let Fact::CandidateDerived {
+        derived: DerivedCandidate::Call { call, .. },
+        ..
+    } = &mut forged[derived_at]
+    else {
+        unreachable!("found above")
+    };
+    *call = ResolvedCall::new(ToolName::new("note"), approved.canonical_arguments().clone());
+    assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ForgedLabel));
 }
 
 #[test]
@@ -554,7 +543,7 @@ fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_a
         .clone()
         .with_annotation(Some(read_pin(&unpinned, &["partner"])));
     assert_eq!(
-        proposal.declaration_id(),
+        e.registry.selected(&proposal).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     let log = vec![opened(&e)];
@@ -571,7 +560,7 @@ fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_a
     .expect("the hop runs");
     let approved = approved_by(&hopped);
     assert_eq!(
-        approved.declaration_id(),
+        e.registry.selected(&approved).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     assert!(
@@ -582,7 +571,7 @@ fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_a
     assert_eq!(e.validate_replay(&hopped_log), Ok(()));
     let facts = taken(&e, &hopped_log, "b2", &approved);
     assert_eq!(
-        opened_contract_of(&facts),
+        opened_contract_of(&e, &facts),
         (
             crate::value::ToolDeclarationId::new(1).unwrap(),
             classified_read(),
@@ -605,7 +594,10 @@ fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_a
     let kept = approved_by(
         &execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, Some(fresh.clone()))).expect("the hop runs"),
     );
-    assert_eq!(kept.declaration_id(), crate::value::ToolDeclarationId::new(0).unwrap());
+    assert_eq!(
+        e.registry.selected(&kept).unwrap(),
+        crate::value::ToolDeclarationId::new(0).unwrap()
+    );
     assert_eq!(kept.annotation(), Some(&fresh));
 }
 
@@ -662,7 +654,7 @@ fn a_rewrite_within_the_declaration_is_annotated_afresh() {
         other => panic!("the substitution re-plans over the derived call, got {other:?}"),
     };
     assert_eq!(
-        block.call.declaration_id(),
+        e.registry.selected(&block.call).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     assert_eq!(block.call.annotation(), Some(&answer));
@@ -700,7 +692,7 @@ fn a_rewrite_within_the_declaration_is_annotated_afresh() {
     .expect("the hop runs");
     let approved = approved_by(&hopped);
     assert_eq!(
-        approved.declaration_id(),
+        e.registry.selected(&approved).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     assert_eq!(approved.annotation(), Some(&widened));
@@ -786,7 +778,7 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
         .resolve_call(ToolName::new("send"), br#"{"to":"partner-desk"}"#)
         .expect("the call resolves");
     assert_eq!(
-        proposal.declaration_id(),
+        e.registry.selected(&proposal).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
     let log = vec![opened(&e)];
@@ -811,7 +803,7 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
         .expect("the hop runs");
     let approved = approved_by(&hopped);
     assert_eq!(
-        approved.declaration_id(),
+        e.registry.selected(&approved).unwrap(),
         crate::value::ToolDeclarationId::new(0).unwrap()
     );
     let log = [log, appended_facts(hopped)].concat();
@@ -827,32 +819,32 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
     assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
 }
 
+/// A call's record names no declaration: replay selects one by the tool and arguments. An
+/// ordinal an earlier build recorded beside them is not read.
 #[test]
-fn replay_refuses_a_later_contract_for_arguments_matching_an_earlier_one() {
+fn replay_selects_a_recorded_calls_declaration_and_reads_no_recorded_ordinal() {
     let e = engine(vec![plain_tool("read(path:*)"), plain_tool("read")]);
     let call = e
         .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#)
         .unwrap();
     let opening = vec![opened(&e)];
-    let mut facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
-    assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
-
-    let later = crate::value::ToolDeclarationId::new(1).unwrap();
-    for fact in &mut facts {
-        match fact {
-            Fact::ProposalBatchDecided { proposals, .. } => {
-                let original = &proposals[0];
-                proposals[0] =
-                    ResolvedCall::new_keyed(original.tool().clone(), later, original.canonical_arguments().clone());
-            }
-            Fact::DispatchOpened { declaration, .. } => *declaration = later,
-            _ => {}
+    let facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
+    let mut wire = serde_json::to_value(&facts).expect("the batch is JSON");
+    assert!(
+        !wire.to_string().contains("\"declaration\""),
+        "no record stores a selection"
+    );
+    for fact in wire.as_array_mut().expect("a batch is an array") {
+        if let Some(decided) = fact.get_mut("ProposalBatchDecided") {
+            decided["proposals"][0]["declaration"] = 1.into();
+        }
+        if let Some(opened) = fact.get_mut("DispatchOpened") {
+            opened["declaration"] = 1.into();
         }
     }
-    assert_eq!(
-        e.validate_replay(&[opening, facts].concat()),
-        Err(TransitionRefusal::MisdecidedBatch)
-    );
+    let recorded: Vec<Fact> = serde_json::from_value(wire).expect("an earlier build's batch reads");
+    assert_eq!(recorded, facts);
+    assert_eq!(e.validate_replay(&[opening, recorded].concat()), Ok(()));
 }
 
 #[test]
@@ -870,7 +862,6 @@ fn replay_refuses_a_corrupt_dispatched_call() {
                 trajectory: traj(),
                 dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
                 tool: ToolName::new(tool),
-                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&payload),
                 proposed_label: Label::new(TRUSTED, Audience::public()),
                 receiving: Label::new(TRUSTED, Audience::public()),
@@ -879,6 +870,7 @@ fn replay_refuses_a_corrupt_dispatched_call() {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: crate::fact::ReleaseTerms::none(),
             },
         ]
     };
@@ -902,15 +894,6 @@ fn replay_refuses_a_corrupt_dispatched_call() {
     assert!(matches!(
         e.validate_replay(&dispatched("send", json!({ "to": "hr" }), &smuggled)),
         Err(TransitionRefusal::DigestMismatch)
-    ));
-    let mut forged_contract = dispatched("send", json!({ "to": "hr" }), &good);
-    let Fact::DispatchOpened { declaration, .. } = &mut forged_contract[1] else {
-        unreachable!("the fixture opens one dispatch")
-    };
-    *declaration = crate::value::ToolDeclarationId::new(99).unwrap();
-    assert!(matches!(
-        e.validate_replay(&forged_contract),
-        Err(TransitionRefusal::UnknownTool(name)) if name == "send"
     ));
 }
 

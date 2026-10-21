@@ -242,6 +242,12 @@ struct Opening<'a> {
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
 pub(super) const RESOLUTION_ROUNDS: u32 = 8;
 
+/// How many publishes one event follows before it refuses. Each one means the head moved
+/// while the event was decided; a run this long is a publisher looping, not a policy change.
+/// Exceeding it surfaces [`EventError::PolicyMoved`], an operational refusal the harness
+/// retries: the next attempt decides at the head.
+const PUBLISHES_FOLLOWED: u32 = 4;
+
 /// The event a drive runs for, as far as its consults' records join it: the host's call
 /// id, or the offer being executed. A proposal's call id also binds the dispatch it opens,
 /// and its prompt keys a fan-out spawn it releases.
@@ -280,9 +286,12 @@ fn fresh_entropy() -> OfferNonce {
 /// ends; nothing caches a session across events. That is what makes the
 /// deployment snapshot below an event-scoped read rather than a
 /// trajectory-scoped one, and a dispatcher that started caching sessions
-/// would have to take the snapshot per event instead.
+/// would have to take the snapshot per event instead. The snapshot moves only
+/// between attempts of one decision, when a publish moved the head under it
+/// ([`Session::follow_head`]); the engine that frames a consult and the externals
+/// that answer it are always one snapshot's.
 pub struct Session {
-    deployment: Arc<Deployment>,
+    deployment: std::sync::RwLock<Arc<Deployment>>,
     inner: Arc<Inner>,
     trajectory: TrajectoryId,
     root: TrajectoryId,
@@ -298,7 +307,7 @@ impl Session {
         presentation: EmbeddedPresentationOptions,
     ) -> Session {
         Session {
-            deployment,
+            deployment: std::sync::RwLock::new(deployment),
             inner,
             trajectory,
             root,
@@ -306,18 +315,34 @@ impl Session {
         }
     }
 
-    fn policy(&self, log: &appa_eventlog::Log) -> Result<crate::engine::PolicyEngine<'_>, EventError> {
-        self.inner.resolve_policy(&self.deployment, log)
+    /// The deployment snapshot this event decides under.
+    pub(crate) fn deployment(&self) -> Arc<Deployment> {
+        Arc::clone(
+            &self
+                .deployment
+                .read()
+                .expect("the session's deployment lock is never poisoned: no panic runs while it is held"),
+        )
+    }
+
+    /// Take the deployment this view now serves after a publish moved the head under `stale`.
+    /// `false` when it serves no later revision than `stale`: a view pinned to one revision
+    /// cannot follow. The operational refusal reaches its host, which reads and pins the head.
+    fn follow_head(&self, stale: &Deployment) -> bool {
+        let serving = self.inner.deployment();
+        if serving.revision() <= stale.revision() {
+            return false;
+        }
+        *self
+            .deployment
+            .write()
+            .expect("the session's deployment lock is never poisoned: no panic runs while it is held") = serving;
+        true
     }
 
     #[cfg(test)]
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
         &self.trajectory
-    }
-
-    #[cfg(test)]
-    pub(crate) fn deployment(&self) -> &Deployment {
-        &self.deployment
     }
 
     /// The actor's turn is over. Calls still open here got no outcome
@@ -411,8 +436,9 @@ impl Session {
     /// The reader this session's family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Result<Option<ReaderId>, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         Ok(view.principal().cloned())
     }
 
@@ -423,8 +449,9 @@ impl Session {
     ///
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
             Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
@@ -469,7 +496,9 @@ impl Session {
         prompt: Option<PromptKey>,
     ) -> Result<ToolCallDecision, EventError> {
         if let Some(id) = super::peer::held_read(&call) {
-            let basis = super::peer::held_basis(&self.inner.store, &self.root, &id)?;
+            let log = self.inner.log(&self.root)?;
+            let chain = self.inner.trust_chain(&self.deployment(), &log)?;
+            let basis = super::peer::held_basis(&self.inner.store, &self.root, &id, &chain)?;
             return self.propose_tool_call(call, call_id, spawn, prompt, Some(basis)).await;
         }
         let Some(files) = &self.inner.shared.files else {
@@ -486,29 +515,41 @@ impl Session {
             }
             return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
         }
-        match call.cwd.as_deref() {
-            Some(cwd) => {
-                files
-                    .bind(&self.inner.store, &self.root, cwd)
-                    .map_err(super::files::refused)?;
-            }
-            None => {
-                files
-                    .store(&self.inner.store, &self.root)
-                    .map_err(super::files::refused)?;
-            }
+        let ledger_policy = match call.cwd.as_deref() {
+            Some(cwd) => files.bind(&self.inner.store, &self.root, cwd),
+            None => files.store(&self.inner.store, &self.root),
         }
+        .and_then(|store| store.policy())
+        .map_err(super::files::refused)?;
         let (operation, path) = super::files::operation(&call)?;
         let log = self.inner.log(&self.root)?;
-        if crate::engine::policy_file_key(log.policy_file()) != files.policy_key
-            || crate::engine::policy_file_key(self.deployment.config.policy_file().bytes()) != files.policy_key
-        {
+        let deployment = self.deployment();
+        // A family shares the ledger with every family of its deployment while the ledger opened
+        // under a policy file the deployment published with the trust chain the family is judged
+        // under: the ledger's labels rank against that chain.
+        let followed = log.deployment();
+        let shares_ledger = followed.as_str() == files.deployment
+            && match self
+                .inner
+                .store
+                .published_as(followed, &ledger_policy)
+                .map_err(|error| EventError::Storage(error.to_string()))?
+            {
+                Some(revision) => {
+                    let ledger_chain = self.inner.replay_engine(revision.value(), None)?;
+                    let judging = self.inner.trust_chain(&deployment, &log)?;
+                    ledger_chain.trust_chain().names().eq(judging.names())
+                }
+                None => false,
+            };
+        if !shares_ledger {
             return Err(super::files::refused(
-                "the workspace ledger and trajectory must use the same policy",
+                "the workspace ledger must belong to the trajectory's policy and rank its labels against \
+                 the same trust chain",
             ));
         }
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log)?;
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log)?;
         let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
         let key = super::files::key(&expected)?;
         let pin = match operation {
@@ -577,7 +618,7 @@ impl Session {
                     return Err(super::files::refused("dispatch changed while reserving the file"));
                 }
                 let log = self.inner.log(&self.root)?;
-                let view = policy.engine().rebuild_view(&log)?;
+                let view = policy.rebuild_view(&log)?;
                 let label = policy.engine().file_output_label(&view, dispatch)?;
                 files
                     .store(&self.inner.store, &self.root)
@@ -666,7 +707,7 @@ impl Session {
                         feedback: join_feedback(feedback),
                         offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
                         display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
-                        review: join_review(feedback, &self.deployment.externals),
+                        review: join_review(feedback, &self.deployment().externals),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
@@ -679,7 +720,8 @@ impl Session {
     /// wildcard does not count. What a spawn needs under [`super::SpawnCoverage::Declared`].
     fn names_tool(&self, tool: &str) -> Result<bool, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
         Ok(policy.engine().names_tool(tool))
     }
 
@@ -729,7 +771,8 @@ impl Session {
             return Err(EventError::UnknownDispatch);
         };
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
         if !is_open_call(&call, || policy.engine().canonical_bytes(&call), open) {
             return Err(EventError::OutcomeMismatch);
         }
@@ -791,7 +834,8 @@ impl Session {
         outcome: &ToolOutcome,
     ) -> Result<(), EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
         let open = self.carried_calls()?;
         let dispatch = match classify_report_identified(
             call,
@@ -823,7 +867,7 @@ impl Session {
         };
         if row.recipient != self.trajectory.as_str()
             || row.status != appa_eventlog::embedded::EmbeddedStatus::Read
-            || super::embedded::message_basis(&row) != basis
+            || super::embedded::message_basis(&row, policy.engine().trust_chain()) != basis
         {
             return Ok(());
         }
@@ -849,7 +893,8 @@ impl Session {
         if self.inner.shared.files.is_some() && super::files::owns(&call) {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
-            let policy = self.policy(&log)?;
+            let deployment = self.deployment();
+            let policy = self.inner.resolve_policy(&deployment, &log)?;
             let open = self.carried_calls()?;
             let dispatch = classify_report_identified(
                 &call,
@@ -898,12 +943,12 @@ impl Session {
                 }
                 ToolOutcome::Success { .. } => {}
             }
-            return outcome_decision(decision, &self.deployment.externals);
+            return outcome_decision(decision, &self.deployment().externals);
         }
         let o = self.cap_outcome(o);
         outcome_decision(
             self.report_outcome(&call, call_id.as_deref(), &o).await?,
-            &self.deployment.externals,
+            &self.deployment().externals,
         )
     }
 
@@ -934,7 +979,8 @@ impl Session {
     /// Rebinding the same pair inherits the parent's current label in the child.
     pub fn on_spawn_resume(&self, call: ProposedCall, child: TrajectoryId) -> Result<(), EventError> {
         let opened = self.inner.log(&self.root)?;
-        let policy = self.policy(&opened)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &opened)?;
         let decision = self.drive(&policy, true, Opening::default(), |context| {
             let dispatch = context.classify_report(&call, None)?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
@@ -1057,7 +1103,7 @@ impl Session {
             // The engine decided on an event this handler built from the view.
             match plan.expect("the spawn result is typed before the engine decides") {
                 SpawnPlan::Outcome => {
-                    return outcome_decision(decision, &self.deployment.externals).map(SpawnResultDecision::Outcome);
+                    return outcome_decision(decision, &self.deployment().externals).map(SpawnResultDecision::Outcome);
                 }
                 SpawnPlan::Close(refusal) => return Err(refusal),
                 SpawnPlan::Bind { child, .. } => match decision.then {
@@ -1067,13 +1113,13 @@ impl Session {
                     _ => return Err(EventError::UnexpectedDecision),
                 },
                 SpawnPlan::Replay => {
-                    outcome_decision(decision, &self.deployment.externals)?;
+                    outcome_decision(decision, &self.deployment().externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned {
                         value: value.expect("a replay repeats a delivered message"),
                     }));
                 }
                 SpawnPlan::Withheld => {
-                    outcome_decision(decision, &self.deployment.externals)?;
+                    outcome_decision(decision, &self.deployment().externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
                         feedback: UNCHECKED_RETURN.to_string(),
                     }));
@@ -1141,7 +1187,7 @@ impl Session {
                     offers,
                     review,
                     display.into_iter().collect(),
-                    &self.deployment.externals,
+                    &self.deployment().externals,
                 ),
             }),
             _ => Err(EventError::UnexpectedDecision),
@@ -1203,7 +1249,8 @@ impl Session {
     ) -> Result<(Session, Option<String>), EventError> {
         let child = id.clone();
         let opened = self.inner.log(&self.root)?;
-        let policy = self.policy(&opened)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &opened)?;
         let mut contract = None;
         let decision = self.drive(&policy, true, Opening::default(), |context| {
             let fork = fork(context)?;
@@ -1223,7 +1270,7 @@ impl Session {
             Next::Done => Ok((
                 Session::attach(
                     Arc::clone(&self.inner),
-                    Arc::clone(&self.deployment),
+                    self.deployment(),
                     id,
                     self.root.clone(),
                     EmbeddedPresentationOptions::default(),
@@ -1250,8 +1297,9 @@ impl Session {
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         if policy.engine().liveness(&view, &self.trajectory) == Liveness::Ended {
             return Ok(match value {
                 None => ChildReturnDecision::NoValue,
@@ -1323,8 +1371,9 @@ impl Session {
 
     fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         Ok(policy.engine().liveness(&view, trajectory))
     }
 
@@ -1332,7 +1381,7 @@ impl Session {
         match outcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(body),
-            } if body.len() > self.deployment.config.externals.max_body_bytes => ToolOutcome::Success {
+            } if body.len() > self.deployment().config.externals.max_body_bytes => ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },
             other => other,
@@ -1351,8 +1400,42 @@ impl Session {
         case.refusal()
     }
 
+    /// Decide one event at the head. A decision made at a revision a publish moved past does
+    /// not commit ([`EventError::PolicyMoved`]); when this view now serves the head, the event
+    /// is decided afresh there, consults included: an answer gathered for the earlier
+    /// revision's question is not carried to the next.
     async fn drive_with_evidence(
         &self,
+        mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
+    ) -> Result<EngineDecision, EventError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let deployment = self.deployment();
+            match self
+                .drive_at(&deployment, &mut event, elicitation, ruling, occasion)
+                .await
+            {
+                Err(EventError::PolicyMoved { .. })
+                    if attempt < PUBLISHES_FOLLOWED && self.follow_head(&deployment) =>
+                {
+                    tracing::debug!(
+                        root = %self.root.0,
+                        attempt,
+                        "a publish moved the head under the decision: deciding again at the head"
+                    );
+                }
+                decided => return decided,
+            }
+        }
+    }
+
+    async fn drive_at(
+        &self,
+        deployment: &Deployment,
         mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
@@ -1363,8 +1446,14 @@ impl Session {
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),
         };
         let opened = self.inner.log(&self.root)?;
-        let policy = self.policy(&opened)?;
-        tracing::Span::current().record("appa.policy.id", crate::engine::policy_file_key(opened.policy_file()));
+        let policy = self.inner.resolve_policy(deployment, &opened)?;
+        tracing::Span::current().record(
+            "appa.policy.id",
+            match policy.engine().revision() {
+                Some(revision) => format!("{}@{revision}", opened.deployment()),
+                None => crate::engine::policy_file_key(opened.policy_file()),
+            },
+        );
         // External answers carry the exact call or group they answered for, and the
         // engine matches them only while that is still the one in front of it — a
         // rewritten call is annotated afresh by construction, so this loop carries
@@ -1428,7 +1517,7 @@ impl Session {
             // wait for it rather than lose their compare-and-swap to it.
             let step = self.inner.step(&self.root)?;
             let log = self.inner.step_log(&step, &self.root)?;
-            let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+            let view = policy.rebuild_view(&log).map_err(EventError::from)?;
             let context = Decided {
                 session: self,
                 policy,
@@ -1540,6 +1629,8 @@ impl Session {
                 .try_with(|hold| hold.clone())
                 .ok()
                 .filter(|hold| hold.root == self.root.as_str());
+            // A batch an engine at a revision decided carries that revision on its first record,
+            // and commits only while the revision is still the deployment's head.
             let appended = if let Some(hold) = hold {
                 step.append_holding_embedded_read(
                     &log,
@@ -1553,15 +1644,24 @@ impl Session {
                     },
                 )
             } else {
-                match host_record.as_ref() {
-                    Some(record) => step.append_host(&log, facts, record),
-                    None => step.append(&log, facts),
-                }
+                step.append(&log, facts, host_record.as_ref())
             };
             match appended {
-                Ok(()) => return Ok(decision),
+                Ok(()) => {
+                    self.inner.shared.spawn_holds.appended();
+                    return Ok(decision);
+                }
                 Err(appa_eventlog::AppendError::ReadClaimLost) => {
                     return Err(EventError::OutcomeMismatch);
+                }
+                // A publish moved the head after this event read it: the decision was made at a
+                // revision that no longer decides. Nothing was written; the event decides again
+                // once this view serves the head.
+                Err(appa_eventlog::AppendError::PolicyMoved { head }) => {
+                    return Err(EventError::PolicyMoved {
+                        deployment: self.inner.line().to_string(),
+                        head: head.map_or_else(|| "none".to_string(), |head| head.to_string()),
+                    });
                 }
                 Err(appa_eventlog::AppendError::Conflict { .. }) => {
                     tracing::debug!(
@@ -1605,7 +1705,8 @@ impl Session {
     ) -> crate::external::ConsultOutcome {
         let started_at = std::time::SystemTime::now();
         let started = std::time::Instant::now();
-        let externals = &self.deployment.externals;
+        let deployment = self.deployment();
+        let externals = &deployment.externals;
         let consulting = async {
             match &self.inner.recorder {
                 // Boxed: the transport future is large, and every drive awaits it deep in the stack.
@@ -1744,7 +1845,8 @@ impl Session {
             } => {
                 // Every context provider answers first, together; one that does not leaves
                 // an error in the context and the Annotator is still asked.
-                let consults = self.deployment.externals.context_consults(context);
+                let deployment = self.deployment();
+                let consults = deployment.externals.context_consults(context);
                 let context = gather_context(&consults, |consult| {
                     self.timed_consult(consult, None, None, occasion, Some(call))
                 })
@@ -2982,8 +3084,11 @@ name = "read"
 parameters = { type = "object", properties = { path = { type = "string" } } }
 "#;
 
+    /// A root opened under one policy follows its deployment to the next: after a restart under
+    /// an edited policy, its earlier batches replay under the revision that decided them, and its
+    /// next call is decided at the head, exactly as a new root's is.
     #[tokio::test]
-    async fn an_old_root_decides_under_its_opening_policy() {
+    async fn an_old_root_decides_at_the_head_its_restart_published() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         {
@@ -3007,13 +3112,40 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(READ_ONLY, None), db, None).expect("the edited deployment opens");
 
         let old = runtime.session(&root(), &root()).expect("the old root reopens");
-        let decision = old
-            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
-            .await
-            .expect("the old root decides");
+        let refused = old.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await;
         assert!(
-            matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
-            "the old root keeps fetch"
+            matches!(refused, Err(EventError::UndeclaredTool { tool }) if tool == "fetch"),
+            "the old root follows the head, which declares no fetch"
+        );
+        let read = old
+            .on_tool_call(
+                ProposedCall {
+                    tool: "read".to_string(),
+                    arguments: raw(serde_json::json!({"path": "a.txt"})),
+                    cwd: None,
+                },
+                false,
+            )
+            .await
+            .expect("the old root decides at the head");
+        assert!(matches!(read, ToolCallDecision::Allow { spawn: None, .. }));
+        let stamps: Vec<Option<u64>> = runtime
+            .inner
+            .log(&root())
+            .expect("the log reads")
+            .stamped_batches()
+            .iter()
+            .map(|batch| batch.revision.map(|revision| revision.value()))
+            .collect();
+        assert_eq!(
+            stamps.first(),
+            Some(&Some(1)),
+            "the opening stays at the revision that decided it"
+        );
+        assert_eq!(
+            stamps.last(),
+            Some(&Some(2)),
+            "the next decision is stamped with the head"
         );
 
         let new = runtime
@@ -3041,12 +3173,19 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         );
     }
 
+    /// The head serves from memory; an earlier revision a root's batches were decided under is
+    /// read from the store to replay them, and its absence refuses the root.
     #[tokio::test]
-    async fn a_missing_stored_policy_file_refuses_the_root() {
+    async fn a_missing_file_of_an_earlier_revision_refuses_the_root() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        {
+            let runtime =
+                Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
+            runtime.create_session(root(), None).expect("a fresh id opens");
+        }
+        let runtime = Runtime::open(config_with(READ_ONLY, None), db, None).expect("the edited deployment opens");
+        let session = runtime.session(&root(), &root()).expect("the old root reopens");
         runtime.store().forget_policy_files();
         let error = session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
@@ -3055,13 +3194,21 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
     }
 
+    /// A revision names its file by the hash of its exact bytes: a stored file that no longer
+    /// hashes to that key is refused, even where it would compile to the same policy.
     #[tokio::test]
-    async fn a_stored_file_with_the_same_identity_but_different_bytes_is_refused() {
+    async fn a_stored_file_that_is_not_its_revisions_bytes_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root(), None).expect("a fresh id opens");
-        let mut tampered = runtime.config_bytes();
+        let opened = {
+            let runtime =
+                Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
+            runtime.create_session(root(), None).expect("a fresh id opens");
+            runtime.config_bytes()
+        };
+        let runtime = Runtime::open(config_with(READ_ONLY, None), db, None).expect("the edited deployment opens");
+        let session = runtime.session(&root(), &root()).expect("the old root reopens");
+        let mut tampered = opened;
         tampered.extend_from_slice(b"\n# tampered\n");
         runtime.store().corrupt_policy_files(&tampered);
         let error = session
@@ -3088,8 +3235,11 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
     }
 
+    /// Removing a policy's authority together with its binding cannot strand an old root: the
+    /// root follows the head, which no longer declares the call that needed the authority. When
+    /// both come back, the root decides at that head and the restored binding answers.
     #[tokio::test]
-    async fn a_missing_binding_abstains_and_a_restored_binding_answers_for_an_old_root() {
+    async fn an_old_root_follows_the_head_through_a_removed_binding_and_its_return() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         {
@@ -3110,26 +3260,13 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             let runtime =
                 Runtime::open(config_with(READ_ONLY, None), db.clone(), None).expect("the edited deployment opens");
             let session = runtime.session(&root(), &root()).expect("the old root reopens");
-            session
-                .on_tool_call(wire(500), false)
-                .await
-                .expect("the block is delivered");
-            let offer = latest_offer(&runtime);
-            let log_before = runtime.log_facts(&root());
-            let got = session
-                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
-                .await
-                .expect("the no-answer is delivered");
-            assert!(matches!(got, RemedyDecision::NoAnswer { .. }), "got {got:?}");
-            let log_after = runtime.log_facts(&root());
-            assert_eq!(log_before.len(), log_after.len(), "an abstention appends no fact",);
-            assert!(matches!(
-                session
-                    .on_remedy(offer, RemedyArguments::default(), None, None)
-                    .await
-                    .expect("the offer is still live"),
-                RemedyDecision::NoAnswer { .. },
-            ));
+            assert!(
+                matches!(
+                    session.on_tool_call(wire(500), false).await,
+                    Err(EventError::UndeclaredTool { tool }) if tool == "wire"
+                ),
+                "the head declares no wire, so nothing asks the removed authority"
+            );
         }
 
         // The binding comes back with the declaration that registers it: a binding no
@@ -5830,11 +5967,11 @@ delta = {}
         );
     }
 
-    /// A root fork decides under the policy its parent's family opened with, whatever the deployment
-    /// serves when the root fork is taken: after a reload drops `fetch`, a root fork of an older root still
-    /// has it, and does not have the reloaded policy's `read`.
+    /// A root fork belongs to its parent's deployment and decides at its head, whatever revision
+    /// opened the parent: after a reload drops `fetch`, a root fork of an older root has the
+    /// reloaded policy's `read` and no `fetch`.
     #[tokio::test]
-    async fn a_root_fork_taken_after_a_reload_decides_under_its_parents_opening_policy() {
+    async fn a_root_fork_taken_after_a_reload_decides_at_the_head() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -5845,8 +5982,11 @@ delta = {}
 
         let fork = open_root_fork_session(&runtime, &root(), &root_fork_id("fork"));
         assert!(
-            runs(&fork, fetch(serde_json::json!({"a": 1}))).await,
-            "the fork keeps its parent's fetch"
+            matches!(
+                fork.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+                Err(EventError::UndeclaredTool { tool }) if tool == "fetch"
+            ),
+            "the fork belongs to its parent's deployment, whose head declares no fetch"
         );
         let read = ProposedCall {
             tool: "read".to_string(),
@@ -5856,9 +5996,9 @@ delta = {}
         assert!(
             matches!(
                 fork.on_tool_call(read, false).await,
-                Err(EventError::UndeclaredTool { tool }) if tool == "read"
+                Ok(ToolCallDecision::Allow { spawn: None, .. })
             ),
-            "the reloaded policy is not the fork's"
+            "the fork decides at the head"
         );
     }
 
@@ -8601,8 +8741,16 @@ max_body_bytes = 65536
             })
             .expect("the PostgreSQL store opens"),
         );
-        let runtime = Arc::new(Runtime::open_with_store(config, Arc::clone(&store), None).expect("the runtime opens"));
         let root = TrajectoryId(format!("pg-writers:{}", dir.path().display()));
+        // Each test serves a line of its own: the database is shared with every other test.
+        let runtime = Arc::new(
+            Runtime::open_with_store_on(
+                config,
+                Arc::clone(&store),
+                appa_eventlog::DeploymentName::new(root.0.clone()),
+            )
+            .expect("the runtime opens"),
+        );
         runtime.create_session(root.clone(), None).expect("a fresh id opens");
         (runtime, store, root)
     }

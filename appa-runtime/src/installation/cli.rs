@@ -1567,7 +1567,7 @@ mod tests {
     fn setup_notices_name_each_credential_the_benefit_and_the_steps() {
         let battery = |credentials: &[&str], benefit: Option<&str>, setup: &[&str]| Battery {
             base: appa_package::RelativePath::parse("appa.toml").unwrap(),
-            targets: Default::default(),
+            targets: appa_package::Targets::Base(appa_package::BatteryTarget::ALL.to_vec()),
             hosts: vec![appa_package::Host::ClaudeCode],
             namespaces: vec![],
             helpers: vec![],
@@ -1630,7 +1630,7 @@ mod tests {
         };
         let battery = Battery {
             base: appa_package::RelativePath::parse("appa.toml").unwrap(),
-            targets: Some(appa_package::TargetPolicies {
+            targets: appa_package::Targets::Split(appa_package::TargetPolicies {
                 single_user: target_policy(None),
                 multi_user: target_policy(Some("Install the App.")),
             }),

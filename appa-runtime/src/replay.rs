@@ -15,6 +15,11 @@
 //! and nothing is offered. Taking an offer goes through the runtime's own remedy path, so the
 //! records read as if the party had answered, and the trace continues from there.
 //!
+//! A step may omit its `expect` line. Such a step is observed: the runner reports what the
+//! call got and never fails on it. An allowed call runs. A block that offers the plain
+//! narrowing acceptance is accepted, as `expect allow` does. Any other block takes nothing:
+//! the call never ran, so its `delta` does not land.
+//!
 //! A step may propose `appa/do_something` instead of a tool. Its one argument, `requires`, is
 //! a tool contract's `requires` table written as JSON, and the call is judged against that
 //! table alone: it asks what the trajectory allows at this step without naming a tool that
@@ -37,6 +42,7 @@ use appa_runtime_api::{
     Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall,
     ToolOutcome, TrajectoryId,
 };
+use serde::Serialize;
 use serde_json::value::RawValue;
 
 use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime};
@@ -81,6 +87,42 @@ impl Expect {
             _ => false,
         }
     }
+
+    fn matches(&self, got: &Got) -> bool {
+        match (self, got) {
+            (Expect::Allow, Got::Allowed) => true,
+            (Expect::Deny, Got::Blocked(kinds)) => kinds.is_empty(),
+            (_, Got::Blocked(kinds)) => kinds.iter().any(|kind| self.takes(kind)),
+            (_, Got::Allowed) => false,
+        }
+    }
+}
+
+/// What a step is judged against: an expected decision, or none for an observed step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    Expect(Expect),
+    Observe,
+}
+
+impl fmt::Display for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Check::Expect(expect) => write!(f, "{expect}"),
+            Check::Observe => f.write_str("observe"),
+        }
+    }
+}
+
+impl Check {
+    /// Whether a blocked call's offer is the one the runner takes. An observed step takes
+    /// only the plain narrowing acceptance, as `expect allow` does.
+    fn takes(&self, kind: &OfferKind) -> bool {
+        match self {
+            Check::Expect(expect) => expect.takes(kind),
+            Check::Observe => *kind == OfferKind::Accept,
+        }
+    }
 }
 
 /// What a step proposes: a tool by its canonical id, or `appa/do_something`.
@@ -109,7 +151,7 @@ impl fmt::Display for StepTool {
     }
 }
 
-/// One proposed call and the decision it must get. The arguments are the JSON object the
+/// One proposed call and what it is checked against. The arguments are the JSON object the
 /// block spells, values byte-for-byte as written: the engine canonicalizes them, the runner
 /// never does.
 #[derive(Debug, Clone)]
@@ -117,7 +159,7 @@ pub struct Step {
     pub line: usize,
     pub tool: StepTool,
     pub arguments: Box<RawValue>,
-    pub expect: Expect,
+    pub check: Check,
 }
 
 /// One trace file: the steps of one root trajectory, in order.
@@ -142,9 +184,11 @@ pub struct SyntaxError {
 }
 
 /// Parse one trace file. The grammar is strict and line-oriented: a step is a canonical tool id
-/// or `appa/do_something` and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`,
-/// `expect withhold`, `expect deny`, `expect authority [name]`, or `expect sanitizer [name]`.
-/// Blank lines and lines whose first character is `#` are skipped anywhere.
+/// or `appa/do_something` and `{`, one `key: <JSON value>` per line, `}`, then optionally
+/// `expect allow`, `expect withhold`, `expect deny`, `expect authority [name]`, or
+/// `expect sanitizer [name]`. A step without an `expect` line is observed; the next call or the
+/// end of the file follows its `}`. Blank lines and lines whose first character is `#` are
+/// skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
     let mut parser = Parser {
         path,
@@ -201,8 +245,29 @@ impl Parser<'_> {
                 line: at,
                 tool,
                 arguments,
-            } => self.expect(number, line, at, tool, arguments),
+            } => match line.split_whitespace().next() {
+                Some("expect") => self.expect(number, line, at, tool, arguments),
+                _ if line.contains('{') => {
+                    self.observe(at, tool, arguments);
+                    self.open(number, line)
+                }
+                _ => Err(self.error(
+                    number,
+                    format!(
+                        "expected {EXPECT_WORDS} or the next tool call after the call at line {at}, found `{line}`"
+                    ),
+                )),
+            },
         }
+    }
+
+    fn observe(&mut self, at: usize, tool: StepTool, arguments: Box<RawValue>) {
+        self.steps.push(Step {
+            line: at,
+            tool,
+            arguments,
+            check: Check::Observe,
+        });
     }
 
     fn open(&mut self, number: usize, line: &str) -> Result<(), SyntaxError> {
@@ -313,7 +378,7 @@ impl Parser<'_> {
             line: at,
             tool,
             arguments,
-            expect,
+            check: Check::Expect(expect),
         });
         Ok(())
     }
@@ -343,19 +408,18 @@ impl Parser<'_> {
         Ok(arguments_of(fields))
     }
 
-    fn finish(self) -> Result<Trace, SyntaxError> {
-        match &self.state {
-            State::Outside => Ok(Trace {
-                path: self.path.to_path_buf(),
-                steps: self.steps,
-            }),
+    fn finish(mut self) -> Result<Trace, SyntaxError> {
+        match std::mem::replace(&mut self.state, State::Outside) {
+            State::Outside => {}
             State::InBlock { line, tool, .. } => {
-                Err(self.error(*line, format!("the `{tool}` call is not closed with `}}`")))
+                return Err(self.error(line, format!("the `{tool}` call is not closed with `}}`")));
             }
-            State::AfterBlock { line, tool, .. } => {
-                Err(self.error(*line, format!("the `{tool}` call has no {EXPECT_WORDS}")))
-            }
+            State::AfterBlock { line, tool, arguments } => self.observe(line, tool, arguments),
         }
+        Ok(Trace {
+            path: self.path.to_path_buf(),
+            steps: self.steps,
+        })
     }
 }
 
@@ -392,26 +456,29 @@ impl fmt::Display for Got {
             Got::Allowed => f.write_str("allow"),
             Got::Blocked(kinds) if kinds.is_empty() => f.write_str("deny"),
             Got::Blocked(kinds) => {
-                let words: Vec<String> = kinds
-                    .iter()
-                    .map(|kind| match kind {
-                        OfferKind::Accept => "allow".to_string(),
-                        OfferKind::Withhold => "withhold".to_string(),
-                        OfferKind::Authority { names } => format!("authority {}", names.join("+")),
-                        OfferKind::Sanitizer { name } => format!("sanitizer {name}"),
-                    })
-                    .collect();
+                let words: Vec<String> = kinds.iter().map(offer_word).collect();
                 f.write_str(&words.join("|"))
             }
         }
     }
 }
 
+/// An offer kind in the words of the `expect` line that takes it.
+fn offer_word(kind: &OfferKind) -> String {
+    match kind {
+        OfferKind::Accept => "allow".to_string(),
+        OfferKind::Withhold => "withhold".to_string(),
+        OfferKind::Authority { names } => format!("authority {}", names.join("+")),
+        OfferKind::Sanitizer { name } => format!("sanitizer {name}"),
+    }
+}
+
 /// What one step got. `taken` names the offer the runner took to get the call released, as
-/// the model would have: none for a call released as proposed.
+/// the model would have: none for a call released as proposed, or an observed block it left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     Passed {
+        got: Got,
         taken: Option<OfferKind>,
     },
     Mismatch {
@@ -419,12 +486,16 @@ pub enum StepOutcome {
         want: Expect,
         feedback: Option<String>,
     },
+    Observed {
+        got: Got,
+        taken: Option<OfferKind>,
+    },
     CannotRun(String),
 }
 
 impl StepOutcome {
-    fn passed(&self) -> bool {
-        matches!(self, StepOutcome::Passed { .. })
+    fn ends_file(&self) -> bool {
+        matches!(self, StepOutcome::Mismatch { .. } | StepOutcome::CannotRun(_))
     }
 }
 
@@ -432,7 +503,7 @@ impl StepOutcome {
 pub struct StepReport {
     pub line: usize,
     pub tool: StepTool,
-    pub expect: Expect,
+    pub check: Check,
     pub outcome: StepOutcome,
 }
 
@@ -460,7 +531,7 @@ impl TraceReport {
         match self.steps.last().map(|step| &step.outcome) {
             Some(StepOutcome::CannotRun(_)) => Verdict::CannotRun,
             Some(StepOutcome::Mismatch { .. }) => Verdict::Failed,
-            Some(StepOutcome::Passed { .. }) | None => Verdict::Ok,
+            Some(StepOutcome::Passed { .. } | StepOutcome::Observed { .. }) | None => Verdict::Ok,
         }
     }
 }
@@ -495,7 +566,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
     .await
     {
         HookDecision::Ack => {}
-        HookDecision::Refuse { detail } => {
+        HookDecision::Refuse { detail, .. } => {
             report.unopened = Some(detail);
             return report;
         }
@@ -506,11 +577,11 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
     }
     for step in &trace.steps {
         let outcome = run_step(runtime, &actor, step).await;
-        let ended = !outcome.passed();
+        let ended = outcome.ends_file();
         report.steps.push(StepReport {
             line: step.line,
             tool: step.tool.clone(),
-            expect: step.expect.clone(),
+            check: step.check.clone(),
             outcome,
         });
         if ended {
@@ -538,28 +609,24 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         }
         Proposed::CannotRun(detail) => return StepOutcome::CannotRun(detail),
     };
-    match (&got, &step.expect) {
-        (Got::Allowed, Expect::Allow) => StepOutcome::Passed { taken: None },
-        (Got::Blocked(kinds), Expect::Deny) if kinds.is_empty() => StepOutcome::Passed { taken: None },
+    let taking = match &step.tool {
         // `appa/do_something` asks what the trajectory allows; taking the offer would change it.
-        (Got::Blocked(kinds), expect)
-            if step.tool == StepTool::DoSomething && kinds.iter().any(|kind| expect.takes(kind)) =>
-        {
-            StepOutcome::Passed { taken: None }
-        }
-        (Got::Blocked(kinds), expect) if kinds.iter().any(|kind| expect.takes(kind)) => {
-            let (kind, offer) = offers
-                .into_iter()
-                .find(|(offered, _)| expect.takes(offered))
-                .expect("the kind was read from these offers");
-            match take_offer(runtime, actor, offer).await {
-                Ok(()) => StepOutcome::Passed { taken: Some(kind) },
-                Err(detail) => StepOutcome::CannotRun(detail),
-            }
-        }
-        _ => StepOutcome::Mismatch {
+        StepTool::DoSomething => None,
+        StepTool::Canonical(_) => offers.into_iter().find(|(offered, _)| step.check.takes(offered)),
+    };
+    let taken = match taking {
+        Some((kind, offer)) => match take_offer(runtime, actor, offer).await {
+            Ok(()) => Some(kind),
+            Err(detail) => return StepOutcome::CannotRun(detail),
+        },
+        None => None,
+    };
+    match &step.check {
+        Check::Observe => StepOutcome::Observed { got, taken },
+        Check::Expect(expect) if expect.matches(&got) => StepOutcome::Passed { got, taken },
+        Check::Expect(expect) => StepOutcome::Mismatch {
             got,
-            want: step.expect.clone(),
+            want: expect.clone(),
             feedback,
         },
     }
@@ -586,7 +653,7 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
         HookDecision::DenyCall { feedback, offers, .. } => Proposed::Denied { feedback, offers },
-        HookDecision::Refuse { detail } => Proposed::CannotRun(detail),
+        HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }
 }
@@ -604,7 +671,7 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
     };
     match hooks::handle(runtime, event).await {
         HookDecision::Ack | HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => Ok(()),
-        HookDecision::Refuse { detail } => Err(detail),
+        HookDecision::Refuse { detail, .. } => Err(detail),
         HookDecision::Block { reason } => Err(reason),
         other => Err(format!("the result answered {other:?}")),
     }
@@ -647,7 +714,7 @@ async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<
 }
 
 /// The counts one run ends with, and the exit code they select.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Summary {
     pub ok: usize,
     pub failed: usize,
@@ -655,6 +722,14 @@ pub struct Summary {
 }
 
 impl Summary {
+    fn add(&mut self, verdict: Verdict) {
+        match verdict {
+            Verdict::Ok => self.ok += 1,
+            Verdict::Failed => self.failed += 1,
+            Verdict::CannotRun => self.cannot_run += 1,
+        }
+    }
+
     pub fn exit_code(self) -> ExitCode {
         if self.cannot_run > 0 {
             ExitCode::from(2)
@@ -703,15 +778,22 @@ pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> s
             let line = step.line;
             let tool = &step.tool;
             match &step.outcome {
-                StepOutcome::Passed { taken } => {
+                StepOutcome::Passed { taken, .. } => {
                     if verbose {
                         writeln!(
                             out,
                             "ok    {path}:{line} {tool} {}{}",
-                            step.expect,
+                            step.check,
                             taken_note(taken.as_ref())
                         )?;
                     }
+                }
+                StepOutcome::Observed { got, taken } => {
+                    writeln!(
+                        out,
+                        "obs   {path}:{line} {tool} got {got}{}",
+                        taken_note(taken.as_ref())
+                    )?;
                 }
                 StepOutcome::Mismatch { got, want, feedback } => {
                     writeln!(out, "{path}:{line}: {tool}: got {got}, want {want}")?;
@@ -724,23 +806,108 @@ pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> s
                 }
             }
         }
-        match report.verdict() {
-            Verdict::Ok => {
-                summary.ok += 1;
-                writeln!(out, "ok    {path}")?;
-            }
-            Verdict::Failed => {
-                summary.failed += 1;
-                writeln!(out, "FAIL  {path}")?;
-            }
-            Verdict::CannotRun => {
-                summary.cannot_run += 1;
-                writeln!(out, "FAIL  {path}")?;
-            }
+        let verdict = report.verdict();
+        summary.add(verdict);
+        match verdict {
+            Verdict::Ok => writeln!(out, "ok    {path}")?,
+            Verdict::Failed | Verdict::CannotRun => writeln!(out, "FAIL  {path}")?,
         }
     }
     writeln!(out, "{summary}")?;
     Ok(summary)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JsonOutcome {
+    Passed,
+    Mismatch,
+    Observed,
+    CannotRun,
+}
+
+/// One step, or one trajectory that could not open, as a JSON Lines record.
+#[derive(Debug, Serialize)]
+struct JsonStep {
+    file: String,
+    line: Option<usize>,
+    tool: Option<String>,
+    check: Option<String>,
+    got: Option<String>,
+    offers: Vec<String>,
+    taken: Option<String>,
+    outcome: JsonOutcome,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonSummary {
+    summary: Summary,
+}
+
+impl JsonStep {
+    fn of(file: String, step: &StepReport) -> Self {
+        let (outcome, got, taken, detail) = match &step.outcome {
+            StepOutcome::Passed { got, taken } => (JsonOutcome::Passed, Some(got), taken.as_ref(), None),
+            StepOutcome::Mismatch { got, .. } => (JsonOutcome::Mismatch, Some(got), None, None),
+            StepOutcome::Observed { got, taken } => (JsonOutcome::Observed, Some(got), taken.as_ref(), None),
+            StepOutcome::CannotRun(detail) => (JsonOutcome::CannotRun, None, None, Some(detail.clone())),
+        };
+        let offers = match got {
+            Some(Got::Blocked(kinds)) => kinds.iter().map(offer_word).collect(),
+            Some(Got::Allowed) | None => Vec::new(),
+        };
+        JsonStep {
+            file,
+            line: Some(step.line),
+            tool: Some(step.tool.to_string()),
+            check: Some(step.check.to_string()),
+            got: got.map(Got::to_string),
+            offers,
+            taken: taken.map(offer_word),
+            outcome,
+            detail,
+        }
+    }
+}
+
+/// Print the reports as JSON Lines: one object per step that ran or could not run, one per
+/// trajectory that could not open, then the summary.
+pub fn render_json(reports: &[TraceReport], out: &mut impl Write) -> std::io::Result<Summary> {
+    let mut summary = Summary::default();
+    for report in reports {
+        let file = report.path.display().to_string();
+        if let Some(detail) = &report.unopened {
+            let unopened = JsonStep {
+                file: file.clone(),
+                line: None,
+                tool: None,
+                check: None,
+                got: None,
+                offers: Vec::new(),
+                taken: None,
+                outcome: JsonOutcome::CannotRun,
+                detail: Some(detail.clone()),
+            };
+            serde_json::to_writer(&mut *out, &unopened)?;
+            writeln!(out)?;
+        }
+        for step in &report.steps {
+            serde_json::to_writer(&mut *out, &JsonStep::of(file.clone(), step))?;
+            writeln!(out)?;
+        }
+        summary.add(report.verdict());
+    }
+    serde_json::to_writer(&mut *out, &JsonSummary { summary })?;
+    writeln!(out)?;
+    Ok(summary)
+}
+
+/// How `appa replay` prints its reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Text { verbose: bool },
+    Json,
 }
 
 /// Every `.appa` file the paths name: a file as itself, a directory as its `.appa` files,
@@ -784,7 +951,7 @@ fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
 /// The `appa replay` command: parse every trace, open the deployment over an in-memory log,
 /// run, print, and exit.
-pub fn main(config: &Path, modules: Option<PathBuf>, verbose: bool, paths: &[PathBuf]) -> ExitCode {
+pub fn main(config: &Path, modules: Option<PathBuf>, format: Format, paths: &[PathBuf]) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -843,7 +1010,11 @@ pub fn main(config: &Path, modules: Option<PathBuf>, verbose: bool, paths: &[Pat
     };
     let reports = executor.block_on(run(&runtime, &traces));
     let mut stdout = std::io::stdout().lock();
-    match render(&reports, verbose, &mut stdout) {
+    let rendered = match format {
+        Format::Text { verbose } => render(&reports, verbose, &mut stdout),
+        Format::Json => render_json(&reports, &mut stdout),
+    };
+    match rendered {
         Ok(summary) => summary.exit_code(),
         Err(error) => {
             eprintln!("appa replay: cannot write the report: {error}");
@@ -873,8 +1044,8 @@ mod tests {
             panic!("one step: {:?}", trace.steps);
         };
         assert_eq!(
-            (step.line, &step.tool, &step.expect),
-            (1, &StepTool::DoSomething, &Expect::Deny)
+            (step.line, &step.tool, &step.check),
+            (1, &StepTool::DoSomething, &Check::Expect(Expect::Deny))
         );
         assert_eq!(step.tool.to_string(), "appa/do_something");
         assert_eq!(step.tool.canonical(), None);
@@ -893,17 +1064,17 @@ mod tests {
         assert_eq!(trace.steps.len(), 5);
         let read = &trace.steps[0];
         assert_eq!(
-            (read.line, read.tool.to_string(), &read.expect),
-            (3, "mcp/files/read".to_string(), &Expect::Allow)
+            (read.line, read.tool.to_string(), &read.check),
+            (3, "mcp/files/read".to_string(), &Check::Expect(Expect::Allow))
         );
         assert_eq!(read.arguments.get(), r#"{"path":"/etc/secrets"}"#);
         let email = &trace.steps[1];
         assert_eq!(
-            (email.line, email.tool.to_string(), &email.expect),
+            (email.line, email.tool.to_string(), &email.check),
             (
                 8,
                 "mcp/mail/send".to_string(),
-                &Expect::Sanitizer(Some("redactor".into()))
+                &Check::Expect(Expect::Sanitizer(Some("redactor".into())))
             )
         );
         assert_eq!(
@@ -911,17 +1082,40 @@ mod tests {
             r#"{"to":"x@other.com","count":2,"tags":["a", "b"]}"#
         );
         assert_eq!(
-            (trace.steps[2].arguments.get(), &trace.steps[2].expect),
-            ("{}", &Expect::Authority(None))
+            (trace.steps[2].arguments.get(), &trace.steps[2].check),
+            ("{}", &Check::Expect(Expect::Authority(None)))
         );
-        assert_eq!(trace.steps[3].expect, Expect::Deny);
-        assert_eq!(trace.steps[4].expect, Expect::Authority(Some("hitl".into())));
+        assert_eq!(trace.steps[3].check, Check::Expect(Expect::Deny));
+        assert_eq!(
+            trace.steps[4].check,
+            Check::Expect(Expect::Authority(Some("hitl".into())))
+        );
+    }
+
+    #[test]
+    fn a_step_without_expect_is_observed() {
+        let trace = parsed(
+            "mcp/files/read {\n  path: \"/hr/a\"\n}\n\n# no expectation\nmcp/mail/send {}\nexpect deny\nmcp/web/fetch {}\nmcp/slack/post {\n  text: \"x\"\n}\n",
+        )
+        .expect("the trace parses");
+        let checks: Vec<(usize, &Check)> = trace.steps.iter().map(|step| (step.line, &step.check)).collect();
+        assert_eq!(
+            checks,
+            vec![
+                (1, &Check::Observe),
+                (6, &Check::Expect(Expect::Deny)),
+                (8, &Check::Observe),
+                (9, &Check::Observe),
+            ]
+        );
+        assert_eq!(trace.steps[0].arguments.get(), r#"{"path":"/hr/a"}"#);
+        assert_eq!(trace.steps[3].arguments.get(), r#"{"text":"x"}"#);
     }
 
     #[test]
     fn a_trace_can_select_the_withhold_remedy() {
         let trace = parsed("mcp/mail/send {}\nexpect withhold\n").expect("the trace parses");
-        assert_eq!(trace.steps[0].expect, Expect::Withhold);
+        assert_eq!(trace.steps[0].check, Check::Expect(Expect::Withhold));
         assert!(Expect::Withhold.takes(&OfferKind::Withhold));
         assert!(!Expect::Allow.takes(&OfferKind::Withhold));
     }
@@ -939,12 +1133,17 @@ mod tests {
                 2,
                 "argument `path` is not one JSON value",
             ),
-            ("mcp/files/read {\n  path: \"a\"\n}\n", 1, "has no `expect allow`"),
             (
                 "mcp/files/read {\n  path: \"a\"\n}\nexpect maybe\n",
                 4,
                 "expected `expect allow`",
             ),
+            (
+                "mcp/files/read {\n  path: \"a\"\n}\n\nresult \"x\"\n",
+                5,
+                "or the next tool call after the call at line 1",
+            ),
+            ("mcp/files/read {}\nRead {}\n", 2, "Read: a canonical tool starts with"),
             ("mcp/files/read {\n  path: \"a\"\n", 1, "is not closed with `}`"),
             ("expect allow\n", 1, "expected a tool call like `mcp/files/read {`"),
             (
@@ -1069,15 +1268,16 @@ mod tests {
                     StepReport {
                         line: 3,
                         tool: canonical("mcp/files/read"),
-                        expect: Expect::Allow,
+                        check: Check::Expect(Expect::Allow),
                         outcome: StepOutcome::Passed {
+                            got: Got::Blocked(BTreeSet::from([OfferKind::Accept])),
                             taken: Some(OfferKind::Accept),
                         },
                     },
                     StepReport {
                         line: 8,
                         tool: canonical("mcp/mail/send"),
-                        expect: Expect::Deny,
+                        check: Check::Expect(Expect::Deny),
                         outcome: StepOutcome::Mismatch {
                             got: Got::Blocked(BTreeSet::from([OfferKind::Sanitizer {
                                 name: "redactor".into(),
@@ -1094,8 +1294,11 @@ mod tests {
                 steps: vec![StepReport {
                     line: 1,
                     tool: canonical("host/shell/bash"),
-                    expect: Expect::Authority(Some("hitl".into())),
+                    check: Check::Expect(Expect::Authority(Some("hitl".into()))),
                     outcome: StepOutcome::Passed {
+                        got: Got::Blocked(BTreeSet::from([OfferKind::Authority {
+                            names: vec!["hitl".into()],
+                        }])),
                         taken: Some(OfferKind::Authority {
                             names: vec!["hitl".into()],
                         }),
@@ -1116,5 +1319,85 @@ mod tests {
         let text = String::from_utf8(out).expect("utf-8");
         assert!(text.starts_with("ok    leak.appa:3 mcp/files/read allow (after accepting the narrowing)\n"));
         assert!(text.contains("ok    push.appa:1 host/shell/bash authority hitl (after hitl approved)\n"));
+    }
+
+    fn observed_report() -> Vec<TraceReport> {
+        let step = |line, tool: &str, got, taken| StepReport {
+            line,
+            tool: canonical(tool),
+            check: Check::Observe,
+            outcome: StepOutcome::Observed { got, taken },
+        };
+        vec![
+            TraceReport {
+                path: PathBuf::from("obs.appa"),
+                unopened: None,
+                steps: vec![
+                    step(
+                        1,
+                        "mcp/files/read",
+                        Got::Blocked(BTreeSet::from([OfferKind::Accept])),
+                        Some(OfferKind::Accept),
+                    ),
+                    step(5, "mcp/web/fetch", Got::Blocked(BTreeSet::new()), None),
+                    StepReport {
+                        line: 7,
+                        tool: canonical("mcp/mail/send"),
+                        check: Check::Expect(Expect::Allow),
+                        outcome: StepOutcome::Mismatch {
+                            got: Got::Blocked(BTreeSet::from([OfferKind::Authority {
+                                names: vec!["hitl".into()],
+                            }])),
+                            want: Expect::Allow,
+                            feedback: Some("ask hitl".into()),
+                        },
+                    },
+                ],
+            },
+            TraceReport {
+                path: PathBuf::from("closed.appa"),
+                unopened: Some("refused".into()),
+                steps: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn rendering_prints_every_observed_step() {
+        let reports = observed_report();
+        let mut out = Vec::new();
+        let summary = render(&reports[..1], false, &mut out).expect("renders");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            "obs   obs.appa:1 mcp/files/read got allow (after accepting the narrowing)\nobs   obs.appa:5 mcp/web/fetch got deny\nobs.appa:7: mcp/mail/send: got authority hitl, want allow\n    ask hitl\nFAIL  obs.appa\n1 file: 0 ok, 1 failed, 0 could not run\n"
+        );
+        assert_eq!(summary.exit_code(), ExitCode::from(1));
+    }
+
+    #[test]
+    fn json_prints_one_object_per_step_then_the_summary() {
+        let mut out = Vec::new();
+        let summary = render_json(&observed_report(), &mut out).expect("renders");
+        let lines: Vec<serde_json::Value> = String::from_utf8(out)
+            .expect("utf-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is one JSON value"))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                serde_json::json!({"file": "obs.appa", "line": 1, "tool": "mcp/files/read", "check": "observe",
+                    "got": "allow", "offers": ["allow"], "taken": "allow", "outcome": "observed", "detail": null}),
+                serde_json::json!({"file": "obs.appa", "line": 5, "tool": "mcp/web/fetch", "check": "observe",
+                    "got": "deny", "offers": [], "taken": null, "outcome": "observed", "detail": null}),
+                serde_json::json!({"file": "obs.appa", "line": 7, "tool": "mcp/mail/send", "check": "allow",
+                    "got": "authority hitl", "offers": ["authority hitl"], "taken": null, "outcome": "mismatch",
+                    "detail": null}),
+                serde_json::json!({"file": "closed.appa", "line": null, "tool": null, "check": null, "got": null,
+                    "offers": [], "taken": null, "outcome": "cannot_run", "detail": "refused"}),
+                serde_json::json!({"summary": {"ok": 0, "failed": 1, "cannot_run": 1}}),
+            ]
+        );
+        assert_eq!(summary.exit_code(), ExitCode::from(2));
     }
 }

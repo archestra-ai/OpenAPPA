@@ -86,9 +86,13 @@ pub enum ManifestError {
     #[error("{path}: `battery.targets.{target}` is not a target: a target is `single-user` or `multi-user`")]
     Target { path: PathBuf, target: String },
     #[error(
-        "{path}: `[battery.targets]` declares some targets but not `{missing}`: a battery declares every target or none"
+        "{path}: one target in `[battery.targets]` has its own policy file, so `{missing}` needs its own policy file too"
     )]
     PartialTargets { path: PathBuf, missing: BatteryTarget },
+    #[error(
+        "{path}: `battery.targets.{target}` uses the base policy, so it uses the base's `readiness` and `setup` too; remove them from the target"
+    )]
+    BaseTargetSettings { path: PathBuf, target: BatteryTarget },
     #[error("{path} declares neither `[battery]` nor `[plugin]`")]
     NoRole { path: PathBuf },
     #[error("{path} declares both `[battery]` and `[plugin]`")]

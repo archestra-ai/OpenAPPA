@@ -5,7 +5,7 @@ use appa_engine::authority::{Attends, DeclaredTransition, Hint};
 use appa_engine::contract::{AudienceRequirement, DeltaAudience, RecipientSpec, SelectorPlaceholder, ToolDeclaration};
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, GroupName, SanitizerName, TagName};
-use appa_engine::profile::{BindingMode, ExecutorClass, PolicyIdentity, neutral_starting_label};
+use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
@@ -898,7 +898,6 @@ fn an_absent_deployment_table_is_the_no_coverage_default_and_refuses_covered_con
         plain.engine().profile().executor_class(&ToolName::new("t")),
         ExecutorClass::Assumed
     );
-    assert_eq!(plain.engine().open_vectors().len(), 1);
     let uncovered = DECLARATIONS.replace(
         "[deployment]\ndispatch = \"enforced\"\nconfined_results = [\"lookup\"]\n",
         "",
@@ -1032,57 +1031,21 @@ dispatch = "enforced"
 confined_results = ["read"]
 "#;
 
-/// Every durable opening records the identity its engine's algorithm gave the policy, so a
-/// trajectory reopens only while the engine still recognizes that digest. These are the digests
-/// the v1 engine (OpenAPPA 0.32) and the current engine recorded for the same policies. A change
-/// to the identity document moves the current digest and fails this test: keep the replaced
-/// algorithm in `PolicyIdentity::earlier_of_registry` and pin its digests here, or every open
-/// trajectory stops reopening.
+/// The policy identity is a function of the compiled policy alone: the same source loads to the
+/// same identity, and a policy that decides differently has another.
 #[test]
-fn the_engine_recognizes_the_identity_every_algorithm_recorded() {
-    let digest = |hex: &str| -> PolicyIdentity { serde_json::from_value(serde_json::json!(hex)).expect("a digest") };
-    let hex =
-        |identity: PolicyIdentity| -> String { identity.bytes().iter().map(|byte| format!("{byte:02x}")).collect() };
-    for (name, source, v1, v2) in [
-        (
-            "the identity fixture",
-            IDENTITY_FIXTURE,
-            "1a4c7e2d6745d281152d6a5c8318d2354ae1b4b13973cedaae1452757df77c56",
-            "ebef4dcf80cd5461661f8b74483147686279a42d20ead293660cedc21dfc4782",
-        ),
-        (
-            "the declarations fixture",
-            DECLARATIONS,
-            "41172107625b0b6f59033f3f7c62e30d682d39e4c3a816e825e8bc4fe65b2b2c",
-            "d4c2074e9a86e79e6f38c42661abab6ff7732b9bce61f497f53c03b169db98e6",
-        ),
-    ] {
-        let engine = load(source).expect("the fixture loads").engine().clone();
-        assert_eq!(hex(engine.identity()), v2, "{name}: the current algorithm moved");
-        assert!(engine.recognizes(&digest(v2)), "{name}: the current identity");
-        assert!(
-            engine.recognizes(&digest(v1)),
-            "{name}: the identity the v1 engine recorded"
-        );
-    }
-    let other = load(DECLARATIONS).expect("the fixture loads").engine().clone();
-    assert!(
-        !other.recognizes(&digest(
-            "1a4c7e2d6745d281152d6a5c8318d2354ae1b4b13973cedaae1452757df77c56"
-        )),
-        "another policy's v1 identity names another policy"
-    );
+fn the_policy_identity_names_the_compiled_policy() {
+    let identity = |source: &str| load(source).expect("the fixture loads").engine().identity();
+    assert_eq!(identity(IDENTITY_FIXTURE), identity(IDENTITY_FIXTURE));
+    assert_ne!(identity(IDENTITY_FIXTURE), identity(DECLARATIONS));
     let forwarding = IDENTITY_FIXTURE.replace(
         "name = \"review\"\n",
         "name = \"review\"\nforwards = { trust = \"suspicious\" }\n",
     );
-    let forwarding = load(&forwarding)
-        .expect("the forwarding fixture loads")
-        .engine()
-        .clone();
-    assert!(
-        forwarding.earlier_identities().is_empty(),
-        "no v1 policy declares forwards"
+    assert_ne!(
+        identity(IDENTITY_FIXTURE),
+        identity(&forwarding),
+        "what a tool forwards is part of the policy"
     );
 }
 
@@ -1566,7 +1529,10 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
         "{ trust = \"suspicious\", audience = [\"@slack:user-group/eng\"] }",
     ))
     .expect("a literal forwards loads");
-    let engine = config.engine();
+    let engine = config.engine().clone().at(
+        appa_engine::profile::DeploymentName::new("default"),
+        appa_engine::profile::PolicyRevision::FIRST,
+    );
     let declared = engine
         .registry()
         .variants(&ToolName::new("mail_report"))

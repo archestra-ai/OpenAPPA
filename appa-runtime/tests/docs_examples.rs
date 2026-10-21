@@ -34,7 +34,7 @@ fn as_policy(mut table: toml::Table) -> Option<String> {
     assert!(
         table
             .keys()
-            .all(|key| matches!(key.as_str(), "policy" | "externals" | "include" | "name"))
+            .all(|key| matches!(key.as_str(), "policy" | "externals" | "include" | "name" | "aliases"))
     );
     let mut policy = match table.remove("policy") {
         Some(toml::Value::Table(policy)) => policy,

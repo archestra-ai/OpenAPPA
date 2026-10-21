@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.34.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.37.0`. # x-release-please-version
 
 ## Install
 
@@ -102,6 +102,19 @@ skill does not refresh either directory.
 If a process stops between the two directory renames, the chart's init
 container restores `.release-batteries.previous` before the runtime
 starts. The prior layer remains on the PVC throughout the transaction.
+
+## Runtime upgrades
+
+The chart runs one replica with the `Recreate` strategy. An upgrade restarts
+the runtime. With persistence enabled, stored trajectory families resume
+from the same PVC after startup.
+
+The runtime's SQLite database uses schema 9. Supported existing databases
+upgrade in place and keep their trajectories. An image without schema 9
+support refuses to open that database. An image rollback does not downgrade
+the stored schema: preserve the PVC and use a compatible runtime.
+
+Pause policy and battery changes until the replacement runtime is ready.
 
 ## Policy
 

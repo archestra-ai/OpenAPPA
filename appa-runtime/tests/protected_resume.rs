@@ -112,15 +112,33 @@ exit "${{APPA_TEST_EXIT:-0}}"
             shell(&self.data.join("settings.json")),
             shell(&self.data),
         );
-        Command::new("script")
-            .args(["-qefc", &command, "/dev/null"])
+        let mut child = Command::new("script")
+            .args(script_args(&command))
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("APPA_TEST_BINARY", appa())
             .env("APPA_TEST_DATA", &self.data)
             .env("APPA_TEST_MODE", mode)
-            .output()
-            .unwrap()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // An open stdin keeps BSD `script` from echoing end-of-input (`^D`) into the output.
+        let stdin = child.stdin.take();
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        output
     }
+}
+
+#[cfg(target_os = "linux")]
+fn script_args(command: &str) -> [&str; 3] {
+    ["-qefc", command, "/dev/null"]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn script_args(command: &str) -> [&str; 5] {
+    ["-q", "/dev/null", "sh", "-c", command]
 }
 
 fn shell(path: &Path) -> String {

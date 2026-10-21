@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use appa_runtime_api::inventory::{InventorySource, InventoryStatus, ToolInventory};
-use appa_runtime_api::{Adapter, AdapterName, CanonicalTool};
+use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, CanonicalToolError};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AliasFamily;
@@ -175,6 +175,35 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     None
 }
 
+/// Why an authored name that spells a server identifies no tool, in plain words for
+/// the policy author: what is wrong and what to write instead.
+fn unidentified_tool(name: &str) -> String {
+    const FULL_NAME: &str = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
+    if name == crate::do_something::NAME {
+        return format!("{name:?} is a test-only tool. Remove this rule from the policy.");
+    }
+    if !name.contains('/') {
+        return format!("{FULL_NAME} {name:?} is not a full name or the exact name of a tool. Use one of them.");
+    }
+    match CanonicalTool::parse(name) {
+        Err(CanonicalToolError::Family { .. }) => {
+            format!(
+                "{FULL_NAME} {name:?} does not say where the tool comes from. For a tool from an MCP server, start it with \"mcp/\"."
+            )
+        }
+        Err(CanonicalToolError::Shape { .. }) => format!("{FULL_NAME} {name:?} has no tool. Add the tool at the end."),
+        Err(CanonicalToolError::Segment { .. }) => format!(
+            "{FULL_NAME} {name:?} has a character that is not allowed. Use only letters, digits, \"_\", \".\", and \"-\"."
+        ),
+        Err(CanonicalToolError::Namespace { .. }) => {
+            format!("{FULL_NAME} The server in {name:?} contains \"__\". Remove it.")
+        }
+        Err(CanonicalToolError::Control { .. }) | Ok(_) => {
+            format!("{name:?} is not allowed. Names that start with \"appa/\" are reserved.")
+        }
+    }
+}
+
 /// Whether an authored name already spells a server: as a canonical id, or in the host's
 /// own grammar, so a `server` selector beside it would name the server twice.
 fn spells_server(adapter: Adapter, name: &str) -> bool {
@@ -287,7 +316,7 @@ pub fn resolve(
             }
         });
         if qualified.is_none() && spells_server(adapter, name) {
-            return Err(format!("tool {name:?} has an invalid qualified identity"));
+            return Err(unidentified_tool(name));
         }
         if qualified.is_none() && adapter.name == AdapterName::Kagent {
             CanonicalTool::of("mcp", "server", name).map_err(|error| error.to_string())?;
@@ -483,6 +512,35 @@ mod tests {
         assert_eq!(
             result.policy["tool"][0]["name"].as_str(),
             Some("host/claude-code/Bash(command:cargo test*)")
+        );
+    }
+
+    #[test]
+    fn an_unidentified_tool_name_says_what_is_wrong_with_it() {
+        let error_for = |name: &str| {
+            let result = resolve(
+                &policy(name),
+                appa_adapter_claude_code::adapter(),
+                &inventory(&[]),
+                &crate::config::Aliases::default(),
+            );
+            assert_eq!(result.report.errors.len(), 1, "{:?}", result.report);
+            result.report.errors[0].clone()
+        };
+        let full_name = "A full tool name has three parts: where the tool comes from, the server, and the tool, like \"mcp/github/list_issues\".";
+        assert_eq!(
+            error_for("appa/do_something"),
+            "\"appa/do_something\" is a test-only tool. Remove this rule from the policy."
+        );
+        assert_eq!(
+            error_for("mcp/github"),
+            format!("{full_name} \"mcp/github\" has no tool. Add the tool at the end.")
+        );
+        assert_eq!(
+            error_for("slack/send_message"),
+            format!(
+                "{full_name} \"slack/send_message\" does not say where the tool comes from. For a tool from an MCP server, start it with \"mcp/\"."
+            )
         );
     }
 

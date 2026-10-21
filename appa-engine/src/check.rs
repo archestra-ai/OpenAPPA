@@ -38,6 +38,13 @@ pub struct Narrowing {
     pub to: Label,
 }
 
+impl Narrowing {
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        self.from.cross_value(crossing);
+        self.to.cross_value(crossing);
+    }
+}
+
 /// The block as the check finds it — the gaps and/or a narrowing — before remedy planning.
 /// The slots are independent and may coexist. A marked spawn is blocked with both empty
 /// until its approval declares the child's return policy: that block has no gap to clear and

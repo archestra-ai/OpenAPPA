@@ -19,19 +19,25 @@
 //! family's `openappa_roots` row. Whether a pending receipt's owner still
 //! drives it is the lease on its row, judged by the database clock.
 //!
+//! A decided batch is fenced at its deployment's head: its append reads the head with
+//! `SELECT … FOR SHARE` on the `openappa_deployments` row as its last lock, and a publish moves
+//! the head with an `UPDATE` of that row, so the two serialize. Every transaction here opens at
+//! READ COMMITTED explicitly: under a stricter host default a locking read of a row a publish
+//! moved would fail with a serialization error rather than read the new head.
+//!
 //! The host's migrations provide the schema: `openappa_events`, `openappa_policy_files`,
-//! `openappa_host_keys`, the receipt tables `openappa_operations` and
+//! `openappa_deployments`, `openappa_policy_revisions`, `openappa_host_keys`, the receipt tables `openappa_operations` and
 //! `openappa_processed_results`, `openappa_held_peer_messages` with
 //! `openappa_peer_inboxes`, and `openappa_roots`.
 //! `tests/fixtures/host_schema.sql` holds the full DDL.
 
+use std::fmt::Write;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::encryption::{StorageCipher, field_context};
 use ::postgres::{Client, GenericClient};
-use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
@@ -46,13 +52,37 @@ use crate::receipts::{
     resolve_operation_claim, resolve_operation_completion, resolve_result_claim, resolve_result_completion,
 };
 
+mod target;
+use target::Target;
+
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct PostgresError(pub String);
 
 impl From<::postgres::Error> for PostgresError {
     fn from(error: ::postgres::Error) -> Self {
-        Self(error.to_string())
+        let Some(database) = error.as_db_error() else {
+            return Self(error.to_string());
+        };
+        // The driver's Display says only "db error". Its server message, detail, hint and
+        // query context can contain receipt values, so retain only the code and schema objects.
+        let mut diagnostic = format!(
+            "PostgreSQL {} (SQLSTATE {})",
+            database.parsed_severity().unwrap_or(::postgres::error::Severity::Error),
+            database.code().code(),
+        );
+        for (field, name) in [
+            ("schema", database.schema()),
+            ("table", database.table()),
+            ("column", database.column()),
+            ("datatype", database.datatype()),
+            ("constraint", database.constraint()),
+        ] {
+            if let Some(name) = name {
+                let _ = write!(diagnostic, "; {field}={name:?}");
+            }
+        }
+        Self(diagnostic)
     }
 }
 
@@ -92,7 +122,7 @@ struct Worker {
 impl Worker {
     /// `wait` bounds each connection attempt and the opening as a whole, unless the URL
     /// sets its own `connect_timeout`.
-    fn connect(url: String, wait: Duration, stall: Option<Duration>) -> Result<Worker, PostgresError> {
+    fn connect(target: Target, wait: Duration, stall: Option<Duration>) -> Result<Worker, PostgresError> {
         let (sender, receiver) = mpsc::channel::<Job>();
         let (ready, initialized) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -102,17 +132,18 @@ impl Worker {
                     if let Some(stall) = stall {
                         std::thread::sleep(stall);
                     }
-                    let tls = native_tls::TlsConnector::new().map_err(|e| PostgresError(e.to_string()))?;
-                    let mut config: ::postgres::Config = url.parse()?;
+                    let Target { mut config, tls } = target;
                     if config.get_connect_timeout().is_none() {
                         config.connect_timeout(wait);
                     }
-                    let mut client = config.connect(MakeTlsConnector::new(tls))?;
+                    let mut client = config.connect(tls)?;
                     // Deliberately no DDL. Core host migrations are required at startup;
                     // optional file-event migrations are checked only when file tracking uses them.
                     client.batch_execute(
                         "SELECT root, seq, payload FROM openappa_events LIMIT 0;
                     SELECT hash, bytes FROM openappa_policy_files LIMIT 0;
+                    SELECT name, head FROM openappa_deployments LIMIT 0;
+                    SELECT deployment, revision, hash FROM openappa_policy_revisions LIMIT 0;
                     SELECT key, root FROM openappa_host_keys LIMIT 0;
                     SELECT seq, id, receiver, digest, label, body, expires_at, notified FROM openappa_held_peer_messages LIMIT 0;
                     SELECT seq, id, root, sender, recipient, pending_spawn, dispatch, digest, label, body, status, read_call_id, decision, expires_at, read_arguments, created_at FROM openappa_embedded_peer_messages LIMIT 0;
@@ -200,7 +231,7 @@ impl Worker {
 }
 
 struct Pool {
-    url: String,
+    target: Target,
     max_connections: NonZeroUsize,
     state: Mutex<PoolState>,
     freed: Condvar,
@@ -257,7 +288,7 @@ impl Pool {
                 state.open += 1;
                 let stall = state.stall_next_connect.take();
                 drop(state);
-                return match Worker::connect(self.url.clone(), remaining, stall) {
+                return match Worker::connect(self.target.clone(), remaining, stall) {
                     Ok(worker) => Ok(Lease {
                         pool: Arc::clone(self),
                         worker: Some(worker),
@@ -453,7 +484,7 @@ impl LeasedPostgres {
 impl PostgresStore {
     pub(super) fn open(url: String, max_connections: NonZeroUsize) -> Result<Self, PostgresError> {
         let pool = Arc::new(Pool {
-            url,
+            target: Target::from_url(&url)?,
             max_connections,
             state: Mutex::new(PoolState {
                 idle: Vec::new(),
@@ -531,7 +562,7 @@ impl PostgresStore {
         E: From<PostgresError> + Send + 'static,
     {
         self.query(move |client| {
-            client.batch_execute("BEGIN")?;
+            client.batch_execute(BEGIN)?;
             let result = operation(client);
             match result {
                 Ok(_) => client.batch_execute("COMMIT")?,
@@ -1186,36 +1217,186 @@ impl PostgresStore {
         root: &TrajectoryId,
         key: &PolicyFileKey,
         policy: &[u8],
-        bytes: Vec<u8>,
+        batch: crate::Batch<'_>,
     ) -> Result<TrajectoryId, CreateError> {
         let id = root.as_str().to_owned();
         let bytes = self
             .cipher
-            .seal_bytes(&event_field(&id, 0), &bytes)
+            .seal_bytes(&event_field(&id, 0), &batch.bytes)
             .map_err(PostgresError::from)?;
+        let fence = batch.fence.map(StoredFence::new);
+        let host_key = batch.key;
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
         let created = self.query(move |client| {
-            let mut transaction = client.transaction()?;
+            let mut transaction = read_committed(client)?;
             transaction.execute(
                 "INSERT INTO openappa_policy_files (hash, bytes) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 &[&hash, &policy],
             )?;
+            transaction.execute("INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING", &[&id])?;
+            if let Some(head) = fence.as_ref().map(|fence| fence.moved(&mut transaction)).transpose()?.flatten() {
+                return Ok(Err(CreateError::PolicyMoved { head }));
+            }
             // The (root, seq) key refuses a second opening; the root's row is what its writers lock.
             let inserted = transaction.execute(
                 "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, 0, $2) ON CONFLICT (root, seq) DO NOTHING",
                 &[&id, &bytes],
             )?;
-            transaction.execute("INSERT INTO openappa_roots (root) VALUES ($1) ON CONFLICT DO NOTHING", &[&id])?;
+            if inserted == 0 {
+                return Ok(Err(CreateError::AlreadyExists { root: id }));
+            }
+            if let Some(key) = &host_key {
+                transaction.execute(
+                    "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[key, &id],
+                )?;
+            }
             transaction.commit()?;
-            Ok(inserted == 1)
+            Ok(Ok(()))
         })?;
-        if !created {
-            return Err(CreateError::AlreadyExists {
-                root: root.as_str().to_owned(),
-            });
+        created.map(|()| root.clone())
+    }
+
+    /// See [`LogStore::head`].
+    pub(super) fn head(&self, deployment: &DeploymentName) -> Result<Option<PolicyHead>, ReadError> {
+        let name = deployment.as_str().to_owned();
+        let row = self.query(move |client| {
+            Ok(client
+                .query_opt(
+                    "SELECT d.head, r.hash FROM openappa_deployments d
+                     JOIN openappa_policy_revisions r ON r.deployment = d.name AND r.revision = d.head
+                     WHERE d.name = $1",
+                    &[&name],
+                )?
+                .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1))))
+        })?;
+        row.map(|(revision, key)| {
+            Ok(PolicyHead {
+                revision: stored_revision(revision)?,
+                key: serde_json::from_value(Value::String(key.clone())).map_err(|error| ReadError::UndecodableKey {
+                    key,
+                    detail: error.to_string(),
+                })?,
+            })
+        })
+        .transpose()
+    }
+
+    /// See [`LogStore::publish`]. The head moves by an `UPDATE` of the deployment's row, which
+    /// waits for every decided append holding that row and makes each later one read the new
+    /// head.
+    pub(super) fn publish(
+        &self,
+        deployment: &DeploymentName,
+        expected: Option<PolicyRevision>,
+        head: &PolicyHead,
+        policy: &[u8],
+    ) -> Result<(), PublishError> {
+        let name = deployment.as_str().to_owned();
+        let hash = head.key.as_str().to_owned();
+        let revision = head.revision.value() as i64;
+        let expected = expected.map(|expected| expected.value() as i64);
+        let policy = policy.to_vec();
+        self.query(move |client| {
+            let mut transaction = read_committed(client)?;
+            transaction.execute(
+                "INSERT INTO openappa_policy_files (hash, bytes) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&hash, &policy],
+            )?;
+            let moved = match expected {
+                None => transaction.execute(
+                    "INSERT INTO openappa_deployments (name, head) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&name, &revision],
+                )?,
+                Some(expected) => transaction.execute(
+                    "UPDATE openappa_deployments SET head = $3 WHERE name = $1 AND head = $2",
+                    &[&name, &expected, &revision],
+                )?,
+            };
+            if moved != 1 {
+                let head = transaction
+                    .query_opt("SELECT head FROM openappa_deployments WHERE name = $1", &[&name])?
+                    .map(|row| stored_revision(row.get(0)))
+                    .transpose()?;
+                return Ok(Err(PublishError::Moved { head }));
+            }
+            transaction.execute(
+                "INSERT INTO openappa_policy_revisions (deployment, revision, hash) VALUES ($1, $2, $3)",
+                &[&name, &revision, &hash],
+            )?;
+            transaction.commit()?;
+            Ok(Ok(()))
+        })?
+    }
+
+    /// See [`LogStore::policy_key`].
+    pub(super) fn policy_key(
+        &self,
+        deployment: &DeploymentName,
+        revision: PolicyRevision,
+    ) -> Result<String, ReadError> {
+        let name = deployment.as_str().to_owned();
+        let stored = revision.value() as i64;
+        self.query(move |client| {
+            Ok(client
+                .query_opt(
+                    "SELECT hash FROM openappa_policy_revisions WHERE deployment = $1 AND revision = $2",
+                    &[&name, &stored],
+                )?
+                .map(|row| row.get::<_, String>(0)))
+        })?
+        .ok_or_else(|| ReadError::UnknownRevision {
+            deployment: deployment.as_str().to_owned(),
+            revision,
+        })
+    }
+
+    /// See [`LogStore::published_as`].
+    pub(super) fn published_as(
+        &self,
+        deployment: &DeploymentName,
+        key: &str,
+    ) -> Result<Option<PolicyRevision>, ReadError> {
+        let (name, key) = (deployment.as_str().to_owned(), key.to_owned());
+        Ok(self.query(move |client| {
+            client
+                .query_one(
+                    "SELECT MIN(revision) FROM openappa_policy_revisions WHERE deployment = $1 AND hash = $2",
+                    &[&name, &key],
+                )?
+                .get::<_, Option<i64>>(0)
+                .map(stored_revision)
+                .transpose()
+        })?)
+    }
+
+    /// See [`LogStore::policy_file`].
+    pub(super) fn policy_file(
+        &self,
+        deployment: &DeploymentName,
+        revision: PolicyRevision,
+    ) -> Result<(String, Vec<u8>), ReadError> {
+        let name = deployment.as_str().to_owned();
+        let stored = revision.value() as i64;
+        let row = self.query(move |client| {
+            Ok(client
+                .query_opt(
+                    "SELECT r.hash, f.bytes FROM openappa_policy_revisions r
+                     LEFT JOIN openappa_policy_files f ON f.hash = r.hash
+                     WHERE r.deployment = $1 AND r.revision = $2",
+                    &[&name, &stored],
+                )?
+                .map(|row| (row.get::<_, String>(0), row.get::<_, Option<Vec<u8>>>(1))))
+        })?;
+        match row {
+            None => Err(ReadError::UnknownRevision {
+                deployment: deployment.as_str().to_owned(),
+                revision,
+            }),
+            Some((key, None)) => Err(ReadError::PolicyFileMissing { key }),
+            Some((key, Some(bytes))) => Ok((key, bytes)),
         }
-        Ok(root.clone())
     }
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
@@ -1336,7 +1517,7 @@ impl PostgresStore {
         step.worker().run(move |state| {
             // A step dropped without an answer from its thread leaves the reset to end it.
             state.host_sql = true;
-            state.client.batch_execute("BEGIN")?;
+            state.client.batch_execute(BEGIN)?;
             lock_root(&mut state.client, &key)?;
             Ok(())
         })?;
@@ -1483,21 +1664,11 @@ impl PostgresStore {
         Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
-    pub(super) fn append(
-        &self,
-        root: &TrajectoryId,
-        basis: u64,
-        bytes: Vec<u8>,
-        key: Option<&str>,
-    ) -> Result<(), AppendError> {
-        let bytes = self
-            .cipher
-            .seal_bytes(&event_field(root.as_str(), basis), &bytes)
-            .map_err(PostgresError::from)?;
-        let batch = Batch::new(root, basis, bytes, key, None);
+    pub(super) fn append(&self, root: &TrajectoryId, basis: u64, batch: crate::Batch<'_>) -> Result<(), AppendError> {
+        let batch = Batch::new(root, basis, batch, None, &self.cipher)?;
         let cipher = self.cipher.clone();
         self.query(move |client| {
-            let mut transaction = client.transaction()?;
+            let mut transaction = read_committed(client)?;
             let written = batch.write(&mut transaction, &cipher)?;
             if written == Written::Done {
                 transaction.commit()?;
@@ -1511,18 +1682,13 @@ impl PostgresStore {
         &self,
         root: &TrajectoryId,
         basis: u64,
-        bytes: Vec<u8>,
-        key: Option<&str>,
+        batch: crate::Batch<'_>,
         hold: &crate::embedded::EmbeddedAppendHold<'_>,
     ) -> Result<(), AppendError> {
-        let bytes = self
-            .cipher
-            .seal_bytes(&event_field(root.as_str(), basis), &bytes)
-            .map_err(PostgresError::from)?;
-        let batch = Batch::new(root, basis, bytes, key, Some(HeldRead::new(hold)));
+        let batch = Batch::new(root, basis, batch, Some(HeldRead::new(hold)), &self.cipher)?;
         let cipher = self.cipher.clone();
         self.query(move |client| {
-            let mut transaction = client.transaction()?;
+            let mut transaction = read_committed(client)?;
             let written = batch.write(&mut transaction, &cipher)?;
             if written == Written::Done {
                 transaction.commit()?;
@@ -1551,16 +1717,10 @@ impl PostgresStep<'_> {
     pub(super) fn append(
         mut self,
         basis: u64,
-        bytes: Vec<u8>,
-        key: Option<&str>,
+        batch: crate::Batch<'_>,
         hold: Option<&crate::embedded::EmbeddedAppendHold<'_>>,
     ) -> Result<(), AppendError> {
-        let bytes = self
-            .store
-            .cipher
-            .seal_bytes(&event_field(self.root.as_str(), basis), &bytes)
-            .map_err(PostgresError::from)?;
-        let batch = Batch::new(&self.root, basis, bytes, key, hold.map(HeldRead::new));
+        let batch = Batch::new(&self.root, basis, batch, hold.map(HeldRead::new), &self.store.cipher)?;
         let cipher = self.store.cipher.clone();
         let written = self.worker().run(move |state| {
             let written = batch.write(&mut state.client, &cipher)?;
@@ -1606,12 +1766,62 @@ fn lock_root(client: &mut Client, root: &str) -> Result<(), ::postgres::Error> {
     Ok(())
 }
 
+/// Every transaction opens here: at READ COMMITTED whatever the host's default, so a locking
+/// read of the deployment row a publish moved reads the new head instead of failing.
+const BEGIN: &str = "BEGIN ISOLATION LEVEL READ COMMITTED";
+
+fn read_committed(client: &mut Client) -> Result<::postgres::Transaction<'_>, ::postgres::Error> {
+    client
+        .build_transaction()
+        .isolation_level(::postgres::IsolationLevel::ReadCommitted)
+        .start()
+}
+
+/// A revision as the `bigint` column stores it, refused when the column holds none.
+fn stored_revision(revision: i64) -> Result<PolicyRevision, PostgresError> {
+    u64::try_from(revision)
+        .ok()
+        .filter(|revision| *revision > 0)
+        .map(PolicyRevision::new)
+        .ok_or_else(|| PostgresError(format!("a stored policy revision is not positive: {revision}")))
+}
+
+/// The head a decided batch requires, owned for the connection's thread.
+struct StoredFence {
+    deployment: String,
+    revision: PolicyRevision,
+}
+
+impl StoredFence {
+    fn new(fence: crate::Fence<'_>) -> StoredFence {
+        StoredFence {
+            deployment: fence.deployment.as_str().to_owned(),
+            revision: fence.revision,
+        }
+    }
+
+    /// Where the head stands when it is not this fence's revision; `None` when the fence holds.
+    /// The row stays share-locked to the end of the transaction, so no publish moves the head
+    /// before this batch commits.
+    fn moved(&self, client: &mut impl GenericClient) -> Result<Option<Option<PolicyRevision>>, PostgresError> {
+        let head = client
+            .query_opt(
+                "SELECT head FROM openappa_deployments WHERE name = $1 FOR SHARE",
+                &[&self.deployment],
+            )?
+            .map(|row| stored_revision(row.get(0)))
+            .transpose()?;
+        Ok((head != Some(self.revision)).then_some(head))
+    }
+}
+
 /// One batch to write at one position of one root's log.
 struct Batch {
     root: String,
     basis: u64,
     bytes: Vec<u8>,
     key: Option<String>,
+    fence: Option<StoredFence>,
     hold: Option<HeldRead>,
 }
 
@@ -1640,6 +1850,8 @@ enum Written {
     /// The position is taken; the log stands at this position now.
     Conflict(u64),
     ReadClaimLost,
+    /// The deployment's head is not the revision the batch was decided at.
+    PolicyMoved(Option<PolicyRevision>),
 }
 
 impl From<Written> for Result<(), AppendError> {
@@ -1648,19 +1860,28 @@ impl From<Written> for Result<(), AppendError> {
             Written::Done => Ok(()),
             Written::Conflict(current) => Err(AppendError::Conflict { current }),
             Written::ReadClaimLost => Err(AppendError::ReadClaimLost),
+            Written::PolicyMoved(head) => Err(AppendError::PolicyMoved { head }),
         }
     }
 }
 
 impl Batch {
-    fn new(root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>, hold: Option<HeldRead>) -> Batch {
-        Batch {
+    /// The batch sealed for its position: the stamp inside the bytes is authenticated with them.
+    fn new(
+        root: &TrajectoryId,
+        basis: u64,
+        batch: crate::Batch<'_>,
+        hold: Option<HeldRead>,
+        cipher: &StorageCipher,
+    ) -> Result<Batch, PostgresError> {
+        Ok(Batch {
             root: root.as_str().to_owned(),
             basis,
-            bytes,
-            key: key.map(str::to_owned),
+            bytes: cipher.seal_bytes(&event_field(root.as_str(), basis), &batch.bytes)?,
+            key: batch.key,
+            fence: batch.fence.map(StoredFence::new),
             hold,
-        }
+        })
     }
 
     /// Write this batch inside the caller's transaction. The `(root, seq)` key is the
@@ -1698,6 +1919,18 @@ impl Batch {
             if changed != 1 {
                 return Ok(Written::ReadClaimLost);
             }
+        }
+        // The insert's position CAS catches a writer that wins after the earlier read.
+        // FOR SHARE then holds the observed head until commit, so a publish cannot move it
+        // between this fence check and the batch insert.
+        if let Some(head) = self
+            .fence
+            .as_ref()
+            .map(|fence| fence.moved(client))
+            .transpose()?
+            .flatten()
+        {
+            return Ok(Written::PolicyMoved(head));
         }
         let inserted = client.execute(
             "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3) ON CONFLICT (root, seq) DO NOTHING",

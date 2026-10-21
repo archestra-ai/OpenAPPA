@@ -73,11 +73,12 @@ fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
     assert_eq!(released.len(), 1);
     assert_eq!(released[0].call, call);
     let appended = decision.append.expect("an allowed call opens a dispatch");
+    let records = declared_records(appended.facts());
     assert!(matches!(
-        &appended.facts()[0],
+        &records[0],
         Fact::ProposalBatchDecided { batch, .. } if batch.as_str() == "b1"
     ));
-    match &appended.facts()[1] {
+    match &records[1] {
         Fact::DispatchOpened { dispatch, subject, .. } => {
             assert_eq!(dispatch, &released[0].dispatch);
             assert_eq!(
@@ -91,7 +92,7 @@ fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
         }
         other => panic!("the decision's first release record is its opening, got {other:?}"),
     }
-    assert_eq!(appended.facts().len(), 2);
+    assert_eq!(records.len(), 2);
 }
 
 #[test]
@@ -239,7 +240,6 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             trajectory: traj(),
             dispatch,
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
@@ -248,6 +248,7 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: crate::fact::ReleaseTerms::none(),
         },
     ];
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::MisdecidedBatch));

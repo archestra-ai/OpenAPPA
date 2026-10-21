@@ -11,3 +11,9 @@ setup = [
   "Get an API key from TypeSafe. APPA sends every annotated call's name, description, and arguments to https://api.typesafe.ai.",
   "Route a tool to the annotator in your root config with `annotator = \"jev.tool-call\"`.",
 ]
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

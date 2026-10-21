@@ -92,6 +92,10 @@ mod process;
 
 pub(super) struct FileTracking {
     pub(super) initial: appa_engine::label::Label,
+    /// The deployment whose following families share the tracked workspaces.
+    pub deployment: String,
+    /// The key of the policy file the runtime opened with. A new workspace stream opens under
+    /// it.
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
     pub process_backend: Option<PathBuf>,
@@ -136,7 +140,6 @@ impl FileTracking {
         Ok(std::sync::Arc::new(FileStore::for_root(
             std::sync::Arc::clone(authority),
             root,
-            &self.policy_key,
             &self.initial,
         )?))
     }
@@ -617,21 +620,23 @@ max_body_bytes = 65536
     #[test]
     fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
         let dir = tempfile::tempdir().unwrap();
-        let battery = dir.path().join("batteries/claude-code");
-        std::fs::create_dir_all(&battery).unwrap();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let default =
             std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
-        std::fs::copy(
-            repository.join("marketplace/batteries/claude-code/appa.toml"),
-            battery.join("appa.toml"),
-        )
-        .unwrap();
+        for name in ["coding", "claude-code"] {
+            let battery = dir.path().join("batteries").join(name);
+            std::fs::create_dir_all(&battery).unwrap();
+            std::fs::copy(
+                repository.join("marketplace/batteries").join(name).join("appa.toml"),
+                battery.join("appa.toml"),
+            )
+            .unwrap();
+        }
         let config = dir.path().join("appa.toml");
         std::fs::write(
             &config,
             format!(
-                "include = [\"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
+                "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
             ),
         )
         .unwrap();
@@ -1427,6 +1432,75 @@ else:
             version.content_dependencies
         );
         assert!(!version.content_dependencies.is_empty());
+    }
+
+    /// Publish an edit of the fixture policy: `from` replaced by `to`.
+    fn publish_an_edit(runtime: &Runtime, dir: &Path, from: &str, to: &str) {
+        let config = dir.join("policy.toml");
+        let edited = std::fs::read_to_string(&config).unwrap().replacen(from, to, 1);
+        std::fs::write(&config, edited).unwrap();
+        assert!(runtime.reload(Config::load(&config).unwrap()).unwrap().changed);
+    }
+
+    /// Publish an edit of the fixture policy that adds one unrelated tool.
+    fn publish_a_tool(runtime: &Runtime, dir: &Path) {
+        publish_an_edit(
+            runtime,
+            dir,
+            "[policy.deployment]",
+            "[[policy.tool]]\nname = \"mcp/github/list_issues\"\ndelta = {}\n[policy.deployment]",
+        );
+    }
+
+    fn refused_ledger(refused: &Result<ToolCallDecision, crate::api::EventError>) -> bool {
+        matches!(refused, Err(crate::api::EventError::RemedyArguments { detail }) if detail.contains("workspace ledger"))
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_serves_every_family_of_its_deployment_across_a_publish() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let before = TrajectoryId("opened-before-the-publish".into());
+        bind(&runtime, &before, dir.path());
+        runtime.create_session(before.clone(), None).unwrap();
+        allow(&runtime, &before, call("Read", "source.txt")).await;
+        success(&runtime, &before, call("Read", "source.txt")).await;
+
+        publish_a_tool(&runtime, dir.path());
+        let after = TrajectoryId("opened-after-the-publish".into());
+        bind(&runtime, &after, dir.path());
+        runtime.create_session(after.clone(), None).unwrap();
+        for id in [&before, &after] {
+            allow(&runtime, id, call("Read", "source.txt")).await;
+            success(&runtime, id, call("Read", "source.txt")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_refuses_a_family_judged_under_another_trust_chain() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("following".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        success(&runtime, &id, call("Read", "source.txt")).await;
+
+        publish_an_edit(
+            &runtime,
+            dir.path(),
+            "version = 2",
+            "version = 2\ntrust_chain = [\"suspicious\", \"vendor\", \"trusted\"]",
+        );
+        let refused = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_call(call("Read", "source.txt"), false)
+            .await;
+        assert!(
+            refused_ledger(&refused),
+            "the ledger's labels rank against the chain it opened under: {refused:?}"
+        );
     }
 
     #[tokio::test]

@@ -128,7 +128,7 @@ fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
     let facts = closed.append.expect("the close appends").facts().to_vec();
     assert!(
         matches!(
-            facts.as_slice(),
+            declared_records(&facts),
             [Fact::DispatchClosed {
                 outcome: crate::fact::CloseOutcome::Indeterminate,
                 ..
@@ -206,7 +206,8 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
     assert!(
         matches!(
             facts.as_slice(),
-            [Fact::DispatchClosed { .. }, Fact::ValueAdmitted { .. }]
+            [Fact::BasisAdvanced { advance, .. }, Fact::DispatchClosed { .. }, Fact::ValueAdmitted { .. }]
+                if advance.is_empty()
         ),
         "a result that leaves the label where it was moves no basis, so the close declares no advance: {facts:?}"
     );

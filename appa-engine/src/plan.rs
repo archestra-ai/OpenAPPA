@@ -601,7 +601,10 @@ pub(crate) fn enumerate_plans(
         // An ordinary call declares no return policy; a marked spawn declares exactly one.
         let returns: Vec<Option<ReturnRoute>> = match role {
             CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, floor, kind).into_iter().map(Some).collect(),
+            CallRole::MarkedSpawn(kind) => return_options(registry, current, floor, kind)
+                .into_iter()
+                .map(Some)
+                .collect(),
         };
         for required in assignments {
             for settlement in &settlements {
@@ -1216,16 +1219,26 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// The return routes a marked spawn may declare here: the bare floor, then in registry name order
 /// the reserved attestation when it is registered and every untagged output sanitizer, then no
 /// return. Under a floor, a sanitizer whose mandate lands below it is not offered — the
-/// grandchild's return could never cross the child. A fan-out spawn is not offered the
+/// grandchild's return could never cross the child. The attestation is offered only where
+/// `current` covers its trust rank, the condition its declaration is checked against, so no
+/// offered route is one the declaration then refuses. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
 /// declaration checks once and a fan-out's later children need not meet.
-fn return_options(registry: &Registry, floor: Option<&Floor>, kind: crate::transition::SpawnKind) -> Vec<ReturnRoute> {
+fn return_options(
+    registry: &Registry,
+    current: &Label,
+    floor: Option<&Floor>,
+    kind: crate::transition::SpawnKind,
+) -> Vec<ReturnRoute> {
     let mut options = vec![ReturnRoute::Raw];
     options.extend(
         registry
             .sanitizers()
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
-            .filter(|sanitizer| kind == crate::transition::SpawnKind::Single || !sanitizer.name.is_attest_schema())
+            .filter(|sanitizer| {
+                !sanitizer.name.is_attest_schema()
+                    || (kind == crate::transition::SpawnKind::Single && attest_fits(&sanitizer.transition, current))
+            })
             .filter(|sanitizer| {
                 floor.is_none_or(|floor| {
                     Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
@@ -1279,13 +1292,12 @@ fn preserving_return_exists(
     context: &MembershipContext<'_>,
 ) -> bool {
     let unchanged = Floor::new(current.clone(), None);
-    return_options(registry, floor, crate::transition::SpawnKind::Single)
+    return_options(registry, current, floor, crate::transition::SpawnKind::Single)
         .into_iter()
         .filter_map(|route| match route {
             ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
             ReturnRoute::Raw | ReturnRoute::Void => None,
         })
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema() || attest_fits(&sanitizer.transition, current))
         .any(|sanitizer| {
             sanitizer
                 .derive_output(&narrowing.to, &[], context)
@@ -2737,7 +2749,6 @@ mod tests {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::public()),
             receiving: Label::new(TRUSTED, Audience::public()),
@@ -2746,6 +2757,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: crate::fact::ReleaseTerms::none(),
         }
     }
 

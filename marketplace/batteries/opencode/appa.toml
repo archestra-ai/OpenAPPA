@@ -18,7 +18,6 @@ delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "host/opencode/websearch"
-requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 [[policy.tool]]

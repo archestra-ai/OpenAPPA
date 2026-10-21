@@ -392,7 +392,7 @@ async fn a_refused_post_use_hook_withholds_the_result_it_reports() {
     for answer in [
         (
             axum::http::StatusCode::CONFLICT,
-            r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+            r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
         ),
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
     ] {
@@ -731,7 +731,7 @@ async fn a_blocked_call_carries_the_runtimes_detail_on_stderr() {
         post(|| async {
             (
                 axum::http::StatusCode::CONFLICT,
-                r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+                r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
             )
         }),
     ))
@@ -789,7 +789,7 @@ async fn a_refused_child_end_withholds_the_return_it_reports() {
     for answer in [
         (
             axum::http::StatusCode::CONFLICT,
-            r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+            r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
         ),
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
     ] {
@@ -895,7 +895,7 @@ async fn a_stop_on_the_withheld_return_ends_the_subagent_the_runtime_cannot_chec
         post(|| async {
             (
                 axum::http::StatusCode::CONFLICT,
-                r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+                r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
             )
         }),
     ))

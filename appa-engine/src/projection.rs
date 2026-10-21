@@ -130,7 +130,8 @@ struct ReturnedChild {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Projection {
-    revision: u64,
+    /// How many batches the family log held when this was folded.
+    position: u64,
     values: Vector<AdmittedValue>,
     local: OrdMap<TrajectoryId, Vector<ValueId>>,
     /// The meet of every label in `local`, met with only terms the trajectory's live fold also
@@ -149,6 +150,8 @@ pub struct Projection {
     occurrences: OrdMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: OrdMap<DispatchId, ResolvedCall>,
     receiving_bounds: OrdMap<DispatchId, Label>,
+    /// The terms each dispatch's release pinned, with the effects it reserved.
+    release_terms: OrdMap<DispatchId, (crate::fact::ReleaseTerms, EffectSet)>,
     dispatch_evidence: OrdMap<DispatchId, AudienceEvidence>,
     subject_dispatches: OrdMap<crate::basis::SubjectKey, DispatchId>,
     observations: OrdMap<DispatchId, ObservedResult>,
@@ -189,18 +192,20 @@ pub struct Projection {
     admissions: OrdMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: OrdMap<crate::value::OfferId, RecordedOffer>,
     approvals: OrdMap<crate::value::OfferId, PreparedApproval>,
+    /// The approvals not yet spent: a spend is the one advance an approval's subject ever
+    /// takes, so a spent approval is never current again and scans skip it.
+    unspent: OrdSet<crate::value::OfferId>,
     versions: crate::basis::Versions,
 }
 
 /// The call a [`Fact::DispatchOpened`] record dispatched, rebuilt from its fields.
 pub(crate) fn opened_call(
     tool: &ToolName,
-    declaration: crate::value::ToolDeclarationId,
     arguments: &crate::params::CanonicalArguments,
     annotation: &Option<PinnedAnnotation>,
     file_basis: &Option<crate::value::FileBasis>,
 ) -> ResolvedCall {
-    ResolvedCall::new_keyed(tool.clone(), declaration, arguments.clone())
+    ResolvedCall::new(tool.clone(), arguments.clone())
         .with_annotation(annotation.clone())
         .with_file_basis(file_basis.clone())
 }
@@ -247,6 +252,18 @@ fn rebuilt_local_label(
     fold
 }
 
+/// Apply `change` to every value of `map` in place. `OrdMap` has no mutable iterator, so the keys
+/// are collected first and each value is reached through `get_mut`: O(n log n), paid once per
+/// trust chain crossing of a family, never on the decision path.
+fn each_mut<K: Ord + Clone, V: Clone>(map: &mut OrdMap<K, V>, mut change: impl FnMut(&mut V)) {
+    let keys: Vec<K> = map.keys().cloned().collect();
+    for key in keys {
+        if let Some(value) = map.get_mut(&key) {
+            change(value);
+        }
+    }
+}
+
 fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &crate::value::OfferId, end: OfferEnd) {
     if let Some(open) = offers.get_mut(offer) {
         open.end = Some(end);
@@ -254,9 +271,9 @@ fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &
 }
 
 impl Projection {
-    pub(crate) fn empty(revision: u64) -> Self {
+    pub(crate) fn empty(position: u64) -> Self {
         Projection {
-            revision,
+            position,
             values: Default::default(),
             local: Default::default(),
             local_label: Default::default(),
@@ -268,6 +285,7 @@ impl Projection {
             occurrences: Default::default(),
             dispatch_calls: Default::default(),
             receiving_bounds: Default::default(),
+            release_terms: Default::default(),
             dispatch_evidence: Default::default(),
             subject_dispatches: Default::default(),
             observations: Default::default(),
@@ -290,14 +308,15 @@ impl Projection {
             admissions: Default::default(),
             offers: Default::default(),
             approvals: Default::default(),
+            unspent: Default::default(),
             versions: crate::basis::Versions::default(),
         }
     }
 
     /// Fold every view from the family log **without** the transition rules.
     #[cfg(test)]
-    pub(crate) fn build(log: &[Fact], revision: u64) -> Self {
-        let mut projection = Projection::empty(revision);
+    pub(crate) fn build(log: &[Fact], position: u64) -> Self {
+        let mut projection = Projection::empty(position);
         projection.fold_all(log);
         projection
     }
@@ -308,15 +327,80 @@ impl Projection {
         }
     }
 
-    pub(crate) fn set_revision(&mut self, revision: u64) {
-        self.revision = revision;
+    pub(crate) fn set_position(&mut self, position: u64) {
+        self.position = position;
+    }
+
+    /// Carry every label this projection decides from into the trust chain `crossing` arrives
+    /// at. Values, bounds, seeds and candidates cross as values; a fork's return floor crosses as
+    /// a requirement. What the log recorded as an identity — a call, an offer's plan, an
+    /// approval's terms — is not rewritten: it either still matches what the arriving policy
+    /// derives when it is used, or it retires there. A cached local fold is rebuilt from its
+    /// crossed terms, never crossed itself: crossing by rank name need not keep the order of
+    /// ranks, so a crossed meet is not the meet of the crossed terms.
+    pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        for value in self.values.iter_mut() {
+            value.label.cross_value(crossing);
+        }
+        each_mut(&mut self.receiving_bounds, |bound| bound.cross_value(crossing));
+        each_mut(&mut self.release_terms, |(terms, _)| {
+            // Audience atoms stay symbolic across revisions; only trust ranks need crossing.
+            if let Some(trust) = &mut terms.delta.trust {
+                *trust = crossing.value(*trust);
+            }
+        });
+        each_mut(&mut self.prepared, |fork| {
+            fork.snapshot.cross(crossing);
+            fork.return_policy.cross(crossing);
+        });
+        for returned in self.child_returns.iter_mut() {
+            returned.value.label.cross_value(crossing);
+        }
+        each_mut(&mut self.resumed, |label| label.cross_value(crossing));
+        if let Some((_, label)) = self.opening.as_mut() {
+            label.cross_value(crossing);
+        }
+        each_mut(&mut self.candidates, |candidate| candidate.derived.cross(crossing));
+        let trajectories: Vec<TrajectoryId> = self.local_label.keys().cloned().collect();
+        for trajectory in trajectories {
+            let snapshot = self
+                .fork_of
+                .get(&trajectory)
+                .and_then(|fork| self.prepared.get(fork))
+                .map(|prepared| &prepared.snapshot);
+            let base = match snapshot {
+                Some(snapshot) => Some(snapshot.base()),
+                None => self
+                    .opening
+                    .as_ref()
+                    .filter(|(root, _)| *root == trajectory)
+                    .map(|(_, starting)| starting),
+            };
+            let rebuilt = rebuilt_local_label(
+                base,
+                snapshot,
+                self.resumed.get(&trajectory),
+                &self.values,
+                self.local.get(&trajectory),
+            );
+            self.local_label.insert(trajectory, rebuilt);
+        }
+    }
+
+    /// Carry this fold to a later policy revision: the family's basis advances, so every offer and
+    /// approval an earlier revision recorded stops being current. A call one of them stood for is
+    /// decided afresh under the later revision, and a confined result is staged again from its
+    /// standing candidate. The advance is no record: replay, the advance of a held view and a live
+    /// decision each apply it where the revision they fold at moves, so all three agree.
+    pub(crate) fn cross_revision(&mut self) {
+        self.versions.advance(&crate::basis::BasisAdvance::family());
     }
 
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
         let Projection {
-            revision: _,
+            position: _,
             values,
             local,
             local_label,
@@ -328,6 +412,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            release_terms,
             dispatch_evidence,
             subject_dispatches,
             observations,
@@ -350,6 +435,7 @@ impl Projection {
             admissions,
             offers,
             approvals,
+            unspent,
             versions,
         } = self;
         match fact {
@@ -420,9 +506,12 @@ impl Projection {
             Fact::OfferAccepted { offer, .. } => end_offer(offers, offer, OfferEnd::Accepted),
             Fact::OfferDenied { offer, authority, .. } => end_offer(offers, offer, OfferEnd::Denied(authority.clone())),
             Fact::OfferInvalidated { offer, .. } => end_offer(offers, offer, OfferEnd::Invalidated),
+            Fact::CallApprovalConsumed { offer, .. } => {
+                unspent.remove(offer);
+            }
             // Both only advance their subject, which the prepended `BasisAdvanced` applies:
             // the record they spend falls out of "current" by that alone.
-            Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
+            Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
             Fact::CallApproved {
                 trajectory,
                 offer,
@@ -435,6 +524,7 @@ impl Projection {
                 basis,
                 evidence,
             } => {
+                unspent.insert(*offer);
                 approvals.insert(
                     *offer,
                     PreparedApproval {
@@ -508,7 +598,6 @@ impl Projection {
                 trajectory,
                 dispatch,
                 tool,
-                declaration,
                 arguments,
                 receiving,
                 proposed_effects,
@@ -516,12 +605,11 @@ impl Projection {
                 file_basis,
                 subject,
                 evidence,
+                terms,
                 proposed_label: _,
             } => {
-                dispatch_calls.insert(
-                    dispatch.clone(),
-                    opened_call(tool, *declaration, arguments, annotation, file_basis),
-                );
+                release_terms.insert(dispatch.clone(), (terms.clone(), proposed_effects.clone()));
+                dispatch_calls.insert(dispatch.clone(), opened_call(tool, arguments, annotation, file_basis));
                 receiving_bounds.insert(dispatch.clone(), receiving.clone());
                 dispatch_evidence.insert(dispatch.clone(), evidence.clone());
                 subject_dispatches.insert(subject.clone(), dispatch.clone());
@@ -679,8 +767,8 @@ impl Projection {
         }
     }
 
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
+    pub(crate) fn position(&self) -> u64 {
+        self.position
     }
 
     fn value(&self, id: ValueId) -> Option<&AdmittedValue> {
@@ -805,7 +893,7 @@ impl Projection {
         Some(RootForkOrigin {
             parent_root: family.clone(),
             parent: trajectory.clone(),
-            basis: self.revision,
+            basis: self.position,
             label: self.fold_for(trajectory),
             effects: EffectSet::distinct(&self.effects),
             reservations: EffectSet::distinct(reserved),
@@ -895,18 +983,16 @@ impl Views<'_> {
             .filter(|open| &open.trajectory == self.trajectory && self.is_pending(open))
             .filter_map(|open| self.proposed_call(&open.subject));
         let approved = self
-            .projection
-            .approvals
-            .iter()
+            .unspent_approvals()
             .filter(|(offer, approval)| {
                 &approval.trajectory == self.trajectory
-                    && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(*offer))
             })
             .map(|(_, approval)| &approval.call);
         let digest = call.digest();
         let mut pins = offered
             .chain(approved)
-            .filter(|standing| standing.digest() == digest && standing.declaration_id() == call.declaration_id())
+            .filter(|standing| standing.digest() == digest)
             .filter_map(ResolvedCall::annotation);
         let first = pins.next()?;
         pins.all(|pin| pin == first).then_some(first)
@@ -1056,18 +1142,53 @@ impl Views<'_> {
         self.projection.approvals.get(offer)
     }
 
-    /// Every approval prepared for this exact call in this trajectory, whatever their freshness.
-    /// The caller decides what current means: a live decision compares against the basis it stands
-    /// at, and the validator against the basis its decision began from.
+    /// Every current approval in this trajectory, found through the unspent set.
+    #[cfg(test)]
+    pub(crate) fn current_approvals(&self) -> Vec<crate::value::OfferId> {
+        self.unspent_approvals()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(*offer))
+            })
+            .map(|(offer, _)| offer)
+            .collect()
+    }
+
+    /// Every current approval in this trajectory by its definition: every approval ever
+    /// recorded, filtered by freshness. The reference `current_approvals` is checked against.
+    #[cfg(test)]
+    pub(crate) fn current_approvals_by_scan(&self) -> Vec<crate::value::OfferId> {
+        self.projection
+            .approvals
+            .iter()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
+            })
+            .map(|(offer, _)| *offer)
+            .collect()
+    }
+
+    fn unspent_approvals(&self) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
+        self.projection.unspent.iter().map(|offer| {
+            let approval = self
+                .projection
+                .approvals
+                .get(offer)
+                .expect("unspent names only recorded approvals");
+            (*offer, approval)
+        })
+    }
+
+    /// Every unspent approval prepared for this exact call in this trajectory, whatever their
+    /// freshness. The caller decides what current means: a live decision compares against the
+    /// basis it stands at, and the validator against the basis its decision began from.
     pub(crate) fn approvals_for(
         &self,
         call: &ResolvedCall,
     ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
-        self.projection
-            .approvals
-            .iter()
+        self.unspent_approvals()
             .filter(move |(_, approval)| &approval.trajectory == self.trajectory && &approval.call == call)
-            .map(|(offer, approval)| (*offer, approval))
     }
 
     /// Every call candidate staged for exactly these substituted bytes in this trajectory,
@@ -1306,6 +1427,12 @@ impl Views<'_> {
     /// result; the runtime also reads it to know which backend to call.
     pub(crate) fn bound_sanitizer(&self, dispatch: &DispatchId) -> Option<&SanitizerName> {
         self.projection.bound_sanitizers.get(dispatch)
+    }
+
+    /// The terms this dispatch's release pinned and the effects it reserved; `None` for a
+    /// dispatch the family never opened.
+    pub(crate) fn release_terms(&self, dispatch: &DispatchId) -> Option<&(crate::fact::ReleaseTerms, EffectSet)> {
+        self.projection.release_terms.get(dispatch)
     }
 
     pub(crate) fn withholds_output(&self, dispatch: &DispatchId) -> bool {
@@ -1624,7 +1751,6 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 receiving: Label::top(),
@@ -1633,6 +1759,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: crate::fact::ReleaseTerms::none(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1655,7 +1782,6 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 receiving: Label::top(),
@@ -1664,6 +1790,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: crate::fact::ReleaseTerms::none(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1685,7 +1812,6 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 receiving: Label::top(),
@@ -1694,6 +1820,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: crate::fact::ReleaseTerms::none(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1794,7 +1921,6 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),
-                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 receiving: Label::top(),
@@ -1803,6 +1929,7 @@ mod tests {
                 file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
+                terms: crate::fact::ReleaseTerms::none(),
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),

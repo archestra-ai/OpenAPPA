@@ -77,7 +77,7 @@ async fn composed_runtime(
                 let Role::Battery(battery) = package.role else {
                     panic!("monday is a battery");
                 };
-                let targets = battery.targets.expect("monday declares its targets");
+                let targets = battery.targets.policies().expect("monday declares its targets");
                 let policy_path = target.join(targets.get(battery_target).policy.as_str());
                 let policy = std::fs::read_to_string(&policy_path).unwrap().replace(
                     "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_MONDAY_TOKEN\"",

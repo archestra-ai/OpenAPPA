@@ -24,7 +24,12 @@ runs:
         version=$(tr -d '\r\n' < .github/release-please/version.txt)
         if [ "$RELOCK" = "true" ]; then
           cargo update --workspace
+          cargo update --workspace --manifest-path scripts/mixed-version/Cargo.toml
         fi
+        # The proof is a separate workspace with path dependencies on the
+        # versioned root crates. Its lockfile must move with the root version.
+        cargo metadata --locked --manifest-path scripts/mixed-version/Cargo.toml \
+          --format-version 1 > /dev/null
         cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
           | jq -r '.packages[] | select(.name == "appa") | .version')
         demo_chart_version=$(sed -n 's/^version: *\([^ #]*\).*/\1/p' \

@@ -86,10 +86,20 @@ func newHook(t *testing.T, answers ...any) *hook {
 			fmt.Fprint(w, `{"error": "scripted"}`)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(answer); err != nil {
+		encoded, err := json.Marshal(answer)
+		if err != nil {
 			t.Errorf("the scripted answer must encode: %v", err)
 		}
+		var answered struct {
+			Decision string `json:"decision"`
+		}
+		_ = json.Unmarshal(encoded, &answered)
+		w.Header().Set("Content-Type", "application/json")
+		// The runtime answers a refuse with 409 and every other decision with 200.
+		if answered.Decision == "refuse" {
+			w.WriteHeader(http.StatusConflict)
+		}
+		_, _ = w.Write(encoded)
 	}))
 	t.Cleanup(h.server.Close)
 	return h
@@ -576,12 +586,12 @@ func TestARefusedChildStartFailsClosedAndTheNextEntryOpensAgain(t *testing.T) {
 	// The pair joins the opened set only after the runtime acked, so a
 	// refused opening fails the entry closed and is sent again on the
 	// next entry.
-	h := newHook(t, map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ack, ack)
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure"}, ack, ack)
 	p := pluginOver(t, h)
 	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1", SpawnBindingHeader: "binding-root-1"})
 	_, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices"))
 	failure := mustFailClosed(t, err, "the refused child start")
-	if failure.Reason != "appa refused the session: storage failure" {
+	if failure.Reason != "appa refused: storage failure (storage)" {
 		t.Errorf("the refusal detail must reach the failure, got %q", failure.Reason)
 	}
 	// Content another run landed in the shared child session between the
@@ -1296,7 +1306,7 @@ func TestAChildScopeOpensAndEndsThroughTheAgentCallbacks(t *testing.T) {
 }
 
 func TestARefusedChildScopeFailsClosed(t *testing.T) {
-	h := newHook(t, ack, map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"})
+	h := newHook(t, ack, map[string]any{"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure"})
 	p := pluginOver(t, h)
 	sess := newFakeSession("s1")
 	if _, err := p.beforeAgent(newFakeContext(sess).forAgent("root-agent")); err != nil {
@@ -1304,7 +1314,7 @@ func TestARefusedChildScopeFailsClosed(t *testing.T) {
 	}
 	_, err := p.beforeAgent(newFakeContext(sess).forAgent("billing-agent"))
 	failure := mustFailClosed(t, err, "the refused child scope")
-	if failure.Reason != "appa refused the child scope: storage failure" {
+	if failure.Reason != "appa refused: storage failure (storage)" {
 		t.Errorf("the refusal detail must reach the failure, got %q", failure.Reason)
 	}
 }
@@ -1370,6 +1380,8 @@ func TestAGatedCallbackFailsClosedOnTransportStatusAndContract(t *testing.T) {
 		500,
 		map[string]any{"protocol": 1, "decision": "approve"},
 		map[string]any{"protocol": 1, "decision": "deny_call"},
+		map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"},
+		map[string]any{"protocol": 1, "decision": "refuse", "class": "disk", "detail": "storage failure"},
 	} {
 		p := pluginOver(t, newHook(t, answer))
 		mustFailClosed(t, call(p), fmt.Sprintf("the %v answer", answer))
@@ -1613,7 +1625,7 @@ func TestARefuseAnswerFailsEveryGatedCallbackClosed(t *testing.T) {
 	// The runtime answers refuse when it cannot rule. Every gated
 	// callback stops its own action on that answer, carries the
 	// runtime's detail, and posts nothing further.
-	refuse := json.RawMessage(`{"protocol":1,"decision":"refuse","detail":"storage failure"}`)
+	refuse := json.RawMessage(`{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure"}`)
 	cases := []struct {
 		name  string
 		event string
@@ -2248,6 +2260,20 @@ func TestADeclarationTheRuntimeDoesNotVouchForReachesTheModel(t *testing.T) {
 	}
 	if len(scripted.calls) != 0 {
 		t.Errorf("no vouch, no plan, got %v", scripted.calls)
+	}
+}
+
+func TestARefusedDeclarationFailsTheCallClosed(t *testing.T) {
+	h := newHook(t, heldSpawn(), map[string]any{"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "moved"})
+	p := pluginOver(t, h)
+	scripted := remedyOver(p)
+	_, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"}, map[string]any{})
+	mustFailClosed(t, err, "the refused declaration")
+	if len(scripted.calls) != 0 {
+		t.Errorf("a refused declaration runs no plan, got %v", scripted.calls)
+	}
+	if events := gated(h); len(events) != 2 {
+		t.Errorf("nothing is proposed after the refusal, got %v", events)
 	}
 }
 

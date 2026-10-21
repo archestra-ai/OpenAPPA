@@ -106,7 +106,11 @@ An adapter handles naming differences between your agent and APPA. For example, 
 
 ### One embedded runtime can serve many policies
 
-A host that serves several policies from one embedded runtime, such as one per organization, prepares each policy's deployment with `Runtime::prepare_deployment` and dispatches each event through `runtime.pinned(&deployment)`. Every root that view opens, every decision it makes, and every consult it sends to an annotator, authority, or membership service uses the pinned deployment, whatever the shared runtime serves. A trajectory opened under an earlier policy still decides under its stored policy file.
+A host that serves several policies from one embedded runtime, such as one per organization, gives each policy its own `deployment`. It prepares a policy with `Runtime::prepare_deployment`, publishes it as the deployment's next `policy revision` with `Runtime::publish`, and dispatches each event through `runtime.pinned(&published)`. Every root that view opens, every decision it makes, and every consult it sends to an annotator, authority, or membership service uses the published revision, whatever the shared runtime serves. A trajectory decides under that revision, whichever revision opened it. Publishing a file that the head already names publishes no new revision.
+
+When another publish moves the deployment's head past a pinned revision, the view refuses events with a retryable error. The host then pins the new head and dispatches the event again.
+
+If the host validates policy inputs that other processes can change, it must read the deployment head before validating those inputs. It then calls `Runtime::publish_if_head` with the observed revision, or `None` for a deployment with no head. If another publisher advances the head, `OpenError::PolicyHeadMoved` tells the host to read and validate its inputs again. This operation never retries publication against a newer head. Matching policy bytes reuse the expected revision without publishing.
 
 A pin selects a policy, not whose trajectories a view can reach. When the policies belong to separate tenants, give each dispatch its tenant's store through `runtime.on(store)`, a store that reads and writes only that tenant's trajectory logs. Also keep root trajectory ids unique across the whole runtime, for example by including the tenant id, because the runtime keys some in-process state by root id alone.
 

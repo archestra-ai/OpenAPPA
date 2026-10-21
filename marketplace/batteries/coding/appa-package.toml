@@ -1,0 +1,16 @@
+schema = 1
+name = "coding"
+description = "Coding-agent tool rules for canonical shell, file and web tools: credential paths and commands narrow to self, writes into them require a trusted session, and every other shell command is labeled per call by an Annotator."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["coding"]
+helpers = []
+benefit = "Rules for a coding agent's shell, file and web tools: reads of credential files and secret commands stay with you."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

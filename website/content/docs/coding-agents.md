@@ -28,7 +28,7 @@ Every Claude Code install includes the [Claude Code tools battery](/battery-clau
 - **Reading credentials narrows the trajectory.** Read, Grep, Bash, or PowerShell calls that contain configured credential-path spellings narrow the audience to `self`.
 - **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
 - **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
-- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands. The `redact-secrets` sanitizer can mask credential tokens before output reaches the model.
+- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
 These contracts label what a command reads or returns; they do not sandbox the command. Use [isolated file processing](#isolated-file-processing) or an operating-system sandbox for confinement.
 
@@ -104,6 +104,8 @@ The runtime records file transitions in an append-only event stream for each can
 A path receives the configured initial Label only when a call first touches it and no history exists. The runtime records a content digest to verify the bytes. The digest does not classify them. Events retain version metadata, not historical file content.
 
 Workspace events and root bindings use the configured SQLite, memory, or PostgreSQL event-log backend. Durable backends preserve them across runtime restarts. A restart does not clear an active quarantine.
+
+A workspace's event stream records the policy it opened under, and its Labels rank against that policy's trust chain. Every root of the runtime's `deployment` can use the stream across policy revisions while each revision keeps the same trust chain. After a revision changes the chain, file tools refuse calls in that workspace.
 
 The runtime requires exclusive ownership of a dedicated workspace. No other process may edit it. The workspace cannot contain symlinks or hard links. Keep policy, database, credentials, plugins, and sandbox backends outside it.
 

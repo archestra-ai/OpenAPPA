@@ -18,6 +18,8 @@ import (
 
 const fixturesPath = "../../../marketplace/plugins/kagent/fixtures/wire-events.jsonl"
 
+const refusalClassesPath = "../../../appa-runtime-api/refusal-classes.txt"
+
 const (
 	fixtureRoot  = "adk-4f6c2f1e"
 	fixtureChild = "adk-9b0d11aa"
@@ -215,8 +217,8 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 		},
 		{
 			"refuse",
-			`{"protocol": 1, "decision": "refuse", "detail": "storage failure: disk full"}`,
-			Decision{Kind: "refuse", Detail: "storage failure: disk full"},
+			`{"protocol": 1, "decision": "refuse", "class": "storage", "detail": "storage failure: disk full"}`,
+			Decision{Kind: "refuse", Detail: "storage failure: disk full", Class: RefusalStorage},
 		},
 	} {
 		got, err := parseDecision([]byte(tc.body))
@@ -249,7 +251,10 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"block_without_reason", `{"protocol": 1, "decision": "block"}`},
 		{"replace_without_output", `{"protocol": 1, "decision": "replace_output"}`},
 		{"deliver_without_value", `{"protocol": 1, "decision": "deliver_value"}`},
-		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse"}`},
+		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse", "class": "storage"}`},
+		{"refuse_without_class", `{"protocol": 1, "decision": "refuse", "detail": "d"}`},
+		{"refuse_class_not_a_string", `{"protocol": 1, "decision": "refuse", "class": 7, "detail": "d"}`},
+		{"refuse_class_outside_the_wire", `{"protocol": 1, "decision": "refuse", "class": "disk", "detail": "d"}`},
 		{"context_without_text", `{"protocol": 1, "decision": "context"}`},
 		{"offers_not_a_list", `{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": {}}`},
 		{"offer_without_an_id", `{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": [{"returns": "as_spoken"}]}`},
@@ -270,6 +275,45 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 			if !errors.As(err, &wireErr) {
 				t.Errorf("the %s answer must fail as a WireError, got %T", tc.name, err)
 			}
+		}
+	}
+}
+
+func TestTheRefusalClassesAreTheRuntimesExactly(t *testing.T) {
+	raw, err := os.ReadFile(refusalClassesPath)
+	if err != nil {
+		t.Fatalf("the refusal class list must be readable: %v", err)
+	}
+	listed := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	closed := make([]string, len(refusalClasses))
+	for i, class := range refusalClasses {
+		closed[i] = string(class)
+	}
+	if !reflect.DeepEqual(closed, listed) {
+		t.Errorf("the closed set drifted from the runtime's: got %v, want %v", closed, listed)
+	}
+}
+
+func TestA409AnswerIsARefuse(t *testing.T) {
+	refuse := []byte(`{"protocol": 1, "decision": "refuse", "class": "policy_moved", "detail": "d"}`)
+	decision, err := parseAnswer(409, refuse)
+	if err != nil || decision.Class != RefusalPolicyMoved {
+		t.Fatalf("a 409 refuse must parse with its class, got %+v, %v", decision, err)
+	}
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{409, `{"protocol": 1, "decision": "ack"}`},
+		{409, `{"protocol": 1, "decision": "refuse", "detail": "d"}`},
+		{409, `{"error": "malformed event"}`},
+		{200, string(refuse)},
+		{500, string(refuse)},
+		{400, `{"protocol": 1, "decision": "ack"}`},
+	} {
+		var wireErr *WireError
+		if _, err := parseAnswer(tc.status, []byte(tc.body)); !errors.As(err, &wireErr) {
+			t.Errorf("a %d answer of %s must fail as a WireError, got %v", tc.status, tc.body, err)
 		}
 	}
 }

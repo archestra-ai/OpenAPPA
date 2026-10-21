@@ -644,7 +644,7 @@ fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
     );
     let facts = appended_facts(first);
     assert!(matches!(
-        facts.as_slice(),
+        declared_records(&facts),
         [
             Fact::ChildReturn {
                 derivation: ReturnDerivation::Raw,
@@ -740,6 +740,42 @@ fn a_fan_out_spawn_is_offered_every_return_route_but_the_attestation() {
 }
 
 #[test]
+fn the_attestation_is_offered_only_where_the_parent_covers_its_rank() {
+    use crate::fact::ReturnRoute;
+    let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
+    let attest = ReturnRoute::Sanitized(SanitizerName::new(SanitizerName::ATTEST_SCHEMA));
+    let routes = |log: &[Fact]| {
+        let blocked = e
+            .handle(
+                &viewing(&e, log),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks");
+        return_steps(&appended_facts(blocked))
+    };
+    let mut log = vec![opened(&e)];
+    assert!(
+        routes(&log).contains(&attest),
+        "a trusted parent is offered the attestation"
+    );
+
+    // A suspicious parent cannot attest a return up to trusted: the declaration would be
+    // refused, so the route is not offered.
+    reads(&e, &mut log, &traj(), "read_suspicious");
+    assert_eq!(
+        viewing(&e, &log)
+            .views(&traj())
+            .expect("the parent is opened")
+            .current_label()
+            .trust,
+        SUSPICIOUS
+    );
+    let offered = routes(&log);
+    assert!(!offered.contains(&attest), "offered {offered:?}");
+    assert!(offered.contains(&ReturnRoute::Raw));
+}
+
+#[test]
 fn the_reserved_route_is_declared_only_with_its_shape() {
     let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
     let log = vec![opened(&e)];
@@ -832,7 +868,7 @@ fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
     );
     let facts = appended_facts(merged);
     assert!(matches!(
-        &facts[0],
+        &declared_records(&facts)[0],
         Fact::ChildReturn {
             value,
             derivation: ReturnDerivation::Sanitized { sanitizer, .. },
@@ -928,7 +964,7 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
     );
     let facts = appended_facts(echoed);
     assert!(matches!(
-        &facts[0],
+        &declared_records(&facts)[0],
         Fact::ChildReturn {
             value,
             derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
@@ -992,7 +1028,7 @@ fn a_return_after_a_resume_is_a_new_crossing_even_when_its_bytes_repeat() {
     let facts = appended_facts(again);
     assert!(
         matches!(
-            facts.as_slice(),
+            declared_records(&facts),
             [
                 Fact::ChildReturn { .. },
                 Fact::ValueAdmitted { .. },

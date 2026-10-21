@@ -85,7 +85,7 @@ impl Engine {
             offer: execution.offer,
         }];
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
         })
     }
@@ -641,7 +641,12 @@ impl Engine {
             basis: views.basis_after(&advance, &subject),
             evidence: act.pinned().clone(),
         });
-        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
+        let batch = self.declaring(
+            view.family(),
+            crate::basis::DecidedAct::Offer(execution.offer),
+            advance,
+            facts,
+        );
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Approved {
@@ -708,7 +713,12 @@ impl Engine {
             act,
         )?;
         facts.extend(opened);
-        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
+        let batch = self.declaring(
+            view.family(),
+            crate::basis::DecidedAct::Offer(execution.offer),
+            advance,
+            facts,
+        );
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Denied { block: Box::new(block) }),
