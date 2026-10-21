@@ -28,9 +28,7 @@ Connect an existing agent through its lifecycle hooks. The hooks pause tool exec
 
 APPA runs alongside the agent as a local process, sidecar, or shared service. For a new harness, your coding agent can build the hook integration and runtime adapter using the existing implementations as references.
 
-[Claude Code](/claude-code) is a ready-made example for a coding agent; [kagent](/kagent) shows the same approach for Kubernetes agents. Their dedicated guides cover setup and configuration.
-
-For OpenCode V2, [AppenCode v1](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/opencode) checks direct tool calls and results. It supports remedy plans and output sanitization. It refuses Code Mode and subagents; it does not gate inference or provide filesystem confinement. The integration README covers source installation and the supported boundaries.
+[Claude Code](/claude-code) and [AppenCode](/opencode) (for OpenCode V2) are ready-made integrations for coding agents; [kagent](/kagent) shows the same approach for Kubernetes agents. Their dedicated guides cover setup and configuration.
 
 Ask your coding agent to run [this prompt](#start-in-your-repository) to implement it.
 
