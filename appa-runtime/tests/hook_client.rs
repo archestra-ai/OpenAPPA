@@ -1,6 +1,10 @@
 //! `appa hook` as the harness runs it: the client contract of the hook entries
 //! a deployment registers. Every test spawns the built binary with a hook event
 //! on stdin and reads the exit code and stdout the harness would.
+//!
+//! Hook stubs consume the request body before replying. Otherwise they can close
+//! the connection while the client is still writing it, testing a broken pipe
+//! instead of the intended answer.
 
 mod common;
 use appa_runtime::child_process;
@@ -10,6 +14,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::routing::post;
 
 /// The gated hook every test posts: a call the runtime must decide.
@@ -140,7 +145,7 @@ async fn refused_url() -> String {
 async fn a_2xx_answer_is_rendered_for_the_host_with_exit_0() {
     let url = serve(Router::new().route(
         "/hook",
-        post(|| async { r#"{"protocol":1,"decision":"block","reason":"denied"}"# }),
+        post(|_body: Bytes| async { r#"{"protocol":1,"decision":"block","reason":"denied"}"# }),
     ))
     .await;
     let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, PRE_TOOL_USE))
@@ -154,7 +159,7 @@ async fn a_2xx_answer_is_rendered_for_the_host_with_exit_0() {
 /// A 2xx body that is no wire decision is not passed through: the hook fails closed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_2xx_answer_that_is_no_wire_decision_exits_2() {
-    let url = serve(Router::new().route("/hook", post(|| async { "{}" }))).await;
+    let url = serve(Router::new().route("/hook", post(|_body: Bytes| async { "{}" }))).await;
     let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, PRE_TOOL_USE))
         .await
         .expect("the blocking task joins");
@@ -250,7 +255,7 @@ async fn the_runtime_refuses_requests_carrying_a_browser_origin() {
 async fn a_server_error_exits_2_instead_of_failing_open() {
     let url = serve(Router::new().route(
         "/hook",
-        post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        post(|_body: Bytes| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
     ))
     .await;
     let (code, _) = tokio::task::spawn_blocking(move || run_client(&url, PRE_TOOL_USE))
@@ -312,7 +317,7 @@ async fn an_unreachable_runtime_never_blocks_a_turn_end() {
 async fn a_refused_turn_end_still_prints_nothing_and_exits_0() {
     let url = serve(Router::new().route(
         "/hook",
-        post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        post(|_body: Bytes| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
     ))
     .await;
     let stop = r#"{"hook_event_name":"Stop","session_id":"client-test","stop_hook_active":false}"#;
@@ -339,20 +344,23 @@ async fn an_unreachable_runtime_exits_2() {
 async fn the_sessions_runtime_url_beats_the_deployments_endpoint() {
     let session = serve(Router::new().route(
         "/hook",
-        post(|| async { r#"{"protocol":1,"decision":"block","reason":"from the session's runtime"}"# }),
+        post(|_body: Bytes| async { r#"{"protocol":1,"decision":"block","reason":"from the session's runtime"}"# }),
     ))
     .await;
     let deployment = refused_url().await;
-    let (code, stdout) = tokio::task::spawn_blocking(move || {
-        finish(
-            child_process::spawn(client(&deployment).env("APPA_RUNTIME_URL", &session))
+    let output = tokio::task::spawn_blocking(move || {
+        finish_output(
+            child_process::spawn(client_heard(&deployment).env("APPA_RUNTIME_URL", &session))
                 .expect("the hook client spawns"),
             PRE_TOOL_USE,
         )
     })
     .await
     .expect("the blocking task joins");
-    assert_eq!(code, 0, "{stdout}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output.status.code().expect("the hook client exits with a code");
+    assert_eq!(code, 0, "stdout: {stdout}; stderr: {stderr}");
     let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the answer is JSON");
     assert_eq!(answer["reason"], "from the session's runtime");
 }
@@ -396,7 +404,7 @@ async fn a_refused_post_use_hook_withholds_the_result_it_reports() {
         ),
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
     ] {
-        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let url = serve(Router::new().route("/hook", post(move |_body: Bytes| async move { answer }))).await;
         let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, POST_TOOL_USE))
             .await
             .expect("the blocking task joins");
@@ -437,7 +445,11 @@ async fn an_unanswered_pre_use_hook_prints_no_replacement() {
 async fn an_event_that_cannot_cross_the_wire_still_withholds_the_result_it_reports() {
     // A runtime that allows whatever reaches it: nothing here may, so an allowed call is
     // what a client that posted this event would print.
-    let url = serve(Router::new().route("/hook", post(|| async { r#"{"protocol":1,"decision":"allow_call"}"# }))).await;
+    let url = serve(Router::new().route(
+        "/hook",
+        post(|_body: Bytes| async { r#"{"protocol":1,"decision":"allow_call"}"# }),
+    ))
+    .await;
     let ran = r#"{"hook_event_name":"PostToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
     let proposed =
         r#"{"hook_event_name":"PreToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
@@ -525,7 +537,7 @@ async fn a_decision_that_cannot_be_written_does_not_exit_zero() {
         r#"{"protocol":1,"decision":"replace_output","output":"[appa] the output is confined"}"#,
         r#"{"protocol":1,"decision":"deliver_value","value":"{\"ticket\":\"scrubbed\"}"}"#,
     ] {
-        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let url = serve(Router::new().route("/hook", post(move |_body: Bytes| async move { answer }))).await;
         let heard = url.clone();
         let (heard, unheard) = tokio::task::spawn_blocking(move || {
             (run_client(&heard, PRE_TOOL_USE), run_unheard_client(&url, PRE_TOOL_USE))
@@ -728,7 +740,7 @@ fn the_session_context_entry_speaks_only_in_a_protected_session() {
 async fn a_blocked_call_carries_the_runtimes_detail_on_stderr() {
     let url = serve(Router::new().route(
         "/hook",
-        post(|| async {
+        post(|_body: Bytes| async {
             (
                 axum::http::StatusCode::CONFLICT,
                 r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
@@ -793,7 +805,7 @@ async fn a_refused_child_end_withholds_the_return_it_reports() {
         ),
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
     ] {
-        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let url = serve(Router::new().route("/hook", post(move |_body: Bytes| async move { answer }))).await;
         let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, SUBAGENT_STOP))
             .await
             .expect("the blocking task joins");
@@ -892,7 +904,7 @@ async fn a_stop_on_the_withheld_return_ends_the_subagent_the_runtime_cannot_chec
     let stop = stop.to_string();
     let refusing = serve(Router::new().route(
         "/hook",
-        post(|| async {
+        post(|_body: Bytes| async {
             (
                 axum::http::StatusCode::CONFLICT,
                 r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"storage failure: disk full"}"#,
