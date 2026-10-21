@@ -8,7 +8,7 @@ import { Cause, Effect, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { refusal } from './refusal'
-import { configuration, guide } from './setup'
+import { configuration } from './setup'
 
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
@@ -32,7 +32,7 @@ export default Plugin.define({
     const base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || 'http://127.0.0.1:8789'
     const setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG
     const setup = setupConfig ? yield* Effect.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || '')).pipe(Effect.orDie) : undefined
-    const setupGuide = setup ? yield* Effect.tryPromise(guide).pipe(Effect.orDie) : undefined
+    let setupGuide: { path: string; dev: number; ino: number } | undefined
     const pending = new Map<string, { proposal: Proposal; actor: Actor }>()
     const children = new Map<string, {
       root: Tool.Context['sessionID']; promptID: SessionMessage.ID; prompt: string; context: string
@@ -179,7 +179,9 @@ export default Plugin.define({
               : tool.options?.namespace ? `mcp/${tool.options.namespace}/${tool.name}` : `host/opencode/${tool.name}` })),
           servers.data.map(server => ({ name: server.name, status: server.status.status }))),
           catch: error => new Tool.Error({ message: error instanceof Error ? error.message : 'AppenCode setup failed.' }) })
-          return { output, content: output }
+          // The private runtime bounds these complete administrative results.
+          // Host truncation would spool them to a file the setup reader cannot open.
+          return { output, content: output, metadata: { truncated: false } }
         }).pipe(Effect.catch(error => Effect.fail(error instanceof Tool.Error ? error : failure(error)))),
       })
       editor.add({
@@ -316,6 +318,28 @@ export default Plugin.define({
 
     yield* ctx.session.hook('prompt', event => Effect.tryPromise({
       try: async () => {
+        // Refuse at prompt admission, not plugin registration: OpenCode can skip
+        // a plugin that fails to load, which would leave native tools available.
+        if (setup && !setupGuide) {
+          const path = process.env.APPA_OPENCODE_SETUP_GUIDE
+          if (!path || !isAbsolute(path) || await realpath(path) !== path) {
+            throw new Error('[appencode] Setup requires a fixed canonical guide path from the operator launcher.')
+          }
+          const file = await lstat(path)
+          if (!file.isFile()) throw new Error('[appencode] Setup guide must be a regular file.')
+          // Internal reads can inject nearby instructions. The guide must be
+          // external to both the Location and its owning project/worktree.
+          const project = resolve(ctx.location.project.directory)
+          for (const root of [ctx.location.directory, ...(project === dirname(project) ? [] : [project])]) {
+            for (const directory of [resolve(root), await realpath(root)]) {
+              const within = relative(directory, path)
+              if (!isAbsolute(within) && within !== '..' && !within.startsWith(`..${sep}`)) {
+                throw new Error('[appencode] Setup guide must be outside the OpenCode project and Location. Choose an external temporary directory.')
+              }
+            }
+          }
+          setupGuide = { path, dev: file.dev, ino: file.ino }
+        }
         const session = await Effect.runPromise(ctx.session.get({ sessionID: event.sessionID }))
         if (session.fork) throw new Error('[appencode] Forked sessions are not supported.')
         if (!session.parentID) return
@@ -339,14 +363,17 @@ export default Plugin.define({
 
     yield* ctx.session.hook('context', event => Effect.tryPromise({
       try: async () => {
+        if (setup && !setupGuide) throw new Error('[appencode] Setup guide was not admitted; retry the prompt.')
         const { context } = await open(event.sessionID)
         delete event.tools.execute
         delete event.tools.subagent
         if (children.has(event.sessionID)) delete event.tools.appa_subagent
         if (setup) {
-          for (const name of Object.keys(event.tools)) if (name !== 'appa_setup') delete event.tools[name]
+          for (const name of Object.keys(event.tools)) if (name !== 'appa_setup' && name !== 'read') delete event.tools[name]
         }
-        event.system.push({ type: 'text', text: setupGuide || context ||
+        event.system.push({ type: 'text', text: setupGuide
+          ? `Read the setup guide first with native read at exactly ${JSON.stringify(setupGuide.path)}. Only that file is readable; other files and directory listings are unavailable. Then use appa_setup to inspect and propose. Wait for a later operator approval before publishing. No coding, shell, MCP or delegation calls are available in setup.`
+          : context ||
           'AppenCode checks direct tool flows through APPA. Use the offered remedy tool, then retry. Do not bypass refused flows.' })
       },
       catch: failure,
@@ -354,6 +381,22 @@ export default Plugin.define({
 
     yield* ctx.tool.hook('execute.before', event => Effect.tryPromise({
       try: async () => {
+        if (setup && !setupGuide) throw new Error('[appencode] Setup guide was not admitted; retry the prompt.')
+        if (setupGuide) {
+          if (event.tool !== 'appa_setup' && event.tool !== 'read') {
+            throw new Error('[appencode] Setup permits only appa_setup and the fixed guide read.')
+          }
+          if (event.tool === 'read') {
+            // Reject alternate paths before checkedRead can probe the filesystem.
+            if (!event.input || typeof event.input !== 'object' || !('path' in event.input) || event.input.path !== setupGuide.path) {
+              throw new Error('[appencode] Setup read is restricted to the fixed guide file.')
+            }
+            const file = await lstat(setupGuide.path)
+            if (!file.isFile() || file.dev !== setupGuide.dev || file.ino !== setupGuide.ino || await realpath(setupGuide.path) !== setupGuide.path) {
+              throw new Error('[appencode] Setup guide was replaced; close and restart setup.')
+            }
+          }
+        }
         if (event.tool === 'appa_subagent') {
           await open(event.sessionID)
           if (children.has(event.sessionID)) throw new Error('[appencode] Nested delegation is not supported.')
