@@ -124,6 +124,9 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "integration-paths": () => <IntegrationPaths />,
   "sponsor-note": () => <SponsorNote />,
   "community-note": () => <CommunityNote />,
+  "video-auto-mode": () => (
+    <YouTubeEmbed title="OpenAPPA: We Beat Claude Code Auto Mode on Agent Security. Here's How" videoId="VMtZloM8HBQ" />
+  ),
   "video-fireship": () => (
     <YouTubeEmbed title="Fireship: Did a 50 year old military secret just solve agent prompt injection?" videoId="I_KVMFrUtPk" />
   ),
