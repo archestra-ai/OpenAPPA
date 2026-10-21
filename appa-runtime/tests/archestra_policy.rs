@@ -5,7 +5,7 @@ mod common;
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, serve, session_runtime};
+use common::{actor, offer_of, offers, propose, ran, raw, repo_root, serve, session_runtime};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -184,55 +184,142 @@ async fn a_share_runs_only_when_everyone_it_reaches_may_already_read() {
     }
 }
 
-/// A run's input and output cross through Archestra, which labels them itself, so the run
-/// tools add no label; a list of runs is the organization's own data.
-#[tokio::test]
-async fn run_tools_add_no_label_and_a_run_list_is_internal() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
+const RUN: &str = "00000000-0000-4000-8000-000000000001";
 
-    let run = "00000000-0000-4000-8000-000000000001";
-    for tool in [
+/// Each call that puts session data into a run or its workspace.
+fn into_a_run() -> [ProposedCall; 5] {
+    [
         archestra(
             "start_agent_run",
             serde_json::json!({ "agent_id": "a", "message": "summarize the notes" }),
         ),
-        archestra("get_agent_run", serde_json::json!({ "run_id": run })),
         archestra(
             "steer_agent_run",
-            serde_json::json!({ "run_id": run, "message": "also list owners" }),
+            serde_json::json!({ "run_id": RUN, "message": "also list owners" }),
         ),
-        archestra("cancel_agent_run", serde_json::json!({ "run_id": run })),
-    ] {
-        let name = tool.tool.clone();
-        assert_eq!(
-            propose(&runtime, tool.clone()).await,
-            HookDecision::AllowCall { spawn: None },
-            "{name}"
+        archestra(
+            "write_workspace_file",
+            serde_json::json!({ "task_id": RUN, "path": "notes.md", "content": "notes" }),
+        ),
+        archestra(
+            "transfer_workspace_file",
+            serde_json::json!({
+                "task_id": RUN, "direction": "upload", "path": "notes.md",
+                "local_path": "/tmp/notes.md", "size": 5, "sha256": "0".repeat(64),
+            }),
+        ),
+        archestra(
+            "transfer_workspace_file",
+            serde_json::json!({ "task_id": RUN, "path": "notes.md", "local_path": "/tmp/notes.md" }),
+        ),
+    ]
+}
+
+/// Each call that brings a run's or its workspace's data into the session.
+fn out_of_a_run() -> [ProposedCall; 5] {
+    [
+        archestra("get_agent_run", serde_json::json!({ "run_id": RUN })),
+        archestra(
+            "read_workspace_file",
+            serde_json::json!({ "task_id": RUN, "path": "notes.md" }),
+        ),
+        archestra(
+            "transfer_workspace_file",
+            serde_json::json!({
+                "task_id": RUN, "direction": "download", "path": "notes.md", "local_path": "/tmp/notes.md",
+            }),
+        ),
+        archestra(
+            "transfer_workspace_file",
+            serde_json::json!({ "task_id": RUN, "path": "notes.md", "local_path": "/tmp/notes.md" }),
+        ),
+        archestra("list_agent_runs", serde_json::json!({ "agent_ids": ["a"] })),
+    ]
+}
+
+/// In a fresh session, `call` first narrows the session to the organization, then runs.
+async fn narrows_to_internal(runtime: &Arc<Runtime>, call: ProposedCall) {
+    let tool = call.tool.clone();
+    let offer = offer_of(&propose(runtime, call.clone()).await);
+    assert!(
+        matches!(
+            runtime.execute_remedy(&actor(), offer).await,
+            RemedyOutcome::Authorized { .. }
+        ),
+        "{tool}"
+    );
+    assert_eq!(
+        propose(runtime, call.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "{tool}"
+    );
+    ran(runtime, call).await;
+}
+
+/// A run and its workspace are one container the organization may read: data a team
+/// narrower than the organization may see cannot enter it.
+#[tokio::test]
+async fn session_data_enters_a_run_only_when_the_organization_may_read_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let team = runtime(&dir).await;
+    narrowed_to_team_t1(&team).await;
+    // Not even after taking every remedy offered, such as narrowing to what is read back.
+    for write in into_a_run() {
+        let tool = write.tool.clone();
+        let decision = propose(&team, write.clone()).await;
+        let HookDecision::DenyCall { feedback, .. } = &decision else {
+            panic!("{tool}: {decision:?}")
+        };
+        for offer in offers(feedback) {
+            team.execute_remedy(&actor(), offer).await;
+        }
+        assert!(
+            !matches!(propose(&team, write).await, HookDecision::AllowCall { .. }),
+            "{tool}"
         );
-        ran(&runtime, tool).await;
     }
-
-    // A list first narrows the session to the organization.
-    let list = archestra("list_agent_runs", serde_json::json!({ "agent_ids": ["a"] }));
-    let offer = offer_of(&propose(&runtime, list.clone()).await);
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer).await,
-        RemedyOutcome::Authorized { .. }
-    ));
+    let cancel = archestra("cancel_agent_run", serde_json::json!({ "run_id": RUN }));
     assert_eq!(
-        propose(&runtime, list.clone()).await,
+        propose(&team, cancel.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    ran(&runtime, list).await;
+    ran(&team, cancel).await;
 
-    // It stays trusted and within the organization, so an org-wide share still runs.
-    assert_eq!(
-        propose(
-            &runtime,
-            archestra("set_project_share", serde_json::json!({ "visibility": "organization" })),
-        )
-        .await,
-        HookDecision::AllowCall { spawn: None }
-    );
+    let dir = tempfile::tempdir().unwrap();
+    let organization = runtime(&dir).await;
+    narrows_to_internal(
+        &organization,
+        archestra("list_agent_runs", serde_json::json!({ "agent_ids": ["a"] })),
+    )
+    .await;
+    for write in into_a_run() {
+        let tool = write.tool.clone();
+        assert_eq!(
+            propose(&organization, write.clone()).await,
+            HookDecision::AllowCall { spawn: None },
+            "{tool}"
+        );
+        ran(&organization, write).await;
+    }
+}
+
+/// What leaves a run narrows the session to the organization and keeps it trusted, so an
+/// org-wide share still runs.
+#[tokio::test]
+async fn reading_a_run_narrows_the_session_to_internal_and_keeps_trust() {
+    for read in out_of_a_run() {
+        let tool = read.tool.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(&dir).await;
+        narrows_to_internal(&runtime, read).await;
+        assert_eq!(
+            propose(
+                &runtime,
+                archestra("set_project_share", serde_json::json!({ "visibility": "organization" })),
+            )
+            .await,
+            HookDecision::AllowCall { spawn: None },
+            "{tool}"
+        );
+    }
 }
