@@ -3170,7 +3170,8 @@ impl Runtime {
         // spends that standing, and every quote that resolves at all is this one spelling.
         let claimed = PermitKey::offer(&quoted);
         let actor = host_actor(acting);
-        let until = std::time::SystemTime::now() + self.execution_bound(elicitation.is_some());
+        let bound = self.execution_bound();
+        let until = std::time::SystemTime::now() + bound;
         // Two calls naming one offer must not both reach its authorities: a human review
         // holds its call open for minutes, and a second dialog for one decision is the
         // thing this refuses. The claim is derived at the position it is written at, so a
@@ -3179,7 +3180,7 @@ impl Runtime {
         // execution that ended the offer did so before releasing its claim.
         let admitted = self.inner.append_host_with::<RemedyOutcome, _>(&root, |log| {
             let host = reduced(log);
-            if host.claimed(&claimed) {
+            if host.claimed(&claimed).is_some() {
                 return Err(refused(RemedyRefusal::AlreadyExecuting));
             }
             let ruling = match admission {
@@ -3215,12 +3216,26 @@ impl Runtime {
             inner: Arc::clone(&self.inner),
             root: root.clone(),
             actor,
-            key: claimed.wire(),
+            key: claimed,
+            until,
             released: false,
         };
-        let outcome = self
-            .run_remedy(acting, offer, arguments, elicitation, ruling, presentation)
-            .await;
+        // The execution renews its claim while it runs, so however many consults and
+        // reviews it waits on, only a hard crash leaves the claim to its bound. One that
+        // finds its claim gone stops: another attempt may be executing the offer now.
+        let execution = self.run_remedy(acting, offer, arguments, elicitation, ruling, presentation);
+        tokio::pin!(execution);
+        let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + bound / 2, bound / 2);
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut execution => break outcome,
+                _ = renewal.tick() => match claim.renew(bound) {
+                    Ok(Holding::Held) => {}
+                    Ok(Holding::Lost) => break refused(RemedyRefusal::AlreadyExecuting),
+                    Err(error) => break refused(RemedyRefusal::Runtime { detail: error.to_string() }),
+                },
+            }
+        };
         claim.release();
         outcome
     }
@@ -3260,13 +3275,10 @@ impl Runtime {
     }
 
     /// How long one execution's claim stands without word from the execution itself: the
-    /// person's budget where a review reaches one, and the machine-consult budget — every
-    /// resolution round of it — otherwise. Only a hard crash ever reaches the bound.
-    fn execution_bound(&self, reviewed: bool) -> std::time::Duration {
-        if reviewed {
-            return self.review_timeout();
-        }
-        self.inner.deployment().config.externals.longest_consult() * session::RESOLUTION_ROUNDS
+    /// machine-consult budget, every resolution round of it.
+    fn execution_bound(&self) -> std::time::Duration {
+        (self.inner.deployment().config.externals.longest_consult() * session::RESOLUTION_ROUNDS)
+            .max(std::time::Duration::from_secs(1))
     }
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
@@ -3686,6 +3698,7 @@ impl Runtime {
     /// it as no answer. Deliberately unrelated to
     /// `[externals] timeout_ms`, which bounds a machine consult: a
     /// person reads the arguments and thinks.
+    #[cfg(feature = "daemon")]
     pub(crate) fn review_timeout(&self) -> std::time::Duration {
         self.inner.deployment().config.externals.review_timeout
     }
@@ -3708,26 +3721,60 @@ impl Runtime {
 /// `Drop` is what the log allows — every store operation is synchronous and none awaits —
 /// and a release that cannot be written is logged and let go, because a destructor has
 /// nowhere to report it.
+///
+/// Renewal and release act only on the claim this execution wrote, which its `until` names:
+/// a claim that expired and was taken by another attempt is that attempt's.
 struct Claimed {
     inner: Arc<Inner>,
     root: TrajectoryId,
     actor: appa_eventlog::HostActor,
-    key: String,
+    key: PermitKey,
+    until: std::time::SystemTime,
     released: bool,
 }
 
+enum Holding {
+    Held,
+    Lost,
+}
+
 impl Claimed {
+    /// A renewal the store cannot confirm is no claim: the execution cannot know it still
+    /// holds the offer once its bound passes.
+    fn renew(&mut self, bound: std::time::Duration) -> Result<Holding, EventError> {
+        let until = std::time::SystemTime::now() + bound;
+        let renewed = self.inner.append_host_with::<EventError, _>(&self.root, |log| {
+            match reduced(log).claimed(&self.key) == Some(self.until) {
+                true => Ok((
+                    Some(HostObservation::Claimed {
+                        actor: self.actor.clone(),
+                        key: self.key.wire(),
+                        until,
+                    }),
+                    Holding::Held,
+                )),
+                false => Ok((None, Holding::Lost)),
+            }
+        });
+        if let Ok(Holding::Held) = renewed {
+            self.until = until;
+        }
+        renewed
+    }
+
     fn release(&mut self) {
         if std::mem::replace(&mut self.released, true) {
             return;
         }
-        if let Err(error) = self.inner.append_host(
-            &self.root,
-            &HostObservation::Released {
-                actor: self.actor.clone(),
-                key: self.key.clone(),
-            },
-        ) {
+        let released = self.inner.append_host_with::<EventError, _>(&self.root, |log| {
+            let observation =
+                (reduced(log).claimed(&self.key) == Some(self.until)).then(|| HostObservation::Released {
+                    actor: self.actor.clone(),
+                    key: self.key.wire(),
+                });
+            Ok((observation, ()))
+        });
+        if let Err(error) = released {
             tracing::warn!(root = %self.root.0, %error, "the executed offer's claim was not released; it stands until it expires");
         }
     }

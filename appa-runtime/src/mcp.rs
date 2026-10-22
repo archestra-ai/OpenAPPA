@@ -1214,6 +1214,13 @@ mod tests {
             reply.is_error,
             "the attempt is refused while the claim stands: {reply:?}"
         );
+        assert_eq!(
+            runtime.execute_remedy(&actor, quoted).await,
+            crate::api::RemedyOutcome::Refused {
+                reason: RemedyRefusal::AlreadyExecuting
+            },
+            "the refused attempt left the running claim in place"
+        );
     }
 
     /// A family with one offer standing: the narrowing acceptance a blocked proposal

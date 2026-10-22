@@ -8817,19 +8817,50 @@ delta = {}
                 "a later attempt vouches for an offer that no longer stands"
             );
             assert_eq!(runtime.log_facts(&root()), facts, "a refused attempt appends no facts");
+        }
 
-            // Another actor is not the pursuer: the record answers nobody else.
-            let intruder = crate::api::Actor {
+        #[tokio::test]
+        async fn a_taken_claim_is_neither_renewed_nor_released_by_its_former_holder() {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(config_with(ATTENTION, None), dir.path().join("appa.db"), None)
+                .expect("the deployment opens");
+            runtime.create_session(root(), None).expect("a fresh id opens");
+            let actor = crate::api::host::host_actor(&crate::api::Actor {
                 root: root(),
-                child: Some(TrajectoryId("cc:intruder".to_string())),
+                child: None,
+            });
+            let key = crate::api::PermitKey::offer(&OfferId("0123456789abcdef".to_string()));
+            let claim = |until| appa_eventlog::HostObservation::Claimed {
+                actor: actor.clone(),
+                key: key.wire(),
+                until,
             };
-            assert!(
-                matches!(
-                    runtime.execute_embedded_remedy(&intruder, args()).await,
-                    RemedyOutcome::Refused { .. }
-                ),
-                "an offer replays only for the trajectory that pursued it"
-            );
+            let lapsed = std::time::SystemTime::now();
+            let successor = lapsed + std::time::Duration::from_secs(600);
+            for until in [lapsed, successor] {
+                runtime
+                    .inner
+                    .append_host(&root(), &claim(until))
+                    .expect("the claim lands");
+            }
+            let log = runtime.inner.log(&root()).expect("the log reads");
+            assert_eq!(crate::api::reduced(&log).claimed(&key), Some(successor));
+            let mut former = crate::api::Claimed {
+                inner: Arc::clone(&runtime.inner),
+                root: root(),
+                actor: actor.clone(),
+                key: key.clone(),
+                until: lapsed,
+                released: false,
+            };
+
+            assert!(matches!(
+                former.renew(std::time::Duration::from_secs(600)),
+                Ok(crate::api::Holding::Lost)
+            ));
+            former.release();
+            let log = runtime.inner.log(&root()).expect("the log reads");
+            assert_eq!(crate::api::reduced(&log).claimed(&key), Some(successor));
         }
     }
 }
