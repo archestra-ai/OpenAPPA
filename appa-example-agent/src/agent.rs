@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::api::{EmbeddedPresentationOptions, RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnKind,
@@ -462,7 +462,13 @@ impl Run<'_> {
             prompt: None,
             ruling: None,
         };
-        match hooks::handle(&self.agent.runtime, event).await {
+        // A block advises delegating only when this frame can open a child.
+        let presentation = EmbeddedPresentationOptions {
+            supports_delegation: self.agent.spawn.is_some() && self.budget.fork_availability(frame.depth).is_ok(),
+            ..EmbeddedPresentationOptions::default()
+        };
+        let handled = hooks::handle_embedded_with_options(&self.agent.runtime, event, presentation).await;
+        match handled.decision {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback, .. } => {
                 let feedback = self.with_spawn_context(frame, feedback);
@@ -472,6 +478,9 @@ impl Run<'_> {
                         call: id,
                         tool: proposed.tool.clone(),
                         feedback: feedback.clone(),
+                        display: handled
+                            .presentation
+                            .and_then(|presentation| presentation.display.into_iter().next()),
                     },
                 )
                 .await;
@@ -862,16 +871,17 @@ impl Run<'_> {
     }
 
     fn with_spawn_context(&self, frame: &Frame, feedback: String) -> String {
-        let context = match &self.agent.spawn {
-            None => "No child-trajectory tool is available in this harness.".to_string(),
-            Some(spawn) => match self.budget.fork_availability(frame.depth) {
+        // Without a spawn tool the block names no child, so there is nothing to qualify.
+        let Some(spawn) = &self.agent.spawn else {
+            return feedback;
+        };
+        let context = match self.budget.fork_availability(frame.depth) {
                 Ok(()) => format!(
                     "A child trajectory is available through the {} tool.",
                     spawn.name.0
                 ),
                 Err(ForkUnavailable::DepthLimit) => "This trajectory is at its child-depth limit; do not delegate again. Use a listed remedy, finish permitted work here, or return control to the parent.".to_string(),
                 Err(ForkUnavailable::RunLimit) => "No child capacity remains in this run; use a listed remedy or finish permitted work here.".to_string(),
-            },
         };
         format!("{feedback}\n\nHarness context:\n  - {context}")
     }

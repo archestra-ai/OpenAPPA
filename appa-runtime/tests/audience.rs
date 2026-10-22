@@ -415,7 +415,7 @@ async fn a_refusal_without_a_continuation_explains_how_to_finish() {
         }
         for misleading in [
             "cannot run yet",
-            "Accepting restricts",
+            "Accepting the narrowing",
             "After accepting",
             "Continue:",
             "delegate",

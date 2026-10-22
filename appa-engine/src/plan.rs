@@ -267,15 +267,14 @@ pub struct PlannedBlock {
 }
 
 /// How a narrowing moves the policy's argument-free tools, judged on the current history:
-/// of `tools` analysed, `sign_off` start needing an authority and `blocked` lose every
-/// authority and input sanitizer that could clear them. `recipient_checked` names the tools
+/// `sign_off` names the tools that start needing an authority and `blocked` the tools that
+/// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
-    pub tools: usize,
-    pub sign_off: usize,
-    pub blocked: usize,
+    pub sign_off: Vec<ToolName>,
+    pub blocked: Vec<ToolName>,
     pub recipient_checked: Vec<ToolName>,
 }
 
@@ -497,9 +496,8 @@ fn narrowing_impact(
         standing
     };
     let mut impact = NarrowingImpact {
-        tools: 0,
-        sign_off: 0,
-        blocked: 0,
+        sign_off: Vec::new(),
+        blocked: Vec::new(),
         recipient_checked: Vec::new(),
     };
     let audience_narrows = narrowing.to.audience != narrowing.from.audience;
@@ -526,15 +524,15 @@ fn narrowing_impact(
         else {
             continue;
         };
-        impact.tools += 1;
         match after {
             _ if after <= before => {}
-            Standing::Blocked => impact.blocked += 1,
-            Standing::SignOff => impact.sign_off += 1,
+            Standing::Blocked => impact.blocked.push(name.clone()),
+            Standing::SignOff => impact.sign_off.push(name.clone()),
             Standing::Clear => {}
         }
     }
-    (impact.sign_off + impact.blocked > 0 || !impact.recipient_checked.is_empty()).then_some(impact)
+    (!impact.sign_off.is_empty() || !impact.blocked.is_empty() || !impact.recipient_checked.is_empty())
+        .then_some(impact)
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
@@ -3135,7 +3133,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrowing_counts_the_tools_it_moves_to_sign_off_or_blocked() {
+    fn a_narrowing_names_the_tools_it_moves_to_sign_off_or_blocked() {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
         let tool = |name: &str, tags: &[&str], recipients: Vec<RecipientSpec>| ToolAnnotation {
@@ -3215,9 +3213,8 @@ mod tests {
         assert_eq!(
             plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
             Some(NarrowingImpact {
-                tools: 5,
-                sign_off: 1,
-                blocked: 2,
+                sign_off: vec![ToolName::new("post")],
+                blocked: vec![ToolName::new("drain"), ToolName::new("read")],
                 recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
@@ -3312,9 +3309,8 @@ mod tests {
         assert_eq!(
             impact(None),
             Some(NarrowingImpact {
-                tools: 3,
-                sign_off: 2,
-                blocked: 0,
+                sign_off: vec![ToolName::new("lookup"), ToolName::new("post")],
+                blocked: vec![],
                 recipient_checked: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
@@ -3322,9 +3318,8 @@ mod tests {
         assert_eq!(
             impact(Some(&Floor::new(Label::new(TRUSTED, insider()), None))),
             Some(NarrowingImpact {
-                tools: 3,
-                sign_off: 1,
-                blocked: 0,
+                sign_off: vec![ToolName::new("post")],
+                blocked: vec![],
                 recipient_checked: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"

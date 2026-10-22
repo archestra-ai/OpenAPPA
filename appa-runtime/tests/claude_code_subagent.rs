@@ -532,7 +532,7 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
         "delegation remains available: {reason}"
     );
     assert!(
-        !reason.contains("Accepting restricts"),
+        !reason.contains("Accepting the narrowing"),
         "no acceptance is offered: {reason}"
     );
     assert!(

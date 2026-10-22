@@ -23,7 +23,11 @@ pub enum Record {
     Blocked {
         call: CallId,
         tool: String,
+        /// What the model reads: the reasons, the remedy calls, and how to choose.
         feedback: String,
+        /// The same reasons and remedies for a person watching the run, without the
+        /// instructions written for the model. `None` when the runtime gives none.
+        display: Option<appa_runtime::api::RemedyDisplay>,
     },
     /// The runtime could not judge the call — an annotator or store did not
     /// answer — so it did not run. Not a policy decision.
@@ -134,6 +138,7 @@ mod tests {
             call: CallId("call_1".to_string()),
             tool: "send_email".to_string(),
             feedback: "the audience does not cover bob@example.com".to_string(),
+            display: None,
         }
         .to_string();
         assert_eq!(

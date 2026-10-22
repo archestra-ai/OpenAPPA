@@ -13,7 +13,7 @@ When a tool call is blocked, OpenAPPA returns structured feedback with a remedy 
 ```text
 [appa] Blocked: get_pod_logs cannot run yet.
 Why:
-  - session trust would fall: trusted -> suspicious
+  - reading its result would lower this session's trust: trusted -> suspicious
 Continue:
   - Accept lower trust for the rest of this session:
     execute_remedy_plan(offer_id: "…")
