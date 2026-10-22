@@ -48,10 +48,16 @@ pub enum Record {
         call: CallId,
         reason: String,
     },
+    /// The remedy the control call `call` chose was carried out. `value`
+    /// is what crossed in place of the held one, when the remedy delivered
+    /// a value rather than authorizing the call to run again.
     OfferTaken {
+        call: CallId,
         detail: String,
+        value: Option<String>,
     },
     OfferRefused {
+        call: CallId,
         feedback: String,
     },
     Forked {
@@ -106,8 +112,8 @@ impl std::fmt::Display for Record {
             Record::Admitted { body, .. } => write!(f, "the output crossed as produced: {body}"),
             Record::Substituted { body, .. } => write!(f, "the output crossed as: {body}"),
             Record::OutputBlocked { reason, .. } => write!(f, "the output was blocked: {reason}"),
-            Record::OfferTaken { detail } => write!(f, "offer taken: {detail}"),
-            Record::OfferRefused { feedback } => write!(f, "offer refused: {feedback}"),
+            Record::OfferTaken { detail, .. } => write!(f, "offer taken: {detail}"),
+            Record::OfferRefused { feedback, .. } => write!(f, "offer refused: {feedback}"),
             Record::Forked { depth, errand } => write!(f, "forked at depth {depth} to: {errand}"),
             Record::ReturnBlocked { reason } => write!(f, "the child's return was blocked: {reason}"),
             Record::Returned { body, .. } => write!(f, "the child's return crossed as: {body}"),

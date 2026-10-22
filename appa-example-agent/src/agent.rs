@@ -486,7 +486,7 @@ impl Run<'_> {
                 .await;
                 Ok(Answered::Reply(feedback))
             }
-            HookDecision::PassControl => self.execute_remedy(frame, &proposed).await,
+            HookDecision::PassControl => self.execute_remedy(frame, id, &proposed).await,
             HookDecision::Refuse { detail, .. } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
@@ -727,73 +727,76 @@ impl Run<'_> {
         }
     }
 
-    async fn execute_remedy(&mut self, frame: &mut Frame, call: &ProposedCall) -> Result<Answered, StopReason> {
+    async fn execute_remedy(
+        &mut self,
+        frame: &mut Frame,
+        id: CallId,
+        call: &ProposedCall,
+    ) -> Result<Answered, StopReason> {
         let (offer, arguments) = match appa_runtime::api::parse_control_arguments(call.arguments.get()) {
             Ok(parsed) => parsed,
             Err(_) => {
-                return Ok(Answered::Reply(format!(
-                    "{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
-                )));
-            }
-        };
-        let acting = self.actor(frame);
-        let reply = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
-            RemedyOutcome::Authorized { call } => {
-                self.record(
-                    frame,
-                    Record::OfferTaken {
-                        detail: format!("{} may now run", call.tool),
-                    },
-                )
-                .await;
-                format!(
-                    "Authorized. Call the {} tool with exactly these arguments to run it: {}",
-                    call.tool,
-                    call.arguments.get(),
-                )
-            }
-            RemedyOutcome::Returned { value } => {
-                self.record(
-                    frame,
-                    Record::OfferTaken {
-                        detail: "a value crossed".to_string(),
-                    },
-                )
-                .await;
-                value
-            }
-            RemedyOutcome::Declined { presentation } => {
+                let feedback =
+                    format!("{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it.");
                 self.record(
                     frame,
                     Record::OfferRefused {
-                        feedback: presentation.feedback.clone(),
-                    },
-                )
-                .await;
-                presentation.feedback
-            }
-            RemedyOutcome::NoAnswer { feedback } => {
-                self.record(
-                    frame,
-                    Record::OfferRefused {
+                        call: id,
                         feedback: feedback.clone(),
                     },
                 )
                 .await;
-                feedback
-            }
-            RemedyOutcome::Refused { reason } => {
-                let detail = reason.detail().to_string();
-                self.record(
-                    frame,
-                    Record::OfferRefused {
-                        feedback: detail.clone(),
-                    },
-                )
-                .await;
-                detail
+                return Ok(Answered::Reply(feedback));
             }
         };
+        let acting = self.actor(frame);
+        let (record, reply) = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
+            RemedyOutcome::Authorized { call } => (
+                Record::OfferTaken {
+                    call: id,
+                    detail: format!("{} may now run", call.tool),
+                    value: None,
+                },
+                format!(
+                    "Authorized. Call the {} tool with exactly these arguments to run it: {}",
+                    call.tool,
+                    call.arguments.get(),
+                ),
+            ),
+            RemedyOutcome::Returned { value } => (
+                Record::OfferTaken {
+                    call: id,
+                    detail: "a value crossed".to_string(),
+                    value: Some(value.clone()),
+                },
+                value,
+            ),
+            RemedyOutcome::Declined { presentation } => (
+                Record::OfferRefused {
+                    call: id,
+                    feedback: presentation.feedback.clone(),
+                },
+                presentation.feedback,
+            ),
+            RemedyOutcome::NoAnswer { feedback } => (
+                Record::OfferRefused {
+                    call: id,
+                    feedback: feedback.clone(),
+                },
+                feedback,
+            ),
+            RemedyOutcome::Refused { reason } => {
+                let detail = reason.detail().to_string();
+                (
+                    Record::OfferRefused {
+                        call: id,
+                        feedback: detail.clone(),
+                    },
+                    detail,
+                )
+            }
+        };
+        self.record(frame, record).await;
         Ok(Answered::Reply(reply))
     }
 

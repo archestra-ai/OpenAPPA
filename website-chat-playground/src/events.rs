@@ -11,9 +11,11 @@
 //! The mapping is lossy on purpose: audit detail the chat does not render
 //! (per-value provenance) stays in the log.
 
+use std::collections::HashMap;
+
 use appa_engine::label::Label;
 use appa_engine::registry::TrustChain;
-use appa_example_agent::{Record, Recorded};
+use appa_example_agent::{CallId, Record, Recorded};
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
 use serde::Serialize;
 
@@ -43,12 +45,23 @@ pub enum WireEvent {
     },
     ToolClosed {
         trajectory: String,
+        call_id: String,
         outcome: String,
         effects: Vec<String>,
     },
+    /// The body the model read as the answer to `call_id`.
     ToolResult {
         trajectory: String,
+        call_id: String,
         body: String,
+    },
+    /// The remedy the control call `call_id` chose was carried out; `value`
+    /// is what crossed in place of the held one, when it delivered one.
+    OfferTaken {
+        trajectory: String,
+        call_id: String,
+        detail: String,
+        value: Option<String>,
     },
     Label {
         trajectory: String,
@@ -138,94 +151,143 @@ impl LabelText {
     }
 }
 
-pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
-    let trajectory = recorded.trajectory.0.clone();
-    match &recorded.record {
-        Record::Says { text } => vec![WireEvent::Says {
-            trajectory,
-            text: text.clone(),
-        }],
-        Record::Proposes { call, tool, arguments } => vec![WireEvent::ToolProposed {
-            trajectory,
-            call_id: call.0.clone(),
-            tool: tool.clone(),
-            arguments: serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
-        }],
-        Record::Blocked {
-            call,
-            feedback,
-            display,
-            ..
-        } => {
-            let (reasons, options) = match display {
-                None => (Vec::new(), Vec::new()),
-                Some(display) => {
-                    // A display plan repeats the reasons after its description, for a host that
-                    // shows one plan alone; the chat shows the reasons once, above the options.
-                    let why = format!("\nWhy: {}", display.reasons.join("; "));
-                    let options = display
-                        .plans
-                        .iter()
-                        .map(|plan| BlockOption {
-                            offer_id: plan.offer_id.clone(),
-                            text: plan.text.strip_suffix(&why).unwrap_or(&plan.text).to_string(),
-                        })
-                        .collect();
-                    (display.reasons.clone(), options)
-                }
-            };
-            vec![WireEvent::Blocked {
-                trajectory,
-                call_id: call.0.clone(),
-                text: feedback.clone(),
-                reasons,
-                options,
-            }]
-        }
-        Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: reason.clone(),
-            reasons: Vec::new(),
-            options: Vec::new(),
-        }],
-        // A refused call shows as the call that did not run: the text names it as the
-        // runtime's refusal, not a policy block.
-        Record::Refused { call, detail, .. } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: format!("[appa] refused: {detail}"),
-            reasons: Vec::new(),
-            options: Vec::new(),
-        }],
-        Record::Admitted { body, .. } | Record::Substituted { body, .. } | Record::Returned { body, .. } => {
-            vec![WireEvent::ToolResult {
-                trajectory,
-                body: body.clone(),
-            }]
-        }
-        Record::OfferRefused { feedback } => vec![WireEvent::Remedy {
-            trajectory,
-            text: feedback.clone(),
-        }],
-        Record::OfferTaken { .. }
-        | Record::Forked { .. }
-        | Record::ReturnBlocked { .. }
-        | Record::ProviderRetried { .. }
-        | Record::BudgetFinalized
-        | Record::Answers { .. } => Vec::new(),
-    }
-}
-
-/// The audit reader's own state: one dispatch writes its committed effects
-/// and its close as two entries, and the chat resolves one card.
+/// The stream's reader: maps both records to wire events, and names the
+/// call behind each dispatch the audit closes.
+///
+/// The audit identifies a dispatch by its tool, not by the harness's call
+/// id, so the reader keeps the correlation. The agent runs one call at a
+/// time and records each proposal before the runtime opens its dispatch;
+/// the pump drains records before it reads the audit. So when the audit
+/// shows a dispatch opened, its proposal has been read, and it is the
+/// trajectory's oldest unresolved proposal of that tool.
 #[derive(Default)]
-pub struct AuditReader {
+pub struct Reader {
+    /// Proposals not yet blocked, refused, answered by a remedy, or
+    /// dispatched, per trajectory, oldest first.
+    proposed: HashMap<String, Vec<(String, String)>>,
+    /// The call whose dispatch is open, per trajectory.
+    open: HashMap<String, String>,
+    /// One dispatch writes its committed effects and its close as two
+    /// entries, and the chat resolves one call.
     committed: Vec<String>,
 }
 
-impl AuditReader {
-    pub fn event(&mut self, entry: &AuditEntry) -> Vec<WireEvent> {
+impl Reader {
+    pub fn record(&mut self, recorded: &Recorded) -> Vec<WireEvent> {
+        let trajectory = recorded.trajectory.0.clone();
+        match &recorded.record {
+            Record::Says { text } => vec![WireEvent::Says {
+                trajectory,
+                text: text.clone(),
+            }],
+            Record::Proposes { call, tool, arguments } => {
+                self.proposed
+                    .entry(trajectory.clone())
+                    .or_default()
+                    .push((call.0.clone(), tool.clone()));
+                vec![WireEvent::ToolProposed {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    tool: tool.clone(),
+                    arguments: serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
+                }]
+            }
+            Record::Blocked {
+                call,
+                feedback,
+                display,
+                ..
+            } => {
+                self.settle(&trajectory, call);
+                let (reasons, options) = match display {
+                    None => (Vec::new(), Vec::new()),
+                    Some(display) => {
+                        // A display plan repeats the reasons after its description, for a host that
+                        // shows one plan alone; the chat shows the reasons once, above the options.
+                        let why = format!("\nWhy: {}", display.reasons.join("; "));
+                        let options = display
+                            .plans
+                            .iter()
+                            .map(|plan| BlockOption {
+                                offer_id: plan.offer_id.clone(),
+                                text: plan.text.strip_suffix(&why).unwrap_or(&plan.text).to_string(),
+                            })
+                            .collect();
+                        (display.reasons.clone(), options)
+                    }
+                };
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: feedback.clone(),
+                    reasons,
+                    options,
+                }]
+            }
+            Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
+                trajectory,
+                call_id: call.0.clone(),
+                text: reason.clone(),
+                reasons: Vec::new(),
+                options: Vec::new(),
+            }],
+            // A refused call shows as the call that did not run: the text names it as the
+            // runtime's refusal, not a policy block.
+            Record::Refused { call, detail, .. } => {
+                self.settle(&trajectory, call);
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: format!("[appa] refused: {detail}"),
+                    reasons: Vec::new(),
+                    options: Vec::new(),
+                }]
+            }
+            Record::Admitted { call, body } | Record::Substituted { call, body } | Record::Returned { call, body } => {
+                vec![WireEvent::ToolResult {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    body: body.clone(),
+                }]
+            }
+            Record::OfferTaken { call, detail, value } => {
+                self.settle(&trajectory, call);
+                vec![WireEvent::OfferTaken {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    detail: detail.clone(),
+                    value: value.clone(),
+                }]
+            }
+            // The control channel refusing the agent's move is a block on the
+            // control call itself.
+            Record::OfferRefused { call, feedback } => {
+                self.settle(&trajectory, call);
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: feedback.clone(),
+                    reasons: Vec::new(),
+                    options: Vec::new(),
+                }]
+            }
+            Record::Forked { .. }
+            | Record::ReturnBlocked { .. }
+            | Record::ProviderRetried { .. }
+            | Record::BudgetFinalized
+            | Record::Answers { .. } => Vec::new(),
+        }
+    }
+
+    /// The proposal was answered without a dispatch.
+    fn settle(&mut self, trajectory: &str, call: &CallId) {
+        if let Some(proposed) = self.proposed.get_mut(trajectory) {
+            proposed.retain(|(id, _)| *id != call.0);
+        }
+    }
+
+    pub fn audit(&mut self, entry: &AuditEntry) -> Vec<WireEvent> {
         let trajectory = entry.trajectory.clone();
         match &entry.event {
             AuditEvent::EffectsCommitted { effects } => {
@@ -240,15 +302,37 @@ impl AuditReader {
                     DispatchOutcome::Failed => ("failed", Vec::new()),
                     DispatchOutcome::Unknown => ("indeterminate", Vec::new()),
                 };
-                vec![WireEvent::ToolClosed {
-                    trajectory,
-                    outcome: outcome.to_string(),
-                    effects,
-                }]
+                // A close the reader cannot place ends no call; its
+                // result still ends it.
+                match self.open.remove(&trajectory) {
+                    Some(call_id) => vec![WireEvent::ToolClosed {
+                        trajectory,
+                        call_id,
+                        outcome: outcome.to_string(),
+                        effects,
+                    }],
+                    None => Vec::new(),
+                }
             }
-            AuditEvent::Released { label, .. } | AuditEvent::Admitted { label } => {
+            AuditEvent::Released { tool, label, .. } => {
+                // Any older proposal still listed was answered without a
+                // record; dropping it keeps it from claiming a later dispatch.
+                let proposed = self.proposed.entry(trajectory.clone()).or_default();
+                match proposed.iter().position(|(_, proposed)| proposed == tool) {
+                    Some(at) => {
+                        let (call, _) = proposed
+                            .drain(..=at)
+                            .next_back()
+                            .expect("the drained range ends at the match");
+                        self.open.insert(trajectory.clone(), call);
+                    }
+                    None => {
+                        self.open.remove(&trajectory);
+                    }
+                }
                 vec![label_event(trajectory, label.clone())]
             }
+            AuditEvent::Admitted { label } => vec![label_event(trajectory, label.clone())],
             AuditEvent::Ruled { authority } => vec![WireEvent::Remedy {
                 trajectory,
                 text: format!("approved by {authority}"),
