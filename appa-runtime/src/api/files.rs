@@ -618,7 +618,7 @@ max_body_bytes = 65536
     }
 
     #[test]
-    fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
+    fn initialized_default_and_claude_code_battery_refuse_file_tracking() {
         let dir = tempfile::tempdir().unwrap();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let default =
@@ -648,9 +648,10 @@ max_body_bytes = 65536
         )
         .unwrap();
 
-        runtime
-            .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
-            .expect("the shipped output-only sanitizer remains available with file tracking");
+        let Err(error) = runtime.with_file_tracking(Label::new(Trust::new(0), Audience::public()), config) else {
+            panic!("the shipped tool-input sanitizer `redact-for-public` must stop file tracking at startup");
+        };
+        assert!(error.to_string().contains("tool-input sanitizer"), "{error}");
     }
 
     #[test]

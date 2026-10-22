@@ -665,7 +665,7 @@ impl Run<'_> {
                 body: OutcomeBody::Available(body),
             } => body.clone(),
             ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
+                body: OutcomeBody::Unavailable | OutcomeBody::TooLarge { .. },
             } => String::new(),
             ToolOutcome::Failure { message } => message.clone(),
             ToolOutcome::Indeterminate => "The tool's outcome is unknown; it may have run.".to_string(),

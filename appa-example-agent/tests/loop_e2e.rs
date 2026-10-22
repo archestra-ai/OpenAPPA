@@ -268,7 +268,10 @@ async fn an_uncarried_output_crosses_as_the_engine_s_account_of_it() {
         "an uncarried body must not reach the model. Got {} bytes",
         shown.len(),
     );
-    assert_eq!(shown, "[appa] the result was not carried; nothing was admitted");
+    assert_eq!(
+        shown,
+        "[appa] the tool ran, but its output is not shown: it is over the 65536-byte limit"
+    );
     assert_eq!(host.calls().len(), 1, "the call ran; only its body did not cross");
 }
 

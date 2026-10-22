@@ -195,6 +195,11 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: String = body;
         }
         ToolOutcome::Success {
+            body: OutcomeBody::TooLarge { limit_bytes },
+        } => {
+            let _: Option<usize> = limit_bytes;
+        }
+        ToolOutcome::Success {
             body: OutcomeBody::Unavailable,
         } => {}
         ToolOutcome::Failure { message } => {
