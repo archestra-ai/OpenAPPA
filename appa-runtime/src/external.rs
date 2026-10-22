@@ -179,7 +179,8 @@ enum Backend {
     Readers(BTreeMap<ReaderId, ReaderId>),
     /// `appa replay`'s stand-in for the parties a remedy consults: every authority
     /// approves, every sanitizer returns the body unchanged. No configuration can name it;
-    /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
+    /// only `Runtime::open_in_memory` under `Remedies::StandIn` installs it, over whatever
+    /// the deployment bound.
     StandIn,
 }
 

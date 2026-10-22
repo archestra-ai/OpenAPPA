@@ -97,12 +97,27 @@ enum Command {
     },
 
     /// Replay trace files against a policy: check every expectation, report every observed step.
+    #[command(long_about = "Replay trace files against a policy: check every expectation, report \
+                            every observed step.\n\n\
+                            No tool runs. Annotators, audience sources, and lookups answer as \
+                            configured. By default a stand-in answers every authority and \
+                            sanitizer a taken offer consults: it approves and returns the value \
+                            unchanged, and the report says so. A replay then checks which remedies \
+                            the policy offers, not what the bound parties decide. Pass \
+                            --live-remedies to consult the bound parties.")]
     Replay {
         #[arg(long, env = "APPA_CONFIG")]
         config: Option<PathBuf>,
 
         #[arg(long, env = "APPA_MODULES_DIR")]
         modules_dir: Option<PathBuf>,
+
+        /// Consult the authorities and sanitizers the configuration binds instead of the
+        /// stand-in. Models, URLs, and commands run and may cost money; a `hitl` authority
+        /// has nobody to ask, so its step cannot run. With -v, a sanitizer's rewritten
+        /// arguments are printed.
+        #[arg(long)]
+        live_remedies: bool,
 
         /// Print every step, not only the ones that failed.
         #[arg(short, long)]
@@ -448,16 +463,21 @@ fn main() -> ExitCode {
         Command::Replay {
             config,
             modules_dir,
+            live_remedies,
             verbose,
             json,
             paths,
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
+            let remedies = match live_remedies {
+                true => appa_runtime::api::Remedies::Live,
+                false => appa_runtime::api::Remedies::StandIn,
+            };
             let format = match json {
                 true => appa_runtime::replay::Format::Json,
                 false => appa_runtime::replay::Format::Text { verbose },
             };
-            appa_runtime::replay::main(&config, modules_dir, format, &paths)
+            appa_runtime::replay::main(&config, modules_dir, remedies, format, &paths)
         }
         Command::AddLookupRosters { config, batteries_dir } => {
             match appa_runtime::config::edit::add_missing_rosters(&config, &batteries_dir) {
