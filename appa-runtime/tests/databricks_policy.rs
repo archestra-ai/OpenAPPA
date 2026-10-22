@@ -114,7 +114,7 @@ max_body_bytes = 1048576
 [externals.authorities.databricks-operator]
 builtin = "approve"
 
-[externals.claude_code]
+[externals.claude-code]
 command = "{command}"
 "#,
             command = command.display(),

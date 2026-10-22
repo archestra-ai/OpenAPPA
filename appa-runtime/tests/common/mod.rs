@@ -390,7 +390,7 @@ pub async fn serve(router: axum::Router) -> String {
 }
 
 /// A fake `claude` executable running `script` in place of the model, for the built-in
-/// Claude Code annotator's `[externals.claude_code] command`.
+/// Claude Code annotator's `[externals.claude-code] command`.
 #[cfg(unix)]
 pub fn fake_claude(dir: &Path, script: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;

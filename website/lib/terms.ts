@@ -148,7 +148,7 @@ const TERMS = {
   'builtin = "approve"':
     "Automatically approves every request within the authority's permits.",
   'builtin = "claude-code"':
-    "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the machine running OpenAPPA.",
+    "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the machine running OpenAPPA. Optional settings (command, model, timeout_ms, max_concurrent) go under [externals.claude-code].",
   'builtin = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":

@@ -48,7 +48,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(
         &path,
         format!(
-            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
+            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude-code]\ncommand = \"{command}\"\n",
             command = command.display(),
         ),
     )

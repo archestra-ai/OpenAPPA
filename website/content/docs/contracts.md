@@ -1323,7 +1323,7 @@ The available settings depend on the component's role:
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
-Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
+Included files can add bindings and annotator builtins. An included file may add `[externals.jev]`, and the section combines field by field: each field is declared by one file only. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude-code]`, or `[externals.llm]`.
 
 ### HTTP services
 
@@ -1400,7 +1400,9 @@ OpenAPPA builds the expected response format from the declaration. The model ret
 
 OpenAPPA checks authority and annotator answers against their permits and assigns sanitized data the declared audience or trust rank. The model is responsible for making the correct judgment or removing the required content.
 
-`[externals.claude_code]` configures the local Claude Code implementation:
+A builtin that takes settings reads them from the `[externals]` table with the same name as the builtin: `[externals.claude-code]`, `[externals.llm]`, or `[externals.jev]`. OpenAPPA rejects a table name that it does not know.
+
+`[externals.claude-code]` configures the local Claude Code implementation:
 
 | Field | Purpose |
 |---|---|

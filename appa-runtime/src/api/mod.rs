@@ -4699,7 +4699,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 AnnotatorBuiltin::Jev,
                 "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
             ),
-            (AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"),
+            (AnnotatorBuiltin::ClaudeCode, "[externals.claude-code]\n"),
         ];
         // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
         const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\

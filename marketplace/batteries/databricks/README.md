@@ -82,7 +82,7 @@ The classifier runs the `claude` command the runtime finds on its PATH,
 with the `sonnet` model, and the runtime checks its answer against the
 mandate above: an answer outside it is refused, and the call with it. A
 root config points at another command or model under
-`[externals.claude_code]`. A root rule for `mcp/databricks/execute_sql`
+`[externals.claude-code]`. A root rule for `mcp/databricks/execute_sql`
 replaces the annotator outright; the comment at the top of `appa.toml`
 shows one that sends every statement to a person.
 

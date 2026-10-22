@@ -63,7 +63,7 @@ class Gate:
         bundled = str(Path(claude_agent_sdk.__file__).parent / "_bundled")
         if os.environ["PATH"].split(os.pathsep)[0] != bundled:
             os.environ["PATH"] = bundled + os.pathsep + os.environ["PATH"]
-        externals = f"""[claude_code]
+        externals = f"""[claude-code]
 model = {json.dumps(model)}
 timeout_ms = 90000
 """

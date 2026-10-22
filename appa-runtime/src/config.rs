@@ -1085,6 +1085,7 @@ struct RawExternals {
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
     context: BTreeMap<String, RawBinding>,
+    #[serde(rename = "claude-code")]
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1740,8 +1741,8 @@ fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
     }
     match externals.claude_code.as_ref().and_then(|table| table.command.as_ref()) {
         Some(_) => Err(ConfigError::HostedCommand {
-            section: "claude_code",
-            name: "claude_code".to_string(),
+            section: "claude-code",
+            name: "claude-code".to_string(),
         }),
         None => Ok(()),
     }
@@ -2454,7 +2455,7 @@ fn resolve_command(
     })
 }
 
-/// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
+/// The `[externals.claude-code]` table with its defaults filled: bare `claude` on `PATH`,
 /// the `sonnet` alias, and the model-consult limits.
 fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigError> {
     let Some(raw) = raw else {
@@ -2464,7 +2465,7 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
     Ok(ClaudeCode {
         command: raw.command.map(PathBuf::from).unwrap_or(defaults.command),
         model: raw.model.unwrap_or(defaults.model),
-        limits: ModelLimits::declared("claude_code", raw.timeout_ms, raw.max_concurrent, defaults.limits)?,
+        limits: ModelLimits::declared("claude-code", raw.timeout_ms, raw.max_concurrent, defaults.limits)?,
     })
 }
 
@@ -3008,17 +3009,22 @@ mod tests {
         assert_eq!(config.externals.claude_code.limits, ModelLimits::MODEL_CALL);
 
         let text =
-            format!("{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n");
+            format!("{MINIMAL}\n[externals.claude-code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n");
         let config = parse(&text).expect("the claude table validates");
         assert_eq!(
             config.externals.claude_code.command,
             PathBuf::from("/opt/claude/bin/claude")
         );
         assert_eq!(config.externals.claude_code.model, "pinned");
-        let text = format!("{MINIMAL}\n[externals.claude_code]\nurl = \"https://x.example\"\n");
+        let text = format!("{MINIMAL}\n[externals.claude-code]\nurl = \"https://x.example\"\n");
         assert!(
             toml::from_str::<RawConfig>(&text).is_err(),
             "a typo cannot silently weaken the deployment"
+        );
+        let text = format!("{MINIMAL}\n[externals.claude_code]\nmodel = \"pinned\"\n");
+        assert!(
+            toml::from_str::<RawConfig>(&text).is_err(),
+            "the table is named after its builtin, so a snake_case spelling is refused, not ignored"
         );
     }
 
@@ -3211,7 +3217,7 @@ mod tests {
     fn each_model_table_declares_its_limits_over_its_defaults() {
         const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
-        const CLAUDE: &str = "[externals.claude_code]\n";
+        const CLAUDE: &str = "[externals.claude-code]\n";
         let limits = |config: &Config| {
             [
                 AnnotatorBuiltin::ClaudeCode,
@@ -3245,7 +3251,7 @@ mod tests {
 
         let floor = JEV_MIN_TIMEOUT.as_millis();
         let jev_timeout = |ms: u128| format!("{JEV}timeout_ms = {ms}\n");
-        let too_small = [(CLAUDE, "claude_code"), (LLM, "llm"), (JEV, "jev")]
+        let too_small = [(CLAUDE, "claude-code"), (LLM, "llm"), (JEV, "jev")]
             .into_iter()
             .flat_map(|(table, section)| {
                 ["timeout_ms", "max_concurrent"].map(|field| (format!("{table}{field} = 0\n"), section, field, 1))
@@ -4158,7 +4164,7 @@ mod tests {
             provider = "ollama"
             model = "llama"
 
-            [externals.claude_code]
+            [externals.claude-code]
             model = "pinned"
 
             [externals.audience.slack]
@@ -4371,9 +4377,9 @@ mod tests {
             );
         }
         assert!(matches!(
-            hosted("[policy]\nversion = 2\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\n"),
+            hosted("[policy]\nversion = 2\n[externals.claude-code]\ncommand = \"/opt/claude/bin/claude\"\n"),
             Err(ConfigError::HostedCommand {
-                section: "claude_code",
+                section: "claude-code",
                 ..
             })
         ));
@@ -4563,7 +4569,7 @@ mod tests {
             "timeout_ms = 1",
             "review_timeout_ms = 1",
             "max_body_bytes = 1",
-            "claude_code = { model = \"other\" }",
+            "claude-code = { model = \"other\" }",
             "llm = { provider = \"openai\", model = \"m\" }",
         ] {
             std::fs::write(&battery, format!("[policy]\nversion = 2\n[externals]\n{field}\n"))

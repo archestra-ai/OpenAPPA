@@ -846,7 +846,7 @@ annotator = "classifier"
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.claude_code]
+[externals.claude-code]
 command = "{command}"
 {extra}
 "#,
@@ -1133,8 +1133,8 @@ async fn a_builtin_annotator_never_touches_an_http_endpoint() {
             "[[policy.annotator]]\nname = \"other\"\n\n[[policy.tool]]",
         )
         .replace(
-            "[externals.claude_code]",
-            &format!("[externals.annotators.other]\nurl = \"{url}\"\n\n[externals.claude_code]"),
+            "[externals.claude-code]",
+            &format!("[externals.annotators.other]\nurl = \"{url}\"\n\n[externals.claude-code]"),
         );
     let runtime = open_runtime(&dir, &config).await;
     assert_eq!(
