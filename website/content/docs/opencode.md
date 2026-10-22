@@ -31,7 +31,13 @@ For external services, prebuilt [batteries](/available-batteries)—including [G
 
 ### 1. Install the plugin
 
-You need the `opencode` CLI and `curl`.
+You need OpenCode V2 and `curl`. AppenCode does not load in OpenCode V1, and `appa plugin install opencode` refuses to install when an `opencode` older than V2 is on your `PATH`. Install OpenCode V2 from npm:
+
+```sh
+npm i -g @opencode/cli
+```
+
+Then install APPA and the plugin:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh &&
