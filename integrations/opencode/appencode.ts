@@ -13,6 +13,15 @@ import { configuration } from './setup'
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
 type Actor = { root: string; child?: string }
+type Task = {
+  root: Tool.Context['sessionID']; child: Tool.Context['sessionID']; proposal: Proposal
+  promptID: SessionMessage.ID
+  transition: Semaphore.Semaphore
+  state: { status: 'active'; candidate?: string }
+    | { status: 'admitted'; value: string }
+    | { status: 'cancelled'; settled: boolean }
+    | { status: 'failed'; message: string }
+}
 
 function text(decision: Decision, field: string): string {
   const value = decision[field]
@@ -39,10 +48,12 @@ export default Plugin.define({
     }>()
     const initialPrompts = new Set<string>()
     const launches = new Map<string, Semaphore.Semaphore>()
+    const tasks = new Map<string, Task>()
+    let disposed = false
 
     async function post(event: string, actor: Actor, fields: Record<string, unknown> = {}): Promise<Decision> {
       if (event === 'tool_call' && actor.child && !children.has(actor.child)) {
-        throw new Error('[appencode] Child has no live foreground delegation.')
+        throw new Error('[appencode] Child has no live delegation.')
       }
       const response = await fetch(`${base.replace(/\/$/, '')}/hook`, {
         method: 'POST',
@@ -70,7 +81,7 @@ export default Plugin.define({
       if (session.parentID) {
         const child = children.get(sessionID)
         if (!child || child.root !== session.parentID) {
-          throw new Error('[appencode] Child has no live foreground delegation. Resume and alternate launches are refused.')
+          throw new Error('[appencode] Child has no live delegation. Resume and alternate launches are refused.')
         }
         await childHistory(sessionID)
         return { actor: { root: child.root, child: sessionID }, context: child.context }
@@ -86,7 +97,7 @@ export default Plugin.define({
 
     async function childHistory(sessionID: Tool.Context['sessionID']) {
       const child = children.get(sessionID)
-      if (!child) throw new Error('[appencode] Child has no live foreground delegation.')
+      if (!child) throw new Error('[appencode] Child has no live delegation.')
       const history = await Effect.runPromise(ctx.session.context({ sessionID }))
       for (const message of history) {
         switch (message.type) {
@@ -105,6 +116,62 @@ export default Plugin.define({
       }
       return history
     }
+
+    async function childAnswer(sessionID: Tool.Context['sessionID']) {
+      const history = await childHistory(sessionID)
+      const answer = [...history].reverse().find(message => message.type === 'assistant')
+      if (!answer || answer.type !== 'assistant' || answer.error || !answer.time.completed || answer.finish !== 'stop') {
+        throw new Error('[appencode] Child did not complete a final answer; its return is withheld.')
+      }
+      return answer.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+    }
+
+    function revoke(child: Tool.Context['sessionID']) {
+      children.delete(child)
+      initialPrompts.delete(child)
+    }
+
+    async function ownedTask(handle: string, sessionID: Tool.Context['sessionID']) {
+      await open(sessionID)
+      const task = tasks.get(handle)
+      if (disposed || children.has(sessionID) || !task || task.root !== sessionID) {
+        throw new Error('[appencode] Unknown task or task not owned by this root.')
+      }
+      return task
+    }
+
+    const cancelTask = (task: Task) => task.transition.withPermits(1)(Effect.gen(function* () {
+      if (task.state.status === 'admitted') return 'Task already collected; cancellation cannot retract its return.'
+      if (task.state.status === 'cancelled' && task.state.settled) return 'Task cancelled.'
+      // Revoke before the host can admit another child tool call. A lost stop or
+      // runtime reply leaves cancellation retryable, never reported as settled.
+      task.state = { status: 'cancelled', settled: false }
+      revoke(task.child)
+      yield* ctx.session.interrupt({ sessionID: task.child, resume: false })
+      yield* ctx.session.wait({ sessionID: task.child })
+      const ended = yield* Effect.tryPromise({ try: () => post('child_end', { root: task.root }, { child_id: task.child }), catch: failure })
+      if (ended.decision !== 'ack') throw new Error('[appencode] Cancellation is not confirmed; retry cancellation.')
+      task.state = { status: 'cancelled', settled: true }
+      return 'Task cancelled.'
+    }).pipe(Effect.uninterruptible))
+
+    yield* Effect.addFinalizer(() => Effect.gen(function* () {
+      disposed = true
+      const owned = [...tasks.values()]
+      tasks.clear()
+      for (const task of owned) revoke(task.child)
+      for (const task of owned) {
+        if (task.state.status === 'admitted') continue
+        // Disposal can run inside the child's graph release. Joining that
+        // execution here would wait on this finalizer itself. Request a stop,
+        // but leave missing outcomes unsettled rather than inventing an end.
+        yield* ctx.session.interrupt({ sessionID: task.child, resume: false }).pipe(
+          Effect.catchCause(() => Effect.logWarning('[appencode] Background cleanup is unconfirmed.')))
+        if (task.state.status !== 'cancelled' || !task.state.settled) {
+          yield* Effect.logWarning('[appencode] Background ownership expired; execution settlement is unconfirmed.')
+        }
+      }
+    }))
 
     async function inventory() {
       const tools = await Effect.runPromise(ctx.tool.list())
@@ -187,7 +254,7 @@ export default Plugin.define({
       editor.add({
         name: 'appa_subagent',
         options: { codemode: false },
-        description: 'Delegate to a fresh foreground subagent through APPA. Declare its return using the offered remedy, then retry. APPA authorizes delegation; native subagent permissions do not apply. No background, resume, or nested delegation.',
+        description: 'Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle; use appa_collect for its checked final text or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.',
         input: Schema.Struct({
           agent: Schema.String,
           description: Schema.String,
@@ -198,8 +265,8 @@ export default Plugin.define({
         }),
         output: Schema.String,
         execute: (input, call) => Effect.gen(function* () {
-          if (children.has(call.sessionID) || input.sessionID !== undefined || input.background === true) {
-            throw new Error('[appencode] Only fresh, one-level foreground delegation is supported.')
+          if (children.has(call.sessionID) || input.sessionID !== undefined) {
+            throw new Error('[appencode] Only fresh, one-level delegation is supported.')
           }
           yield* Effect.tryPromise({ try: () => open(call.sessionID), catch: failure })
           const parent = yield* ctx.session.get({ sessionID: call.sessionID })
@@ -225,8 +292,11 @@ export default Plugin.define({
           const releaseFields = { ...proposal, cwd: ctx.location.directory, inventory: { tools } }
           let release: 'unattempted' | 'uncertain' | 'approved' = 'unattempted'
           let settled = false
+          let transferred = false
+          let backgroundReport: Record<string, unknown> | undefined
           let childID: Tool.Context['sessionID'] | undefined
           const cleanup = Effect.gen(function* () {
+            if (transferred) return
             if (childID) {
               children.delete(childID)
               initialPrompts.delete(childID)
@@ -242,10 +312,11 @@ export default Plugin.define({
             }
             if (release === 'approved') {
               if (childID) yield* runtime('child_end', { child_id: childID }).pipe(Effect.catchCause(() => Effect.void))
-              const ended = yield* runtime('spawn_result', { ...proposal, spawned_id: childID, outcome: { status: 'indeterminate' } })
+              const ended = yield* runtime('spawn_result', backgroundReport ?? { ...proposal, spawned_id: childID, outcome: { status: 'indeterminate' } })
               settled = ended.decision === 'ack'
             }
-          }).pipe(Effect.catchCause(() => Effect.void))
+          }).pipe(Effect.catchCause(() => input.background === true
+            ? Effect.logWarning('[appencode] Background launch cleanup is unconfirmed.') : Effect.void))
           let launch = launches.get(call.sessionID)
           if (!launch) { launch = Semaphore.makeUnsafe(1); launches.set(call.sessionID, launch) }
           return yield* Effect.gen(function* () {
@@ -272,13 +343,23 @@ export default Plugin.define({
             }).pipe(Effect.onError(() => cleanup), Effect.uninterruptible))
             initialPrompts.add(child.id)
             yield* ctx.session.prompt({ sessionID: child.id, id: child.promptID, text: child.prompt })
-            yield* ctx.session.wait({ sessionID: child.id })
-            const history = yield* Effect.tryPromise({ try: () => childHistory(child.id), catch: failure })
-            const answer = [...history].reverse().find(message => message.type === 'assistant')
-            if (!answer || answer.type !== 'assistant' || answer.error || !answer.time.completed || answer.finish !== 'stop') {
-              throw new Error('[appencode] Child did not complete a final answer; its return is withheld.')
+            if (input.background === true) {
+              return yield* Effect.gen(function* () {
+                const task = crypto.randomUUID()
+                backgroundReport = { ...proposal, spawned_id: child.id,
+                  outcome: { status: 'success', body: { output: task, content: task } } }
+                const acknowledged = yield* runtime('spawn_result', backgroundReport)
+                if (acknowledged.decision !== 'ack') throw new Error('[appencode] Background launch was not confirmed.')
+                if (disposed) throw new Error('[appencode] Plugin disposed during launch.')
+                tasks.set(task, { root: call.sessionID, child: child.id, proposal, promptID: child.promptID,
+                  transition: Semaphore.makeUnsafe(1), state: { status: 'active' } })
+                settled = true
+                transferred = true
+                return { output: task, content: task }
+              }).pipe(Effect.uninterruptible)
             }
-            let value = answer.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+            yield* ctx.session.wait({ sessionID: child.id })
+            let value = yield* Effect.tryPromise({ try: () => childAnswer(child.id), catch: failure })
             const returned = yield* runtime('child_end', { child_id: childID, value })
             if (returned.decision === 'child_return') {
               value = text(returned, 'value')
@@ -299,6 +380,67 @@ export default Plugin.define({
           return Effect.fail(failure(Cause.squash(cause)))
         })),
       })
+      editor.add({
+        name: 'appa_collect',
+        options: { codemode: false },
+        description: 'Wait for an owned background task and return only its APPA-admitted final text. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.',
+        input: Schema.Struct({ task: Schema.String }),
+        output: Schema.String,
+        execute: (input, call) => Effect.gen(function* () {
+          const task = yield* Effect.tryPromise({ try: () => ownedTask(input.task, call.sessionID), catch: failure })
+          // Never hold the transition permit while waiting: cancellation must be
+          // able to stop a child whose collector is blocked here.
+          if (task.state.status === 'active') yield* ctx.session.wait({ sessionID: task.child })
+          const value = yield* task.transition.withPermits(1)(Effect.tryPromise({ try: async () => {
+            if (disposed || tasks.get(input.task) !== task) throw new Error('[appencode] Task ownership expired.')
+            switch (task.state.status) {
+              case 'admitted': return task.state.value
+              case 'cancelled': throw new Error('[appencode] Task cancelled; its return is withheld.')
+              case 'failed': throw new Error(task.state.message)
+              case 'active': break
+            }
+            if (task.state.candidate === undefined) {
+              try { task.state.candidate = await childAnswer(task.child) }
+              catch {
+                const message = '[appencode] Child did not complete a valid final answer; its return is withheld.'
+                task.state = { status: 'failed', message }
+                revoke(task.child)
+                await post('child_end', { root: task.root }, { child_id: task.child }).catch(() =>
+                  Effect.runPromise(Effect.logWarning('[appencode] Failed child settlement is unconfirmed.')))
+                throw new Error(message)
+              }
+            }
+            const returned = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
+            if (returned.decision === 'child_return') {
+              // Retain the exact next admission before sending it. A lost reply
+              // can replay these bytes, including a sanitizer's replacement.
+              task.state.candidate = text(returned, 'value')
+              const echoed = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
+              if (echoed.decision !== 'ack') throw new Error('[appencode] Replacement return was not admitted.')
+            } else if (returned.decision !== 'ack') {
+              throw new Error('[appencode] Child return was not admitted; retry collection or cancel the task.')
+            }
+            const value = task.state.candidate
+            task.state = { status: 'admitted', value }
+            revoke(task.child)
+            return value
+          }, catch: failure }).pipe(Effect.uninterruptible))
+          if (disposed || tasks.get(input.task) !== task) throw new Error('[appencode] Task ownership expired.')
+          return { output: value, content: value }
+        }).pipe(Effect.catchCause(cause => Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.fail(failure(Cause.squash(cause))))),
+      })
+      editor.add({
+        name: 'appa_cancel',
+        options: { codemode: false },
+        description: 'Revoke and stop an owned background task without returning child content. Root-only; safe to repeat. Cannot undo effects or retract an admitted return. Retry if cancellation is unconfirmed.',
+        input: Schema.Struct({ task: Schema.String }),
+        output: Schema.String,
+        execute: (input, call) => Effect.gen(function* () {
+          const task = yield* Effect.tryPromise({ try: () => ownedTask(input.task, call.sessionID), catch: failure })
+          const value = yield* cancelTask(task)
+          return { output: value, content: value }
+        }).pipe(Effect.catchCause(cause => Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.fail(failure(Cause.squash(cause))))),
+      })
       for (const tool of editor.list()) {
         editor.update(tool.id, item => {
           // Code Mode has a host-side fetch extension without a public admission hook.
@@ -312,7 +454,7 @@ export default Plugin.define({
     yield* ctx.permission.hook('evaluate', event => Effect.sync(() => {
       if (event.action === 'execute' || event.action === 'subagent') {
         event.effect = 'deny'
-        event.message = 'Use APPA foreground delegation, not Code Mode or native subagent returns.'
+        event.message = 'Use APPA delegation, not Code Mode or native subagent returns.'
       }
     }))
 
@@ -346,7 +488,7 @@ export default Plugin.define({
         const child = children.get(event.sessionID)
         if (!child || !initialPrompts.delete(event.sessionID) || event.messageID !== child.promptID ||
             event.prompt.text !== child.prompt || event.prompt.files?.length || event.prompt.agents?.length || event.prompt.skills?.length) {
-          throw new Error('[appencode] Child prompts require an exact live foreground delegation; steering and alternate launches are refused.')
+          throw new Error('[appencode] Child prompts require an exact live delegation; steering and alternate launches are refused.')
         }
       }, catch: failure,
     }).pipe(Effect.andThen(setup ? Effect.void : remedyReady),
@@ -367,7 +509,11 @@ export default Plugin.define({
         const { context } = await open(event.sessionID)
         delete event.tools.execute
         delete event.tools.subagent
-        if (children.has(event.sessionID)) delete event.tools.appa_subagent
+        if (children.has(event.sessionID)) {
+          delete event.tools.appa_subagent
+          delete event.tools.appa_collect
+          delete event.tools.appa_cancel
+        }
         if (setup) {
           for (const name of Object.keys(event.tools)) if (name !== 'appa_setup' && name !== 'read') delete event.tools[name]
         }
@@ -410,6 +556,9 @@ export default Plugin.define({
           throw new Error('[appencode] Background shell results use an unchecked notification path. Use a foreground call.')
         }
         const { actor } = await open(event.sessionID)
+        if (actor.child && (event.tool === 'appa_collect' || event.tool === 'appa_cancel')) {
+          throw new Error('[appencode] Background task operations require the owning root.')
+        }
         const tools = await inventory()
         const tool = tools.find(tool => tool.name === event.tool)
         if (!tool) throw new Error('[appencode] Tool is absent from the current registry.')
