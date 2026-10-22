@@ -1,6 +1,6 @@
 # AppenCode v1 — OpenAPPA for OpenCode V2
 
-AppenCode checks direct OpenCode tool calls, results, and foreground subagent
+AppenCode checks direct OpenCode tool calls, results, and owned subagent
 returns through APPA's runtime. It targets `@opencode/cli` and
 `@opencode/plugin` 2.0.28. It does not support
 OpenCode V1's `@opencode-ai/plugin` API.
@@ -294,6 +294,7 @@ Use `opencode run --standalone --auto 'your task'` for a private-server run.
 | --- | --- |
 | `read`, `shell`, `write`, `edit`, `webfetch` | `host/opencode/<name>` |
 | `appa_subagent` | `host/opencode/appa_subagent` (single child launch) |
+| `appa_collect`, `appa_cancel` | `host/opencode/<name>` (ordinary tools) |
 | Namespaced tool, such as `github_create_issue` | `mcp/github/create_issue` |
 | `appa_execute_remedy_plan` from namespace `appa` | `appa/execute_remedy_plan` |
 | Unnamespaced lookalike `appa_execute_remedy_plan` | `host/opencode/appa_execute_remedy_plan` |
@@ -314,9 +315,9 @@ then stop. Sanitizers can replace
 confined results when the deployment registers them. The starting policy
 registers no sanitizer.
 
-## Foreground subagents
+## Owned subagents
 
-The plugin exposes `appa_subagent` for fresh, one-level foreground delegation.
+The plugin exposes `appa_subagent` for fresh, one-level delegation.
 The starting policy declares `host/opencode/appa_subagent` and enables
 `policy.deployment.context_control`. The agent prepares a return contract by
 executing the offered remedy, then retries the same delegation arguments.
@@ -325,7 +326,8 @@ Each call needs its own declaration, including concurrent calls.
 The tool accepts `agent`, `description`, and `prompt`, plus an optional `model`
 override. Select a visible subagent, not a primary agent. A model override
 must identify an available provider, model, and optional variant. Existing
-`sessionID` values and `background: true` are refused.
+`sessionID` values are refused. Omit `background`, or set it to `false`, to
+wait for the checked return in this call.
 
 APPA binds the fresh child to the exact launching call before its initial
 prompt. The child inherits the parent's Label and receives its return
@@ -336,7 +338,7 @@ it. The plugin constructs fresh output and text channels from the admitted
 value; it does not forward child attachments, metadata, or raw errors.
 
 Launch binding is serialized within each parent. Bound children can run
-concurrently and finish in any order. Interruption revokes child ownership,
+concurrently and finish in any order. Foreground interruption revokes child ownership,
 interrupts the child, and attempts to settle the launch without returning its
 prose. A failed child cannot return earlier prose. Uncertain outcomes remain
 unsettled if the runtime cannot acknowledge cleanup.
@@ -355,6 +357,64 @@ messages outside the mutable tool-result hook. The owned executor registers
 neither a Job nor a synthetic completion observer. OpenCode's background
 action therefore cannot convert its foreground return into a delayed message.
 
+### Background launch, collect, and cancel
+
+Set `background: true` to receive an opaque task handle after prompt admission.
+The launch result contains only this plugin-generated handle. APPA authorizes
+the launch outcome before the tool returns. The child continues independently;
+the parent can run other permitted tools. Finishing alone does not change the
+parent's Label or deliver child content. Completion does not wake an idle
+parent; the parent must call `appa_collect`.
+
+```text
+appa_subagent({ agent: "general", description: "Inspect module", prompt: "…", background: true })
+→ <task handle>
+appa_collect({ task: "<task handle>" })
+→ <APPA-admitted final text>
+appa_cancel({ task: "<another task handle>" })
+→ Task cancelled.
+```
+
+Only the launching root can collect or cancel a task. A handle is not
+authorization. Children cannot use these tools. Unknown handles and handles
+from other roots are refused without returning child content.
+
+#### Collection
+
+`appa_collect` waits for completion, then checks the final text through APPA's
+child-return boundary. A sanitizer's replacement must be admitted before
+delivery. Only admitted text enters fresh output and content channels.
+Failed children return neither earlier prose nor raw error details.
+Simultaneous collectors share one admission boundary. Repeated collection
+returns the cached admitted text without repeating that admission.
+Collection remains an ordinary authorized tool call with its own result accounting;
+its policy declaration does not replace the child-return check.
+
+Lost admission replies withhold output. Retry `appa_collect` to replay the
+exact candidate or sanitizer replacement.
+
+#### Cancellation and interruption
+
+Interrupting the parent or a collection wait does not cancel an acknowledged
+background task. Use `appa_cancel` to revoke ownership, interrupt without
+resumption, wait for idle, and report the child end to APPA without a value.
+Cancellation returns no child content. Repeat it when settlement is unconfirmed.
+Cancellation cannot undo effects or retract an admitted return. A waiting
+collection does not prevent cancellation from stopping the child.
+
+Uncertain launch cleanup or cancellation does not prove absence of effects.
+Diagnostics report unconfirmed cleanup; runtime failure can leave operations unsettled.
+
+#### Restart and reload
+
+Handles last only for the current plugin activation. An APPA restart with the
+same database preserves live bindings while the plugin remains active.
+OpenCode restart or plugin reload invalidates handles. Disposal revokes owned
+tasks and attempts to stop active children; it does not adopt them on reload.
+Disposal does not wait for idle or confirm settlement. Cancel tasks before
+reload when confirmed settlement is required. Missing outcomes remain unsettled.
+Durable OpenCode restart recovery and automatic completion notifications are deferred.
+
 ## V1 boundaries
 
 - Direct tool calls fail closed on connection errors, timeouts, invalid replies,
@@ -363,7 +423,7 @@ action therefore cannot convert its foreground return into a delayed message.
 - **Code Mode is refused.** Its built-in `fetch` has no public admission hook.
   Registered tools are exposed directly instead. Native subagents, unowned
   child sessions, and forked sessions are refused. Use `appa_subagent` for
-  foreground delegation. Continue the protected root rather than copying its
+  owned delegation. Continue the protected root rather than copying its
   history into a fork.
 - **Reads keep OpenCode's native permissions.** The plugin resolves the requested
   path before policy selection. Missing paths are refused instead of allowing
@@ -408,7 +468,7 @@ separately. Keep the policy and database if protected sessions will resume.
 
 The restrictions above are integration limits, not judgments that these
 OpenCode features are undesirable. The APPA engine already supports child
-trajectories and checked returns; AppenCode maps fresh foreground children.
+trajectories and checked returns; AppenCode maps fresh owned children.
 Keep a feature refused until its additional flows are mediated. An OpenCode
 permission approval alone must not bypass that boundary.
 
@@ -426,13 +486,13 @@ how an existing integration reports child starts and checked returns.
    operation. A conversation copied from a protected parent must inherit its
    security state, not open as a neutral root. Cover resume, revert, and
    restart; copied history must not lose its restrictions.
-3. **Background results and alternate child launches.** Mediate delayed child
-   and shell completion messages, including foreground jobs moved into the
-   background. OpenCode admits these through synthetic messages rather than
-   the original tool-result hook. Commands can also create children without
-   the subagent tool. Observing completion after delivery is insufficient:
-   the integration needs a boundary that can withhold or replace what reaches
-   the parent. Public hook coverage may need an upstream extension.
+3. **Automatic delivery and alternate child launches.** Explicit collection
+   handles owned background returns. Automatic delivery needs checked,
+   retryable notification admission and recovery. Native Jobs and shell
+   completion use synthetic messages outside the original tool-result hook.
+   Commands can also create children without the subagent tool. Keep these
+   paths refused until their additional flows are mediated. Observing content
+   after delivery is insufficient.
 4. **Code Mode.** In the targeted 2.0.28 implementation, its host-side `fetch`
    bypasses individual tool hooks. Mediate those network emissions and assign
    distinct APPA call identities to nested tool calls before enabling
@@ -462,7 +522,10 @@ From the checkout:
 ```sh
 cargo test --locked -p appa-adapter-opencode -p appa-runtime-api -p appa-package
 cargo build --locked -p appa
-(cd integrations/opencode && bun install --frozen-lockfile && bun run check && bun test)
+(cd integrations/opencode && bun install --frozen-lockfile && bun run check)
+bun scripts/appa-opencode-package.ts
+(cd integrations/opencode && bun test)
+bun scripts/appa-opencode-package.ts --check
 ```
 
 The tests include a host-shaped driver and a real published OpenCode 2.0.28
@@ -471,6 +534,8 @@ policies and databases. The server tests script only model inference; plugin
 loading, native tools, session lifecycle, and remedy execution are real.
 They check inherited audience/trust, return floors, sanitizer replacement,
 concurrent identities, interruption, restart, and refused alternate launches.
+Background cases check parent progress while a child is held, explicit collection,
+collection-only narrowing, cached returns, cancellation, and lost admission replies.
 They also check ordinary root flows and replacement of all tool-result
 channels. No inference-policy enforcement is claimed.
 

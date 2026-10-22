@@ -144,7 +144,7 @@ builtin = "redact-email"
       if (last?.role === 'tool' && !(previous === 'appa_execute_remedy_plan' && output.includes('Authorized'))) {
         return completion(`Battery result: ${output}`)
       }
-      return completion(null, [{ name: call.name, input: call.input }])
+      return completion(null, call.calls ?? [{ name: call.name, input: call.input }])
     }
     if (user.startsWith('setup:')) {
       if (user === 'setup:guide' || user === 'setup:battery') {
@@ -204,7 +204,7 @@ builtin = "redact-email"
         : completion(null, [{ name: 'webfetch', input: { url: 'https://example.invalid/' } }])
       if (user === 'child:inherit-trust') return last?.role === 'tool' ? completion(`Inherited trust: ${output}`)
         : completion(null, [{ name: 'write', input: { path: `${directory}/unchecked.txt`, content: 'Unchecked write' } }])
-      if (user === 'child:failure') return last?.role === 'tool'
+      if (user === 'child:failure' || user === 'child:bg-failure') return last?.role === 'tool'
         ? Response.json({ error: { message: 'RAW-CHILD-ERROR', type: 'invalid_request_error' } }, { status: 400 })
         : completion('EARLIER-CHILD-ANSWER', [{ name: 'read', input: { path: 'suspicious.txt' } }])
       if (user.includes('private') && (!last || last.role !== 'tool' || previous === 'appa_execute_remedy_plan')) {
@@ -214,7 +214,7 @@ builtin = "redact-email"
     }
     if (!user.startsWith('delegate:')) return completion('Foreground delegation test')
     const input = { agent: 'general', description: 'Foreground test', prompt: `child:${user.slice('delegate:'.length)}` }
-    if (user === 'delegate:background-input') Object.assign(input, { background: true })
+    if (user === 'delegate:background-input' || user.startsWith('delegate:bg-')) Object.assign(input, { background: true })
     if (user === 'delegate:resume-input') Object.assign(input, { sessionID: 'ses_existing' })
     if (user === 'delegate:inherit-trust' && previous !== 'appa_subagent' &&
         !conversation.some((message: any) => message.role === 'tool' && message.content.includes('Untrusted source'))) {
@@ -396,10 +396,10 @@ test('lost approval, binding and return replies withhold output without blocking
   }
 }, 45_000)
 
-test('background input, resume input, nested delegation and alternate commands are refused', async () => {
-  for (const task of ['background-input', 'resume-input']) {
+test('resume input, nested delegation and alternate commands are refused', async () => {
+  for (const task of ['resume-input']) {
     const { session, history } = await delegate(task)
-    expect(JSON.stringify(history)).toContain('Only fresh, one-level foreground delegation')
+    expect(JSON.stringify(history)).toContain('Only fresh, one-level delegation')
     expect((await client.session.list({ parentID: session.id })).data.length).toBe(0)
   }
   const nested = await delegate('nested')
@@ -424,6 +424,196 @@ async function slowChild(task: string) {
   const child = (await client.session.list({ parentID: session.id })).data[0]!
   return { session, child, resolve }
 }
+
+async function taskHandle(sessionID: string) {
+  const history = await client.session.context({ sessionID })
+  const launch = history.flatMap(message => message.type === 'assistant' ? message.content : []).reverse().find(
+    part => part.type === 'tool' && part.name === 'appa_subagent' && part.state.status === 'completed')
+  if (!launch || launch.type !== 'tool' || launch.state.status !== 'completed') throw new Error('No launch handle')
+  const value = launch.state.content.find(part => part.type === 'text')
+  if (!value || value.type !== 'text') throw new Error('No launch handle text')
+  expect(value.text).toMatch(/^[a-f0-9-]{36}$/)
+  return value.text
+}
+
+async function taskCalls(sessionID: string, calls: { name: string; input: unknown }[]) {
+  await client.session.prompt({ sessionID, text: `battery:${JSON.stringify({ calls, remedy: false })}` })
+  await client.session.wait({ sessionID })
+  return await client.session.context({ sessionID })
+}
+
+async function background(task: string) {
+  const session = await begin(`bg-${task}`)
+  await client.session.wait({ sessionID: session.id })
+  const handle = await taskHandle(session.id)
+  const child = (await client.session.list({ parentID: session.id })).data[0]!
+  return { session, child, handle }
+}
+
+test('wire launch acknowledgment releases the parent while the background child remains active', async () => {
+  const live = await slowChild('bg-wire')
+  try {
+    await client.session.wait({ sessionID: live.session.id })
+    const flow = hooks.filter(hook => hook.event.root_id === live.session.id)
+    const launch = flow.find(hook => hook.event.event === 'spawn_result')!
+    expect(launch.event.spawned_id).toBe(live.child.id)
+    expect(launch.event.value).toBeUndefined()
+    expect(launch.reply.decision).toBe('ack')
+    expect(flow.some(hook => hook.event.event === 'child_end')).toBe(false)
+    await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:while-child-active' })
+    await client.session.wait({ sessionID: live.session.id })
+    expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+    const history = await client.session.context({ sessionID: live.session.id })
+    expect(history.some(message => message.type === 'synthetic')).toBe(false)
+    expect(JSON.stringify(history.filter(message => message.type === 'assistant' && message.finish === 'stop'))).not.toContain('child:bg-wire')
+    await client.session.background({ sessionID: live.child.id })
+  } finally {
+    live.resolve()
+    await client.session.wait({ sessionID: live.child.id })
+  }
+  const handle = await taskHandle(live.session.id)
+  const collected = await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: handle } }])
+  expect(JSON.stringify(collected)).toContain('Battery result: child:bg-wire')
+  expect(collected.some(message => message.type === 'synthetic')).toBe(false)
+  expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end' && hook.reply.decision === 'ack')).toBe(true)
+}, 45_000)
+
+test('background returns narrow only on collection; sanitizers and return floors still apply', async () => {
+  for (const mode of ['private raw', 'sanitize private', 'public-floor private']) {
+    const live = await background(mode)
+    await client.session.wait({ sessionID: live.child.id })
+    expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')).toBe(false)
+    await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:before-collection' })
+    await client.session.wait({ sessionID: live.session.id })
+    const shell = () => hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'shell' && hook.event.event === 'tool_call').at(-1)!
+    expect(shell().reply.decision).toBe('allow_call')
+    const history = await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }])
+    const collected = JSON.stringify(history)
+    if (mode === 'private raw') expect(collected).toContain('Battery result: Contact alice@corp.example')
+    else {
+      expect(collected).not.toContain('alice@corp.example')
+      if (mode === 'sanitize private') expect(collected).toContain('Battery result: Contact [redacted-email]')
+      else expect(collected).toContain('Child read refused')
+    }
+    await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:after-collection' })
+    await client.session.wait({ sessionID: live.session.id })
+    expect(shell().reply.decision).toBe(mode === 'private raw' ? 'deny_call' : 'allow_call')
+    const returns = hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')
+    await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }, { name: 'appa_collect', input: { task: live.handle } }])
+    expect(hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')).toHaveLength(returns.length)
+    expect(hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'spawn_result')).toHaveLength(1)
+  }
+}, 45_000)
+
+test('two background handles keep identity when completed and collected in reverse order', async () => {
+  const first = await slowChild('bg-first')
+  await client.session.wait({ sessionID: first.session.id })
+  const a = await taskHandle(first.session.id)
+  await client.session.prompt({ sessionID: first.session.id, text: 'delegate:bg-second' })
+  await client.session.wait({ sessionID: first.session.id })
+  const b = await taskHandle(first.session.id)
+  expect(a).not.toBe(b)
+  expect(JSON.stringify(await taskCalls(first.session.id, [{ name: 'appa_collect', input: { task: b } }]))).toContain('Battery result: child:bg-second')
+  first.resolve()
+  const result = await taskCalls(first.session.id, [{ name: 'appa_collect', input: { task: a } }, { name: 'appa_collect', input: { task: a } }])
+  expect(JSON.stringify(result)).toContain('Battery result: child:bg-first')
+  const returns = hooks.filter(hook => hook.event.root_id === first.session.id && hook.event.event === 'child_end')
+  expect(returns.map(hook => hook.event.value)).toEqual(['child:bg-second', 'child:bg-first'])
+}, 45_000)
+
+test('background ownership rejects other roots, guessed handles and child operations; failed prose is withheld', async () => {
+  const live = await background('ownership')
+  const other = await client.session.create({ location: { directory } })
+  for (const name of ['appa_collect', 'appa_cancel']) {
+    const history = await taskCalls(other.id, [{ name, input: { task: live.handle } }])
+    expect(JSON.stringify(history)).toContain('Unknown task or task not owned')
+    expect(JSON.stringify(history)).not.toContain('child:bg-ownership')
+  }
+  expect(JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: crypto.randomUUID() } }]))).toContain('Unknown task or task not owned')
+  const childRequest = requests.find(request => request.messages.some((message: any) => message.content === 'child:bg-ownership'))
+  expect(childRequest.tools.map((tool: any) => tool.function.name)).not.toContain('appa_collect')
+  expect(childRequest.tools.map((tool: any) => tool.function.name)).not.toContain('appa_cancel')
+  await taskCalls(live.session.id, [{ name: 'appa_cancel', input: { task: live.handle } }])
+  const failed = await background('failure')
+  const history = JSON.stringify(await taskCalls(failed.session.id, [{ name: 'appa_collect', input: { task: failed.handle } }]))
+  expect(history).toContain('valid final answer; its return is withheld')
+  expect(history).not.toContain('EARLIER-CHILD-ANSWER')
+  expect(history).not.toContain('RAW-CHILD-ERROR')
+}, 45_000)
+
+test('cancel can stop a waiting collector; interrupted collection leaves the child owned', async () => {
+  const live = await slowChild('bg-cancel')
+  await client.session.wait({ sessionID: live.session.id })
+  const handle = await taskHandle(live.session.id)
+  const history = await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: handle } }, { name: 'appa_cancel', input: { task: handle } }])
+  expect(JSON.stringify(history)).toContain('Task cancelled')
+  live.resolve()
+  await client.session.wait({ sessionID: live.child.id })
+  expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end' && hook.event.value)).toBe(false)
+  expect(JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_cancel', input: { task: handle } }]))).toContain('Task cancelled.')
+  expect(JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: handle } }]))).not.toContain('Battery result: child:bg-cancel')
+
+  const waiting = await slowChild('bg-interrupt')
+  await client.session.wait({ sessionID: waiting.session.id })
+  const task = await taskHandle(waiting.session.id)
+  await client.session.prompt({ sessionID: waiting.session.id, text: `battery:${JSON.stringify({ calls: [{ name: 'appa_collect', input: { task } }], remedy: false })}` })
+  await ready(async () => {
+    if (!hooks.some(hook => hook.event.root_id === waiting.session.id && hook.event.tool === 'appa_collect' && hook.reply.decision === 'allow_call')) throw new Error('Not collecting')
+  }, server, `${directory}/opencode-error.log`)
+  await client.session.interrupt({ sessionID: waiting.session.id, resume: false })
+  expect(hooks.some(hook => hook.event.root_id === waiting.session.id && hook.event.event === 'child_end')).toBe(false)
+  waiting.resolve()
+  expect(JSON.stringify(await taskCalls(waiting.session.id, [{ name: 'appa_collect', input: { task } }]))).toContain('Battery result: child:bg-interrupt')
+}, 45_000)
+
+test('lost background launch and return replies fail closed and exact return admission is retryable', async () => {
+  corruptDecision = 'spawn_result'
+  const lost = await delegate('bg-lost-launch')
+  expect(JSON.stringify(lost.history)).toContain('Invalid runtime reply')
+  expect(corruptDecision).toBeUndefined()
+  await client.session.prompt({ sessionID: lost.session.id, text: 'delegate:bg-after-lost-launch' })
+  await client.session.wait({ sessionID: lost.session.id })
+  await taskHandle(lost.session.id)
+  for (const mode of ['raw', 'sanitize private']) {
+    const live = await background(mode)
+    await client.session.wait({ sessionID: live.child.id })
+    corruptDecision = 'child_end'
+    const first = JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }]))
+    expect(first).toContain('Invalid runtime reply')
+    expect(first).not.toContain('Battery result: child:bg-raw')
+    expect(first).not.toContain('alice@corp.example')
+    const retry = JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }]))
+    expect(retry).toContain(mode === 'raw' ? 'Battery result: child:bg-raw' : 'Battery result: Contact [redacted-email]')
+    expect(retry).not.toContain('alice@corp.example')
+  }
+}, 45_000)
+
+test('background ownership survives APPA restart, not plugin reload or OpenCode restart', async () => {
+  const live = await slowChild('bg-runtime')
+  await client.session.wait({ sessionID: live.session.id })
+  const task = await taskHandle(live.session.id)
+  runtime.kill(); await runtime.exited; await startRuntime()
+  live.resolve()
+  expect(JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task } }]))).toContain('Battery result: child:bg-runtime')
+  const reloading = await slowChild('bg-reload')
+  await client.session.wait({ sessionID: reloading.session.id })
+  const retired = await taskHandle(reloading.session.id)
+  await client.location.reload()
+  reloading.resolve()
+  await client.session.wait({ sessionID: reloading.child.id })
+  expect(hooks.some(hook => hook.event.root_id === reloading.session.id && hook.event.event === 'child_end' && hook.event.value)).toBe(false)
+  expect(JSON.stringify(await taskCalls(reloading.session.id, [{ name: 'appa_collect', input: { task: retired } }]))).toContain('Unknown task or task not owned')
+  const orphan = await slowChild('bg-host')
+  await client.session.wait({ sessionID: orphan.session.id })
+  const expired = await taskHandle(orphan.session.id)
+  server.kill(9); await server.exited
+  orphan.resolve()
+  await startServer()
+  expect(JSON.stringify(await taskCalls(orphan.session.id, [{ name: 'appa_collect', input: { task: expired } }]))).toContain('Unknown task or task not owned')
+  await expect(client.session.prompt({ sessionID: orphan.child.id, text: 'resume orphan' })).rejects.toThrow()
+  const fresh = await background('fresh')
+  expect(JSON.stringify(await taskCalls(fresh.session.id, [{ name: 'appa_collect', input: { task: fresh.handle } }]))).toContain('Battery result: child:bg-fresh')
+}, 45_000)
 
 test('host background action cannot turn owned foreground delegation into a synthetic return', async () => {
   const { session, resolve } = await slowChild('slow-background')
