@@ -1215,6 +1215,19 @@ mod tests {
             fs::create_dir_all(target.parent().unwrap()).unwrap();
             fs::copy(&source, &target).unwrap();
         }
+        // A stale catalog otherwise surfaces far from its cause, as an
+        // install refusing a package's catalog identity.
+        let marketplace = copy.path().join("marketplace");
+        for entry in Marketplace::read(&marketplace.join("marketplace.toml"))
+            .unwrap()
+            .packages
+        {
+            assert!(
+                TreeDigest::of_tree(&marketplace.join(entry.path.as_path())).unwrap() == entry.digest,
+                "marketplace/marketplace.toml is stale for package {}: run `bash scripts/appa-marketplace.sh`",
+                entry.name
+            );
+        }
         copy
     }
 
