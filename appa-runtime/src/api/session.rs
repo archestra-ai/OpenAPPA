@@ -1050,6 +1050,13 @@ impl Session {
                                 fork: fork.clone(),
                                 child: child.clone(),
                             },
+                            // A failure that names no child: the subagent ended before it
+                            // returned, whether or not it had started.
+                            (ForkStatus::Prepared | ForkStatus::Bound(_), None)
+                                if matches!(outcome, ToolOutcome::Failure { .. }) =>
+                            {
+                                SpawnPlan::Close(EventError::SpawnStopped)
+                            }
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
@@ -6682,6 +6689,48 @@ delta = {}
         assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
         assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+    }
+
+    /// A harness reports a spawn call as failed, and names no child, when its
+    /// subagent ended before it returned: on a provider error before the
+    /// subagent's first request, or partway through its turn. The spawn
+    /// closes, the model reads its next step, and the parent can spawn again.
+    #[tokio::test]
+    async fn a_failed_spawn_result_naming_no_child_closes_the_spawn_with_the_next_step() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let failure = || ToolOutcome::Failure {
+            message: "Invalid LLM OAuth client access token.".to_string(),
+        };
+
+        // The subagent never started.
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let error = session
+            .on_spawn_result(fetch(serde_json::json!({"a": 1})), failure(), None, None)
+            .await
+            .expect_err("a failed spawn crosses nothing");
+        assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(!error.is_operational());
+        assert_eq!(
+            error.to_string(),
+            "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
+        );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+
+        // The subagent started, then stopped. A spawn still in flight would refuse this one.
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 2}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        let error = session
+            .on_spawn_result(fetch(serde_json::json!({"a": 2})), failure(), None, None)
+            .await
+            .expect_err("a failed spawn crosses nothing");
+        assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
     }
 
     /// A harness that launches the subagent and returns at once reports

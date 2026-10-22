@@ -567,6 +567,13 @@ pub(crate) enum EventError {
     SpawnAmbiguous,
     #[error("the fork and the child are already bound elsewhere")]
     BindingMismatch,
+    /// The harness reported the spawn call as failed and named no child: the subagent ended
+    /// before it returned. The spawn closes, so the parent can spawn again. The text is the
+    /// model's next step.
+    #[error(
+        "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
+    )]
+    SpawnStopped,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("external resolution did not settle after {rounds} rounds")]
@@ -654,7 +661,8 @@ impl EventError {
             EventError::NotAChild
             | EventError::FanOutUnkeyed
             | EventError::SpawnAmbiguous
-            | EventError::BindingMismatch => RefusalClass::Spawn,
+            | EventError::BindingMismatch
+            | EventError::SpawnStopped => RefusalClass::Spawn,
         }
     }
 
@@ -699,7 +707,8 @@ impl EventError {
             | EventError::SpawnAmbiguous
             | EventError::UndeclaredSpawn { .. }
             | EventError::PeerMessageTooLarge { .. }
-            | EventError::BindingMismatch => false,
+            | EventError::BindingMismatch
+            | EventError::SpawnStopped => false,
         }
     }
 }
