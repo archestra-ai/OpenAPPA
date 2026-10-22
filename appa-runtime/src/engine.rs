@@ -4275,6 +4275,27 @@ fn block_feedback(
     presentation: &EmbeddedPresentationOptions,
 ) -> RenderedBlock {
     let chain = registry.trust_chain();
+    // A redispatch needs no offer. Delegation can isolate a narrowing, but a child
+    // inherits the same label and cannot clear requirement gaps by being a child.
+    let spelling = ReturnSpelling::of(chain, bounds);
+    let target = naming.model_spelling(target);
+    let target = target.as_str();
+    let remedies = remedy_lines(
+        planned,
+        offers,
+        &spelling,
+        chain,
+        naming,
+        RemedyRenderContext {
+            registry: Some(registry),
+            target,
+            presentation,
+        },
+    );
+    let delegation_available = presentation.supports_delegation
+        && matches!(planned.fork_advice, Some(ForkAdvice::Narrowing { .. }))
+        && planned.raw.requirement_gaps.is_empty();
+    let no_continuation = remedies.is_empty() && !delegation_available;
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap, chain)));
@@ -4309,7 +4330,9 @@ fn block_feedback(
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
     }
-    if let Some(impact) = &planned.narrowing_impact {
+    if !remedies.is_empty()
+        && let Some(impact) = &planned.narrowing_impact
+    {
         if impact.sign_off + impact.blocked > 0 {
             reasons.push(format!(
                 "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
@@ -4344,29 +4367,25 @@ fn block_feedback(
     }
 
     // Name the call the way the model spelled it, never its arguments.
-    let target = naming.model_spelling(target);
-    let target = target.as_str();
     let mut lines = vec![
-        format!("[appa] Blocked: {} cannot run yet.", terminal_safe(target)),
+        if no_continuation {
+            format!("[appa] Blocked: {} cannot run.", terminal_safe(target))
+        } else {
+            format!("[appa] Blocked: {} cannot run yet.", terminal_safe(target))
+        },
         String::new(),
         "Why:".to_string(),
     ];
     lines.extend(reasons.iter().map(|reason| format!("  - {reason}")));
 
-    let spelling = ReturnSpelling::of(chain, bounds);
-    let remedies = remedy_lines(
-        planned,
-        offers,
-        &spelling,
-        chain,
-        naming,
-        RemedyRenderContext {
-            registry: Some(registry),
-            target,
-            presentation,
-        },
-    );
-    if !remedies.is_empty() {
+    if no_continuation {
+        lines.push(String::new());
+        lines.push(
+            "No remedy is offered for this call in the current state. Do not retry this flow or reuse an earlier \
+             offer for it. Tell the user that the policy refused this part of the task, and finish any permitted work."
+                .to_string(),
+        );
+    } else if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
         lines.extend(remedies);
@@ -4375,7 +4394,8 @@ fn block_feedback(
         let plans = display_plans(planned, offers, &reasons, Some(registry), target);
         RemedyDisplay { reasons, plans }
     });
-    if presentation.supports_delegation
+    if !no_continuation
+        && presentation.supports_delegation
         && let Some(advice) = planned.fork_advice
     {
         let remedies_required = !planned.raw.requirement_gaps.is_empty();
@@ -5407,7 +5427,14 @@ mod tests {
                         to: Label::new(Trust::new(0), Audience::public()),
                     }),
                 },
-                plans: vec![],
+                plans: vec![RemedyPlan::Executable(ExecutableRemedyPlan {
+                    id: PlanId::new(1),
+                    steps: vec![RemedyStep::Accept(Narrowing {
+                        from: Label::new(Trust::new(2), Audience::public()),
+                        to: Label::new(Trust::new(0), Audience::public()),
+                    })],
+                    required: vec![],
+                })],
                 fork_advice: None,
                 narrowing_impact,
             };
@@ -5419,7 +5446,7 @@ mod tests {
             };
             block_feedback(
                 &planned,
-                &[],
+                &[(OfferId("offer-1".to_string()), PlanId::new(1))],
                 policy.engine().registry(),
                 &ReturnBounds {
                     label: Label::top(),

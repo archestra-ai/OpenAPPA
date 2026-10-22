@@ -523,6 +523,22 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
         offers(reason).is_empty(),
         "attestation does not unbind the public audience floor: {reason}"
     );
+    assert!(
+        reason.contains("delegate"),
+        "a further child can take no return: {reason}"
+    );
+    assert!(
+        !reason.contains("No remedy is offered"),
+        "delegation remains available: {reason}"
+    );
+    assert!(
+        !reason.contains("Accepting restricts"),
+        "no acceptance is offered: {reason}"
+    );
+    assert!(
+        !reason.contains("After accepting"),
+        "no acceptance is offered: {reason}"
+    );
 
     let compatible = make_runtime();
     replay(&compatible, &events[..1]).await;

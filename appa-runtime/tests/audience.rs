@@ -182,6 +182,8 @@ async fn narrowed_under(dir: &tempfile::TempDir, policy: &str, audience_url: &st
     let HookDecision::DenyCall { feedback, .. } = blocked else {
         panic!("the narrowing read is offered for acceptance, got {blocked:?}");
     };
+    assert!(feedback.contains("Continue:"), "{feedback}");
+    assert!(!feedback.contains("No remedy is offered"), "{feedback}");
     assert!(matches!(
         runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
@@ -382,6 +384,50 @@ async fn public_and_literal_arguments_never_consult_the_source() {
         HookDecision::DenyCall { .. }
     ));
     assert!(source.requests().is_empty(), "no spelling here names a group");
+}
+
+#[tokio::test]
+async fn a_refusal_without_a_continuation_explains_how_to_finish() {
+    let (url, _) = serve_source().await;
+    // A requirement gap alone, and the same gap with a narrowing. Neither can be
+    // cleared by delegating to a child that inherits this session's label.
+    for delta in ["{}", "{ trust = \"suspicious\", audience = [\"self\"] }"] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let policy = POLICY.replace(
+            "effects = [\"egress\"]\ndelta = {}",
+            &format!("effects = [\"egress\"]\ndelta = {delta}"),
+        );
+        let policy = format!(
+            "{policy}\n[[policy.tool]]\nname = \"trusted_work\"\nrequires = {{ trust = \"trusted\" }}\ndelta = {{}}\n"
+        );
+        let runtime = narrowed_under(&dir, &policy, &url).await;
+        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, send("public")).await else {
+            panic!("public is outside the private read's audience");
+        };
+        assert!(offers.is_empty());
+        assert!(feedback.starts_with("[appa] Blocked: send cannot run."), "{feedback}");
+        for guidance in [
+            "No remedy is offered for this call in the current state.",
+            "Do not retry this flow or reuse an earlier offer for it.",
+            "Tell the user that the policy refused this part of the task, and finish any permitted work.",
+        ] {
+            assert!(feedback.contains(guidance), "{feedback}");
+        }
+        for misleading in [
+            "cannot run yet",
+            "Accepting restricts",
+            "After accepting",
+            "Continue:",
+            "delegate",
+        ] {
+            assert!(!feedback.contains(misleading), "{feedback}");
+        }
+        // The refusal does not stop permitted work in the same trajectory.
+        assert_eq!(
+            propose(&runtime, read_hr()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
 }
 
 /// The probe reads every selector the policy references, once each, and refuses the first
