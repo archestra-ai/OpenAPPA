@@ -910,7 +910,7 @@ impl Session {
             // A missing observation is repaired after its writer has stopped.
             let o = match o {
                 ToolOutcome::Success {
-                    body: OutcomeBody::Unavailable,
+                    body: OutcomeBody::Unavailable | OutcomeBody::TooLarge { .. },
                 } => ToolOutcome::Success {
                     body: OutcomeBody::Available(String::new()),
                 },
