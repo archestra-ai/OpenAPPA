@@ -175,14 +175,6 @@ function isRemedyCall(name: string): boolean {
   return name === "execute_remedy_plan" || name === CONTROL_TOOL;
 }
 
-/**
- * An option as a person reads it: what the agent would do, without the
- * sanitizer's instructions, which the policy pane already shows.
- */
-function optionText(option: BlockOption): string {
-  return option.text.split(". It is instructed:")[0];
-}
-
 /** The offer a remedy call takes. */
 function offerOf(args: Record<string, unknown>): string | undefined {
   return typeof args.offer_id === "string" ? args.offer_id : undefined;
@@ -1393,7 +1385,7 @@ export function ChatPlayground() {
               <ol className="m-0 mt-0.5 list-decimal pl-5">
                 {item.options.map((option) => (
                   <li className="my-1" key={option.offer_id}>
-                    {optionText(option)}
+                    {option.text}
                   </li>
                 ))}
               </ol>
@@ -1583,7 +1575,7 @@ export function ChatPlayground() {
           .
         </>
       ) : option ? (
-        <>Choosing: {optionText(option)}.</>
+        <>Choosing: {option.text}.</>
       ) : (
         <>Taking remedy {offerOf(item.args) ?? "…"}.</>
       );

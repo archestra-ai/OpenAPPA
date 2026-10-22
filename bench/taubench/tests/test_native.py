@@ -208,7 +208,8 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
 def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> None:
     # An executable offer: the model accepts it with the control tool.
     offered = (
-        "[appa] Blocked: read_record cannot run yet.\n\nWhy:\n  - reading its result would lower this session's trust\n\nContinue:\n"
+        "[appa] Blocked: read_record cannot run yet.\n\n"
+        "Why:\n  - reading its result would lower this session's trust\n\nContinue:\n"
         "  - Accept lower trust for the rest of this session:\n"
         '    execute_remedy_plan(offer_id: "a6b41f1968b6fa7d")'
     )

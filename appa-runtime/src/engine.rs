@@ -4106,13 +4106,7 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
                 } else {
                     "Use"
                 };
-                let mut action = format!("{lead} sanitizer {}'s result", terminal_safe(sanitizer.as_str()));
-                // What the rewrite keeps decides whether its result still serves the task.
-                if let Some(hint) = sanitizer_hint(registry, sanitizer) {
-                    action.push_str(". It is instructed: ");
-                    action.push_str(&hint);
-                }
-                action
+                format!("{lead} sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
             }
             (true, Some(narrowing), None) => format!(
                 "Submit for approval and accept {} for the rest of this session",
@@ -4178,10 +4172,17 @@ fn remedy_instruction(
     let mut instruction = if include_display_plan {
         format!("  - {call}")
     } else {
-        // A sanitizer's hint can end its own sentence; otherwise a colon introduces the call.
-        let colon = if description.ends_with('.') { "" } else { ":" };
-        format!("  - {description}{colon}\n    {call}")
+        format!("  - {description}:\n    {call}")
     };
+    // What an output sanitizer's rewrite keeps decides whether its result still serves the task.
+    if plan.hop().is_none()
+        && let Some(hint) = plan
+            .sanitizer()
+            .and_then(|sanitizer| sanitizer_hint(registry, sanitizer))
+    {
+        instruction.push_str("\n    The sanitizer is instructed: ");
+        instruction.push_str(&hint);
+    }
     let needs_approval = !plan.required.is_empty();
     if needs_approval {
         if include_display_plan {
