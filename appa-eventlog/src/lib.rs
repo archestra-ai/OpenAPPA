@@ -4029,6 +4029,56 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_plaintext_receipts_store_and_replay_nul() {
+        // Binary tool output can carry U+0000, which PostgreSQL text and jsonb refuse.
+        let store = postgres_store(1);
+        let (mut operation, mut result) = postgres_receipts();
+        let root = postgres_root(&store, "plaintext-nul");
+        operation.root = root.clone();
+        result.root = root.clone();
+        let session = result.key.session.session_id.clone();
+        operation.input = serde_json::json!({"tool": "Bash", "arguments": {"command": "cat\0bin"}});
+        let lease = receipt_lease("plain-nul");
+        let operation_decision = serde_json::json!({"decision": "allow_call", "note": "a\0b"});
+        assert!(matches!(
+            store.claim_operation(operation.clone(), &lease),
+            Ok(OperationClaim::Claimed)
+        ));
+        store
+            .complete_operation(operation.key.clone(), operation_decision.clone(), lease.owner())
+            .unwrap();
+        assert_eq!(
+            store.claim_operation(operation, &lease).unwrap(),
+            OperationClaim::Complete {
+                decision: operation_decision
+            }
+        );
+
+        let output = "ck.json\0\u{1e}warn\0";
+        let result_decision = serde_json::json!({"decision": "ack", "approved_output": output});
+        store.claim_processed_result(result.clone(), &lease).unwrap();
+        store
+            .complete_processed_result(
+                result.key.clone(),
+                output.to_owned(),
+                result_decision.clone(),
+                lease.owner(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.claim_processed_result(result, &lease).unwrap(),
+            ProcessedResultClaim::Complete {
+                approved_output: output.to_owned(),
+                decision: result_decision
+            }
+        );
+        forget_postgres_receipts(&store, &session);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
     fn postgres_encrypted_result_completion_requires_the_root_key() {
         let plain = postgres_store(1);
         let cipher = encryption::StorageCipher::encrypted(&[7; 32], "encrypted-result".into()).unwrap();
