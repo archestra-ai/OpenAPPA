@@ -1,7 +1,7 @@
 //! Server-side identification for AppenCode, the OpenCode V2 plugin.
 //! The plugin obtains namespaces from the registry, never by splitting OpenCode's
 //! flattened dispatch names. Namespaced tools cross as `mcp__<namespace>__<name>`.
-//! Only the plugin-owned foreground tool starts checked child trajectories.
+//! Only the plugin-owned delegation tool starts checked child trajectories.
 
 use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, SpawnKind};
 
@@ -61,6 +61,8 @@ mod tests {
         for (raw, canonical) in [
             ("read", "host/opencode/read"),
             ("subagent", "host/opencode/subagent"),
+            ("appa_collect", "host/opencode/appa_collect"),
+            ("appa_cancel", "host/opencode/appa_cancel"),
             ("appa_execute_remedy_plan", "host/opencode/appa_execute_remedy_plan"),
             ("mcp__github_team__create_issue", "mcp/github_team/create_issue"),
             ("mcp__other__execute_remedy_plan", "mcp/other/execute_remedy_plan"),
