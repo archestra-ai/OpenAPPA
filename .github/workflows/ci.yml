@@ -674,6 +674,10 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
+    # The build and the tests below share one dependency tree only while the dev and
+    # test profiles agree; the workspace manifest gives tests line tables only.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
