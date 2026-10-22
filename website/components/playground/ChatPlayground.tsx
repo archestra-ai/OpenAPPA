@@ -26,7 +26,6 @@ import {
 
 import {
   DEMO_URL,
-  type DemoEvent,
   checkPolicy,
   createSession,
   deleteSession,
@@ -36,20 +35,17 @@ import {
 } from "./demo-client";
 import { type LabelState, PLAYGROUND_MODEL } from "./playground-data";
 import {
-  type ParsedPlan,
-  type Ruling,
   type StreamState,
   type ThreadItem,
   PROTOCOL_TOOLS,
   applyEvent,
   isRemedyCall,
   offerOf,
-  splitRuling,
 } from "./stream";
+import type { WireEvent } from "./wire-events";
 import { NEW_CHAT_EVENT } from "@/components/DocsSidebar";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
 import { registerPixelMarks } from "@/components/pixel-marks";
-import { termDefinition } from "@/lib/terms";
 
 declare module "react" {
   namespace JSX {
@@ -110,15 +106,6 @@ const REFERENCE_CLASS =
  *  never stores a width the columns would refuse to grant. */
 const SIDEBAR_MIN_PX = 320;
 const CHAT_MIN_PX = 480;
-
-
-/** Drop the protocol instruction the runtime appends for the model. */
-function readable(summary: string): string {
-  return summary
-    .replace(/[;,]?\s*execute (?:one offered plan|plan [^\s]+) with execute_remedy_plan\.?/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 /**
  * The tools the playground's own stories touch. The CRM pair is registered and
@@ -206,23 +193,6 @@ function shortPolicy(full: string): string {
 }
 
 /**
- * The runtime's refusal for an unoffered `plan_id` is written for the model:
- * it leads with the fork case, because that is the one a model reads its way
- * into, and closes by telling it how to re-propose. A reader watching the
- * stream needs neither — in this playground the agent simply answered one
- * ruling twice, and the second answer arrived after the first had settled it.
- */
-function refusal(output: string | undefined, offerKnown: boolean): string {
-  const text = readable(output ?? "");
-  if (/no pending blocked call offers that plan_id/i.test(text)) {
-    return offerKnown
-      ? "That ruling was already settled, so its plans are no longer on offer."
-      : "No ruling in this chat is offering that plan.";
-  }
-  return text || "The engine refused this plan.";
-}
-
-/**
  * The model answers in markdown out of habit. Its bold labels, code chips and
  * heading rules turn a two-line answer into a formatted document, which reads
  * as noise beside a stream that has no formatting of its own. Strip the
@@ -243,18 +213,6 @@ function asProse(text: string): string {
     .trim();
 }
 
-
-/**
- * The policy's trust ranks, least-trusted first, read from the policy's own
- * text — a narrowing names its target trust as a chain index, and this is what
- * gives that index its name. The loader validates the real
- * parse; this regex only has to agree with it on the happy path.
- */
-function parseTrustChain(policy: string): string[] {
-  const match = policy.match(/trust_chain\s*=\s*\[([^\]]*)\]/);
-  const names = match?.[1].match(/"([^"]*)"/g)?.map((quoted) => quoted.slice(1, -1));
-  return names?.length ? names : ["suspicious", "trusted"];
-}
 
 /**
  * Split the thread into runs by trajectory: root activity renders inline,
@@ -477,7 +435,7 @@ export function ChatPlayground() {
 
   // ---- live path ----------------------------------------------------------
 
-  const receive = useCallback((event: DemoEvent) => {
+  const receive = useCallback((event: WireEvent) => {
     setStream((prev) => applyEvent(prev, event, () => ++idRef.current));
     // The turn has settled: the engine's focus lingers briefly and fades.
     if (event.type === "answer" || event.type === "stopped" || event.type === "error")
@@ -576,9 +534,6 @@ export function ChatPlayground() {
   // Line numbers are the short text's own: it is the only policy on screen.
   const highlight = useMemo(() => (focus ? findBlock(shortText, focus.name) : null), [focus, shortText]);
 
-  // Names a narrowing's target trust rank in the visitor's own vocabulary.
-  const trustChain = useMemo(() => parseTrustChain(policyText), [policyText]);
-
   // Post the visitor's ruling; the resolved state arrives back on the stream.
   const answerApproval = async (approvalId: string, approve: boolean) => {
     if (!sessionRef.current) return;
@@ -637,91 +592,6 @@ export function ChatPlayground() {
       `Click to see ${target} in the policy`,
     );
 
-  /** A value whose *cause* lives in the policy: reads as prose, opens the rule. */
-  const policyPill = (text: string, target: string) =>
-    reference(text, target, REFERENCE_CLASS, `Click to see the ${target} rule that set this in the policy`);
-
-  // A label value wears the glossary: the same definition the docs popovers
-  // use, as a plain tooltip.
-  const termPill = (text: string) => (
-    <span
-      className="font-mono text-[12.5px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4"
-      style={termDefinition(text) ? { cursor: "help" } : undefined}
-      title={termDefinition(text)}
-    >
-      {text}
-    </span>
-  );
-
-  /** What the narrowing costs, named once so nothing has to repeat it. */
-  const narrowedTrust = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
-    ruling.toTrustRank !== undefined ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`) : null;
-
-  /** The readers left, when the engine resolved them to a concrete set. */
-  const narrowedReaders = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
-    ruling.readers ? ruling.readers.join(", ") || "nobody" : null;
-
-  /** The dimension a narrowing lands on, for sentences that name it. */
-  const narrowedDimension = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
-    ruling.dimension === "trust" ? "trust" : ruling.dimension === "audience" ? "audience" : "label";
-
-  /** "the audience narrowing" / "the trust narrowing" / "the narrowing". */
-  const narrowingNoun = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
-    ruling.dimension === "both" ? "the narrowing" : `the ${ruling.dimension} narrowing`;
-
-  /**
-   * What accepting does to this chat, as one clause. Says what changes and
-   * for how long — a reader who has never met an information-flow label
-   * should still understand the price.
-   */
-  const acceptMove = (ruling: Extract<Ruling, { kind: "narrowing" }>) => {
-    const moves: React.ReactNode[] = [];
-    if (ruling.dimension !== "audience") {
-      const to = narrowedTrust(ruling);
-      moves.push(<span key="trust">lowers this chat&apos;s trust{to ? <> to {termPill(to)}</> : null}</span>);
-    }
-    if (ruling.dimension !== "trust") {
-      const to = narrowedReaders(ruling);
-      moves.push(<span key="audience">narrows this chat&apos;s audience{to ? <> to {termPill(to)}</> : null}</span>);
-    }
-    return moves.map((move, index) => (
-      <span key={index}>
-        {index > 0 && " and "}
-        {move}
-      </span>
-    ));
-  };
-
-  /**
-   * One plan as one option. The price is already stated in the sentence
-   * above, so an option says what it *does* rather than restating the cost —
-   * the repetition was most of what made these rulings hard to read.
-   */
-  const planOption = (plan: ParsedPlan, ruling: Ruling) => {
-    const clauses: React.ReactNode[] = [];
-    for (const ruled of plan.rulings)
-      clauses.push(<>ask {entityPill(ruled.authority, ruled.hint)} to approve this one call</>);
-    if (plan.sanitize)
-      clauses.push(
-        <>
-          clean it first with {entityPill(plan.sanitize.sanitizer, plan.sanitize.hint)}
-          {ruling.kind === "narrowing" ? <>, and this chat&apos;s {narrowedDimension(ruling)} stays as it is</> : null}
-        </>,
-      );
-    if (plan.accepts || clauses.length === 0)
-      clauses.push(ruling.kind === "narrowing" ? <>accept {narrowingNoun(ruling)}</> : <>accept</>);
-    return (
-      <li className="my-1" key={plan.id}>
-        {clauses.map((clause, index) => (
-          <span key={index}>
-            {index > 0 && ", then "}
-            {clause}
-          </span>
-        ))}
-      </li>
-    );
-  };
-
   /* Who is speaking: a name and a colon. The label shares a baseline with the
      line it opens, which is correct and still reads low — at 11px its ink sits
      0.9px below the optical centre of the 13.5px sentence beside it (measured,
@@ -753,10 +623,9 @@ export function ChatPlayground() {
   };
 
   /**
-   * The plan an `execute_remedy_plan` call chose, resolved against the block
-   * that offered it — the nearest earlier blocked call whose ruling carries
-   * that plan_id. Lets the choice render in the agent's own voice instead of
-   * as a protocol payload.
+   * The option a control call chose, resolved against the block that offered
+   * it. Lets the choice render in the agent's own voice instead of as a
+   * protocol payload.
    */
   const chosenOption = (item: Extract<ThreadItem, { t: "tool" }>) => {
     const offerId = offerOf(item.args);
@@ -766,20 +635,6 @@ export function ChatPlayground() {
         const option = entry.options?.find((candidate) => candidate.offer_id === offerId);
         if (option) return option;
       }
-    return null;
-  };
-
-  const chosenPlan = (item: Extract<ThreadItem, { t: "tool" }>) => {
-    const planId = offerOf(item.args);
-    if (planId === undefined) return null;
-    const at = thread.findIndex((entry) => entry.id === item.id);
-    for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
-      const prev = thread[index];
-      if (prev.t !== "tool" || prev.state !== "blocked" || !prev.blocked) continue;
-      const ruling = splitRuling(prev.blocked);
-      const plan = ruling.plans.find((entry) => entry.id === planId);
-      if (plan) return { plan, ruling };
-    }
     return null;
   };
 
@@ -815,57 +670,16 @@ export function ChatPlayground() {
         </div>,
       );
     }
-    if (item.t === "verdict") {
-      const ruling = splitRuling(item.text);
-      const warnKind = ruling.kind === "narrowing";
-      const tone = warnKind
-        ? { bg: "var(--warn-bg)", fg: "var(--warn)" }
-        : { bg: "var(--danger-bg)", fg: "var(--danger)" };
-      // The story in one sentence: what this call returns, what reading it
-      // would cost, and how long the cost lasts. The tool is named so the
-      // sentence stands on its own when read out of the stream.
-      const tool = item.tool;
-      const subject = tool ? entityPill(tool) : <>This call</>;
-      const readers = ruling.kind === "narrowing" ? narrowedReaders(ruling) : null;
-      const rank = ruling.kind === "narrowing" ? narrowedTrust(ruling) : null;
-      const caption =
-        ruling.kind === "refusal" ? (
-          <>
-            {subject} — {readable(ruling.summary)}
-          </>
-        ) : ruling.dimension === "trust" ? (
-          <>
-            {subject} returns content the policy does not trust. Reading it lowers this chat&apos;s trust
-            {rank ? <> to {tool ? policyPill(rank, tool) : termPill(rank)}</> : null}.
-          </>
-        ) : ruling.dimension === "audience" ? (
-          <>
-            {subject} returns confidential data. Reading it narrows this chat&apos;s audience
-            {readers ? <> to {tool ? policyPill(readers, tool) : termPill(readers)}</> : null}.
-          </>
-        ) : (
-          <>
-            {subject} returns confidential data the policy does not trust. Reading it {acceptMove(ruling)}.
-          </>
-        );
+    if (item.t === "verdict")
+      // A hold with no remedies to choose from — a held result, or a call the
+      // runtime could not judge — says so in the runtime's own words.
       return exchangeShell(
         group,
-        <>
-          <div className="text-[13.5px] leading-relaxed">
-            <p className="m-0">
-              {appaWho()}
-              {caption}
-            </p>
-            {ruling.plans.length > 0 && (
-              <>
-                <p className="m-0 mt-2 text-[var(--text)]">Remedy plan options:</p>
-                <ol className="m-0 mt-0.5 list-decimal pl-5">{ruling.plans.map((plan) => planOption(plan, ruling))}</ol>
-              </>
-            )}
-          </div>
-        </>,
+        <p className="m-0 text-[13.5px] leading-relaxed">
+          {appaWho()}
+          {item.tool ? entityPill(item.tool) : <>This call</>} — {item.text}
+        </p>,
       );
-    }
     if (item.t === "user")
       return (
         /* `ph-mask` keeps whatever the reader typed out of session replay:
@@ -969,37 +783,10 @@ export function ChatPlayground() {
     // The agent's remedy choice, in its own voice: "I choose to use X" says
     // more than a protocol payload. The wire call stays available underneath.
     if (isRemedyCall(item.name)) {
-      const chosen = chosenPlan(item);
-      const option = chosen ? null : chosenOption(item);
+      const option = chosenOption(item);
       // The agent's answer, short: APPA has just stated the price, so the
       // reply names the choice and stops.
-      const sentence = chosen ? (
-        <>
-          {chosen.plan.rulings.map((ruled, index) => (
-            <span key={ruled.authority}>
-              {index > 0 && " and "}Asking {entityPill(ruled.authority, ruled.hint)} to approve this call
-            </span>
-          ))}
-          {chosen.plan.sanitize && (
-            <>
-              {chosen.plan.rulings.length > 0 && ", then "}
-              {chosen.plan.rulings.length > 0 ? "cleaning" : "Cleaning"} it first with{" "}
-              {entityPill(chosen.plan.sanitize.sanitizer, chosen.plan.sanitize.hint)}
-            </>
-          )}
-          {chosen.plan.accepts &&
-            (chosen.plan.rulings.length > 0 || chosen.plan.sanitize ? (
-              <> and accepting what remains</>
-            ) : (
-              <>Accepting {chosen.ruling.kind === "narrowing" ? narrowingNoun(chosen.ruling) : "the ruling"}</>
-            ))}
-          .
-        </>
-      ) : option ? (
-        <>Choosing: {option.text}.</>
-      ) : (
-        <>Taking remedy {offerOf(item.args) ?? "…"}.</>
-      );
+      const sentence = option ? <>Choosing: {option.text}.</> : <>Taking remedy {offerOf(item.args) ?? "…"}.</>;
       return exchangeShell(
         group,
         <div className={`text-[13.5px] leading-relaxed ${item.state === "running" ? "animate-pulse" : ""}`}>
@@ -1013,13 +800,12 @@ export function ChatPlayground() {
           {item.refused && (
             <div className="mt-1 text-[12.5px] text-[var(--warn)]">
               {speaker("appa")}
-              {refusal(item.output, Boolean(chosen ?? option))}
+              {item.output || "The runtime refused this offer."}
             </div>
           )}
         </div>,
       );
     }
-    const ruling = item.state === "blocked" && item.blocked ? splitRuling(item.blocked) : null;
     /* A tool call is a line on the spine. The arrow carries the
        direction — out to the world, or a result coming back — which is what
        the wrench never said; the name is mono because it is an identifier;
