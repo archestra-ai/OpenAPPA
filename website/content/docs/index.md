@@ -13,6 +13,8 @@ And yes, it outperforms competitors on benchmarks:
 
 :::benchmark-highlight:::
 
+:::video-auto-mode:::
+
 :::video-fireship:::
 
 ## Non-deterministic guardrails miss the problem

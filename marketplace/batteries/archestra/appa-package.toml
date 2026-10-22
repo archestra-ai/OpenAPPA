@@ -1,6 +1,6 @@
 schema = 1
 name = "archestra"
-description = "Rules for Archestra's built-in sharing tools: projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, and team membership; each share must be sharable with the organization, teams, or users it names, plus the archestra audience source."
+description = "Rules for Archestra's built-in sharing tools: projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, and team membership; each share must be sharable with the organization, teams, or users it names. A run and its workspace are an internal container: what enters must be sharable with the organization, what leaves is internal. Plus the archestra audience source."
 
 [battery]
 policy = "appa.toml"

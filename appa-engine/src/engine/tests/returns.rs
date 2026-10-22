@@ -740,6 +740,42 @@ fn a_fan_out_spawn_is_offered_every_return_route_but_the_attestation() {
 }
 
 #[test]
+fn the_attestation_is_offered_only_where_the_parent_covers_its_rank() {
+    use crate::fact::ReturnRoute;
+    let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
+    let attest = ReturnRoute::Sanitized(SanitizerName::new(SanitizerName::ATTEST_SCHEMA));
+    let routes = |log: &[Fact]| {
+        let blocked = e
+            .handle(
+                &viewing(&e, log),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks");
+        return_steps(&appended_facts(blocked))
+    };
+    let mut log = vec![opened(&e)];
+    assert!(
+        routes(&log).contains(&attest),
+        "a trusted parent is offered the attestation"
+    );
+
+    // A suspicious parent cannot attest a return up to trusted: the declaration would be
+    // refused, so the route is not offered.
+    reads(&e, &mut log, &traj(), "read_suspicious");
+    assert_eq!(
+        viewing(&e, &log)
+            .views(&traj())
+            .expect("the parent is opened")
+            .current_label()
+            .trust,
+        SUSPICIOUS
+    );
+    let offered = routes(&log);
+    assert!(!offered.contains(&attest), "offered {offered:?}");
+    assert!(offered.contains(&ReturnRoute::Raw));
+}
+
+#[test]
 fn the_reserved_route_is_declared_only_with_its_shape() {
     let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
     let log = vec![opened(&e)];

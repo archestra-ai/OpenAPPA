@@ -1763,6 +1763,7 @@ mod tests {
 
     /// An opening of `id` that follows a deployment of its own, published on `store` at its first
     /// revision: no other test moves that deployment's head.
+    #[cfg(feature = "postgres")]
     fn own_line_opening(store: &LogStore, id: &TrajectoryId) -> Vec<Fact> {
         let line = DeploymentName::new(format!("line:{}", id.as_str()));
         match store.publish(&line, None, POLICY.as_bytes()) {
