@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appa_eventlog::{Backend, LogStore};
-use appa_runtime::api::{OpenError, RemedyOutcome, Runtime};
+use appa_runtime::api::{OpenError, Remedies, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 #[cfg(feature = "daemon")]
@@ -439,7 +439,8 @@ builtin = "hitl"
     )
     .expect("the trace parses");
 
-    let replaying = Runtime::open_in_memory_as(config(), None, adapter()).expect("the replay deployment opens");
+    let replaying =
+        Runtime::open_in_memory_as(config(), None, adapter(), Remedies::StandIn).expect("the replay deployment opens");
     let report = &replay::run(&replaying, std::slice::from_ref(&trace)).await[0];
     assert_eq!(report.verdict(), replay::Verdict::Ok, "{:?}", report.steps);
     assert_eq!(report.steps.len(), 2);
@@ -468,7 +469,7 @@ fn a_host_replay_refuses_an_adapter_that_spells_no_control_tool() {
     )
     .expect("the hosted document loads");
     assert!(matches!(
-        Runtime::open_in_memory_as(config, None, unspelled),
+        Runtime::open_in_memory_as(config, None, unspelled, Remedies::StandIn),
         Err(OpenError::UnspelledControlTool)
     ));
 }

@@ -374,6 +374,18 @@ impl From<EventError> for RemedyOutcome {
     }
 }
 
+/// Who answers the authorities and sanitizers a remedy consults in an in-memory deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedies {
+    /// An in-process stand-in answers each one, whatever the configuration binds: every
+    /// authority approves, and every sanitizer returns the body unchanged. Nothing leaves
+    /// the process and nobody is asked.
+    StandIn,
+    /// The parties the configuration binds answer, exactly as a served deployment consults
+    /// them. A `hitl` authority has nobody to ask and abstains.
+    Live,
+}
+
 /// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
 /// named authorities' rulings, or the named sanitizer's rewrite of the value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -879,9 +891,13 @@ impl Deployment {
         crate::engine::policy_file_key(self.config.policy_file().bytes())
     }
 
-    /// Answer every authority and sanitizer the policy declares in process — approve, and
-    /// the body unchanged — as if the bound party had. `appa replay`'s deployment only.
-    fn stand_in_for_remedies(&mut self) {
+    /// Under [`Remedies::StandIn`], answer every authority and sanitizer the policy declares
+    /// in process: approve, and the body unchanged. `appa replay`'s deployment only.
+    fn answer_remedies(&mut self, remedies: Remedies) {
+        match remedies {
+            Remedies::Live => return,
+            Remedies::StandIn => {}
+        }
         let registry = self.resident.registry();
         Arc::get_mut(&mut self.externals)
             .expect("a deployment stands in for its remedies before anything shares its externals")
@@ -2103,24 +2119,29 @@ impl Runtime {
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
-    /// only as long as this value, with every authority and sanitizer answered in process —
-    /// approve, and the body unchanged — as if the bound party had. Annotators, audience
-    /// sources, and lookups stay bound as configured. Nothing of the run survives the process.
-    pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+    /// only as long as this value, with the authorities and sanitizers answered as `remedies`
+    /// says. Annotators, audience sources, and lookups stay bound as configured. Nothing of
+    /// the run survives the process.
+    pub fn open_in_memory(config: Config, modules: Option<PathBuf>, remedies: Remedies) -> Result<Runtime, OpenError> {
         let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
-        prepared.deployment.stand_in_for_remedies();
+        prepared.deployment.answer_remedies(remedies);
         prepared.assemble(Backend::Memory)
     }
 
     /// [`Runtime::open_in_memory`] for a host that names tools through an adapter of its
     /// own, as [`Runtime::open_with_store_as`] resolves them: the deployment a host's replay
-    /// runs, with the same in-process stand-in for every authority and sanitizer.
-    pub fn open_in_memory_as(config: Config, modules: Option<PathBuf>, adapter: Adapter) -> Result<Runtime, OpenError> {
+    /// runs.
+    pub fn open_in_memory_as(
+        config: Config,
+        modules: Option<PathBuf>,
+        adapter: Adapter,
+        remedies: Remedies,
+    ) -> Result<Runtime, OpenError> {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
         let mut prepared = Prepared::new(config, modules, ToolNaming::Canonical { adapter })?;
-        prepared.deployment.stand_in_for_remedies();
+        prepared.deployment.answer_remedies(remedies);
         prepared.assemble(Backend::Memory)
     }
 
@@ -4660,7 +4681,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             dir.path().join("appa.db"),
             None
         )));
-        assert!(refused(Runtime::open_in_memory(deferred(DOCUMENT), None)));
+        assert!(refused(Runtime::open_in_memory(
+            deferred(DOCUMENT),
+            None,
+            Remedies::StandIn
+        )));
         assert!(refused(Runtime::open_with_store(deferred(DOCUMENT), store(), None)));
         assert!(refused(Runtime::open_with_store_as(
             deferred(DOCUMENT),
@@ -4675,7 +4700,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             None,
             adapter
         )));
-        let runtime = Runtime::open_in_memory(claude_config(DOCUMENT), None).expect("the keyed document opens");
+        let runtime = Runtime::open_in_memory(claude_config(DOCUMENT), None, Remedies::StandIn)
+            .expect("the keyed document opens");
         assert!(refused(runtime.reload(deferred(DOCUMENT))));
         assert!(refused(runtime.prepare_deployment(deferred(DOCUMENT))));
         assert!(refused(load(deferred(DOCUMENT))));
@@ -4900,7 +4926,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[tokio::test]
     async fn a_view_records_in_its_own_store_under_the_deployment_it_shares() {
-        let runtime = Runtime::open_in_memory(versioned_policy("first"), None).expect("the deployment opens");
+        let runtime =
+            Runtime::open_in_memory(versioned_policy("first"), None, Remedies::StandIn).expect("the deployment opens");
         let other = Arc::new(LogStore::open(appa_eventlog::Backend::Memory).expect("a second store opens"));
         // A view's store follows the line the view serves: the host publishes to it as it
         // publishes to the runtime's own.

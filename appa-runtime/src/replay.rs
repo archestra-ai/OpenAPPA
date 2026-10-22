@@ -9,11 +9,17 @@
 //!
 //! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
 //! the plain narrowing acceptance, which the runner takes as the model would. `authority`: the
-//! call is blocked and the offer names an authority; the runner takes it, and the runtime's
-//! stand-in approves. `sanitizer`: the call is blocked and the offer names a sanitizer; the
-//! runner takes it, and the stand-in returns the value unchanged. `deny`: the call is blocked
-//! and nothing is offered. Taking an offer goes through the runtime's own remedy path, so the
-//! records read as if the party had answered, and the trace continues from there.
+//! call is blocked and the offer names an authority; the runner takes it. `sanitizer`: the call
+//! is blocked and the offer names a sanitizer; the runner takes it. `deny`: the call is blocked
+//! and nothing is offered. Taking an offer goes through the runtime's own remedy path, and the
+//! trace continues from the call it released.
+//!
+//! Who answers a taken authority or sanitizer offer is the run's [`Remedies`]. By default a
+//! stand-in does, in process: every authority approves, and every sanitizer returns the value
+//! unchanged. Such a run checks which remedies the policy offers and what the trajectory does
+//! after them, never what a party decides, and the report says the stand-in answered. Under
+//! [`Remedies::Live`] the bound parties answer, and a sanitizer's rewrite of the call's
+//! arguments is reported.
 //!
 //! A step may omit its `expect` line. Such a step is observed: the runner reports what the
 //! call got and never fails on it. An allowed call runs. A block that offers the plain
@@ -45,7 +51,7 @@ use appa_runtime_api::{
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime};
+use crate::api::{OfferId, OfferKind, Remedies, RemedyOutcome, Runtime};
 use crate::config::Config;
 use crate::{do_something, hooks};
 
@@ -473,13 +479,22 @@ fn offer_word(kind: &OfferKind) -> String {
     }
 }
 
-/// What one step got. `taken` names the offer the runner took to get the call released, as
-/// the model would have: none for a call released as proposed, or an observed block it left.
+/// An offer the runner took to get the call released, as the model would have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    pub offer: OfferKind,
+    /// The arguments the remedy released the call with, when they differ from the proposed
+    /// ones: a sanitizer's rewrite. The stand-in never rewrites.
+    pub rewritten: Option<serde_json::Value>,
+}
+
+/// What one step got. `taken` is none for a call released as proposed, or an observed block
+/// the runner left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     Passed {
         got: Got,
-        taken: Option<OfferKind>,
+        taken: Option<Taken>,
     },
     Mismatch {
         got: Got,
@@ -488,7 +503,7 @@ pub enum StepOutcome {
     },
     Observed {
         got: Got,
-        taken: Option<OfferKind>,
+        taken: Option<Taken>,
     },
     CannotRun(String),
 }
@@ -615,8 +630,8 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         StepTool::Canonical(_) => offers.into_iter().find(|(offered, _)| step.check.takes(offered)),
     };
     let taken = match taking {
-        Some((kind, offer)) => match take_offer(runtime, actor, offer).await {
-            Ok(()) => Some(kind),
+        Some((offer, id)) => match take_offer(runtime, actor, id, &step.arguments).await {
+            Ok(rewritten) => Some(Taken { offer, rewritten }),
             Err(detail) => return StepOutcome::CannotRun(detail),
         },
         None => None,
@@ -688,11 +703,17 @@ fn recognized(runtime: &Runtime, actor: &Actor, offers: Vec<OfferedRemedy>) -> V
 }
 
 /// Take an offer the way the model does — the remedy tool, then the call proposed exactly as
-/// the remedy authorized it — and close the call with an empty output.
-async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<(), String> {
+/// the remedy authorized it — and close the call with an empty output. Answers the released
+/// arguments when they differ from `proposed`.
+async fn take_offer(
+    runtime: &Runtime,
+    actor: &Actor,
+    offer: OfferId,
+    proposed: &RawValue,
+) -> Result<Option<serde_json::Value>, String> {
     let call = match runtime.execute_remedy(actor, offer).await {
         RemedyOutcome::Authorized { call } => call,
-        RemedyOutcome::Returned { .. } => return Ok(()),
+        RemedyOutcome::Returned { .. } => return Ok(None),
         RemedyOutcome::Declined { presentation } => {
             return Err(format!(
                 "taking the offer did not release the call: {}",
@@ -704,8 +725,14 @@ async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<
         }
         RemedyOutcome::Refused { reason } => return Err(reason.detail().to_string()),
     };
+    let released: serde_json::Value = serde_json::from_str(call.arguments.get())
+        .map_err(|error| format!("the released call's arguments are not JSON: {error}"))?;
+    let rewritten = match serde_json::from_str::<serde_json::Value>(proposed.get()) {
+        Ok(proposed) if proposed == released => None,
+        _ => Some(released),
+    };
     match propose(runtime, actor, call).await {
-        Proposed::Allowed(call) => report_empty_output(runtime, actor, call).await,
+        Proposed::Allowed(call) => report_empty_output(runtime, actor, call).await.map(|()| rewritten),
         Proposed::Denied { feedback, .. } => {
             Err(format!("the released call was proposed again and denied: {feedback}"))
         }
@@ -755,20 +782,59 @@ impl fmt::Display for Summary {
     }
 }
 
-fn taken_note(taken: Option<&OfferKind>) -> String {
-    match taken {
-        None => String::new(),
-        Some(OfferKind::Accept) => " (after accepting the narrowing)".to_string(),
-        Some(OfferKind::Withhold) => " (after withholding the result)".to_string(),
-        Some(OfferKind::Authority { names }) => format!(" (after {} approved)", names.join(" and ")),
-        Some(OfferKind::Sanitizer { name }) => format!(" (after {name} rewrote it)"),
+/// Whether a taken offer consulted an authority or a sanitizer, which `remedies` answers.
+fn consults(taken: &Taken) -> bool {
+    matches!(taken.offer, OfferKind::Authority { .. } | OfferKind::Sanitizer { .. })
+}
+
+/// What taking the offer did, in words that never credit a party the stand-in answered for.
+fn taken_note(taken: Option<&Taken>, remedies: Remedies) -> String {
+    let Some(taken) = taken else {
+        return String::new();
+    };
+    match (&taken.offer, remedies) {
+        (OfferKind::Accept, _) => " (after accepting the narrowing)".to_string(),
+        (OfferKind::Withhold, _) => " (after withholding the result)".to_string(),
+        (OfferKind::Authority { names }, Remedies::StandIn) => {
+            format!(" (the stand-in approved for {})", names.join(" and "))
+        }
+        (OfferKind::Sanitizer { name }, Remedies::StandIn) => {
+            format!(" (the stand-in answered for {name}: value unchanged)")
+        }
+        (OfferKind::Authority { names }, Remedies::Live) => format!(" (after {} approved)", names.join(" and ")),
+        (OfferKind::Sanitizer { name }, Remedies::Live) => match &taken.rewritten {
+            Some(_) => format!(" (after {name} rewrote it)"),
+            None => format!(" (after {name} answered)"),
+        },
     }
+}
+
+/// The step line for a taken offer, then the arguments a sanitizer rewrote the call to.
+fn write_taken(
+    out: &mut impl Write,
+    head: fmt::Arguments<'_>,
+    taken: Option<&Taken>,
+    remedies: Remedies,
+) -> std::io::Result<()> {
+    writeln!(out, "{head}{}", taken_note(taken, remedies))?;
+    if let Some(rewritten) = taken.and_then(|taken| taken.rewritten.as_ref()) {
+        writeln!(out, "    rewritten arguments: {rewritten}")?;
+    }
+    Ok(())
 }
 
 /// Print the reports the way `go test` does: nothing for a step that passed unless
 /// `verbose`, one line per step that did not, `ok` or `FAIL` per file, then the summary.
-pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> std::io::Result<Summary> {
+/// Under [`Remedies::StandIn`], a note before the summary counts the consults the stand-in
+/// answered, so a quiet run cannot pass for a check of the parties.
+pub fn render(
+    reports: &[TraceReport],
+    remedies: Remedies,
+    verbose: bool,
+    out: &mut impl Write,
+) -> std::io::Result<Summary> {
     let mut summary = Summary::default();
+    let mut stood_in = 0;
     for report in reports {
         let path = report.path.display();
         if let Some(detail) = &report.unopened {
@@ -777,22 +843,31 @@ pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> s
         for step in &report.steps {
             let line = step.line;
             let tool = &step.tool;
+            if remedies == Remedies::StandIn
+                && matches!(&step.outcome,
+                    StepOutcome::Passed { taken: Some(taken), .. } | StepOutcome::Observed { taken: Some(taken), .. }
+                        if consults(taken))
+            {
+                stood_in += 1;
+            }
             match &step.outcome {
                 StepOutcome::Passed { taken, .. } => {
                     if verbose {
-                        writeln!(
+                        let check = &step.check;
+                        write_taken(
                             out,
-                            "ok    {path}:{line} {tool} {}{}",
-                            step.check,
-                            taken_note(taken.as_ref())
+                            format_args!("ok    {path}:{line} {tool} {check}"),
+                            taken.as_ref(),
+                            remedies,
                         )?;
                     }
                 }
                 StepOutcome::Observed { got, taken } => {
-                    writeln!(
+                    write_taken(
                         out,
-                        "obs   {path}:{line} {tool} got {got}{}",
-                        taken_note(taken.as_ref())
+                        format_args!("obs   {path}:{line} {tool} got {got}"),
+                        taken.as_ref(),
+                        remedies,
                     )?;
                 }
                 StepOutcome::Mismatch { got, want, feedback } => {
@@ -812,6 +887,14 @@ pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> s
             Verdict::Ok => writeln!(out, "ok    {path}")?,
             Verdict::Failed | Verdict::CannotRun => writeln!(out, "FAIL  {path}")?,
         }
+    }
+    if stood_in > 0 {
+        writeln!(
+            out,
+            "note: a stand-in answered {stood_in} authority or sanitizer {}: it approves and returns values unchanged; \
+             --live-remedies consults the bound parties",
+            if stood_in == 1 { "consult" } else { "consults" }
+        )?;
     }
     writeln!(out, "{summary}")?;
     Ok(summary)
@@ -836,6 +919,9 @@ struct JsonStep {
     got: Option<String>,
     offers: Vec<String>,
     taken: Option<String>,
+    /// Who answered a taken authority or sanitizer offer: `stand-in` or `live`.
+    answered_by: Option<&'static str>,
+    rewritten: Option<serde_json::Value>,
     outcome: JsonOutcome,
     detail: Option<String>,
 }
@@ -846,7 +932,7 @@ struct JsonSummary {
 }
 
 impl JsonStep {
-    fn of(file: String, step: &StepReport) -> Self {
+    fn of(file: String, step: &StepReport, remedies: Remedies) -> Self {
         let (outcome, got, taken, detail) = match &step.outcome {
             StepOutcome::Passed { got, taken } => (JsonOutcome::Passed, Some(got), taken.as_ref(), None),
             StepOutcome::Mismatch { got, .. } => (JsonOutcome::Mismatch, Some(got), None, None),
@@ -864,7 +950,12 @@ impl JsonStep {
             check: Some(step.check.to_string()),
             got: got.map(Got::to_string),
             offers,
-            taken: taken.map(offer_word),
+            taken: taken.map(|taken| offer_word(&taken.offer)),
+            answered_by: taken.filter(|taken| consults(taken)).map(|_| match remedies {
+                Remedies::StandIn => "stand-in",
+                Remedies::Live => "live",
+            }),
+            rewritten: taken.and_then(|taken| taken.rewritten.clone()),
             outcome,
             detail,
         }
@@ -873,7 +964,7 @@ impl JsonStep {
 
 /// Print the reports as JSON Lines: one object per step that ran or could not run, one per
 /// trajectory that could not open, then the summary.
-pub fn render_json(reports: &[TraceReport], out: &mut impl Write) -> std::io::Result<Summary> {
+pub fn render_json(reports: &[TraceReport], remedies: Remedies, out: &mut impl Write) -> std::io::Result<Summary> {
     let mut summary = Summary::default();
     for report in reports {
         let file = report.path.display().to_string();
@@ -886,6 +977,8 @@ pub fn render_json(reports: &[TraceReport], out: &mut impl Write) -> std::io::Re
                 got: None,
                 offers: Vec::new(),
                 taken: None,
+                answered_by: None,
+                rewritten: None,
                 outcome: JsonOutcome::CannotRun,
                 detail: Some(detail.clone()),
             };
@@ -893,7 +986,7 @@ pub fn render_json(reports: &[TraceReport], out: &mut impl Write) -> std::io::Re
             writeln!(out)?;
         }
         for step in &report.steps {
-            serde_json::to_writer(&mut *out, &JsonStep::of(file.clone(), step))?;
+            serde_json::to_writer(&mut *out, &JsonStep::of(file.clone(), step, remedies))?;
             writeln!(out)?;
         }
         summary.add(report.verdict());
@@ -951,7 +1044,13 @@ fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
 /// The `appa replay` command: parse every trace, open the deployment over an in-memory log,
 /// run, print, and exit.
-pub fn main(config: &Path, modules: Option<PathBuf>, format: Format, paths: &[PathBuf]) -> ExitCode {
+pub fn main(
+    config: &Path,
+    modules: Option<PathBuf>,
+    remedies: Remedies,
+    format: Format,
+    paths: &[PathBuf],
+) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -994,7 +1093,7 @@ pub fn main(config: &Path, modules: Option<PathBuf>, format: Format, paths: &[Pa
             return ExitCode::from(2);
         }
     };
-    let runtime = match Runtime::open_in_memory(config, modules) {
+    let runtime = match Runtime::open_in_memory(config, modules, remedies) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("appa replay: {error}");
@@ -1011,8 +1110,8 @@ pub fn main(config: &Path, modules: Option<PathBuf>, format: Format, paths: &[Pa
     let reports = executor.block_on(run(&runtime, &traces));
     let mut stdout = std::io::stdout().lock();
     let rendered = match format {
-        Format::Text { verbose } => render(&reports, verbose, &mut stdout),
-        Format::Json => render_json(&reports, &mut stdout),
+        Format::Text { verbose } => render(&reports, remedies, verbose, &mut stdout),
+        Format::Json => render_json(&reports, remedies, &mut stdout),
     };
     match rendered {
         Ok(summary) => summary.exit_code(),
@@ -1271,7 +1370,7 @@ mod tests {
                         check: Check::Expect(Expect::Allow),
                         outcome: StepOutcome::Passed {
                             got: Got::Blocked(BTreeSet::from([OfferKind::Accept])),
-                            taken: Some(OfferKind::Accept),
+                            taken: Some(taken(OfferKind::Accept)),
                         },
                     },
                     StepReport {
@@ -1299,26 +1398,38 @@ mod tests {
                         got: Got::Blocked(BTreeSet::from([OfferKind::Authority {
                             names: vec!["hitl".into()],
                         }])),
-                        taken: Some(OfferKind::Authority {
+                        taken: Some(taken(OfferKind::Authority {
                             names: vec!["hitl".into()],
-                        }),
+                        })),
                     },
                 }],
             },
         ];
         let mut out = Vec::new();
-        let summary = render(&reports, false, &mut out).expect("renders");
+        let summary = render(&reports, Remedies::StandIn, false, &mut out).expect("renders");
         assert_eq!(
             String::from_utf8(out).expect("utf-8"),
-            "leak.appa:8: mcp/mail/send: got sanitizer redactor, want deny\nFAIL  leak.appa\nok    push.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
+            "leak.appa:8: mcp/mail/send: got sanitizer redactor, want deny\nFAIL  leak.appa\nok    push.appa\n\
+             note: a stand-in answered 1 authority or sanitizer consult: it approves and returns values unchanged; \
+             --live-remedies consults the bound parties\n2 files: 1 ok, 1 failed, 0 could not run\n"
         );
         assert_eq!(summary.exit_code(), ExitCode::from(1));
 
         let mut out = Vec::new();
-        render(&reports, true, &mut out).expect("renders");
+        render(&reports, Remedies::StandIn, true, &mut out).expect("renders");
         let text = String::from_utf8(out).expect("utf-8");
         assert!(text.starts_with("ok    leak.appa:3 mcp/files/read allow (after accepting the narrowing)\n"));
+        assert!(text.contains("ok    push.appa:1 host/shell/bash authority hitl (the stand-in approved for hitl)\n"));
+
+        let mut out = Vec::new();
+        render(&reports, Remedies::Live, true, &mut out).expect("renders");
+        let text = String::from_utf8(out).expect("utf-8");
         assert!(text.contains("ok    push.appa:1 host/shell/bash authority hitl (after hitl approved)\n"));
+        assert!(!text.contains("stand-in"), "{text}");
+    }
+
+    fn taken(offer: OfferKind) -> Taken {
+        Taken { offer, rewritten: None }
     }
 
     fn observed_report() -> Vec<TraceReport> {
@@ -1337,7 +1448,7 @@ mod tests {
                         1,
                         "mcp/files/read",
                         Got::Blocked(BTreeSet::from([OfferKind::Accept])),
-                        Some(OfferKind::Accept),
+                        Some(taken(OfferKind::Accept)),
                     ),
                     step(5, "mcp/web/fetch", Got::Blocked(BTreeSet::new()), None),
                     StepReport {
@@ -1366,7 +1477,7 @@ mod tests {
     fn rendering_prints_every_observed_step() {
         let reports = observed_report();
         let mut out = Vec::new();
-        let summary = render(&reports[..1], false, &mut out).expect("renders");
+        let summary = render(&reports[..1], Remedies::StandIn, false, &mut out).expect("renders");
         assert_eq!(
             String::from_utf8(out).expect("utf-8"),
             "obs   obs.appa:1 mcp/files/read got allow (after accepting the narrowing)\nobs   obs.appa:5 mcp/web/fetch got deny\nobs.appa:7: mcp/mail/send: got authority hitl, want allow\n    ask hitl\nFAIL  obs.appa\n1 file: 0 ok, 1 failed, 0 could not run\n"
@@ -1377,7 +1488,7 @@ mod tests {
     #[test]
     fn json_prints_one_object_per_step_then_the_summary() {
         let mut out = Vec::new();
-        let summary = render_json(&observed_report(), &mut out).expect("renders");
+        let summary = render_json(&observed_report(), Remedies::StandIn, &mut out).expect("renders");
         let lines: Vec<serde_json::Value> = String::from_utf8(out)
             .expect("utf-8")
             .lines()
@@ -1387,14 +1498,14 @@ mod tests {
             lines,
             vec![
                 serde_json::json!({"file": "obs.appa", "line": 1, "tool": "mcp/files/read", "check": "observe",
-                    "got": "allow", "offers": ["allow"], "taken": "allow", "outcome": "observed", "detail": null}),
+                    "got": "allow", "offers": ["allow"], "taken": "allow", "answered_by": null, "rewritten": null, "outcome": "observed", "detail": null}),
                 serde_json::json!({"file": "obs.appa", "line": 5, "tool": "mcp/web/fetch", "check": "observe",
-                    "got": "deny", "offers": [], "taken": null, "outcome": "observed", "detail": null}),
+                    "got": "deny", "offers": [], "taken": null, "answered_by": null, "rewritten": null, "outcome": "observed", "detail": null}),
                 serde_json::json!({"file": "obs.appa", "line": 7, "tool": "mcp/mail/send", "check": "allow",
-                    "got": "authority hitl", "offers": ["authority hitl"], "taken": null, "outcome": "mismatch",
+                    "got": "authority hitl", "offers": ["authority hitl"], "taken": null, "answered_by": null, "rewritten": null, "outcome": "mismatch",
                     "detail": null}),
                 serde_json::json!({"file": "closed.appa", "line": null, "tool": null, "check": null, "got": null,
-                    "offers": [], "taken": null, "outcome": "cannot_run", "detail": "refused"}),
+                    "offers": [], "taken": null, "answered_by": null, "rewritten": null, "outcome": "cannot_run", "detail": "refused"}),
                 serde_json::json!({"summary": {"ok": 0, "failed": 1, "cannot_run": 1}}),
             ]
         );
