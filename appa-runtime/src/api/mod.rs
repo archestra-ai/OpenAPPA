@@ -3271,6 +3271,7 @@ impl Runtime {
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
+    #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
         self.offer_kind_in(&self.inner.log(root).ok()?, quoted)
     }
@@ -3410,6 +3411,7 @@ impl Runtime {
         reduced(&log).vouched(key)
     }
 
+    #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
         // key, so a caller over a non-loopback listener can ask about ids this runtime never
