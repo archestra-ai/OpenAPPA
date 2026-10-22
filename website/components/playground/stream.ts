@@ -2,7 +2,7 @@
 // appa-demo service sends changes the chat. A pure function of the stream so
 // far and the next event, so a recorded stream can be replayed in a test.
 
-import type { BlockOption, DemoEvent } from "./demo-client";
+import type { BlockOption, WireEvent } from "./wire-events";
 import type { LabelState } from "./playground-data";
 
 export type ThreadItem = { lab?: LabelState } & (
@@ -19,7 +19,6 @@ export type ThreadItem = { lab?: LabelState } & (
       output?: string;
       /** The result body the model read, verbatim. */
       result?: string;
-      blocked?: string;
       /** Set when the engine refused this protocol call outright. */
       refused?: boolean;
       /** Set when the raw result was withheld and a sanitizer's derivation admitted. */
@@ -84,15 +83,22 @@ export type StreamState = {
  */
 /**
  * The runtime's control tool under its canonical id. The service reports the
- * call the runtime saw, and the runtime translates the model's alias to this.
+ * call the runtime saw, and the agent translates the model's alias to this.
  */
 const CONTROL_TOOL = "appa/execute_remedy_plan";
 
-export const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", CONTROL_TOOL, "fork", "submit_result"]);
+export const PROTOCOL_TOOLS = new Set([CONTROL_TOOL, "fork", "submit_result"]);
 
-/** The runtime's control call, under the alias the model calls or its canonical id. */
+/** The runtime's control call. */
 export function isRemedyCall(name: string): boolean {
-  return name === "execute_remedy_plan" || name === CONTROL_TOOL;
+  return name === CONTROL_TOOL;
+}
+
+/** A JSON object's fields; the wire types arguments and details as any JSON value. */
+export function fieldsOf(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : { value };
 }
 
 /** The offer a remedy call takes. */
@@ -101,129 +107,10 @@ export function offerOf(args: Record<string, unknown>): string | undefined {
 }
 
 /**
- * A ruling arrives as the model sees it: a sentence naming what failed and
- * what would fix it, then the machine-readable gaps and remedy plans. The ruling
- * leads with the sentence and keeps the payload as scrollable detail.
- *
- * Both kinds are the engine doing its job, never a malfunction, so neither
- * wears error styling. They differ in what they ask of the agent: a
- * `narrowing` is a price — the call's own contract would drop the session
- * label, and dispatch waits for an acceptance or a fork — while a `refusal`
- * is a gate — the label does not meet the tool's requirements, and the
- * ruling names the remedies. For a narrowing the ruling names the concrete
- * consequence per dimension: a trust drop taints the session, an audience
- * shrink makes it confidential.
- */
-/** One executable plan the block offers, with everything its option line needs. */
-export type ParsedPlan = {
-  id: string;
-  /** The authorities the plan consults, each with the operator's hint. */
-  rulings: { authority: string; hint?: string }[];
-  /** The output sanitizer the plan binds, with its hint. */
-  sanitize?: { sanitizer: string; hint?: string };
-  /** Whether executing the plan accepts the block's narrowing. */
-  accepts: boolean;
-};
-
-export type Ruling = { plans: ParsedPlan[]; summary: string; detail?: string } & (
-  | { kind: "refusal" }
-  | {
-      kind: "narrowing";
-      dimension: "trust" | "audience" | "both";
-      /** The readers left, when the shrunk audience is a concrete set. */
-      readers?: string[];
-      /** The target trust rank — an index into the policy's trust chain. */
-      toTrustRank?: number;
-    }
-);
-
-/** The executable entries of `remedy_plans`; id-less redispatch advice stays in the payload. */
-function parsePlans(plans: unknown): ParsedPlan[] {
-  if (!Array.isArray(plans)) return [];
-  return plans.flatMap((plan) => {
-    const entry = plan as {
-      plan_id?: unknown;
-      rulings?: { authority?: unknown; hint?: unknown }[];
-      sanitizes?: { sanitizer?: unknown; hint?: unknown };
-      accepts_narrowing?: unknown;
-    };
-    if (typeof entry.plan_id !== "string") return [];
-    const rulings = (Array.isArray(entry.rulings) ? entry.rulings : []).flatMap((ruling) =>
-      typeof ruling.authority === "string"
-        ? [
-            {
-              authority: ruling.authority,
-              hint: typeof ruling.hint === "string" ? ruling.hint : undefined,
-            },
-          ]
-        : [],
-    );
-    const sanitize =
-      typeof entry.sanitizes?.sanitizer === "string"
-        ? {
-            sanitizer: entry.sanitizes.sanitizer,
-            hint: typeof entry.sanitizes.hint === "string" ? entry.sanitizes.hint : undefined,
-          }
-        : undefined;
-    return [
-      {
-        id: entry.plan_id,
-        rulings,
-        sanitize,
-        accepts: Boolean(entry.accepts_narrowing),
-      },
-    ];
-  });
-}
-
-export function splitRuling(text: string): Ruling {
-  const start = text.indexOf("\n{");
-  if (start === -1) return { kind: "refusal", summary: text, plans: [] };
-  const summary = text.slice(0, start).trim();
-  const detail = text.slice(start + 1);
-  try {
-    const parsed = JSON.parse(detail) as {
-      narrowing?: {
-        from?: Record<string, unknown>;
-        to?: Record<string, unknown>;
-      };
-      requirement_gaps?: unknown[];
-      remedy_plans?: unknown;
-    };
-    const pretty = JSON.stringify(parsed, null, 2);
-    const plans = parsePlans(parsed.remedy_plans);
-    const narrowing = parsed.narrowing;
-    if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
-    const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
-    const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // A concrete reader set arrives as `{"Restricted": [...]}` and a trust rank
-    // as a plain chain index. Any other shape (e.g. `"Public"`) makes these
-    // sentences fall back to "fewer readers" and "less trusted" instead of
-    // naming the real thing.
-    const audience = narrowing.to?.audience as { Restricted?: unknown } | undefined;
-    const restricted = audience?.Restricted;
-    const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
-    const trustValue = narrowing.to?.trust;
-    const toTrustRank = typeof trustValue === "number" ? trustValue : undefined;
-    return {
-      kind: "narrowing",
-      dimension,
-      readers,
-      toTrustRank,
-      summary,
-      detail: pretty,
-      plans,
-    };
-  } catch {
-    return { kind: "refusal", summary, detail, plans: [] };
-  }
-}
-
-/**
  * The chat after one more event. `nextId` mints the id of every item the
  * event adds.
  */
-export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => number): StreamState {
+export function applyEvent(state: StreamState, event: WireEvent, nextId: () => number): StreamState {
   let { thread, label, children } = state;
   const update = (change: (prev: ThreadItem[]) => ThreadItem[]) => {
     thread = change(thread);
@@ -243,33 +130,21 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
   const resolveHeld = (
     prev: ThreadItem[],
     patch: Partial<Extract<ThreadItem, { t: "tool" }>>,
-    sanitizer?: string,
     known?: number,
   ): ThreadItem[] => {
     /* Which held call this outcome belongs to. A delivered value names its
-       remedy, and so its held call (`known`); a sanitizer or an approval
-       arrives from the audit with no call id, and the agent can have several
-       calls held at once — taking "the last held call" then routed every
-       outcome to the same call, so one re-run was overwritten and
-       the other never appeared.
-
-       A sanitizer names itself, and only one held ruling offered it, so that
-       is the reliable match. Failing that, outcomes arrive in the order the
-       remedies were taken, so the oldest still-unresolved call is next. */
+       remedy, and so its held call (`known`); an approval, or a derivation
+       the service cannot place on a call, arrives with no call id, and the
+       agent can have several calls held at once — taking "the last held call"
+       then routed every outcome to the same call, so one re-run was
+       overwritten and the other never appeared. Outcomes arrive in the order
+       the remedies were taken, so the oldest still-unresolved call is next. */
     const resolved = (item: Extract<ThreadItem, { t: "tool" }>) =>
       prev.some((entry) => entry.t === "tool" && entry.echo && entry.callId === `${item.callId}+resolved`);
     const isHeld = (item: ThreadItem): item is Extract<ThreadItem, { t: "tool" }> =>
       item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name);
-    const offers = (item: Extract<ThreadItem, { t: "tool" }>) =>
-      Boolean(
-        sanitizer &&
-        item.blocked &&
-        splitRuling(item.blocked).plans.some((plan) => plan.sanitize?.sanitizer === sanitizer),
-      );
 
-    // The sanitizer match ignores whether the call already has a resolution
-    // re-run: the outcome batch opens that re-run, and this event patches it.
-    let heldAt = known ?? (sanitizer ? prev.findIndex((item) => isHeld(item) && offers(item)) : -1);
+    let heldAt = known ?? -1;
     if (heldAt === -1) heldAt = prev.findIndex((item) => isHeld(item) && !resolved(item));
     if (heldAt === -1) heldAt = prev.findLastIndex(isHeld);
     if (heldAt === -1) return prev;
@@ -315,23 +190,20 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
         t: "tool",
         callId: event.call_id,
         name: event.tool,
-        args: event.arguments,
+        args: fieldsOf(event.arguments),
         state: "running",
         traj: event.trajectory,
         lab: label ?? undefined,
       };
       update((prev) => {
-        /* A remedy answers one ruling, so it belongs under that ruling. Plan
+        /* A remedy answers one ruling, so it belongs under that ruling. Offer
            ids are unique across a batch, so the offer identifies its block
            exactly — appending instead filed every remedy under whichever
            ruling happened to be last. */
-        const planId = isRemedyCall(event.tool) ? offerOf(event.arguments) : undefined;
-        if (planId !== undefined) {
+        const offer = item.t === "tool" && isRemedyCall(item.name) ? offerOf(item.args) : undefined;
+        if (offer !== undefined) {
           const verdictAt = prev.findIndex(
-            (entry) =>
-              entry.t === "verdict" &&
-              (entry.options?.some((option) => option.offer_id === planId) ||
-                splitRuling(entry.text).plans.some((plan) => plan.id === planId)),
+            (entry) => entry.t === "verdict" && Boolean(entry.options?.some((option) => option.offer_id === offer)),
           );
           if (verdictAt !== -1) {
             // Past any remedy already filed under the same ruling.
@@ -392,7 +264,7 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
           );
         // The call records the hold; the ruling itself is APPA's own turn.
         const next = prev.map((entry, at) =>
-          at === index ? { ...item, state: "blocked" as const, blocked: event.text } : entry,
+          at === index ? { ...item, state: "blocked" as const } : entry,
         );
         /* File the ruling directly under the call it answers, not at the
            end of the stream. The agent proposes calls in batches, so the
@@ -458,15 +330,10 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
           (item) => item.t === "verdict" && Boolean(item.options?.some((option) => option.offer_id === offer)),
         );
         const heldAt =
-          verdictAt !== -1
-            ? next.findLastIndex(
-                (item, at) => at < verdictAt && item.t === "tool" && item.state === "blocked",
-              )
-            : next.findIndex(
-                (item) =>
-                  item.t === "tool" && item.state === "blocked" && Boolean(item.blocked?.includes(`"${offer}"`)),
-              );
-        return heldAt === -1 ? next : resolveHeld(next, { result: event.value }, undefined, heldAt);
+          verdictAt === -1
+            ? -1
+            : next.findLastIndex((item, at) => at < verdictAt && item.t === "tool" && item.state === "blocked");
+        return heldAt === -1 ? next : resolveHeld(next, { result: event.value }, heldAt);
       });
       break;
     case "label": {
@@ -520,13 +387,13 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
       // The policy pane stays where the reader put it: jumping it mid-run
       // moved the ground under anyone reading, and the stream already names
       // every rule as a reference they can follow when they choose to.
-      const authority = (event.detail as { authority?: string }).authority;
+      const { authority } = fieldsOf(event.detail);
       push({
         id: nextId(),
         t: "approval",
         approvalId: event.id,
         tool: event.tool,
-        authority,
+        authority: typeof authority === "string" ? authority : undefined,
         detail: JSON.stringify(event.detail, null, 2),
         state: "pending",
       });
@@ -585,18 +452,15 @@ export function applyEvent(state: StreamState, event: DemoEvent, nextId: () => n
       break;
     }
     case "sanitized":
-      // Mark the call whose result was replaced: a running world call
-      // completes in place; a held call resolves onto its re-run.
-      update((prev) => {
-        const running = prev.findLastIndex(
-          (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
-        );
-        if (running !== -1)
-          return prev.map((item, at) =>
-            at === running && item.t === "tool" ? { ...item, sanitizedBy: event.sanitizer } : item,
-          );
-        return resolveHeld(prev, { sanitizedBy: event.sanitizer }, event.sanitizer);
-      });
+      // A rewritten result names the call that read it. A derivation the
+      // service cannot place on a call resolves onto the held call's re-run.
+      update((prev) =>
+        event.call_id === null
+          ? resolveHeld(prev, { sanitizedBy: event.sanitizer })
+          : prev.map((item) =>
+              item.t === "tool" && item.callId === event.call_id ? { ...item, sanitizedBy: event.sanitizer } : item,
+            ),
+      );
       break;
     case "merge":
       // A return is its own checked crossing: the branch confined what the
