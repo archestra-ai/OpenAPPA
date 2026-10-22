@@ -1194,6 +1194,28 @@ mod tests {
         );
     }
 
+    /// Another attempt in the session that is executing the offer passes the control gate
+    /// too. Spending its standing must not end the running execution's claim.
+    #[tokio::test]
+    async fn a_daemon_attempt_cannot_end_a_running_claim() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root, quoted) = blocked_offer(&dir).await;
+        let actor = acting(root.0.as_str());
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        runtime.claim_until(&actor, &quoted, ahead);
+        runtime.vouch(&PermitKey::offer(&quoted), &actor, None);
+        let args = ExecuteRemedyPlanArgs {
+            offer_id: quoted.0.clone(),
+            label: None,
+            return_schema: None,
+        };
+        let reply = runtime.execute_remedy_plan(args, None, None).await;
+        assert!(
+            reply.is_error,
+            "the attempt is refused while the claim stands: {reply:?}"
+        );
+    }
+
     /// A family with one offer standing: the narrowing acceptance a blocked proposal
     /// surfaced, which the model can execute unaided.
     async fn blocked_offer(dir: &tempfile::TempDir) -> (Runtime, crate::api::TrajectoryId, OfferId) {

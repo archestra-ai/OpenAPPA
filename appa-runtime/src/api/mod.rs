@@ -2903,7 +2903,7 @@ impl Runtime {
             offer,
             RemedyArguments::default(),
             None,
-            None,
+            Admission::Open,
             EmbeddedPresentationOptions::default(),
         )
         .await
@@ -2922,7 +2922,7 @@ impl Runtime {
             offer,
             arguments,
             None,
-            None,
+            Admission::Open,
             EmbeddedPresentationOptions::default(),
         )
         .await
@@ -2990,46 +2990,39 @@ impl Runtime {
             }
         };
         let arguments = RemedyArguments::from(args);
-        let key = PermitKey::offer(&quoted);
-        // Replay an ended offer only for its recorded pursuer. Do not spend another vouch.
-        let mut replaying = false;
-        if let Some(expected) = expected_actor {
-            match self.peek_vouched(&key) {
-                Ok((actor, _)) if actor != *expected => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::ActorMismatch,
-                    };
-                }
-                Ok(_) => {}
-                Err(_) if self.replays_ended_offer(expected, &quoted) => replaying = true,
-                Err(_) => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::Unvouched,
-                    };
-                }
+        // The vouch is only read here: the claim spends it where the claim lands. Taking it
+        // first would write a release that also ends a running execution's claim, because
+        // one session's attempts are one actor.
+        //
+        // A daemon replays an ended offer for its recorded pursuer without spending a vouch:
+        // an MCP delivery retry carries no attempt identity to tell it from another attempt.
+        // An embedded host deduplicates its own retries, so a spent offer answers no other
+        // attempt of it.
+        let (acting, admission) = match (expected_actor, self.peek_vouched(&PermitKey::offer(&quoted))) {
+            (Some(expected), Ok((actor, _))) if actor != *expected => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::ActorMismatch,
+                };
             }
-        }
-        let (acting, ruling) = if replaying {
-            (expected_actor.expect("a replay authenticates its actor").clone(), None)
-        } else {
-            match self.take_vouched(&key) {
-                Ok(consumed) => consumed,
-                Err(_) => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::Unvouched,
-                    };
-                }
+            (_, Ok((actor, _))) => (
+                actor,
+                Admission::Vouched {
+                    fresh: strict_freshness,
+                },
+            ),
+            (Some(expected), Err(_)) if !strict_freshness && self.replays_ended_offer(expected, &quoted) => {
+                (expected.clone(), Admission::Open)
+            }
+            (_, Err(_)) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::Unvouched,
+                };
             }
         };
         let started = std::time::Instant::now();
-        let outcome = if strict_freshness && !replaying && self.offer_kind(&acting.root, &quoted).is_none() {
-            RemedyOutcome::Refused {
-                reason: RemedyRefusal::UnknownOffer,
-            }
-        } else {
-            self.remedy(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
-                .await
-        };
+        let outcome = self
+            .remedy(&acting, quoted.clone(), arguments, elicitation, admission, presentation)
+            .await;
         // Recorded from the typed outcome, before rendering turns it into the text the
         // model reads: a remedy that takes a minute and then declines is the shape of "APPA
         // is in the way", and neither the duration nor the offer it quoted is in the
@@ -3084,6 +3077,16 @@ enum RemedyCaller<'a> {
         elicitation: Option<&'a Elicitation>,
         expected_actor: Option<&'a Actor>,
     },
+}
+
+/// What admits an execution where its claim lands.
+#[derive(Clone, Copy)]
+enum Admission {
+    /// The caller authenticated the act itself, and nothing stands behind it to spend.
+    Open,
+    /// A control gate vouched for the offer, and the claim spends that standing. `fresh`
+    /// also requires the offer to still stand there.
+    Vouched { fresh: bool },
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
@@ -3144,18 +3147,17 @@ impl Runtime {
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
-    pub(crate) async fn remedy(
+    async fn remedy(
         &self,
         acting: &Actor,
         quoted: OfferId,
         arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        admission: Admission,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        let unknown = || RemedyOutcome::Refused {
-            reason: RemedyRefusal::UnknownOffer,
-        };
+        let refused = |reason| RemedyOutcome::Refused { reason };
+        let unknown = || refused(RemedyRefusal::UnknownOffer);
         let root = acting.root.clone();
         let trajectory = acting_trajectory(acting).clone();
         let Some((offer, pursuer)) = self.resolve_in(&root, &quoted) else {
@@ -3172,25 +3174,43 @@ impl Runtime {
         // Two calls naming one offer must not both reach its authorities: a human review
         // holds its call open for minutes, and a second dialog for one decision is the
         // thing this refuses. The claim is derived at the position it is written at, so a
-        // writer that loses the compare-and-swap sees the winner's claim and refuses.
-        if let Err(refused) =
-            self.inner
-                .append_host_with::<RemedyOutcome, _>(&root, |log| match reduced(log).claimed(&claimed) {
-                    true => Err(RemedyOutcome::Refused {
-                        reason: RemedyRefusal::AlreadyExecuting,
-                    }),
-                    false => Ok((
-                        Some(HostObservation::Claimed {
-                            actor: actor.clone(),
-                            key: claimed.wire(),
-                            until,
-                        }),
-                        (),
-                    )),
-                })
-        {
-            return refused;
-        }
+        // writer that loses the compare-and-swap sees the winner's claim and refuses. The
+        // standing it spends and the offer it executes are read at that position too: an
+        // execution that ended the offer did so before releasing its claim.
+        let admitted = self.inner.append_host_with::<RemedyOutcome, _>(&root, |log| {
+            let host = reduced(log);
+            if host.claimed(&claimed) {
+                return Err(refused(RemedyRefusal::AlreadyExecuting));
+            }
+            let ruling = match admission {
+                Admission::Open => None,
+                Admission::Vouched { fresh } => {
+                    let ruling = match host.vouched(&claimed) {
+                        Ok((holder, ruling)) if holder == *acting => ruling,
+                        _ => return Err(refused(RemedyRefusal::Unvouched)),
+                    };
+                    if !matches!(self.live_holder(&claimed, Some(&root)), Ok(None)) {
+                        return Err(refused(RemedyRefusal::Unvouched));
+                    }
+                    if fresh && self.offer_kind_in(log, &quoted).is_none() {
+                        return Err(unknown());
+                    }
+                    ruling
+                }
+            };
+            Ok((
+                Some(HostObservation::Claimed {
+                    actor: actor.clone(),
+                    key: claimed.wire(),
+                    until,
+                }),
+                ruling,
+            ))
+        });
+        let ruling = match admitted {
+            Ok(ruling) => ruling,
+            Err(refusal) => return refusal,
+        };
         let mut claim = Claimed {
             inner: Arc::clone(&self.inner),
             root: root.clone(),
@@ -3252,7 +3272,11 @@ impl Runtime {
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
-        self.read_offer(root, quoted, |standing| {
+        self.offer_kind_in(&self.inner.log(root).ok()?, quoted)
+    }
+
+    fn offer_kind_in(&self, log: &Log, quoted: &OfferId) -> Option<OfferKind> {
+        self.read_offer_in(log, quoted, |standing| {
             standing
                 .engine
                 .offer_kind(standing.view, &standing.pursuer, &standing.offer)
@@ -3268,11 +3292,19 @@ impl Runtime {
         quoted: &OfferId,
         read: impl FnOnce(StandingOffer<'_>) -> Option<T>,
     ) -> Option<T> {
-        let log = self.inner.log(root).ok()?;
-        let offer = crate::engine::resolve_rendered(&log, quoted)?;
+        self.read_offer_in(&self.inner.log(root).ok()?, quoted, read)
+    }
+
+    fn read_offer_in<T>(
+        &self,
+        log: &Log,
+        quoted: &OfferId,
+        read: impl FnOnce(StandingOffer<'_>) -> Option<T>,
+    ) -> Option<T> {
+        let offer = crate::engine::resolve_rendered(log, quoted)?;
         let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = policy.rebuild_view(&log).ok()?;
+        let policy = self.inner.resolve_policy(&deployment, log).ok()?;
+        let view = policy.rebuild_view(log).ok()?;
         let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
         read(StandingOffer {
             engine: policy.engine(),
