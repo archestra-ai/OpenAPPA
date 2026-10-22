@@ -9,14 +9,19 @@ else
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-profile_marker="# OpenAPPA mise environment"
+# amp-headless reads the login profile before it changes into the repository,
+# so a PWD-guarded `mise activate` never fires for agent shells. Shims resolve
+# the versions pinned in mise.toml from whatever directory the tool runs in.
+legacy_profile_marker="# OpenAPPA mise environment"
+if grep -Fqx "$legacy_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  sed -i "/^$legacy_profile_marker\$/,/^fi\$/d" "$HOME/.bash_profile"
+fi
+profile_marker="# OpenAPPA mise shims"
 if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
   cat >> "$HOME/.bash_profile" <<EOF
 
 $profile_marker
-if [[ "\${PWD}" == "$repo_root" || "\${PWD}" == "$repo_root"/* ]]; then
-  eval "\$("$mise_bin" activate bash)"
-fi
+eval "\$("$mise_bin" activate bash --shims)"
 EOF
 fi
 
