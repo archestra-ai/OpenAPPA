@@ -3525,7 +3525,7 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
         ToolOutcome::Failure { .. } => CoreToolOutcome::Failure,
         ToolOutcome::Indeterminate => CoreToolOutcome::Indeterminate,
         ToolOutcome::Success {
-            body: OutcomeBody::Unavailable,
+            body: OutcomeBody::Unavailable | OutcomeBody::TooLarge { .. },
         } => CoreToolOutcome::Success {
             body: CoreOutcomeBody::Unavailable,
         },
@@ -3558,11 +3558,24 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>, with
         },
         (
             ToolOutcome::Success {
+                body: OutcomeBody::TooLarge { limit_bytes },
+            },
+            None,
+        ) => Presentation::ReplaceOutput {
+            placeholder: match limit_bytes {
+                Some(limit) => {
+                    format!("[appa] the tool ran, but its output is not shown: it is over the {limit}-byte limit")
+                }
+                None => "[appa] the tool ran, but its output is not shown: it is over the size limit".to_string(),
+            },
+        },
+        (
+            ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },
             None,
         ) => Presentation::ReplaceOutput {
-            placeholder: "[appa] the result was not carried; nothing was admitted".to_string(),
+            placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
         },
         (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
         (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {

@@ -1389,7 +1389,9 @@ impl Session {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(body),
             } if body.len() > self.deployment().config.externals.max_body_bytes => ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
+                body: OutcomeBody::TooLarge {
+                    limit_bytes: Some(self.deployment().config.externals.max_body_bytes),
+                },
             },
             other => other,
         }
@@ -7557,19 +7559,21 @@ delta = {}
     }
 
     #[test]
-    fn an_over_cap_success_body_is_carried_as_unavailable() {
+    fn an_over_cap_success_body_is_carried_as_too_large() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let success = |len: usize| ToolOutcome::Success {
             body: OutcomeBody::Available("x".repeat(len)),
         };
-        assert!(matches!(
+        assert_eq!(
             session.cap_outcome(success(70_000)),
             ToolOutcome::Success {
-                body: OutcomeBody::Unavailable
+                body: OutcomeBody::TooLarge {
+                    limit_bytes: Some(session.deployment().config.externals.max_body_bytes),
+                },
             },
-        ));
+        );
         assert_eq!(session.cap_outcome(success(8)), success(8));
     }
 
@@ -8247,7 +8251,7 @@ delta = {}
                 assert_eq!(
                     decision,
                     ToolResultDecision::Replace {
-                        placeholder: "[appa] the result was not carried; nothing was admitted".to_string(),
+                        placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
                         presentation: None,
                     },
                 );
