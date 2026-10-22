@@ -25,6 +25,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 
 import {
+  type BlockOption,
   DEMO_URL,
   type DemoEvent,
   checkPolicy,
@@ -92,8 +93,19 @@ type ThreadItem = { lab?: LabelState } & (
       detail: string;
       state: "pending" | "approved" | "denied" | "expired";
     }
-  /** APPA's turn on a held call: the ruling text, rendered as a speaker. */
-  | { id: number; t: "verdict"; text: string; traj?: string; tool?: string }
+  /**
+   * APPA's turn on a held call. `text` is what the model read; `reasons` and
+   * `options` are the same ruling written for the person watching.
+   */
+  | {
+      id: number;
+      t: "verdict";
+      text: string;
+      reasons?: string[];
+      options?: BlockOption[];
+      traj?: string;
+      tool?: string;
+    }
   /** The root label moved: a marker row that recolors the rail below it. */
   | { id: number; t: "shift"; from: LabelState; to: LabelState; cause?: string }
   /** Where the session entered: the label's opening row in the stream. */
@@ -150,7 +162,23 @@ const STARTER_PROMPTS = [
 const REFERENCE_CLASS =
   "cursor-pointer font-mono text-[12.5px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4 hover:text-[var(--accent)] hover:decoration-[var(--accent)]";
 
-const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"]);
+/**
+ * The runtime's control tool under its canonical id. The service reports the
+ * call the runtime saw, and the runtime translates the model's alias to this.
+ */
+const CONTROL_TOOL = "appa/execute_remedy_plan";
+
+const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", CONTROL_TOOL, "fork", "submit_result"]);
+
+/** The runtime's control call, under the alias the model calls or its canonical id. */
+function isRemedyCall(name: string): boolean {
+  return name === "execute_remedy_plan" || name === CONTROL_TOOL;
+}
+
+/** The offer a remedy call takes. */
+function offerOf(args: Record<string, unknown>): string | undefined {
+  return typeof args.offer_id === "string" ? args.offer_id : undefined;
+}
 
 /** Resizing floors: the policy pane and the chat pane each keep a readable
  *  minimum. The chat floor matches the grid's larger (xl) floor so a drag
@@ -442,7 +470,7 @@ function segmentThread(
 
 /** The turns that belong to the APPA ↔ agent exchange, boxed as one. */
 function isExchange(item: ThreadItem): boolean {
-  return item.t === "verdict" || item.t === "approval" || (item.t === "tool" && item.name === "execute_remedy_plan");
+  return item.t === "verdict" || item.t === "approval" || (item.t === "tool" && isRemedyCall(item.name));
 }
 
 // Toolbar chrome, matching the site's style strings.
@@ -735,10 +763,13 @@ export function ChatPlayground() {
              ids are unique across a batch, so the offer identifies its block
              exactly — appending instead filed every remedy under whichever
              ruling happened to be last. */
-          const planId = event.tool === "execute_remedy_plan" ? event.arguments.plan_id : undefined;
-          if (typeof planId === "string") {
+          const planId = isRemedyCall(event.tool) ? offerOf(event.arguments) : undefined;
+          if (planId !== undefined) {
             const verdictAt = prev.findIndex(
-              (entry) => entry.t === "verdict" && splitRuling(entry.text).plans.some((plan) => plan.id === planId),
+              (entry) =>
+                entry.t === "verdict" &&
+                (entry.options?.some((option) => option.offer_id === planId) ||
+                  splitRuling(entry.text).plans.some((plan) => plan.id === planId)),
             );
             if (verdictAt !== -1) {
               // Past any remedy already filed under the same ruling.
@@ -809,6 +840,8 @@ export function ChatPlayground() {
             id: ++idRef.current,
             t: "verdict",
             text: event.text,
+            reasons: event.reasons,
+            options: event.options,
             tool: item.name,
             traj: item.traj,
             lab: labelRef.current ?? undefined,
@@ -1304,9 +1337,20 @@ export function ChatPlayground() {
    * that plan_id. Lets the choice render in the agent's own voice instead of
    * as a protocol payload.
    */
+  const chosenOption = (item: Extract<ThreadItem, { t: "tool" }>) => {
+    const offerId = offerOf(item.args);
+    if (offerId === undefined) return null;
+    for (const entry of thread)
+      if (entry.t === "verdict") {
+        const option = entry.options?.find((candidate) => candidate.offer_id === offerId);
+        if (option) return option;
+      }
+    return null;
+  };
+
   const chosenPlan = (item: Extract<ThreadItem, { t: "tool" }>) => {
-    const planId = item.args.plan_id;
-    if (typeof planId !== "string") return null;
+    const planId = offerOf(item.args);
+    if (planId === undefined) return null;
     const at = thread.findIndex((entry) => entry.id === item.id);
     for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
       const prev = thread[index];
@@ -1319,6 +1363,37 @@ export function ChatPlayground() {
   };
 
   const renderItem = (item: ThreadItem, group?: { first: boolean; last: boolean }) => {
+    if (item.t === "verdict" && item.reasons?.length) {
+      // The runtime's own account for a person: why the call is held and what
+      // the agent may do about it. The instructions the model read stay out.
+      const subject = item.tool ? entityPill(item.tool) : <>This call</>;
+      return exchangeShell(
+        group,
+        <div className="text-[13.5px] leading-relaxed">
+          <p className="m-0">
+            {appaWho()}
+            {subject} is paused until the agent picks an option.
+          </p>
+          <ul className="m-0 mt-1 list-disc pl-5 text-[var(--text)]">
+            {item.reasons.map((reason) => (
+              <li key={reason}>{asProse(reason)}</li>
+            ))}
+          </ul>
+          {item.options && item.options.length > 0 && (
+            <>
+              <p className="m-0 mt-2 text-[var(--text)]">Options:</p>
+              <ol className="m-0 mt-0.5 list-decimal pl-5">
+                {item.options.map((option) => (
+                  <li className="my-1" key={option.offer_id}>
+                    {option.text}
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </div>,
+      );
+    }
     if (item.t === "verdict") {
       const ruling = splitRuling(item.text);
       const warnKind = ruling.kind === "narrowing";
@@ -1472,8 +1547,9 @@ export function ChatPlayground() {
     }
     // The agent's remedy choice, in its own voice: "I choose to use X" says
     // more than a protocol payload. The wire call stays available underneath.
-    if (item.name === "execute_remedy_plan") {
+    if (isRemedyCall(item.name)) {
       const chosen = chosenPlan(item);
+      const option = chosen ? null : chosenOption(item);
       // The agent's answer, short: APPA has just stated the price, so the
       // reply names the choice and stops.
       const sentence = chosen ? (
@@ -1498,8 +1574,10 @@ export function ChatPlayground() {
             ))}
           .
         </>
+      ) : option ? (
+        <>Choosing: {option.text}.</>
       ) : (
-        <>Taking remedy plan {typeof item.args.plan_id === "string" ? item.args.plan_id : "…"}.</>
+        <>Taking remedy {offerOf(item.args) ?? "…"}.</>
       );
       return exchangeShell(
         group,
@@ -1514,7 +1592,7 @@ export function ChatPlayground() {
           {item.refused && (
             <div className="mt-1 text-[12.5px] text-[var(--warn)]">
               {speaker("appa")}
-              {refusal(item.output, Boolean(chosen))}
+              {refusal(item.output, Boolean(chosen ?? option))}
             </div>
           )}
         </div>,

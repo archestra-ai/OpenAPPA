@@ -30,10 +30,16 @@ pub enum WireEvent {
         tool: String,
         arguments: serde_json::Value,
     },
+    /// A held call. `text` is what the model read; `reasons` and `options` say the same
+    /// for the person watching, without the instructions written for the model.
     Blocked {
         trajectory: String,
         call_id: String,
         text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        reasons: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        options: Vec<BlockOption>,
     },
     ToolClosed {
         trajectory: String,
@@ -83,6 +89,13 @@ pub enum WireEvent {
     Error {
         message: String,
     },
+}
+
+/// One remedy a block offers, keyed by the `offer_id` the model passes to take it.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlockOption {
+    pub offer_id: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,15 +151,43 @@ pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
             tool: tool.clone(),
             arguments: serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
         }],
-        Record::Blocked { call, feedback, .. } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: feedback.clone(),
-        }],
+        Record::Blocked {
+            call,
+            feedback,
+            display,
+            ..
+        } => {
+            let (reasons, options) = match display {
+                None => (Vec::new(), Vec::new()),
+                Some(display) => {
+                    // A display plan repeats the reasons after its description, for a host that
+                    // shows one plan alone; the chat shows the reasons once, above the options.
+                    let why = format!("\nWhy: {}", display.reasons.join("; "));
+                    let options = display
+                        .plans
+                        .iter()
+                        .map(|plan| BlockOption {
+                            offer_id: plan.offer_id.clone(),
+                            text: plan.text.strip_suffix(&why).unwrap_or(&plan.text).to_string(),
+                        })
+                        .collect();
+                    (display.reasons.clone(), options)
+                }
+            };
+            vec![WireEvent::Blocked {
+                trajectory,
+                call_id: call.0.clone(),
+                text: feedback.clone(),
+                reasons,
+                options,
+            }]
+        }
         Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
             trajectory,
             call_id: call.0.clone(),
             text: reason.clone(),
+            reasons: Vec::new(),
+            options: Vec::new(),
         }],
         // A refused call shows as the call that did not run: the text names it as the
         // runtime's refusal, not a policy block.
@@ -154,6 +195,8 @@ pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
             trajectory,
             call_id: call.0.clone(),
             text: format!("[appa] refused: {detail}"),
+            reasons: Vec::new(),
+            options: Vec::new(),
         }],
         Record::Admitted { body, .. } | Record::Substituted { body, .. } | Record::Returned { body, .. } => {
             vec![WireEvent::ToolResult {

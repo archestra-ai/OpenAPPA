@@ -1833,7 +1833,7 @@ impl RuntimeEngine {
         Feedback {
             text: rendered.text,
             offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
-            display: rendered.display,
+            display: Some(rendered.display),
             review,
         }
     }
@@ -3858,14 +3858,14 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
     let mut changes = Vec::new();
     if narrowing.from.trust != narrowing.to.trust {
         changes.push(format!(
-            "session trust would fall: {} -> {}",
+            "reading its result would lower this session's trust: {} -> {}",
             trust_feedback(narrowing.from.trust, chain),
             trust_feedback(narrowing.to.trust, chain),
         ));
     }
     if narrowing.from.audience != narrowing.to.audience {
         changes.push(format!(
-            "allowed readers would narrow: {} -> {}",
+            "reading its result would narrow this session's audience: {} -> {}",
             audience_count(&narrowing.from.audience),
             audience_count(&narrowing.to.audience),
         ));
@@ -4084,6 +4084,13 @@ fn return_description(route: &ReturnRoute) -> String {
     }
 }
 
+fn sanitizer_hint(registry: Option<&Registry>, sanitizer: &appa_engine::names::SanitizerName) -> Option<String> {
+    registry
+        .and_then(|registry| registry.sanitizer(sanitizer))
+        .and_then(|sanitizer| sanitizer.hint.as_ref())
+        .map(|hint| terminal_safe(hint.as_str()))
+}
+
 fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, target: &str) -> String {
     let needs_approval = !plan.required.is_empty();
     if let Some(sanitizer) = plan.hop() {
@@ -4092,12 +4099,9 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             terminal_safe(sanitizer.as_str()),
             terminal_safe(target),
         );
-        if let Some(hint) = registry
-            .and_then(|registry| registry.sanitizer(sanitizer))
-            .and_then(|sanitizer| sanitizer.hint.as_ref())
-        {
+        if let Some(hint) = sanitizer_hint(registry, sanitizer) {
             action.push_str(": ");
-            action.push_str(&terminal_safe(hint.as_str()));
+            action.push_str(&hint);
         }
         action
     } else {
@@ -4109,14 +4113,13 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             };
         }
         match (needs_approval, plan.narrowing(), plan.sanitizer()) {
-            (true, _, Some(sanitizer)) => {
-                format!(
-                    "Submit for approval and use sanitizer {}'s result",
-                    terminal_safe(sanitizer.as_str())
-                )
-            }
-            (false, _, Some(sanitizer)) => {
-                format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
+            (needs_approval, _, Some(sanitizer)) => {
+                let lead = if needs_approval {
+                    "Submit for approval and use"
+                } else {
+                    "Use"
+                };
+                format!("{lead} sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
             }
             (true, Some(narrowing), None) => format!(
                 "Submit for approval and accept {} for the rest of this session",
@@ -4132,17 +4135,17 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
 }
 
 /// The change a narrowing plan asks the model to accept, in the words of the reasons
-/// `narrowing_feedback` gives: "session trust would fall", "allowed readers would narrow".
+/// `narrowing_feedback` gives: "lower this session's trust", "narrow this session's audience".
 fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
     // The engine builds a narrowing only where the label moves, so one dimension changes.
-    debug_assert_ne!(narrowing.from, narrowing.to, "a narrowing changes trust or readers");
+    debug_assert_ne!(narrowing.from, narrowing.to, "a narrowing changes trust or audience");
     match (
         narrowing.from.trust != narrowing.to.trust,
         narrowing.from.audience != narrowing.to.audience,
     ) {
-        (true, true) => "lower trust and narrower readers",
+        (true, true) => "lower trust and the narrower audience",
         (true, false) => "lower trust",
-        (false, true) => "narrower readers",
+        (false, true) => "the narrower audience",
         // The assert above rules this out; a release build keeps a neutral label.
         (false, false) => "this change",
     }
@@ -4184,6 +4187,15 @@ fn remedy_instruction(
     } else {
         format!("  - {description}:\n    {call}")
     };
+    // What an output sanitizer's rewrite keeps decides whether its result still serves the task.
+    if plan.hop().is_none()
+        && let Some(hint) = plan
+            .sanitizer()
+            .and_then(|sanitizer| sanitizer_hint(registry, sanitizer))
+    {
+        instruction.push_str("\n    The sanitizer is instructed: ");
+        instruction.push_str(&hint);
+    }
     let needs_approval = !plan.required.is_empty();
     if needs_approval {
         if include_display_plan {
@@ -4275,7 +4287,7 @@ fn display_plans(
 
 struct RenderedBlock {
     text: String,
-    display: Option<RemedyDisplay>,
+    display: RemedyDisplay,
 }
 
 fn block_feedback(
@@ -4346,22 +4358,35 @@ fn block_feedback(
     if !remedies.is_empty()
         && let Some(impact) = &planned.narrowing_impact
     {
-        if impact.sign_off + impact.blocked > 0 {
-            reasons.push(format!(
-                "Accepting restricts {} of {} tools for this session: {} will need sign-off, {} will be blocked.",
-                impact.sign_off + impact.blocked,
-                impact.tools,
-                impact.sign_off,
-                impact.blocked
-            ));
-        }
-        if !impact.recipient_checked.is_empty() {
-            let tools = impact
-                .recipient_checked
+        // A policy can restrict dozens of tools at once; the first few say what kind of work stops.
+        const NAMED: usize = 5;
+        let spell = |tools: &[ToolName]| {
+            let mut named = tools
                 .iter()
+                .take(NAMED)
                 .map(|tool| format!("`{}`", terminal_safe(&naming.model_spelling(tool.as_str()))))
                 .collect::<Vec<_>>()
                 .join(", ");
+            if tools.len() > NAMED {
+                named.push_str(&format!(" and {} more", tools.len() - NAMED));
+            }
+            named
+        };
+        if !impact.blocked.is_empty() {
+            reasons.push(format!(
+                "Accepting the narrowing blocks these tools for the rest of this session: {}.",
+                spell(&impact.blocked)
+            ));
+        }
+        if !impact.sign_off.is_empty() {
+            reasons.push(format!(
+                "Accepting the narrowing makes these tools need an authority's sign-off for the rest of this \
+                 session: {}.",
+                spell(&impact.sign_off)
+            ));
+        }
+        if !impact.recipient_checked.is_empty() {
+            let tools = spell(&impact.recipient_checked);
             reasons.push(format!(
                 "{tools} can check recipients against the readers of what they send. After accepting, a recipient \
                  outside this session's readers fails that check unless a remedy covers it."
@@ -4402,11 +4427,24 @@ fn block_feedback(
         lines.push(String::new());
         lines.push("Continue:".to_string());
         lines.extend(remedies);
+        if matches!(
+            planned.fork_advice,
+            Some(ForkAdvice::Narrowing {
+                standing: FloorStanding::Unbound | FloorStanding::Within,
+                preserving_output: true,
+                ..
+            })
+        ) {
+            lines.push(
+                "  An output sanitizer above can admit this result without changing this session's label, if its \
+                 required steps succeed. You then receive its rewrite, not the raw result: choose it when the \
+                 rewrite still serves the task."
+                    .to_string(),
+            );
+        }
     }
-    let display = presentation.include_display_plan.then(|| {
-        let plans = display_plans(planned, offers, &reasons, Some(registry), target);
-        RemedyDisplay { reasons, plans }
-    });
+    let plans = display_plans(planned, offers, &reasons, Some(registry), target);
+    let display = RemedyDisplay { reasons, plans };
     if !no_continuation
         && presentation.supports_delegation
         && let Some(advice) = planned.fork_advice
@@ -4464,7 +4502,7 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,
         sanitized_return,
-        preserving_output,
+        ..
     } = advice
     else {
         return "If a child-session or subagent tool is available, handle the work there if isolation is \
@@ -4482,16 +4520,9 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
                          every narrowing the delegated work needs. A sanitizer unbinds only the dimension it raises. \
                          Under a floor, an empty final message controls what crosses back; it does not relax what the \
                          child may read or accept.";
-    let preferred = match (standing, preserving_output) {
-        (FloorStanding::Unbound | FloorStanding::Within, true) => {
-            "An output sanitizer offered under Continue can admit this result without changing this session's \
-             label, if its required steps succeed. Prefer that offer to the routes below.\n"
-        }
-        (FloorStanding::Below, _) | (_, false) => "",
-    };
     let returned = "A final message the parent admits crosses to it and can narrow its label. When the task needs \
                     no return, end with an empty final message to leave the parent's label unchanged.";
-    let route = match (standing, sanitized_return) {
+    match (standing, sanitized_return) {
         (FloorStanding::Unbound, true) => format!(
             "If a child-session or subagent tool is available, delegate {delegated} there.\n{declare_floor}\nFinish \
              there by returning nothing, or choose a registered return sanitizer whose declared permit covers the \
@@ -4531,8 +4562,7 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
              needs a child declared with a lower floor, a return sanitizer, or no return."
                 .to_string()
         }
-    };
-    format!("{preferred}{route}")
+    }
 }
 
 #[cfg(test)]
@@ -4602,26 +4632,61 @@ mod tests {
     }
 
     #[test]
-    fn a_label_preserving_output_offer_adds_advice_only_where_the_raw_change_is_allowed() {
+    fn a_label_preserving_output_offer_is_noted_under_continue_only_where_the_raw_change_is_allowed() {
         use super::FloorStanding::{Below, Unbound, Within};
-        for (standing, extends) in [(Unbound, true), (Within, true), (Below, false)] {
-            for sanitized_return in [false, true] {
-                let text = |preserving_output| {
-                    super::fork_advice_text(
-                        super::ForkAdvice::Narrowing {
-                            standing,
-                            sanitized_return,
-                            preserving_output,
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::Label;
+
+        let narrowing = Narrowing {
+            from: Label::new(Trust::new(2), Audience::public()),
+            to: Label::new(Trust::new(2), restricted(&["alice"])),
+        };
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let note = "An output sanitizer above can admit this result without changing this session's label";
+        for (standing, noted) in [(Unbound, true), (Within, true), (Below, false)] {
+            for preserving_output in [false, true] {
+                // The note serves a model that cannot delegate as much as one that can.
+                for supports_delegation in [false, true] {
+                    let planned = PlannedBlock {
+                        raw: RawBlock {
+                            requirement_gaps: vec![],
+                            narrowing: Some(narrowing.clone()),
                         },
-                        false,
+                        plans: vec![RemedyPlan::Executable(ExecutableRemedyPlan {
+                            id: PlanId::new(1),
+                            steps: vec![RemedyStep::Sanitize(SanitizerName::new("strip"))],
+                            required: vec![],
+                        })],
+                        fork_advice: Some(super::ForkAdvice::Narrowing {
+                            standing,
+                            sanitized_return: false,
+                            preserving_output,
+                        }),
+                        narrowing_impact: None,
+                    };
+                    let text = block_feedback(
+                        &planned,
+                        &[(OfferId("0123456789abcdef".to_string()), PlanId::new(1))],
+                        policy.engine().registry(),
+                        &ReturnBounds {
+                            label: Label::top(),
+                            lowest: Trust::new(0),
+                        },
+                        ToolNaming::AsAuthored,
+                        "read",
+                        &EmbeddedPresentationOptions {
+                            supports_delegation,
+                            ..EmbeddedPresentationOptions::default()
+                        },
                     )
-                };
-                let (plain, preferred) = (text(false), text(true));
-                assert_eq!(
-                    preferred != plain && preferred.ends_with(&plain),
-                    extends,
-                    "{standing:?}, sanitized return {sanitized_return}"
-                );
+                    .text;
+                    assert_eq!(
+                        text.contains(note),
+                        noted && preserving_output,
+                        "{standing:?}, preserving {preserving_output}, delegation {supports_delegation}: {text}"
+                    );
+                    assert_eq!(text.contains("subagent"), supports_delegation, "{text}");
+                }
             }
         }
     }
@@ -5344,10 +5409,10 @@ mod tests {
         let narrower = Audience::restricted([ReaderId::new("alice")]);
         let cases = [
             (Label::new(Trust::new(0), Audience::public()), "lower trust"),
-            (Label::new(Trust::new(2), narrower.clone()), "narrower readers"),
+            (Label::new(Trust::new(2), narrower.clone()), "the narrower audience"),
             (
                 Label::new(Trust::new(0), narrower.clone()),
-                "lower trust and narrower readers",
+                "lower trust and the narrower audience",
             ),
         ];
         let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
@@ -5413,10 +5478,7 @@ mod tests {
                         )),
                         "{text}"
                     );
-                    assert_eq!(
-                        feedback.display.expect("display plan").plans[0].text.split('\n').next(),
-                        Some(label.as_str())
-                    );
+                    assert_eq!(feedback.display.plans[0].text.split('\n').next(), Some(label.as_str()));
                 } else {
                     assert!(text.contains(&format!("  - {label}:\n    ")), "{text}");
                 }
@@ -5470,30 +5532,45 @@ mod tests {
                 &options,
             )
             .display
-            .expect("the display plan is requested")
             .reasons
         };
         let without = reasons(None);
-        let impact = |restricted: usize, recipient_checked: &[&str]| {
+        let names = |tools: &[&str]| {
+            tools
+                .iter()
+                .map(|tool| appa_engine::value::ToolName::new(*tool))
+                .collect()
+        };
+        let impact = |sign_off: &[&str], blocked: &[&str], recipient_checked: &[&str]| {
             Some(NarrowingImpact {
-                tools: 4,
-                sign_off: restricted,
-                blocked: 0,
-                recipient_checked: recipient_checked
-                    .iter()
-                    .map(|tool| appa_engine::value::ToolName::new(*tool))
-                    .collect(),
+                sign_off: names(sign_off),
+                blocked: names(blocked),
+                recipient_checked: names(recipient_checked),
             })
         };
         for (impact, added) in [
-            (impact(1, &[]), 1),
-            (impact(0, &["send_mail", "reply"]), 1),
-            (impact(1, &["send_mail"]), 2),
+            (impact(&["post"], &[], &[]), 1),
+            (impact(&[], &["send_mail"], &[]), 1),
+            (impact(&[], &[], &["send_mail", "reply"]), 1),
+            (impact(&["post"], &["drain"], &["send_mail"]), 3),
         ] {
             let with = reasons(impact.clone());
             assert_eq!(with.len(), without.len() + added, "{impact:?}");
             assert!(with.starts_with(&without));
         }
+        let many = reasons(impact(&["a", "b", "c", "d", "e", "f", "g"], &[], &[]));
+        assert!(
+            many.iter()
+                .any(|reason| reason.ends_with("`a`, `b`, `c`, `d`, `e` and 2 more.")),
+            "a long list names five tools and counts the rest: {many:?}"
+        );
+        let blocking = reasons(impact(&[], &["send_mail"], &[]));
+        assert!(
+            blocking
+                .iter()
+                .any(|reason| reason.contains("blocks these tools") && reason.contains("`send_mail`")),
+            "the reason names the tool it blocks: {blocking:?}"
+        );
     }
 
     #[test]
@@ -5544,7 +5621,7 @@ mod tests {
         assert!(!feedback.text.contains(BARE_CONTROL_TOOL));
         assert!(!feedback.text.contains("Alternative:"));
         assert!(!feedback.text.contains("Delegation:"));
-        let display = feedback.display.expect("the opt-in carries a typed display plan");
+        let display = feedback.display;
         assert_eq!(display.plans[0].offer_id, "0123456789abcdef");
         assert_eq!(display.plans[0].text, "Submit for approval");
     }
