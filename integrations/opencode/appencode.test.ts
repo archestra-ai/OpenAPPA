@@ -292,7 +292,7 @@ builtin = "redact-email"
     try { await plugin.before(tool, input) } catch (error) { denial = String(error) }
     expect(denial).toContain('appa_execute_remedy_plan')
     const lines = denial.split('\n')
-    const instruction = sanitizer ? lines[lines.findIndex(line => line.includes(`Use sanitizer ${sanitizer}'s result`)) + 1] : denial
+    const instruction = sanitizer ? lines[lines.findIndex(line => line.includes(sanitizer)) + 1] : denial
     const offer = instruction?.match(/offer_id: "([a-f0-9]+)"/)?.[1]
     expect(offer).toBeDefined()
     const call = await plugin.before('appa_execute_remedy_plan', { offer_id: offer })

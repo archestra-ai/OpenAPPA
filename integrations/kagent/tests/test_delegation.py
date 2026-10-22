@@ -31,7 +31,7 @@ import uuid
 
 import pytest
 
-from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION, UNDECLARED_TOOL
+from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION, OFFER, UNDECLARED_TOOL
 
 # The parent's prompts, and the `request` each delegation carries. The
 # child's script is keyed by that request, so the two must agree.
@@ -70,11 +70,10 @@ SPAWN_NOT_TAKEN = "the spawn did not take"
 RETURN_TOOL = "appa_return"
 VOID_CROSSED = "the void return crossed"
 
-# The two offers a narrowing can settle with, as the feedback renders
-# them (`appa-runtime/src/engine.rs`, `remedy_instruction`). Which of
-# them the child is offered is the whole point of the second case.
-ACCEPT = "Accept lower trust"
-SANITIZE = "Use sanitizer strip-instructions"
+# The sanitizer the policy registers for the crash logs' trust. Its
+# offer names it; the runtime's wording around the name is not pinned
+# here. Which offers the child gets is the whole point of the second case.
+SANITIZE = "strip-instructions"
 
 
 def status(runtime_url: str, context_id: str) -> dict:
@@ -214,9 +213,10 @@ def test_the_floor_the_parent_declared_binds_the_child_s_own_reads(stack, runtim
     assert len(reads) == 2, f"the child proposed the read, was denied, and proposed it again: {reads}"
     feedback = str(reads[0].get("result", ""))
     assert reads[0].get("appa") == "denied", f"the untrusted read is gated in the child's branch too: {reads[0]}"
-    assert SANITIZE in feedback, f"the child is offered the sanitizer: {feedback}"
-    assert ACCEPT not in feedback, (
-        f"the floor the parent declared binds the child: a change it accepted could never cross: {feedback}"
+    offered = [action for action, _ in OFFER.findall(feedback)]
+    assert len(offered) == 1 and SANITIZE in offered[0], (
+        f"the child is offered the sanitizer alone: the floor the parent declared binds the child, "
+        f"and a change it accepted could never cross: {feedback}"
     )
     derivation = json.dumps(reads[1], default=str)
     assert reads[1].get("appa") is None, f"the re-proposed read is not gated shut: {derivation}"
