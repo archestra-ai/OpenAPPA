@@ -122,7 +122,7 @@ jobs:
       # required for pull_request events generated with GITHUB_TOKEN.
       - name: Generate release PR token
         id: release-pr-token
-        uses: archestra-ai/.github/actions/github-app-token@d3a50799fd699bd774eb02e9e1be522639b3dcaa
+        uses: archestra-ai/.github/actions/github-app-token@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
         with:
           app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
           private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
@@ -328,7 +328,7 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@d3a50799fd699bd774eb02e9e1be522639b3dcaa
+        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
