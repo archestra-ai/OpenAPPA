@@ -130,6 +130,29 @@ impl ClientHandler for Silent {
     }
 }
 
+/// A reviewer that has the review on screen and never answers it.
+#[derive(Clone)]
+struct Held {
+    open: Arc<tokio::sync::Notify>,
+}
+
+impl ClientHandler for Held {
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
+        info.capabilities.elicitation = Some(Default::default());
+        info
+    }
+
+    async fn create_elicitation(
+        &self,
+        _request: ElicitRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<ElicitResult, rmcp::ErrorData> {
+        self.open.notify_one();
+        std::future::pending().await
+    }
+}
+
 struct Deployment {
     url: String,
     offer: String,
@@ -923,4 +946,29 @@ async fn no_reviewer_is_asked_about_an_offer_from_an_earlier_revision() {
     let answer = execute(&deployment, reviewer.clone()).await;
     assert!(!answer.contains("Authorized"), "{answer}");
     assert!(reviewer.reviews().is_empty(), "nobody reviews a stale offer");
+}
+
+/// A review outlasting every machine-consult budget still holds the offer: a second
+/// attempt meanwhile puts no second review in front of anyone.
+#[tokio::test]
+async fn a_review_held_past_the_claim_bound_keeps_the_offer_claimed() {
+    let short_consults = policy(30_000).replace("\ntimeout_ms = 1000", "\ntimeout_ms = 1")
+        + "\n[externals.claude_code]\ntimeout_ms = 1\n";
+    let deployment = Arc::new(deployment_from(short_consults).await);
+    let open = Arc::new(tokio::sync::Notify::new());
+    let first = tokio::spawn({
+        let deployment = Arc::clone(&deployment);
+        let held = Held {
+            open: Arc::clone(&open),
+        };
+        async move { execute(&deployment, held).await }
+    });
+    open.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let second = execute(&deployment, reviewer.clone()).await;
+    assert!(!second.contains("Authorized"), "{second}");
+    assert!(reviewer.reviews().is_empty(), "one offer is on one screen at a time");
+    first.abort();
 }

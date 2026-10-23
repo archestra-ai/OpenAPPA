@@ -206,13 +206,10 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
 
 
 def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> None:
+    # Only the `Continue:` heading and a quoted `offer_id` mark a next step.
+    # The prose around them is the runtime's, so these fixtures leave it out.
     # An executable offer: the model accepts it with the control tool.
-    offered = (
-        "[appa] Blocked: read_record cannot run yet.\n\n"
-        "Why:\n  - reading its result would lower this session's trust\n\nContinue:\n"
-        "  - Accept lower trust for the rest of this session:\n"
-        '    execute_remedy_plan(offer_id: "a6b41f1968b6fa7d")'
-    )
+    offered = '[appa] Blocked.\n\nContinue:\n  - …:\n    execute_remedy_plan(offer_id: "a6b41f1968b6fa7d")'
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": offered})
     try:
         decision = session.check(
@@ -224,10 +221,7 @@ def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> Non
         session.close()
 
     # A redispatch remedy: the model runs the named tool and proposes again.
-    redispatch = (
-        "[appa] Blocked: write_record cannot run yet.\n\nWhy:\n  - requires a prior identity.verified effect\n\n"
-        "Continue:\n  - Run log_verification first; it clears: requires a prior identity.verified effect."
-    )
+    redispatch = "[appa] Blocked.\n\nContinue:\n  - …"
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": redispatch})
     try:
         decision = session.check(
@@ -239,10 +233,7 @@ def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> Non
         session.close()
 
     # A gap with no remedy is terminal: no authority may waive a trust floor.
-    terminal = (
-        "[appa] Blocked: write_record cannot run yet.\n\nWhy:\n"
-        "  - trust is suspicious, below the required floor internal"
-    )
+    terminal = "[appa] Blocked.\n\nWhy:\n  - …"
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": terminal})
     try:
         assert session.check(

@@ -3,7 +3,7 @@ use common::{actor, audit_len, last_offer, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 
-use appa_runtime::api::{ProbeError, RemedyOutcome, Runtime};
+use appa_runtime::api::{ProbeError, Remedies, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::Router;
@@ -646,7 +646,8 @@ fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
 
     for batteries in [vec![], vec![battery("[policy]\nversion = 2\n")]] {
         let config = compose(ROOT, &batteries).expect("the document composes");
-        let Err(appa_runtime::api::OpenError::Policy(error)) = Runtime::open_in_memory(config, None) else {
+        let Err(appa_runtime::api::OpenError::Policy(error)) = Runtime::open_in_memory(config, None, Remedies::StandIn)
+        else {
             panic!("an undeclared audience source must not open");
         };
         let appa_policy::ConfigError::UndeclaredProvider { context, provider } = *error else {
@@ -656,7 +657,7 @@ fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
     }
 
     let restored = compose(ROOT, &[battery(&declaring)]).expect("the restored include composes");
-    Runtime::open_in_memory(restored, None).expect("the restored include declares the source");
+    Runtime::open_in_memory(restored, None, Remedies::StandIn).expect("the restored include declares the source");
 
     let doubled = format!("{ROOT}{ROOT_BINDING}");
     assert!(matches!(

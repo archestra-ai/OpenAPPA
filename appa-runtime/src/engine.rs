@@ -632,6 +632,9 @@ pub struct AuditLabel {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditEntry {
     pub trajectory: String,
+    /// The host's id for the tool call this entry concerns, when the entry names a
+    /// dispatch and the host identified the call.
+    pub call_id: Option<String>,
     pub event: AuditEvent,
 }
 
@@ -1344,6 +1347,11 @@ impl RuntimeEngine {
                 );
             }
         }
+        // The log binds each identified call to its dispatch in the batch that opened it.
+        let calls: BTreeMap<&appa_engine::value::DispatchId, &str> = log
+            .call_bindings()
+            .map(|binding| (binding.dispatch, binding.call_id))
+            .collect();
         let mut entries = Vec::new();
         for fact in facts {
             let event = match fact {
@@ -1369,6 +1377,9 @@ impl RuntimeEngine {
             };
             entries.push(AuditEntry {
                 trajectory: terminal_safe(fact.trajectory().as_str()),
+                call_id: dispatch_of(fact)
+                    .and_then(|dispatch| calls.get(dispatch))
+                    .map(|call| terminal_safe(call)),
                 event,
             });
         }
@@ -3781,6 +3792,28 @@ fn clause_wire(clause: &Clause) -> String {
         format!("{}+{rest}", entries.join(","))
     } else {
         entries.join(",")
+    }
+}
+
+/// The dispatch a fact concerns, when it concerns exactly one.
+fn dispatch_of(fact: &Fact) -> Option<&appa_engine::value::DispatchId> {
+    match fact {
+        Fact::DispatchOpened { dispatch, .. }
+        | Fact::DispatchSucceeded { dispatch, .. }
+        | Fact::DispatchClosed { dispatch, .. }
+        | Fact::Ruling { dispatch, .. }
+        | Fact::Acceptance { dispatch, .. }
+        | Fact::OutputSanitizerBound { dispatch, .. }
+        | Fact::OutputWithheld { dispatch, .. }
+        | Fact::ValueAdmitted {
+            provenance: appa_engine::value::Provenance::ToolResult { dispatch },
+            ..
+        }
+        | Fact::CandidateDerived {
+            derived: appa_engine::candidate::DerivedCandidate::Result { dispatch, .. },
+            ..
+        } => Some(dispatch),
+        _ => None,
     }
 }
 

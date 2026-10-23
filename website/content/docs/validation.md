@@ -111,10 +111,29 @@ Each call in a test file can be followed by one `expect` line:
 | `expect allow` | The call runs. A plain narrowing acceptance is taken as the model would take it. |
 | `expect deny` | The call is blocked and no remedy is offered. |
 | `expect withhold` | The call is blocked with an offer to run it without returning its result. Replay takes the offer. |
-| `expect authority [name]` | The call is blocked with an offer to ask an authority. Replay takes the offer, and a stand-in approves. |
-| `expect sanitizer [name]` | The call is blocked with an offer to apply a sanitizer. Replay takes the offer, and the stand-in returns the value unchanged. |
+| `expect authority [name]` | The call is blocked with an offer to ask an authority. Replay takes the offer. |
+| `expect sanitizer [name]` | The call is blocked with an offer to apply a sanitizer. Replay takes the offer. |
 
 With a name, the offer must involve that authority or sanitizer. Without a name, any authority or sanitizer passes. After a taken offer, the trajectory continues from the remedied call.
+
+## Stand-in and live remedies
+
+By default, replay does not consult the authorities and sanitizers that your configuration binds. A stand-in answers them in the process: every authority approves, and every sanitizer returns the value unchanged. No model, service, or person is asked. Such a run checks which remedies the policy offers and how the trajectory continues after them. It does not check what an authority decides or what a sanitizer writes.
+
+The report names the stand-in. With `-v`, a remedied step reads `(the stand-in approved for hitl)` or `(the stand-in answered for redact-for-public: value unchanged)`. A note before the summary counts the consults that the stand-in answered.
+
+To consult the bound parties, pass `--live-remedies`:
+
+```sh
+appa replay --live-remedies -v --config appa.toml policy-tests/
+```
+
+```text
+ok    policy-tests/release-note.appa:6 host/claude-code/SendMessage sanitizer redact-for-public (after redact-for-public rewrote it)
+    rewritten arguments: {"message":"…","to":"release-bot"}
+```
+
+Replay then consults each authority and sanitizer exactly as a running deployment does. Models, URLs, and commands run, and they can cost money and time. When a sanitizer rewrites the call's arguments, the report shows them, and replay proposes the rewritten call again. A `hitl` authority has nobody to ask in replay, so its step reports `could not run`. A declined approval also reports `could not run`. Do not use `--live-remedies` for checks that must give the same result on every run.
 
 ## Observe decisions without expectations
 
@@ -152,6 +171,8 @@ An observed call never fails its file. When the call is allowed, it runs. When t
 | `got` | The decision in `expect` words, or `null` when the call could not run. |
 | `offers` | The offers of a blocked call, in `expect` words. |
 | `taken` | The offer that replay took, or `null`. |
+| `answered_by` | Who answered a taken authority or sanitizer offer: `stand-in` or `live`. Otherwise `null`. |
+| `rewritten` | The arguments that a sanitizer rewrote the call to, or `null`. |
 | `outcome` | `passed`, `mismatch`, `observed`, or `cannot_run`. |
 | `detail` | Why the call or trajectory could not run, or `null`. |
 

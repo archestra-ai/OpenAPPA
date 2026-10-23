@@ -8030,7 +8030,7 @@ delta = {}
     /// the record is refused without reaching the model.
     mod replay {
         use super::*;
-        use crate::api::RemedyOutcome;
+        use crate::api::{RemedyOutcome, RemedyRefusal};
 
         fn host_records(session: &Session) -> usize {
             session
@@ -8694,7 +8694,83 @@ delta = {}
         }
 
         #[tokio::test]
-        async fn an_embedded_remedy_replays_after_its_vouch_is_spent() {
+        async fn another_attempt_waits_out_a_running_consult() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            // The first consult is held until the test lets it answer; any later one answers
+            // at once, so a second consult would finish and authorize.
+            let asked = Arc::new(AtomicUsize::new(0));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let answer = Arc::new(tokio::sync::Notify::new());
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::post({
+                    let (asked, entered, answer) = (asked.clone(), entered.clone(), answer.clone());
+                    move || async move {
+                        if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                            entered.notify_one();
+                            answer.notified().await;
+                        }
+                        axum::Json(serde_json::json!({"version": 1, "answer": {"ruling": "approve"}}))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback stub binds");
+            let url = format!("http://{}/", listener.local_addr().expect("the stub has an address"));
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+                .expect("the deployment opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
+            let actor = crate::api::Actor {
+                root: root(),
+                child: None,
+            };
+            let denied = session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered");
+            let ToolCallDecision::Deny { ref offers, .. } = denied else {
+                panic!("the call blocks: {denied:?}");
+            };
+            let quoted = OfferId(offers[0].id.clone());
+            let key = crate::api::PermitKey::offer(&quoted);
+            let args = || crate::api::ExecuteRemedyPlanArgs {
+                offer_id: quoted.0.clone(),
+                label: None,
+                return_schema: None,
+            };
+
+            runtime.vouch(&key, &actor, None);
+            let mut first = Box::pin(runtime.execute_embedded_remedy(&actor, args()));
+            tokio::select! {
+                outcome = &mut first => panic!("the consult is held, yet the remedy answered: {outcome:?}"),
+                () = entered.notified() => {}
+            }
+            runtime.vouch(&key, &actor, None);
+            assert_eq!(
+                runtime.execute_embedded_remedy(&actor, args()).await,
+                RemedyOutcome::Refused {
+                    reason: RemedyRefusal::AlreadyExecuting
+                },
+            );
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                1,
+                "the offer's authority is consulted once"
+            );
+            answer.notify_one();
+            let first = first.await;
+            assert!(
+                matches!(first, RemedyOutcome::Authorized { .. }),
+                "the running remedy completes: {first:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_spent_embedded_offer_answers_no_other_attempt() {
             let dir = tempfile::tempdir().expect("a temp dir is creatable");
             let url = stub(serde_json::json!({"ruling": "approve"})).await;
             let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
@@ -8712,7 +8788,11 @@ delta = {}
                 panic!("the call blocks: {denied:?}");
             };
             let quoted = OfferId(offers[0].id.clone());
-            runtime.vouch(&crate::api::PermitKey::offer(&quoted), &actor, None);
+            let key = crate::api::PermitKey::offer(&quoted);
+            // Two attempts pass the control gate before either executes; one session's
+            // standings behind one offer are one standing.
+            runtime.vouch(&key, &actor, None);
+            runtime.vouch(&key, &actor, None);
             let args = || crate::api::ExecuteRemedyPlanArgs {
                 offer_id: quoted.0.clone(),
                 label: None,
@@ -8725,24 +8805,66 @@ delta = {}
             );
             let facts = runtime.log_facts(&root());
 
-            // The vouch is spent: the retry authenticates from the record — the actor is the
-            // offer's recorded pursuer and the offer is ended — and re-answers the outcome.
-            let second = runtime.execute_embedded_remedy(&actor, args()).await;
-            assert_eq!(second, first, "the executed remedy replays its recorded outcome");
-            assert_eq!(runtime.log_facts(&root()), facts, "a replay appends no facts");
-
-            // Another actor is not the pursuer: the record answers nobody else.
-            let intruder = crate::api::Actor {
-                root: root(),
-                child: Some(TrajectoryId("cc:intruder".to_string())),
-            };
-            assert!(
-                matches!(
-                    runtime.execute_embedded_remedy(&intruder, args()).await,
-                    RemedyOutcome::Refused { .. }
-                ),
-                "an offer replays only for the trajectory that pursued it"
+            assert_eq!(
+                runtime.execute_embedded_remedy(&actor, args()).await,
+                RemedyOutcome::Refused {
+                    reason: RemedyRefusal::Unvouched
+                },
+                "the other attempt's standing was spent with the first"
             );
+            runtime.vouch(&key, &actor, None);
+            assert_eq!(
+                runtime.execute_embedded_remedy(&actor, args()).await,
+                RemedyOutcome::Refused {
+                    reason: RemedyRefusal::UnknownOffer
+                },
+                "a later attempt vouches for an offer that no longer stands"
+            );
+            assert_eq!(runtime.log_facts(&root()), facts, "a refused attempt appends no facts");
+        }
+
+        #[tokio::test]
+        async fn a_taken_claim_is_neither_renewed_nor_released_by_its_former_holder() {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(config_with(ATTENTION, None), dir.path().join("appa.db"), None)
+                .expect("the deployment opens");
+            runtime.create_session(root(), None).expect("a fresh id opens");
+            let actor = crate::api::host::host_actor(&crate::api::Actor {
+                root: root(),
+                child: None,
+            });
+            let key = crate::api::PermitKey::offer(&OfferId("0123456789abcdef".to_string()));
+            let claim = |until| appa_eventlog::HostObservation::Claimed {
+                actor: actor.clone(),
+                key: key.wire(),
+                until,
+            };
+            let lapsed = std::time::SystemTime::now();
+            let successor = lapsed + std::time::Duration::from_secs(600);
+            for until in [lapsed, successor] {
+                runtime
+                    .inner
+                    .append_host(&root(), &claim(until))
+                    .expect("the claim lands");
+            }
+            let log = runtime.inner.log(&root()).expect("the log reads");
+            assert_eq!(crate::api::reduced(&log).claimed(&key), Some(successor));
+            let mut former = crate::api::Claimed {
+                inner: Arc::clone(&runtime.inner),
+                root: root(),
+                actor: actor.clone(),
+                key: key.clone(),
+                until: lapsed,
+                released: false,
+            };
+
+            assert!(matches!(
+                former.renew(std::time::Duration::from_secs(600)),
+                Ok(crate::api::Holding::Lost)
+            ));
+            former.release();
+            let log = runtime.inner.log(&root()).expect("the log reads");
+            assert_eq!(crate::api::reduced(&log).claimed(&key), Some(successor));
         }
     }
 }

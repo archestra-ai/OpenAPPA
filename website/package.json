@@ -6,7 +6,8 @@
     "dev": "next dev -p 4321",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON components/playground/"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
