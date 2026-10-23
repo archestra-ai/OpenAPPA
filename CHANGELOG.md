@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.38.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.37.0...v0.38.0) (2026-10-23)
+
+
+### Features
+
+* **battery:** cover archestra agent run tools ([#716](https://github.com/archestra-ai/OpenAPPA/issues/716)) ([a50060a](https://github.com/archestra-ai/OpenAPPA/commit/a50060ab41eb45df1fb609acdd5b1d68c834ab0d))
+* **marketplace:** offer an LLM sanitizer for public sinks in the Claude Code default ([#727](https://github.com/archestra-ai/OpenAPPA/issues/727)) ([663ca91](https://github.com/archestra-ai/OpenAPPA/commit/663ca91715a345862a4f483d8b33356100c0d78d))
+* **replay:** name the stand-in in reports; add --live-remedies ([#739](https://github.com/archestra-ai/OpenAPPA/issues/739)) ([5eb179b](https://github.com/archestra-ai/OpenAPPA/commit/5eb179be4eb4c991231c3c1051cbc56e48eb9e36))
+* **website:** add the auto mode comparison video to the landing page ([#719](https://github.com/archestra-ai/OpenAPPA/issues/719)) ([b5c5fe7](https://github.com/archestra-ai/OpenAPPA/commit/b5c5fe79fb14e4068319d2710cf4fb101ead1fa4))
+
+
+### Bug Fixes
+
+* **engine:** offer the attestation only where the parent covers its rank ([#713](https://github.com/archestra-ai/OpenAPPA/issues/713)) ([6d29637](https://github.com/archestra-ai/OpenAPPA/commit/6d296379be0791eb1c49197d81cfc5060f1da784))
+* **eventlog:** accept libpq TLS parameters in the PostgreSQL URL ([#710](https://github.com/archestra-ai/OpenAPPA/issues/710)) ([bc6a5a1](https://github.com/archestra-ai/OpenAPPA/commit/bc6a5a166c2bd37ae1069f441b280dd987da6d19))
+* **eventlog:** store plaintext receipts that contain NUL ([#724](https://github.com/archestra-ai/OpenAPPA/issues/724)) ([2b94c95](https://github.com/archestra-ai/OpenAPPA/commit/2b94c95052c9b1f643be2b8fff34e1510f6975f1))
+* **install:** include required batteries when writing a fresh default config ([#718](https://github.com/archestra-ai/OpenAPPA/issues/718)) ([66ed593](https://github.com/archestra-ai/OpenAPPA/commit/66ed5932ab1fe567e5ebe71a0b01d773264076b3))
+* **opencode:** refuse to install AppenCode into OpenCode V1 ([#721](https://github.com/archestra-ai/OpenAPPA/issues/721)) ([0a31d22](https://github.com/archestra-ai/OpenAPPA/commit/0a31d22b8cbf78e1e046e6713009b6d941e25145))
+* **opencode:** retain a guide-only native reader during setup ([ba285c1](https://github.com/archestra-ai/OpenAPPA/commit/ba285c178ccd8af92ad42826fbf64716123c8b2a))
+* **opencode:** support free-model setup with a guide-only native reader ([#676](https://github.com/archestra-ai/OpenAPPA/issues/676)) ([ba285c1](https://github.com/archestra-ai/OpenAPPA/commit/ba285c178ccd8af92ad42826fbf64716123c8b2a))
+* **orb:** put mise shims on PATH for agent shells ([#729](https://github.com/archestra-ai/OpenAPPA/issues/729)) ([634b8d3](https://github.com/archestra-ai/OpenAPPA/commit/634b8d3f449745a53851ac731513f07cc9c42144))
+* **runtime:** make no-remedy refusal feedback explicit ([#720](https://github.com/archestra-ai/OpenAPPA/issues/720)) ([1ac085c](https://github.com/archestra-ai/OpenAPPA/commit/1ac085cd050c4bf7d97cbb95e920b28ad163e85b))
+* **runtime:** say why a tool's output is not shown ([#723](https://github.com/archestra-ai/OpenAPPA/issues/723)) ([584e390](https://github.com/archestra-ai/OpenAPPA/commit/584e390426bac8998d323f2be1e26b82fb3382f3))
+* **runtime:** shorter block feedback for the model, a plain summary for the user ([#726](https://github.com/archestra-ai/OpenAPPA/issues/726)) ([ed6cc55](https://github.com/archestra-ai/OpenAPPA/commit/ed6cc5556fcdf68a182c3422950d97a83ae65e74))
+* **runtime:** spend a remedy's vouch at its claim ([#725](https://github.com/archestra-ai/OpenAPPA/issues/725)) ([685dc88](https://github.com/archestra-ai/OpenAPPA/commit/685dc887fdbc90d951e7598beefc7db2d78bf5b2))
+* **runtime:** tell the model that a failed subagent stopped and can start again ([#722](https://github.com/archestra-ai/OpenAPPA/issues/722)) ([2a31e6b](https://github.com/archestra-ai/OpenAPPA/commit/2a31e6bdcfbe893f3b0ecc2d58aa954b44c9e4e9))
+* **website:** name each audited dispatch's call, and replay the playground stream in tests ([#735](https://github.com/archestra-ai/OpenAPPA/issues/735)) ([fa36eae](https://github.com/archestra-ai/OpenAPPA/commit/fa36eae52acdf3f8f1d220a58c7321fd76c3d7ea))
+* **website:** show each tool result on the call that produced it ([#728](https://github.com/archestra-ai/OpenAPPA/issues/728)) ([5e35ea4](https://github.com/archestra-ai/OpenAPPA/commit/5e35ea4fd72a94a3c948bb9c0d3982cec437fe7b))
+
+
+### Performance Improvements
+
+* **build:** optimize the gzip codec in dev builds and slim test debug info ([#733](https://github.com/archestra-ai/OpenAPPA/issues/733)) ([97c0e2f](https://github.com/archestra-ai/OpenAPPA/commit/97c0e2fca3e63aa08fb53c38794a500df5f08e5f))
+
+
+### Documentation
+
+* add AppenCode setup and protection guide ([#662](https://github.com/archestra-ai/OpenAPPA/issues/662)) ([aea5f47](https://github.com/archestra-ai/OpenAPPA/commit/aea5f4769fc47d9ba6587e413fe917ee2f0b8169))
+* focus OpenCode guide on guardrails, setup, and UX ([#715](https://github.com/archestra-ai/OpenAPPA/issues/715)) ([59c0471](https://github.com/archestra-ai/OpenAPPA/commit/59c0471312c0b5ec61fc83065f8e6baff10356cd))
+* **runtime:** rewrite consult_with_retries doc comment ([#732](https://github.com/archestra-ai/OpenAPPA/issues/732)) ([bf00a10](https://github.com/archestra-ai/OpenAPPA/commit/bf00a10cfb49f7a3495559e5380478554c25efa5))
+
+
+### Code Refactoring
+
+* **ci:** use shared organization authentication actions ([#740](https://github.com/archestra-ai/OpenAPPA/issues/740)) ([4e80b68](https://github.com/archestra-ai/OpenAPPA/commit/4e80b6871677abf4ddd1f2ba15ff2d5d810ca055))
+
 ## [0.37.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.36.0...v0.37.0) (2026-10-20)
 
 
