@@ -1834,6 +1834,7 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("to"),
                 annotator: crate::names::AnnotatorName::new("classifier"),
+                on_no_answer: None,
             }],
             sanitizers: vec![redact],
             annotators: vec![crate::registry::AnnotatorDeclaration {
@@ -1992,6 +1993,7 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("room"),
                 annotator: crate::names::AnnotatorName::new("directory"),
+                on_no_answer: None,
             }],
             sanitizers: vec![
                 output_sanitizer(

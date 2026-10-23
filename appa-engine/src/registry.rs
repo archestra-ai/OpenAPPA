@@ -8,8 +8,8 @@ use thiserror::Error;
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
 use crate::authority::{Authority, DeclaredTransition, Sanitizer};
 use crate::contract::{
-    AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
-    ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, RecipientSpec, Requires, SelectorPlaceholder,
+    ToolAnnotation, ToolDeclaration,
 };
 use crate::fact::EffectKind;
 use crate::label::{
@@ -751,6 +751,8 @@ pub enum LoadError {
         "tool {tool} forwards a selector placeholder: `forwards` labels content the call sends whatever its arguments say, so it is written as a literal"
     )]
     ForwardsPlaceholder { tool: String },
+    #[error("tool {tool}: on_no_answer requires no attention mark, so an outage would release the call unreviewed")]
+    FallbackWithoutAttention { tool: String },
     #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
@@ -1237,6 +1239,7 @@ impl Registry {
                 ContractName::Named(name) => name,
                 ContractName::Wildcard => {
                     Self::admit_wildcard(&declaration, &matcher, &annotator_declarations)?;
+                    check_fallback(&config.trust_chain, &audience, &declaration, &mut direct)?;
                     if wildcard.replace(declaration).is_some() {
                         return Err(LoadError::DuplicateWildcard);
                     }
@@ -1246,54 +1249,14 @@ impl Registry {
             declaration.set_name(base_name);
             match &declaration {
                 ToolDeclaration::Declared(tool) => {
-                    check_rank(&config.trust_chain, tool.delta.trust, || {
-                        format!("tool {} delta", tool.name.as_str())
-                    })?;
-                    check_rank(&config.trust_chain, tool.requires.trust_floor(), || {
-                        format!("tool {} trust floor", tool.name.as_str())
-                    })?;
-                    match tool.delta.audience.as_ref() {
-                        Some(DeltaAudience::Static(declared)) => {
-                            direct.extend(check_declared(&audience, declared, || {
-                                format!("tool {} delta", tool.name.as_str())
-                            })?);
-                        }
-                        Some(DeltaAudience::Selector(placeholder)) => {
-                            check_placeholder(&audience, placeholder, || format!("tool {} delta", tool.name.as_str()))?;
-                        }
-                        None => {}
-                    }
-                    check_rank(&config.trust_chain, tool.forwards.trust, || {
-                        format!("tool {} forwards", tool.name.as_str())
-                    })?;
-                    match tool.forwards.audience.as_ref() {
-                        Some(DeltaAudience::Static(declared)) => {
-                            direct.extend(check_declared(&audience, declared, || {
-                                format!("tool {} forwards", tool.name.as_str())
-                            })?);
-                        }
-                        Some(DeltaAudience::Selector(_)) => {
-                            return Err(LoadError::ForwardsPlaceholder {
-                                tool: tool.name.as_str().to_string(),
-                            });
-                        }
-                        None => {}
-                    }
-                    for requirement in tool.requires.audience_requirements() {
-                        match requirement {
-                            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                                direct.extend(check_declared(&audience, recipients, || {
-                                    format!("tool {} contains", tool.name.as_str())
-                                })?);
-                            }
-                            AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
-                                check_placeholder(&audience, placeholder, || {
-                                    format!("tool {} contains", tool.name.as_str())
-                                })?;
-                            }
-                            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
-                        }
-                    }
+                    direct.extend(check_annotation_bounds(
+                        &config.trust_chain,
+                        &audience,
+                        &tool.delta,
+                        &tool.forwards,
+                        &tool.requires,
+                        tool.name.as_str(),
+                    )?);
                 }
                 ToolDeclaration::Annotated { name, annotator, .. } => {
                     if !annotator_declarations.contains_key(annotator) {
@@ -1302,6 +1265,7 @@ impl Registry {
                             annotator: annotator.as_str().to_string(),
                         });
                     }
+                    check_fallback(&config.trust_chain, &audience, &declaration, &mut direct)?;
                 }
             }
             if profile.is_provider_run(declaration.name()) {
@@ -1366,9 +1330,24 @@ impl Registry {
         let attention_marks: BTreeSet<MarkName> = tools
             .values()
             .flatten()
-            .filter_map(|(_, d)| d.declared())
-            .chain(provider_run.values())
-            .flat_map(|tool| tool.requires.attention_marks().iter().cloned())
+            .flat_map(|(_, declaration)| {
+                declaration
+                    .declared()
+                    .map(|tool| tool.requires.attention_marks())
+                    .or_else(|| {
+                        declaration
+                            .on_no_answer()
+                            .map(|fallback| fallback.requires.attention_marks())
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .cloned()
+            })
+            .chain(
+                provider_run
+                    .values()
+                    .flat_map(|tool| tool.requires.attention_marks().iter().cloned()),
+            )
             .chain(
                 config
                     .authorities
@@ -1869,6 +1848,79 @@ fn audience_arguments(
 
 /// A selector placeholder resolves at load as far as it can: its provider is registered and
 /// some declared template fits every collection it may instantiate into.
+/// The bounds one static annotation places on a call: its `delta`, its `forwards`, and its
+/// `requires`. A `Declared` tool and an `on_no_answer` fallback both load under these rules.
+/// Returns the direct readers the bounds name.
+fn check_annotation_bounds(
+    chain: &TrustChain,
+    audience: &AudienceRegistry,
+    delta: &Delta,
+    forwards: &Delta,
+    requires: &Requires,
+    tool: &str,
+) -> Result<BTreeSet<SelectorSpec>, LoadError> {
+    let mut direct = BTreeSet::new();
+    check_rank(chain, delta.trust, || format!("tool {tool} delta"))?;
+    check_rank(chain, requires.trust_floor(), || format!("tool {tool} trust floor"))?;
+    match delta.audience.as_ref() {
+        Some(DeltaAudience::Static(declared)) => {
+            direct.extend(check_declared(audience, declared, || format!("tool {tool} delta"))?);
+        }
+        Some(DeltaAudience::Selector(placeholder)) => {
+            check_placeholder(audience, placeholder, || format!("tool {tool} delta"))?;
+        }
+        None => {}
+    }
+    check_rank(chain, forwards.trust, || format!("tool {tool} forwards"))?;
+    match forwards.audience.as_ref() {
+        Some(DeltaAudience::Static(declared)) => {
+            direct.extend(check_declared(audience, declared, || format!("tool {tool} forwards"))?);
+        }
+        Some(DeltaAudience::Selector(_)) => {
+            return Err(LoadError::ForwardsPlaceholder { tool: tool.to_string() });
+        }
+        None => {}
+    }
+    for requirement in requires.audience_requirements() {
+        match requirement {
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
+                direct.extend(check_declared(audience, recipients, || format!("tool {tool} contains"))?);
+            }
+            AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
+                check_placeholder(audience, placeholder, || format!("tool {tool} contains"))?;
+            }
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
+        }
+    }
+    Ok(direct)
+}
+
+/// A fallback is a static annotation that loads under the same rules as a declared tool, and it
+/// must name the attention it requires, so an outage can never release a call unreviewed.
+fn check_fallback(
+    chain: &TrustChain,
+    audience: &AudienceRegistry,
+    declaration: &ToolDeclaration,
+    direct: &mut BTreeSet<SelectorSpec>,
+) -> Result<(), LoadError> {
+    let Some(fallback) = declaration.on_no_answer() else {
+        return Ok(());
+    };
+    let tool = declaration.name().as_str();
+    if fallback.requires.attention_marks().is_empty() {
+        return Err(LoadError::FallbackWithoutAttention { tool: tool.to_string() });
+    }
+    direct.extend(check_annotation_bounds(
+        chain,
+        audience,
+        &fallback.delta,
+        &fallback.forwards,
+        &fallback.requires,
+        tool,
+    )?);
+    Ok(())
+}
+
 fn check_placeholder(
     registry: &AudienceRegistry,
     placeholder: &SelectorPlaceholder,
@@ -2172,6 +2224,7 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new(by),
+            on_no_answer: None,
         }
     }
 
@@ -3324,6 +3377,7 @@ mod tests {
                 description: None,
                 parameters: crate::params::ToolParameters::open(),
                 annotator: AnnotatorName::new("any"),
+                on_no_answer: None,
             }];
             Registry::build_covered(cfg)
         };
@@ -3999,5 +4053,70 @@ mod tests {
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(8).expect("nonzero")).is_ok());
+    }
+    fn produced(delta: Delta, requires: Requires) -> crate::contract::ProducedAnnotation {
+        crate::contract::ProducedAnnotation {
+            delta,
+            forwards: Delta::NONE,
+            emits: EffectSet::default(),
+            requires,
+        }
+    }
+
+    fn fallback_route(name: &str, produced: crate::contract::ProducedAnnotation) -> ToolDeclaration {
+        ToolDeclaration::Annotated {
+            name: ToolName::new(name),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new("classifier"),
+            on_no_answer: Some(produced),
+        }
+    }
+
+    #[test]
+    fn a_fallback_requires_attention_and_loads_under_the_declared_rules() {
+        let review = || Requires {
+            attention: vec![MarkName::new("review")],
+            ..Requires::default()
+        };
+
+        let mut cfg = base();
+        cfg.annotators = vec![annotator("classifier")];
+        cfg.tools = vec![fallback_route("shell", produced(Delta::NONE, Requires::default()))];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::FallbackWithoutAttention { tool }) if tool == "shell"
+        ));
+
+        let out_of_chain = Delta {
+            trust: Some(Trust::new(9)),
+            audience: None,
+        };
+        let mut cfg = base();
+        cfg.annotators = vec![annotator("classifier")];
+        cfg.tools = vec![fallback_route("shell", produced(out_of_chain, review()))];
+        assert!(matches!(Registry::build_covered(cfg), Err(LoadError::RankOutOfChain { .. })));
+    }
+
+    #[test]
+    fn the_wildcard_fallback_loads_under_the_declared_rules_too() {
+        let out_of_chain = Delta {
+            trust: Some(Trust::new(9)),
+            audience: None,
+        };
+        let mut cfg = base();
+        cfg.annotators = vec![annotator("classifier")];
+        cfg.tools = vec![fallback_route(
+            crate::registry::WILDCARD_SPELLING,
+            produced(
+                out_of_chain,
+                Requires {
+                    attention: vec![MarkName::new("review")],
+                    ..Requires::default()
+                },
+            ),
+        )];
+        assert!(matches!(Registry::build_covered(cfg), Err(LoadError::RankOutOfChain { .. })));
     }
 }
