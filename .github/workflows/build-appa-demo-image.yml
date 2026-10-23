@@ -53,10 +53,11 @@ jobs:
 
       - name: Authenticate to Artifact Registry
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-        uses: ./.github/actions/auth-to-gar
+        uses: archestra-ai/.github/actions/google-auth@d3a50799fd699bd774eb02e9e1be522639b3dcaa
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          registry: europe-west1-docker.pkg.dev
 
       - name: Push image
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'

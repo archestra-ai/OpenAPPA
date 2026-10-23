@@ -74,7 +74,7 @@ jobs:
 
       - name: Authenticate to Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        uses: archestra-ai/.github/actions/google-auth@d3a50799fd699bd774eb02e9e1be522639b3dcaa
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
