@@ -1,11 +1,11 @@
 "use client";
 
-// The /playground chat: demo-card chrome around a real chat UI (AI Elements),
+// The /playground chat: demo chrome around a real chat UI (AI Elements),
 // driven by the appa-demo service — the visitor's own OpenRouter key, the
 // policy shown beside the chat actually enforced, any prompt.
 //
 // Everything shown is a live run. There is no canned transcript: when the
-// service is unreachable the card says so and the composer is disabled, rather
+// service is unreachable the chat says so and the composer is disabled, rather
 // than replaying something that only looks live.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +35,17 @@ import {
   streamTurn,
 } from "./demo-client";
 import { type LabelState, PLAYGROUND_MODEL } from "./playground-data";
+import {
+  type ParsedPlan,
+  type Ruling,
+  type StreamState,
+  type ThreadItem,
+  PROTOCOL_TOOLS,
+  applyEvent,
+  isRemedyCall,
+  offerOf,
+  splitRuling,
+} from "./stream";
 import { NEW_CHAT_EVENT } from "@/components/DocsSidebar";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
 import { registerPixelMarks } from "@/components/pixel-marks";
@@ -51,57 +62,6 @@ declare module "react" {
     }
   }
 }
-
-type ThreadItem = { lab?: LabelState } & (
-  | { id: number; t: "user"; text: string }
-  | { id: number; t: "text"; text: string; traj?: string }
-  | { id: number; t: "note"; text: string; traj?: string }
-  | {
-      id: number;
-      t: "tool";
-      callId: string;
-      name: string;
-      args: Record<string, unknown>;
-      state: "running" | "done" | "blocked";
-      output?: string;
-      /** The result body the model read, verbatim. */
-      result?: string;
-      blocked?: string;
-      /** Set when the engine refused this protocol call outright. */
-      refused?: boolean;
-      /** Set when the raw result was withheld and a sanitizer's derivation admitted. */
-      sanitizedBy?: string;
-      /** Set when the call ran under an authority's ruling. */
-      approvedBy?: string;
-      /**
-       * A resolution card: the held call, run again after its remedy. The
-       * original card keeps the block; this one carries the outcome.
-       */
-      echo?: boolean;
-      /** Which trajectory this happened on; child ids render as a branch. */
-      traj?: string;
-    }
-  | {
-      id: number;
-      t: "approval";
-      /** The service-side approval id the answer posts back to. */
-      approvalId: string;
-      tool: string;
-      /** The authority the policy consulted, named in the request. */
-      authority?: string;
-      detail: string;
-      state: "pending" | "approved" | "denied" | "expired";
-    }
-  /** APPA's turn on a held call: the ruling text, rendered as a speaker. */
-  | { id: number; t: "verdict"; text: string; traj?: string; tool?: string }
-  /** The root label moved: a marker row that recolors the rail below it. */
-  | { id: number; t: "shift"; from: LabelState; to: LabelState; cause?: string }
-  /** Where the session entered: the label's opening row in the stream. */
-  | { id: number; t: "entry"; label: LabelState }
-  /** The closing recap of a demo case: what the path just showed and why. */
-  | { id: number; t: "authors"; text: string }
-  | { id: number; t: "rule" }
-);
 
 type Mode = "probing" | "live" | "down";
 
@@ -138,19 +98,12 @@ const STARTER_PROMPTS = [
   },
 ];
 
-/**
- * The harness's own tools (`appa_runtime::tool`). Feedback on these is
- * protocol dialogue — an acknowledgment, a cost statement, a stale-offer
- * notice — never a policy ruling on a flow; rulings land on the blocked
- * tool's own card. So their cards close calmly instead of styling as errors.
- */
 /* Every reference into the policy wears the same clothes: mono, a dotted
    underline that lifts to the accent on hover. Pills boxed each mention and
    broke the line's rhythm wherever a sentence carried two of them. */
 const REFERENCE_CLASS =
   "cursor-pointer font-mono text-[12.5px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4 hover:text-[var(--accent)] hover:decoration-[var(--accent)]";
 
-const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"]);
 
 /** Resizing floors: the policy pane and the chat pane each keep a readable
  *  minimum. The chat floor matches the grid's larger (xl) floor so a drag
@@ -158,81 +111,6 @@ const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"])
 const SIDEBAR_MIN_PX = 320;
 const CHAT_MIN_PX = 480;
 
-/**
- * A ruling arrives as the model sees it: a sentence naming what failed and
- * what would fix it, then the machine-readable gaps and remedy plans. The card
- * leads with the sentence and keeps the payload as scrollable detail.
- *
- * Both kinds are the engine doing its job, never a malfunction, so neither
- * wears error styling. They differ in what they ask of the agent: a
- * `narrowing` is a price — the call's own contract would drop the session
- * label, and dispatch waits for an acceptance or a fork — while a `refusal`
- * is a gate — the label does not meet the tool's requirements, and the
- * ruling names the remedies. For a narrowing the card names the concrete
- * consequence per dimension: a trust drop taints the session, an audience
- * shrink makes it confidential.
- */
-/** One executable plan the block offers, with everything its option line needs. */
-type ParsedPlan = {
-  id: string;
-  /** The authorities the plan consults, each with the operator's hint. */
-  rulings: { authority: string; hint?: string }[];
-  /** The output sanitizer the plan binds, with its hint. */
-  sanitize?: { sanitizer: string; hint?: string };
-  /** Whether executing the plan accepts the block's narrowing. */
-  accepts: boolean;
-};
-
-type Ruling = { plans: ParsedPlan[]; summary: string; detail?: string } & (
-  | { kind: "refusal" }
-  | {
-      kind: "narrowing";
-      dimension: "trust" | "audience" | "both";
-      /** The readers left, when the shrunk audience is a concrete set. */
-      readers?: string[];
-      /** The target trust rank — an index into the policy's trust chain. */
-      toTrustRank?: number;
-    }
-);
-
-/** The executable entries of `remedy_plans`; id-less redispatch advice stays in the payload. */
-function parsePlans(plans: unknown): ParsedPlan[] {
-  if (!Array.isArray(plans)) return [];
-  return plans.flatMap((plan) => {
-    const entry = plan as {
-      plan_id?: unknown;
-      rulings?: { authority?: unknown; hint?: unknown }[];
-      sanitizes?: { sanitizer?: unknown; hint?: unknown };
-      accepts_narrowing?: unknown;
-    };
-    if (typeof entry.plan_id !== "string") return [];
-    const rulings = (Array.isArray(entry.rulings) ? entry.rulings : []).flatMap((ruling) =>
-      typeof ruling.authority === "string"
-        ? [
-            {
-              authority: ruling.authority,
-              hint: typeof ruling.hint === "string" ? ruling.hint : undefined,
-            },
-          ]
-        : [],
-    );
-    const sanitize =
-      typeof entry.sanitizes?.sanitizer === "string"
-        ? {
-            sanitizer: entry.sanitizes.sanitizer,
-            hint: typeof entry.sanitizes.hint === "string" ? entry.sanitizes.hint : undefined,
-          }
-        : undefined;
-    return [
-      {
-        id: entry.plan_id,
-        rulings,
-        sanitize,
-        accepts: Boolean(entry.accepts_narrowing),
-      },
-    ];
-  });
-}
 
 /** Drop the protocol instruction the runtime appends for the model. */
 function readable(summary: string): string {
@@ -365,48 +243,6 @@ function asProse(text: string): string {
     .trim();
 }
 
-function splitRuling(text: string): Ruling {
-  const start = text.indexOf("\n{");
-  if (start === -1) return { kind: "refusal", summary: text, plans: [] };
-  const summary = text.slice(0, start).trim();
-  const detail = text.slice(start + 1);
-  try {
-    const parsed = JSON.parse(detail) as {
-      narrowing?: {
-        from?: Record<string, unknown>;
-        to?: Record<string, unknown>;
-      };
-      requirement_gaps?: unknown[];
-      remedy_plans?: unknown;
-    };
-    const pretty = JSON.stringify(parsed, null, 2);
-    const plans = parsePlans(parsed.remedy_plans);
-    const narrowing = parsed.narrowing;
-    if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
-    const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
-    const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // A concrete reader set arrives as `{"Restricted": [...]}` and a trust rank
-    // as a plain chain index. Any other shape (e.g. `"Public"`) makes these
-    // sentences fall back to "fewer readers" and "less trusted" instead of
-    // naming the real thing.
-    const audience = narrowing.to?.audience as { Restricted?: unknown } | undefined;
-    const restricted = audience?.Restricted;
-    const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
-    const trustValue = narrowing.to?.trust;
-    const toTrustRank = typeof trustValue === "number" ? trustValue : undefined;
-    return {
-      kind: "narrowing",
-      dimension,
-      readers,
-      toTrustRank,
-      summary,
-      detail: pretty,
-      plans,
-    };
-  } catch {
-    return { kind: "refusal", summary, detail, plans: [] };
-  }
-}
 
 /**
  * The policy's trust ranks, least-trusted first, read from the policy's own
@@ -442,7 +278,7 @@ function segmentThread(
 
 /** The turns that belong to the APPA ↔ agent exchange, boxed as one. */
 function isExchange(item: ThreadItem): boolean {
-  return item.t === "verdict" || item.t === "approval" || (item.t === "tool" && item.name === "execute_remedy_plan");
+  return item.t === "verdict" || item.t === "approval" || (item.t === "tool" && isRemedyCall(item.name));
 }
 
 // Toolbar chrome, matching the site's style strings.
@@ -465,10 +301,10 @@ const chrome = {
  */
 export function ChatPlayground() {
   const [mode, setMode] = useState<Mode>(DEMO_URL ? "probing" : "down");
-  const [thread, setThread] = useState<ThreadItem[]>([]);
-  // Trajectories forked off the root this session; their items render as a
-  // collapsed branch instead of inline root activity.
-  const [childIds, setChildIds] = useState<ReadonlySet<string>>(new Set());
+  // The chat so far, the root label, and the trajectories forked off the
+  // root this session (their items render as a collapsed branch).
+  const [stream, setStream] = useState<StreamState>({ thread: [], label: null, children: new Set() });
+  const { thread, children: childIds } = stream;
   // Null until the loader reports where a turn enters under the current
   // policy; there is nothing honest to show before that.
   const [boundary, setBoundary] = useState<LabelState | null>(null);
@@ -551,7 +387,8 @@ export function ChatPlayground() {
             // With no session running the label simply *is* the boundary.
             // Once a session exists its live label owns it until New chat.
             if (!sessionRef.current) {
-              labelRef.current = result.boundary;
+              const boundary = result.boundary;
+              setStream((prev) => ({ ...prev, label: boundary }));
             }
           }
           // Silence on success: a policy that loads has nothing to announce.
@@ -613,83 +450,16 @@ export function ChatPlayground() {
   // Every pushed item is stamped with the root label at that moment — the
   // rail beside the thread is this history, not a live value.
   const push = (item: ThreadItem) =>
-    setThread((prev) => [...prev, { ...item, lab: item.lab ?? labelRef.current ?? undefined }]);
+    setStream((prev) => ({ ...prev, thread: [...prev.thread, { ...item, lab: item.lab ?? prev.label ?? undefined }] }));
 
-  // The root trajectory's current label, readable from `applyEvent`.
-  const labelRef = useRef<LabelState | null>(null);
-  // Mirror of `childIds` for the same reason.
-  const childIdsRef = useRef<Set<string>>(new Set());
 
-  /**
-   * Route a remedy's outcome to a resolution card: the held card keeps its
-   * block, and a second card for the same call — appended after the APPA and
-   * agent turns — carries what the remedy produced. Created on the first
-   * outcome event of the batch, patched by the rest.
-   */
-  const resolveHeld = (
-    prev: ThreadItem[],
-    patch: Partial<Extract<ThreadItem, { t: "tool" }>>,
-    sanitizer?: string,
-  ): ThreadItem[] => {
-    /* Which held call this outcome belongs to. The wire carries no call id on
-       a result, and the agent can have several calls held at once — taking
-       "the last held card" then routed every outcome to the same call, so one
-       resolution card was overwritten and the other never appeared.
-
-       A sanitizer names itself, and only one held ruling offered it, so that
-       is the reliable match. Failing that, outcomes arrive in the order the
-       remedies were taken, so the oldest still-unresolved call is next. */
-    const resolved = (item: Extract<ThreadItem, { t: "tool" }>) =>
-      prev.some((entry) => entry.t === "tool" && entry.echo && entry.callId === `${item.callId}+resolved`);
-    const isHeld = (item: ThreadItem): item is Extract<ThreadItem, { t: "tool" }> =>
-      item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name);
-    const offers = (item: Extract<ThreadItem, { t: "tool" }>) =>
-      Boolean(
-        sanitizer &&
-        item.blocked &&
-        splitRuling(item.blocked).plans.some((plan) => plan.sanitize?.sanitizer === sanitizer),
-      );
-
-    // The sanitizer match ignores whether the call already has a resolution
-    // card: the outcome batch opens that card, and this event patches it.
-    let heldAt = sanitizer ? prev.findIndex((item) => isHeld(item) && offers(item)) : -1;
-    if (heldAt === -1) heldAt = prev.findIndex((item) => isHeld(item) && !resolved(item));
-    if (heldAt === -1) heldAt = prev.findLastIndex(isHeld);
-    if (heldAt === -1) return prev;
-    const held = prev[heldAt] as Extract<ThreadItem, { t: "tool" }>;
-    // The echo belongs to this call, not merely to a call of the same name.
-    const echoAt = prev.findIndex(
-      (item) => item.t === "tool" && Boolean(item.echo) && item.callId === `${held.callId}+resolved`,
-    );
-    if (echoAt !== -1)
-      return prev.map((item, at) => (at === echoAt && item.t === "tool" ? { ...item, ...patch } : item));
-    return [
-      ...prev,
-      {
-        id: ++idRef.current,
-        t: "tool",
-        echo: true,
-        callId: `${held.callId}+resolved`,
-        name: held.name,
-        args: held.args,
-        state: "done",
-        output: "ran",
-        traj: held.traj,
-        lab: labelRef.current ?? undefined,
-        ...patch,
-      },
-    ];
-  };
 
   const resetChat = useCallback(() => {
     runRef.current += 1;
     abortRef.current?.abort();
     if (sessionRef.current) deleteSession(sessionRef.current);
     sessionRef.current = null;
-    setThread([]);
-    childIdsRef.current = new Set();
-    setChildIds(new Set());
-    labelRef.current = boundary;
+    setStream({ thread: [], label: boundary, children: new Set() });
     setBusy(false);
     setTurns(0);
     setInput("");
@@ -707,332 +477,13 @@ export function ChatPlayground() {
 
   // ---- live path ----------------------------------------------------------
 
-  const applyEvent = useCallback((event: DemoEvent) => {
-    switch (event.type) {
-      case "says":
-        push({
-          id: nextId(),
-          t: "text",
-          text: event.text,
-          traj: event.trajectory,
-        });
-        break;
-      case "tool_proposed": {
-        // Light the contract the engine is about to check. The harness's own
-        // tools have no contract in the editor.
-        const item: ThreadItem = {
-          id: nextId(),
-          t: "tool",
-          callId: event.call_id,
-          name: event.tool,
-          args: event.arguments,
-          state: "running",
-          traj: event.trajectory,
-          lab: labelRef.current ?? undefined,
-        };
-        setThread((prev) => {
-          /* A remedy answers one ruling, so it belongs under that ruling. Plan
-             ids are unique across a batch, so the offer identifies its block
-             exactly — appending instead filed every remedy under whichever
-             ruling happened to be last. */
-          const planId = event.tool === "execute_remedy_plan" ? event.arguments.plan_id : undefined;
-          if (typeof planId === "string") {
-            const verdictAt = prev.findIndex(
-              (entry) => entry.t === "verdict" && splitRuling(entry.text).plans.some((plan) => plan.id === planId),
-            );
-            if (verdictAt !== -1) {
-              // Past any remedy already filed under the same ruling.
-              let after = verdictAt + 1;
-              while (after < prev.length) {
-                const entry = prev[after];
-                if (entry.t !== "tool" || !PROTOCOL_TOOLS.has(entry.name)) break;
-                after++;
-              }
-              const next = [...prev];
-              next.splice(after, 0, item);
-              return next;
-            }
-          }
-          // The agent's remedy choice precedes the approval it triggers, but
-          // the elicitation can hit the wire first: slot a protocol call in
-          // front of any still-pending approval so the screen keeps the
-          // causal order — choose, then ask the human.
-          let at = prev.length;
-          if (PROTOCOL_TOOLS.has(event.tool))
-            while (at > 0) {
-              const before = prev[at - 1];
-              if (before.t === "approval" && before.state === "pending") at--;
-              else break;
-            }
-          return [...prev.slice(0, at), item, ...prev.slice(at)];
-        });
-        break;
-      }
-      case "blocked":
-        // The runtime has one channel for text fed back to the model on a
-        // call, and it carries harness acknowledgments as well as rulings —
-        // "result submitted to the parent" arrives the same way a refusal
-        // does. Feedback on the harness's own protocol tools (submit_result,
-        // fork) is an outcome, not a ruling, so it closes the card calmly
-        // instead of wearing the error styling.
-        setThread((prev) => {
-          const index = prev.findIndex(
-            (item) => item.t === "tool" && item.callId === event.call_id && item.state === "running",
-          );
-          if (index === -1) return prev;
-          const item = prev[index] as Extract<ThreadItem, { t: "tool" }>;
-          // A block on a protocol call is the engine refusing the agent's own
-          // move — the card has to say so, or a rejected remedy reads exactly
-          // like one that worked.
-          if (PROTOCOL_TOOLS.has(item.name))
-            return prev.map((entry, at) =>
-              at === index
-                ? {
-                    ...item,
-                    state: "done" as const,
-                    output: event.text,
-                    refused: true,
-                  }
-                : entry,
-            );
-          // The card records the hold; the ruling itself is APPA's own turn.
-          const next = prev.map((entry, at) =>
-            at === index ? { ...item, state: "blocked" as const, blocked: event.text } : entry,
-          );
-          /* File the ruling directly under the call it answers, not at the
-             end of the stream. The agent proposes calls in batches, so the
-             engine's rulings arrive together after them — appending left a
-             run of calls followed by a run of rulings, with nothing saying
-             which answered which. The ruling names its own tool for the same
-             reason: it is matched by `call_id`, never by proximity. */
-          next.splice(index + 1, 0, {
-            id: ++idRef.current,
-            t: "verdict",
-            text: event.text,
-            tool: item.name,
-            traj: item.traj,
-            lab: labelRef.current ?? undefined,
-          });
-          return next;
-        });
-        break;
-      case "tool_result":
-        // The admission and the close land in the same batch, in either
-        // order. Attach to the oldest running world card; failing that, to
-        // the held card whose remedy produced this body — the result belongs
-        // on the call the visitor watched get held, not on the protocol step
-        // that unblocked it — then to any running card, then to the newest
-        // done card still missing its body.
-        setThread((prev) => {
-          const runningWorld = prev.findIndex(
-            (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
-          );
-          if (runningWorld !== -1) {
-            const item = prev[runningWorld] as Extract<ThreadItem, { t: "tool" }>;
-            const next = [...prev];
-            next[runningWorld] = { ...item, result: event.body };
-            return next;
-          }
-          const held = prev.findLastIndex(
-            (item) => item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name),
-          );
-          if (held !== -1) return resolveHeld(prev, { result: event.body });
-          const running = prev.findIndex((item) => item.t === "tool" && item.state === "running");
-          const at =
-            running !== -1
-              ? running
-              : prev.findLastIndex((item) => item.t === "tool" && item.state === "done" && !item.result);
-          const item = prev[at];
-          if (!item || item.t !== "tool") return prev;
-          const next = [...prev];
-          next[at] = { ...item, result: event.body };
-          return next;
-        });
-        break;
-      case "tool_closed":
-        setThread((prev) => {
-          const index = prev.findIndex((item) => item.t === "tool" && item.state === "running");
-          if (index === -1) return prev;
-          const next = [...prev];
-          const item = next[index] as Extract<ThreadItem, { t: "tool" }>;
-          next[index] = {
-            ...item,
-            state: "done",
-            output:
-              event.outcome === "ran"
-                ? event.effects.length
-                  ? `ran, committing [${event.effects.join(", ")}]`
-                  : "ran"
-                : event.outcome,
-          };
-          return next;
-        });
-        break;
-      case "label": {
-        const next = { trust: event.trust, audience: event.audience };
-        // A child's fold is its branch's own story: a line inside the branch
-        // block, never a move on the root rail.
-        if (childIdsRef.current.has(event.trajectory)) {
-          push({
-            id: nextId(),
-            t: "note",
-            text: `branch label → trust: ${event.trust} · audience: ${event.audience}`,
-            traj: event.trajectory,
-          });
-          break;
-        }
-        const from = labelRef.current;
-        if (from && (from.trust !== next.trust || from.audience !== next.audience)) {
-          const shift: ThreadItem = {
-            id: nextId(),
-            t: "shift",
-            from,
-            to: next,
-            lab: next,
-          };
-          /* The service reports the new label after the call's result, but on
-             an accepted narrowing the label moved *before* dispatch — the
-             acceptance is what paid for the call. Rendering the
-             wire order puts the move after the call it authorised, which
-             reads as the wrong causal story. So the move is filed ahead of
-             the resolution cards it paid for.
-
-             Scoped to those cards on purpose: when a narrowing is not
-             accepted but simply admitted with the result, the label really
-             does move after the call, and that order is left alone. */
-          setThread((prev) => {
-            let at = prev.length;
-            while (at > 0) {
-              const above = prev[at - 1];
-              if (above.t !== "tool" || !above.echo) break;
-              at--;
-            }
-            const paid = prev[at];
-            const caused = paid && paid.t === "tool" ? paid.name : undefined;
-            return [...prev.slice(0, at), { ...shift, cause: caused }, ...prev.slice(at)];
-          });
-        }
-        labelRef.current = next;
-        break;
-      }
-      case "approval_requested": {
-        // The policy pane stays where the reader put it: jumping it mid-run
-        // moved the ground under anyone reading, and the stream already names
-        // every rule as a reference they can follow when they choose to.
-        const authority = (event.detail as { authority?: string }).authority;
-        push({
-          id: nextId(),
-          t: "approval",
-          approvalId: event.id,
-          tool: event.tool,
-          authority,
-          detail: JSON.stringify(event.detail, null, 2),
-          state: "pending",
-        });
-        break;
-      }
-      case "approval_resolved":
-        setThread((prev) => {
-          // The paused call resumes under this ruling: say so on its card.
-          const resolved = prev.find((item) => item.t === "approval" && item.approvalId === event.id);
-          const authority = resolved?.t === "approval" ? resolved.authority : undefined;
-          const running = event.approved
-            ? prev.findLastIndex(
-                (item) =>
-                  item.t === "tool" &&
-                  item.state === "running" &&
-                  resolved?.t === "approval" &&
-                  item.name === resolved.tool,
-              )
-            : -1;
-          return prev.map((item, at) => {
-            if (item.t === "approval" && item.approvalId === event.id)
-              return {
-                ...item,
-                state: event.expired ? "expired" : event.approved ? "approved" : "denied",
-              };
-            if (at === running && item.t === "tool" && authority) return { ...item, approvedBy: authority };
-            return item;
-          });
-        });
-        break;
-      case "remedy": {
-        // "narrowing accepted" would repeat what the label separator (root)
-        // or the branch-label note (child) already says: drop it. A ruling
-        // lands on the card it approved instead of floating as a line.
-        const approved = event.text.match(/^approved by (.+)$/);
-        if (approved) {
-          setThread((prev) => {
-            const running = prev.findLastIndex(
-              (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
-            );
-            if (running !== -1)
-              return prev.map((item, at) =>
-                at === running && item.t === "tool" ? { ...item, approvedBy: approved[1] } : item,
-              );
-            return resolveHeld(prev, { approvedBy: approved[1] });
-          });
-          break;
-        }
-        if (event.text.startsWith("narrowing accepted:")) break;
-        push({
-          id: nextId(),
-          t: "note",
-          text: event.text,
-          traj: event.trajectory,
-        });
-        break;
-      }
-      case "sanitized":
-        // Mark the call whose result was replaced: a running world card
-        // completes in place; a held card resolves onto its echo.
-        setThread((prev) => {
-          const running = prev.findLastIndex(
-            (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
-          );
-          if (running !== -1)
-            return prev.map((item, at) =>
-              at === running && item.t === "tool" ? { ...item, sanitizedBy: event.sanitizer } : item,
-            );
-          return resolveHeld(prev, { sanitizedBy: event.sanitizer }, event.sanitizer);
-        });
-        break;
-      case "merge":
-        // A return is its own checked crossing: the branch confined what the
-        // child *kept*, not what it hands back. If the returned value is
-        // restricted, the label event right after shows the parent paying for
-        // it — so say what crossed, not that it was free.
-        push({
-          id: nextId(),
-          t: "note",
-          text: "child returned a value — checked at the merge",
-        });
-        break;
-      case "fork":
-        // No note: the branch block's own header marks the fork.
-        childIdsRef.current = new Set(childIdsRef.current).add(event.child);
-        setChildIds(childIdsRef.current);
-        break;
-      case "answer":
-        // The final answer is already in the log as the last assistant message;
-        // the outcome repeats it, so only append when the loop ended some other way.
-        setThread((prev) => {
-          const lastText = [...prev].reverse().find((item) => item.t === "text");
-          if (lastText && lastText.t === "text" && lastText.text.trim() === event.text.trim()) return prev;
-          return [...prev, { id: nextId(), t: "text", text: event.text }];
-        });
-        setFocus((prev) => (prev ? { ...prev, settled: true } : prev));
-        break;
-      case "stopped":
-        push({ id: nextId(), t: "note", text: event.text });
-        setFocus((prev) => (prev ? { ...prev, settled: true } : prev));
-        break;
-      case "error":
-        push({ id: nextId(), t: "note", text: event.message });
-        setFocus((prev) => (prev ? { ...prev, settled: true } : prev));
-        break;
-    }
+  const receive = useCallback((event: DemoEvent) => {
+    setStream((prev) => applyEvent(prev, event, () => ++idRef.current));
+    // The turn has settled: the engine's focus lingers briefly and fades.
+    if (event.type === "answer" || event.type === "stopped" || event.type === "error")
+      setFocus((prev) => (prev ? { ...prev, settled: true } : prev));
   }, []);
+
 
   const sendLive = useCallback(
     async (text: string) => {
@@ -1044,7 +495,7 @@ export function ChatPlayground() {
       // the session enters under, so a screenshot needs no chrome around it.
       // Before the loader's first answer there is nothing honest to show;
       // then the row is inserted once the session reports where it entered.
-      const entryLabel = labelRef.current ?? boundary;
+      const entryLabel = stream.label ?? boundary;
       const opening = turns === 0;
       const starter = STARTER_PROMPTS.find((prompt) => prompt.text === text);
       if (opening && starter) push({ id: nextId(), t: "authors", text: starter.expectation });
@@ -1057,12 +508,12 @@ export function ChatPlayground() {
           const info = await createSession(policyText, systems, PLAYGROUND_MODEL.id);
           if (runRef.current !== run) return;
           sessionRef.current = info.session;
-          labelRef.current = { trust: info.trust, audience: info.audience };
+          const label = { trust: info.trust, audience: info.audience };
+          setStream((prev) => ({ ...prev, label }));
           if (opening && !entryLabel) {
             // The visitor beat the policy check's debounce: open the stream
             // with the label the session actually entered under.
-            const label = { trust: info.trust, audience: info.audience };
-            setThread((prev) => {
+            setStream(({ thread: prev, ...rest }) => {
               const at = prev.findIndex((item) => item.t === "user");
               const item: ThreadItem = {
                 id: ++idRef.current,
@@ -1070,7 +521,10 @@ export function ChatPlayground() {
                 label,
                 lab: label,
               };
-              return at === -1 ? [item, ...prev] : [...prev.slice(0, at), item, ...prev.slice(at)];
+              return {
+                ...rest,
+                thread: at === -1 ? [item, ...prev] : [...prev.slice(0, at), item, ...prev.slice(at)],
+              };
             });
           }
         }
@@ -1080,7 +534,7 @@ export function ChatPlayground() {
           sessionRef.current,
           text,
           (event) => {
-            if (runRef.current === run) applyEvent(event);
+            if (runRef.current === run) receive(event);
           },
           controller.signal,
         );
@@ -1094,7 +548,7 @@ export function ChatPlayground() {
         if (runRef.current === run) setBusy(false);
       }
     },
-    [applyEvent, boundary, policyText, systems, turns],
+    [boundary, policyText, receive, stream.label, systems, turns],
   );
 
   const send = useCallback(
@@ -1241,7 +695,7 @@ export function ChatPlayground() {
   /**
    * One plan as one option. The price is already stated in the sentence
    * above, so an option says what it *does* rather than restating the cost —
-   * the repetition was most of what made these cards hard to read.
+   * the repetition was most of what made these rulings hard to read.
    */
   const planOption = (plan: ParsedPlan, ruling: Ruling) => {
     const clauses: React.ReactNode[] = [];
@@ -1300,13 +754,24 @@ export function ChatPlayground() {
 
   /**
    * The plan an `execute_remedy_plan` call chose, resolved against the block
-   * that offered it — the nearest earlier blocked card whose ruling carries
+   * that offered it — the nearest earlier blocked call whose ruling carries
    * that plan_id. Lets the choice render in the agent's own voice instead of
    * as a protocol payload.
    */
+  const chosenOption = (item: Extract<ThreadItem, { t: "tool" }>) => {
+    const offerId = offerOf(item.args);
+    if (offerId === undefined) return null;
+    for (const entry of thread)
+      if (entry.t === "verdict") {
+        const option = entry.options?.find((candidate) => candidate.offer_id === offerId);
+        if (option) return option;
+      }
+    return null;
+  };
+
   const chosenPlan = (item: Extract<ThreadItem, { t: "tool" }>) => {
-    const planId = item.args.plan_id;
-    if (typeof planId !== "string") return null;
+    const planId = offerOf(item.args);
+    if (planId === undefined) return null;
     const at = thread.findIndex((entry) => entry.id === item.id);
     for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
       const prev = thread[index];
@@ -1319,6 +784,37 @@ export function ChatPlayground() {
   };
 
   const renderItem = (item: ThreadItem, group?: { first: boolean; last: boolean }) => {
+    if (item.t === "verdict" && item.reasons?.length) {
+      // The runtime's own account for a person: why the call is held and what
+      // the agent may do about it. The instructions the model read stay out.
+      const subject = item.tool ? entityPill(item.tool) : <>This call</>;
+      return exchangeShell(
+        group,
+        <div className="text-[13.5px] leading-relaxed">
+          <p className="m-0">
+            {appaWho()}
+            {subject} is paused until the agent picks an option.
+          </p>
+          <ul className="m-0 mt-1 list-disc pl-5 text-[var(--text)]">
+            {item.reasons.map((reason) => (
+              <li key={reason}>{asProse(reason)}</li>
+            ))}
+          </ul>
+          {item.options && item.options.length > 0 && (
+            <>
+              <p className="m-0 mt-2 text-[var(--text)]">Options:</p>
+              <ol className="m-0 mt-0.5 list-decimal pl-5">
+                {item.options.map((option) => (
+                  <li className="my-1" key={option.offer_id}>
+                    {option.text}
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </div>,
+      );
+    }
     if (item.t === "verdict") {
       const ruling = splitRuling(item.text);
       const warnKind = ruling.kind === "narrowing";
@@ -1472,8 +968,9 @@ export function ChatPlayground() {
     }
     // The agent's remedy choice, in its own voice: "I choose to use X" says
     // more than a protocol payload. The wire call stays available underneath.
-    if (item.name === "execute_remedy_plan") {
+    if (isRemedyCall(item.name)) {
       const chosen = chosenPlan(item);
+      const option = chosen ? null : chosenOption(item);
       // The agent's answer, short: APPA has just stated the price, so the
       // reply names the choice and stops.
       const sentence = chosen ? (
@@ -1498,8 +995,10 @@ export function ChatPlayground() {
             ))}
           .
         </>
+      ) : option ? (
+        <>Choosing: {option.text}.</>
       ) : (
-        <>Taking remedy plan {typeof item.args.plan_id === "string" ? item.args.plan_id : "…"}.</>
+        <>Taking remedy {offerOf(item.args) ?? "…"}.</>
       );
       return exchangeShell(
         group,
@@ -1510,18 +1009,18 @@ export function ChatPlayground() {
           </div>
           {/* The engine can refuse the move itself — an offer belongs to the
                 block that made it, and that block may already be settled.
-                Without this the card reads as though the plan was taken. */}
+                Without this the call reads as though the plan was taken. */}
           {item.refused && (
             <div className="mt-1 text-[12.5px] text-[var(--warn)]">
               {speaker("appa")}
-              {refusal(item.output, Boolean(chosen))}
+              {refusal(item.output, Boolean(chosen ?? option))}
             </div>
           )}
         </div>,
       );
     }
     const ruling = item.state === "blocked" && item.blocked ? splitRuling(item.blocked) : null;
-    /* A tool call is a line on the spine, not a card. The arrow carries the
+    /* A tool call is a line on the spine. The arrow carries the
        direction — out to the world, or a result coming back — which is what
        the wrench never said; the name is mono because it is an identifier;
        and the one status that matters sits at the end of the line. What was
@@ -1562,7 +1061,7 @@ export function ChatPlayground() {
                 "Click to see this tool's contract in the policy",
               )
             )}
-            {args.length > 0 && (
+            {(args.length > 0 || item.result !== undefined) && (
               <button
                 className="ml-1.5 cursor-pointer font-mono text-[12px] text-[var(--icon)] hover:text-[var(--text-strong)]"
                 onClick={() =>
@@ -1575,7 +1074,8 @@ export function ChatPlayground() {
                 }
                 type="button"
               >
-                ({argsOpen ? "hide arguments" : "arguments"})
+                ({argsOpen ? "hide " : ""}
+                {args.length === 0 ? "result" : item.result === undefined ? "arguments" : "arguments and result"})
               </button>
             )}
             {item.output && <span className="font-mono text-[11.5px] text-[var(--text-weak)]"> · {item.output}</span>}
@@ -1592,6 +1092,12 @@ export function ChatPlayground() {
                 </span>
               </div>
             ))}
+            {item.result !== undefined && (
+              <div className={`flex gap-2 break-words ${args.length > 0 ? "mt-1" : ""}`}>
+                <span className="shrink-0 text-[var(--icon)]">{"\u2190"}</span>
+                <span className="whitespace-pre-wrap text-[var(--text)]">{item.result || "(empty)"}</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1729,7 +1235,7 @@ export function ChatPlayground() {
                 mode === "live" ? (
                   // Column count follows the pane (container), not the
                   // viewport — the sidebar leaves the chat far narrower than
-                  // the breakpoint suggests. Safe centering: when the cards
+                  // the breakpoint suggests. Safe centering: when the tiles
                   // outgrow the pane, align to the scrollable top instead of
                   // clipping both ends.
                   /* Four choices and nothing else. A fill alone did not read as
@@ -1857,7 +1363,7 @@ export function ChatPlayground() {
                             : undefined;
                           // A paused call and the exchange it opened are one
                           // thought: drop the gap between them so the nested
-                          // block hangs off the card instead of floating free.
+                          // block hangs off the call instead of floating free.
                           const opensExchange =
                             item.t === "tool" &&
                             item.state === "blocked" &&
@@ -1891,7 +1397,7 @@ export function ChatPlayground() {
                         }),
                   )}
                   {/* Between the model's moves nothing on screen is alive —
-                    running cards pulse, pending approvals wear a badge, and
+                    running calls pulse, pending approvals wear a badge, and
                     this row covers the remaining silence. */}
                   {busy &&
                     !thread.some((item) => item.t === "tool" && item.state === "running") &&
@@ -1899,7 +1405,7 @@ export function ChatPlayground() {
                     spineRow(
                       -1,
                       <div className="animate-pulse font-mono text-[11px] text-[var(--icon)]">⎿ thinking…</div>,
-                      labelRef.current ?? undefined,
+                      stream.label ?? undefined,
                     )}
                   {/* The run has played out and nothing is pending: offer a
                     fresh start where the eye already is, at the foot of the

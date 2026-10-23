@@ -433,14 +433,18 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     )
     .await;
     let HookDecision::DenyCall { offers, review, .. } = publication else {
-        panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
+        panic!("a trajectory narrowed to `self` requires a remedy before publishing: {publication:?}");
     };
+    let rewrites: Vec<_> = offers
+        .iter()
+        .filter_map(|offer| offer.input_sanitizer.as_ref().map(|sanitizer| sanitizer.name.as_str()))
+        .collect();
     assert_eq!(
-        offers.len(),
-        1,
-        "the default authority can review the audience expansion"
+        (offers.len(), rewrites),
+        (2, vec!["redact-for-public"]),
+        "the default authority can review the audience expansion, or the model sanitizer can rewrite the call for `public`"
     );
-    assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
+    assert_eq!(review.len(), 1, "one offer is backed by the default human authority");
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),

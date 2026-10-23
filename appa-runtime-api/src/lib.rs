@@ -396,13 +396,15 @@ pub enum ToolOutcome {
     Indeterminate,
 }
 
-/// The tool output body, where available. `Unavailable` records a
-/// success whose body the runtime refused to carry (for example, over
-/// the byte cap — the cap is the runtime's to apply, so the adapter
-/// carries the body it saw).
+/// The tool output body, where available. `TooLarge` records a success
+/// whose body was over a byte cap, with the cap when the side that applied
+/// it knows it (the cap is the runtime's to apply, so an adapter carries the
+/// body it saw). `Unavailable` records a success the harness reported
+/// without a body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutcomeBody {
     Available(String),
+    TooLarge { limit_bytes: Option<usize> },
     Unavailable,
 }
 

@@ -9,9 +9,19 @@ export const DEMO_URL = process.env.NEXT_PUBLIC_APPA_DEMO_URL ?? "";
 export type DemoEvent =
   | { type: "says"; trajectory: string; text: string }
   | { type: "tool_proposed"; trajectory: string; call_id: string; tool: string; arguments: Record<string, unknown> }
-  | { type: "blocked"; trajectory: string; call_id: string; text: string }
-  | { type: "tool_closed"; trajectory: string; outcome: string; effects: string[] }
-  | { type: "tool_result"; trajectory: string; body: string }
+  | {
+      type: "blocked";
+      trajectory: string;
+      call_id: string;
+      /** What the model read. */
+      text: string;
+      /** The same ruling for a person: why the call is held, and what the agent may do. */
+      reasons?: string[];
+      options?: BlockOption[];
+    }
+  | { type: "tool_closed"; trajectory: string; call_id: string; outcome: string; effects: string[] }
+  | { type: "tool_result"; trajectory: string; call_id: string; body: string }
+  | { type: "offer_taken"; trajectory: string; call_id: string; detail: string; value: string | null }
   | { type: "label"; trajectory: string; trust: string; audience: string }
   | { type: "remedy"; trajectory: string; text: string }
   | { type: "sanitized"; trajectory: string; sanitizer: string }
@@ -22,6 +32,9 @@ export type DemoEvent =
   | { type: "answer"; text: string }
   | { type: "stopped"; text: string }
   | { type: "error"; message: string };
+
+/** One remedy a block offers, keyed by the `offer_id` the agent passes to take it. */
+export type BlockOption = { offer_id: string; text: string };
 
 export type SessionInfo = {
   session: string;

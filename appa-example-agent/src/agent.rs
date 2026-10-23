@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::api::{EmbeddedPresentationOptions, RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnKind,
@@ -462,7 +462,13 @@ impl Run<'_> {
             prompt: None,
             ruling: None,
         };
-        match hooks::handle(&self.agent.runtime, event).await {
+        // A block advises delegating only when this frame can open a child.
+        let presentation = EmbeddedPresentationOptions {
+            supports_delegation: self.agent.spawn.is_some() && self.budget.fork_availability(frame.depth).is_ok(),
+            ..EmbeddedPresentationOptions::default()
+        };
+        let handled = hooks::handle_embedded_with_options(&self.agent.runtime, event, presentation).await;
+        match handled.decision {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback, .. } => {
                 let feedback = self.with_spawn_context(frame, feedback);
@@ -472,12 +478,15 @@ impl Run<'_> {
                         call: id,
                         tool: proposed.tool.clone(),
                         feedback: feedback.clone(),
+                        display: handled
+                            .presentation
+                            .and_then(|presentation| presentation.display.into_iter().next()),
                     },
                 )
                 .await;
                 Ok(Answered::Reply(feedback))
             }
-            HookDecision::PassControl => self.execute_remedy(frame, &proposed).await,
+            HookDecision::PassControl => self.execute_remedy(frame, id, &proposed).await,
             HookDecision::Refuse { detail, .. } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
@@ -656,7 +665,7 @@ impl Run<'_> {
                 body: OutcomeBody::Available(body),
             } => body.clone(),
             ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
+                body: OutcomeBody::Unavailable | OutcomeBody::TooLarge { .. },
             } => String::new(),
             ToolOutcome::Failure { message } => message.clone(),
             ToolOutcome::Indeterminate => "The tool's outcome is unknown; it may have run.".to_string(),
@@ -718,73 +727,76 @@ impl Run<'_> {
         }
     }
 
-    async fn execute_remedy(&mut self, frame: &mut Frame, call: &ProposedCall) -> Result<Answered, StopReason> {
+    async fn execute_remedy(
+        &mut self,
+        frame: &mut Frame,
+        id: CallId,
+        call: &ProposedCall,
+    ) -> Result<Answered, StopReason> {
         let (offer, arguments) = match appa_runtime::api::parse_control_arguments(call.arguments.get()) {
             Ok(parsed) => parsed,
             Err(_) => {
-                return Ok(Answered::Reply(format!(
-                    "{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
-                )));
-            }
-        };
-        let acting = self.actor(frame);
-        let reply = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
-            RemedyOutcome::Authorized { call } => {
-                self.record(
-                    frame,
-                    Record::OfferTaken {
-                        detail: format!("{} may now run", call.tool),
-                    },
-                )
-                .await;
-                format!(
-                    "Authorized. Call the {} tool with exactly these arguments to run it: {}",
-                    call.tool,
-                    call.arguments.get(),
-                )
-            }
-            RemedyOutcome::Returned { value } => {
-                self.record(
-                    frame,
-                    Record::OfferTaken {
-                        detail: "a value crossed".to_string(),
-                    },
-                )
-                .await;
-                value
-            }
-            RemedyOutcome::Declined { presentation } => {
+                let feedback =
+                    format!("{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it.");
                 self.record(
                     frame,
                     Record::OfferRefused {
-                        feedback: presentation.feedback.clone(),
-                    },
-                )
-                .await;
-                presentation.feedback
-            }
-            RemedyOutcome::NoAnswer { feedback } => {
-                self.record(
-                    frame,
-                    Record::OfferRefused {
+                        call: id,
                         feedback: feedback.clone(),
                     },
                 )
                 .await;
-                feedback
-            }
-            RemedyOutcome::Refused { reason } => {
-                let detail = reason.detail().to_string();
-                self.record(
-                    frame,
-                    Record::OfferRefused {
-                        feedback: detail.clone(),
-                    },
-                )
-                .await;
-                detail
+                return Ok(Answered::Reply(feedback));
             }
         };
+        let acting = self.actor(frame);
+        let (record, reply) = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
+            RemedyOutcome::Authorized { call } => (
+                Record::OfferTaken {
+                    call: id,
+                    detail: format!("{} may now run", call.tool),
+                    value: None,
+                },
+                format!(
+                    "Authorized. Call the {} tool with exactly these arguments to run it: {}",
+                    call.tool,
+                    call.arguments.get(),
+                ),
+            ),
+            RemedyOutcome::Returned { value } => (
+                Record::OfferTaken {
+                    call: id,
+                    detail: "a value crossed".to_string(),
+                    value: Some(value.clone()),
+                },
+                value,
+            ),
+            RemedyOutcome::Declined { presentation } => (
+                Record::OfferRefused {
+                    call: id,
+                    feedback: presentation.feedback.clone(),
+                },
+                presentation.feedback,
+            ),
+            RemedyOutcome::NoAnswer { feedback } => (
+                Record::OfferRefused {
+                    call: id,
+                    feedback: feedback.clone(),
+                },
+                feedback,
+            ),
+            RemedyOutcome::Refused { reason } => {
+                let detail = reason.detail().to_string();
+                (
+                    Record::OfferRefused {
+                        call: id,
+                        feedback: detail.clone(),
+                    },
+                    detail,
+                )
+            }
+        };
+        self.record(frame, record).await;
         Ok(Answered::Reply(reply))
     }
 
@@ -862,16 +874,17 @@ impl Run<'_> {
     }
 
     fn with_spawn_context(&self, frame: &Frame, feedback: String) -> String {
-        let context = match &self.agent.spawn {
-            None => "No child-trajectory tool is available in this harness.".to_string(),
-            Some(spawn) => match self.budget.fork_availability(frame.depth) {
+        // Without a spawn tool the block names no child, so there is nothing to qualify.
+        let Some(spawn) = &self.agent.spawn else {
+            return feedback;
+        };
+        let context = match self.budget.fork_availability(frame.depth) {
                 Ok(()) => format!(
                     "A child trajectory is available through the {} tool.",
                     spawn.name.0
                 ),
                 Err(ForkUnavailable::DepthLimit) => "This trajectory is at its child-depth limit; do not delegate again. Use a listed remedy, finish permitted work here, or return control to the parent.".to_string(),
                 Err(ForkUnavailable::RunLimit) => "No child capacity remains in this run; use a listed remedy or finish permitted work here.".to_string(),
-            },
         };
         format!("{feedback}\n\nHarness context:\n  - {context}")
     }

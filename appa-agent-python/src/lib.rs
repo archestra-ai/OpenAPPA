@@ -484,7 +484,12 @@ impl SessionInner {
                 Some(content) if content.len() <= MAX_BODY_BYTES => ToolOutcome::Success {
                     body: OutcomeBody::Available(content.to_string()),
                 },
-                Some(_) | None => ToolOutcome::Success {
+                Some(_) => ToolOutcome::Success {
+                    body: OutcomeBody::TooLarge {
+                        limit_bytes: Some(MAX_BODY_BYTES),
+                    },
+                },
+                None => ToolOutcome::Success {
                     body: OutcomeBody::Unavailable,
                 },
             },
@@ -517,8 +522,11 @@ impl SessionInner {
                 body: OutcomeBody::Available(body),
             } => (body.clone(), true),
             ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
+                body: OutcomeBody::TooLarge { .. },
             } => ("The tool ran; its result was too large to carry.".to_string(), false),
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            } => ("The tool ran; it returned no result.".to_string(), false),
             ToolOutcome::Failure { .. } => ("The tool call failed.".to_string(), false),
             ToolOutcome::Indeterminate => ("The tool's outcome is unknown; it may have run.".to_string(), false),
         };
@@ -973,7 +981,7 @@ async fn invoke_bridge(client: reqwest::Client, url: reqwest::Url, call: &Propos
     match response.status().as_u16() {
         200..=299 => read_capped(response).await,
         413 | 460 => ToolOutcome::Success {
-            body: OutcomeBody::Unavailable,
+            body: OutcomeBody::TooLarge { limit_bytes: None },
         },
         422 => ToolOutcome::Failure {
             message: "the tool endpoint reported a failed call".to_string(),
@@ -992,7 +1000,9 @@ async fn read_capped(mut response: reqwest::Response) -> ToolOutcome {
                 body.extend_from_slice(&chunk[..room.min(chunk.len())]);
                 if body.len() > MAX_BODY_BYTES {
                     return ToolOutcome::Success {
-                        body: OutcomeBody::Unavailable,
+                        body: OutcomeBody::TooLarge {
+                            limit_bytes: Some(MAX_BODY_BYTES),
+                        },
                     };
                 }
             }

@@ -30,19 +30,36 @@ pub enum WireEvent {
         tool: String,
         arguments: serde_json::Value,
     },
+    /// A held call. `text` is what the model read; `reasons` and `options` say the same
+    /// for the person watching, without the instructions written for the model.
     Blocked {
         trajectory: String,
         call_id: String,
         text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        reasons: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        options: Vec<BlockOption>,
     },
     ToolClosed {
         trajectory: String,
+        call_id: String,
         outcome: String,
         effects: Vec<String>,
     },
+    /// The body the model read as the answer to `call_id`.
     ToolResult {
         trajectory: String,
+        call_id: String,
         body: String,
+    },
+    /// The remedy the control call `call_id` chose was carried out; `value`
+    /// is what crossed in place of the held one, when it delivered one.
+    OfferTaken {
+        trajectory: String,
+        call_id: String,
+        detail: String,
+        value: Option<String>,
     },
     Label {
         trajectory: String,
@@ -85,6 +102,13 @@ pub enum WireEvent {
     },
 }
 
+/// One remedy a block offers, keyed by the `offer_id` the model passes to take it.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlockOption {
+    pub offer_id: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LabelText {
     pub trust: String,
@@ -125,64 +149,117 @@ impl LabelText {
     }
 }
 
-pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
-    let trajectory = recorded.trajectory.0.clone();
-    match &recorded.record {
-        Record::Says { text } => vec![WireEvent::Says {
-            trajectory,
-            text: text.clone(),
-        }],
-        Record::Proposes { call, tool, arguments } => vec![WireEvent::ToolProposed {
-            trajectory,
-            call_id: call.0.clone(),
-            tool: tool.clone(),
-            arguments: serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
-        }],
-        Record::Blocked { call, feedback, .. } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: feedback.clone(),
-        }],
-        Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: reason.clone(),
-        }],
-        // A refused call shows as the call that did not run: the text names it as the
-        // runtime's refusal, not a policy block.
-        Record::Refused { call, detail, .. } => vec![WireEvent::Blocked {
-            trajectory,
-            call_id: call.0.clone(),
-            text: format!("[appa] refused: {detail}"),
-        }],
-        Record::Admitted { body, .. } | Record::Substituted { body, .. } | Record::Returned { body, .. } => {
-            vec![WireEvent::ToolResult {
-                trajectory,
-                body: body.clone(),
-            }]
-        }
-        Record::OfferRefused { feedback } => vec![WireEvent::Remedy {
-            trajectory,
-            text: feedback.clone(),
-        }],
-        Record::OfferTaken { .. }
-        | Record::Forked { .. }
-        | Record::ReturnBlocked { .. }
-        | Record::ProviderRetried { .. }
-        | Record::BudgetFinalized
-        | Record::Answers { .. } => Vec::new(),
-    }
-}
-
-/// The audit reader's own state: one dispatch writes its committed effects
-/// and its close as two entries, and the chat resolves one card.
+/// The stream's reader: maps both records to wire events. Every event about
+/// a tool call names it by the harness's call id; the audit carries that id
+/// for each dispatch the runtime opened for an identified call.
 #[derive(Default)]
-pub struct AuditReader {
+pub struct Reader {
+    /// One dispatch writes its committed effects and its close as two
+    /// entries, and the chat resolves one call.
     committed: Vec<String>,
 }
 
-impl AuditReader {
-    pub fn event(&mut self, entry: &AuditEntry) -> Vec<WireEvent> {
+impl Reader {
+    pub fn record(&mut self, recorded: &Recorded) -> Vec<WireEvent> {
+        let trajectory = recorded.trajectory.0.clone();
+        match &recorded.record {
+            Record::Says { text } => vec![WireEvent::Says {
+                trajectory,
+                text: text.clone(),
+            }],
+            Record::Proposes { call, tool, arguments } => {
+                vec![WireEvent::ToolProposed {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    tool: tool.clone(),
+                    arguments: serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
+                }]
+            }
+            Record::Blocked {
+                call,
+                feedback,
+                display,
+                ..
+            } => {
+                let (reasons, options) = match display {
+                    None => (Vec::new(), Vec::new()),
+                    Some(display) => {
+                        // A display plan repeats the reasons after its description, for a host that
+                        // shows one plan alone; the chat shows the reasons once, above the options.
+                        let why = format!("\nWhy: {}", display.reasons.join("; "));
+                        let options = display
+                            .plans
+                            .iter()
+                            .map(|plan| BlockOption {
+                                offer_id: plan.offer_id.clone(),
+                                text: plan.text.strip_suffix(&why).unwrap_or(&plan.text).to_string(),
+                            })
+                            .collect();
+                        (display.reasons.clone(), options)
+                    }
+                };
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: feedback.clone(),
+                    reasons,
+                    options,
+                }]
+            }
+            Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
+                trajectory,
+                call_id: call.0.clone(),
+                text: reason.clone(),
+                reasons: Vec::new(),
+                options: Vec::new(),
+            }],
+            // A refused call shows as the call that did not run: the text names it as the
+            // runtime's refusal, not a policy block.
+            Record::Refused { call, detail, .. } => {
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: format!("[appa] refused: {detail}"),
+                    reasons: Vec::new(),
+                    options: Vec::new(),
+                }]
+            }
+            Record::Admitted { call, body } | Record::Substituted { call, body } | Record::Returned { call, body } => {
+                vec![WireEvent::ToolResult {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    body: body.clone(),
+                }]
+            }
+            Record::OfferTaken { call, detail, value } => {
+                vec![WireEvent::OfferTaken {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    detail: detail.clone(),
+                    value: value.clone(),
+                }]
+            }
+            // The control channel refusing the agent's move is a block on the
+            // control call itself.
+            Record::OfferRefused { call, feedback } => {
+                vec![WireEvent::Blocked {
+                    trajectory,
+                    call_id: call.0.clone(),
+                    text: feedback.clone(),
+                    reasons: Vec::new(),
+                    options: Vec::new(),
+                }]
+            }
+            Record::Forked { .. }
+            | Record::ReturnBlocked { .. }
+            | Record::ProviderRetried { .. }
+            | Record::BudgetFinalized
+            | Record::Answers { .. } => Vec::new(),
+        }
+    }
+
+    pub fn audit(&mut self, entry: &AuditEntry) -> Vec<WireEvent> {
         let trajectory = entry.trajectory.clone();
         match &entry.event {
             AuditEvent::EffectsCommitted { effects } => {
@@ -197,11 +274,17 @@ impl AuditReader {
                     DispatchOutcome::Failed => ("failed", Vec::new()),
                     DispatchOutcome::Unknown => ("indeterminate", Vec::new()),
                 };
-                vec![WireEvent::ToolClosed {
-                    trajectory,
-                    outcome: outcome.to_string(),
-                    effects,
-                }]
+                // A close for a call the host did not identify ends no call;
+                // its result still ends it.
+                match entry.call_id.clone() {
+                    Some(call_id) => vec![WireEvent::ToolClosed {
+                        trajectory,
+                        call_id,
+                        outcome: outcome.to_string(),
+                        effects,
+                    }],
+                    None => Vec::new(),
+                }
             }
             AuditEvent::Released { label, .. } | AuditEvent::Admitted { label } => {
                 vec![label_event(trajectory, label.clone())]

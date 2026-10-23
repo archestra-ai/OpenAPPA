@@ -557,7 +557,7 @@ async fn a_turn_streams_both_what_the_model_did_and_what_the_policy_did() {
     assert_eq!(blocked.len(), 1, "one call was refused: {events:#?}");
     assert_eq!(
         blocked[0]["call_id"], proposed[0]["call_id"],
-        "the block resolves the card its own proposal opened"
+        "the block resolves the call its own proposal opened"
     );
     assert!(
         blocked[0]["text"].as_str().is_some_and(|text| !text.is_empty()),
@@ -584,6 +584,56 @@ async fn a_turn_streams_both_what_the_model_did_and_what_the_policy_did() {
         "answer",
         "the turn's outcome closes the stream"
     );
+}
+
+#[tokio::test]
+async fn every_outcome_names_the_call_that_produced_it() {
+    // Held, remedied, re-run, then run again: two results and two closes
+    // land in one batch, and the remedy's answer names its own control call.
+    let provider = Provider::default();
+    provider
+        .calls("list_customers", serde_json::json!({}))
+        .pursues_the_offer()
+        .calls("list_customers", serde_json::json!({}))
+        .calls("list_customers", serde_json::json!({}))
+        .says("Done.");
+    let service = Service::with(&provider.serve().await, Some("sk-test"), 30);
+    let session = service.open().await;
+
+    let events = service.turn(&session, "Who are our customers?").await.all().await;
+
+    let proposed: Vec<(&str, &str)> = of_kind(&events, "tool_proposed")
+        .iter()
+        .map(|event| (event["tool"].as_str().unwrap(), event["call_id"].as_str().unwrap()))
+        .collect();
+    let [
+        ("list_customers", held),
+        ("appa/execute_remedy_plan", remedy),
+        ("list_customers", rerun),
+        ("list_customers", again),
+    ] = proposed[..]
+    else {
+        panic!("the scripted calls were proposed in order: {events:#?}");
+    };
+
+    let blocked = of_kind(&events, "blocked");
+    assert_eq!(blocked.len(), 1, "only the first read was held: {events:#?}");
+    assert_eq!(blocked[0]["call_id"], held);
+
+    let taken = of_kind(&events, "offer_taken");
+    assert_eq!(taken.len(), 1, "the remedy answered: {events:#?}");
+    assert_eq!(taken[0]["call_id"], remedy, "the remedy's answer resolves its own call");
+
+    let results: Vec<&str> = of_kind(&events, "tool_result")
+        .iter()
+        .map(|event| event["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, [rerun, again], "each body lands on the call that read it");
+    let closed: Vec<&str> = of_kind(&events, "tool_closed")
+        .iter()
+        .map(|event| event["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(closed, [rerun, again], "each close resolves the dispatch it ends");
 }
 
 #[tokio::test]

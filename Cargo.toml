@@ -59,6 +59,27 @@ opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
 
+# `appa plugin install` and `appa bundle` gzip that same executable into the
+# runtime archive, and an install unpacks it again. Through an unoptimized deflate
+# a debug build's archive takes minutes per install; these crates are the codec.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.adler2]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+# The integration tests install, copy and digest the `appa` they built, many times
+# per run. Full debug info makes that binary over 500 MB; line tables keep
+# backtraces' file:line at a fraction of the size, compile and link time.
+[profile.test]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

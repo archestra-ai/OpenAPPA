@@ -256,7 +256,7 @@ builtin = "redact-email"
     })).toEqual({ status: 'done', output: denial.message, error: '' })
     const lines = denial.message.split('\n') as string[]
     const instruction = sanitizer
-      ? lines[lines.findIndex(line => line.includes(`Use sanitizer ${sanitizer}'s result`)) + 1]
+      ? lines[lines.findIndex(line => line.includes(sanitizer)) + 1]
       : denial.message
     const offer = instruction?.match(/offer_id: "([a-f0-9]+)"/)?.[1]
     expect(offer).toBeDefined()
