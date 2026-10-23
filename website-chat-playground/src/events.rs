@@ -17,7 +17,12 @@ use appa_example_agent::{Record, Recorded};
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
 use serde::Serialize;
 
+// The website reads this type as `website/components/playground/wire-events.ts`,
+// which `wire_events::the_website_reads_what_the_service_writes` renders from
+// it, and fails on when the two differ.
+/// One event of a turn's stream.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
     Says {
@@ -70,8 +75,12 @@ pub enum WireEvent {
         trajectory: String,
         text: String,
     },
+    /// A sanitizer's derivation crossed in place of a raw value. `call_id` names the call
+    /// whose result it rewrote; `None` when it rewrote something else, such as a call's
+    /// arguments before its dispatch.
     Sanitized {
         trajectory: String,
+        call_id: Option<String>,
         sanitizer: String,
     },
     Fork {
@@ -104,6 +113,7 @@ pub enum WireEvent {
 
 /// One remedy a block offers, keyed by the `offer_id` the model passes to take it.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct BlockOption {
     pub offer_id: String,
     pub text: String,
@@ -309,6 +319,7 @@ impl Reader {
             ],
             AuditEvent::Sanitized { sanitizer } => vec![WireEvent::Sanitized {
                 trajectory,
+                call_id: entry.call_id.clone(),
                 sanitizer: sanitizer.clone(),
             }],
             AuditEvent::OutputWithheld => vec![WireEvent::Remedy {
@@ -342,5 +353,134 @@ fn label_event(trajectory: String, label: AuditLabel) -> WireEvent {
         trajectory,
         trust: label.trust,
         audience: label.audience,
+    }
+}
+
+/// The website's copy of the wire vocabulary is generated from `WireEvent`, so a
+/// field renamed, added, retyped or dropped here fails this test until the copy
+/// is regenerated and the website compiles against it.
+#[cfg(test)]
+mod wire_events {
+    use std::path::PathBuf;
+
+    use schemars::generate::SchemaSettings;
+    use serde_json::Value;
+
+    use super::WireEvent;
+
+    const REGENERATE: &str = "APPA_BLESS=1 cargo test -p website-chat-playground --lib wire_events";
+
+    #[test]
+    fn the_website_reads_what_the_service_writes() {
+        let schema = SchemaSettings::draft2020_12()
+            .for_serialize()
+            .into_generator()
+            .into_root_schema_for::<WireEvent>();
+        let rendered = module(schema.as_value());
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../website/components/playground/wire-events.ts");
+        if std::env::var_os("APPA_BLESS").is_some() {
+            std::fs::write(&path, &rendered).expect("the website's copy is writable");
+            return;
+        }
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            current == rendered,
+            "{} no longer matches `WireEvent`; regenerate it with `{REGENERATE}`, then fix what the website no longer compiles",
+            path.display()
+        );
+    }
+
+    fn module(root: &Value) -> String {
+        let mut out = format!(
+            "// Generated from `WireEvent` in website-chat-playground/src/events.rs. Do not edit.\n\
+             // Regenerate with `{REGENERATE}`.\n"
+        );
+        let variants = root["oneOf"].as_array().expect("a tagged enum renders as oneOf");
+        out.push_str(&format!("\n{}export type WireEvent =\n", doc(root, "")));
+        for variant in variants {
+            out.push_str(&doc(variant, "  "));
+            out.push_str(&format!("  | {}\n", object(variant)));
+        }
+        out.pop();
+        out.push_str(";\n");
+        for (name, definition) in root["$defs"].as_object().into_iter().flatten() {
+            out.push_str(&format!(
+                "\n{}export type {name} = {};\n",
+                doc(definition, ""),
+                ts(definition)
+            ));
+        }
+        out
+    }
+
+    fn doc(schema: &Value, indent: &str) -> String {
+        match schema["description"].as_str() {
+            None => String::new(),
+            Some(text) => format!("{indent}/** {} */\n", text.replace('\n', " ")),
+        }
+    }
+
+    /// An object's properties with the tag first, as the wire writes it.
+    fn object(schema: &Value) -> String {
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("an object names its properties");
+        let mut names: Vec<&String> = properties.keys().collect();
+        names.sort_by_key(|name| *name != "type");
+        let fields: Vec<String> = names
+            .into_iter()
+            .map(|name| {
+                let optional = if required.contains(&name.as_str()) { "" } else { "?" };
+                let doc = doc(&properties[name], "").replace('\n', " ");
+                format!("{doc}{name}{optional}: {}", ts(&properties[name]))
+            })
+            .collect();
+        format!("{{ {} }}", fields.join("; "))
+    }
+
+    fn ts(schema: &Value) -> String {
+        if schema == &Value::Bool(true) || schema.as_object().is_some_and(|object| object.is_empty()) {
+            return "unknown".to_string();
+        }
+        if let Some(reference) = schema["$ref"].as_str() {
+            return reference
+                .rsplit('/')
+                .next()
+                .expect("a reference names its target")
+                .to_string();
+        }
+        if let Some(constant) = schema.get("const") {
+            return constant.to_string();
+        }
+        if let Some(alternatives) = schema["anyOf"].as_array().or(schema["oneOf"].as_array()) {
+            return alternatives.iter().map(ts).collect::<Vec<_>>().join(" | ");
+        }
+        match &schema["type"] {
+            Value::Array(types) => types
+                .iter()
+                .map(|kind| ts(&serde_json::json!({ "type": kind, "items": schema["items"] })))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            Value::String(kind) => match kind.as_str() {
+                "string" => "string".to_string(),
+                "boolean" => "boolean".to_string(),
+                "integer" | "number" => "number".to_string(),
+                "null" => "null".to_string(),
+                "array" => match ts(&schema["items"]) {
+                    item if item.contains(' ') => format!("({item})[]"),
+                    item => format!("{item}[]"),
+                },
+                "object" if schema.get("properties").is_some() => object(schema),
+                "object" => "Record<string, unknown>".to_string(),
+                other => panic!("no TypeScript rendering for JSON Schema type {other}"),
+            },
+            _ => panic!("no TypeScript rendering for {schema}"),
+        }
     }
 }
