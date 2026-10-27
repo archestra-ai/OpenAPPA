@@ -79,7 +79,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ inputs.release_ref }}
           source_commit: ${{ inputs.source_commit }}
