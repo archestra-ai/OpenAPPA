@@ -152,7 +152,7 @@ jobs:
 
       - name: Synchronize release version
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
-        uses: ./.github/actions/check-release-versions
+        uses: $/.github/actions/check-release-versions
         with:
           relock: "true"
 
@@ -196,7 +196,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -248,7 +248,7 @@ jobs:
       - batteries-artifact
     permissions:
       contents: read # Required to verify and check out the release tag.
-    uses: ./.github/workflows/build-appa-runtime-binaries.yml
+    uses: $/.github/workflows/build-appa-runtime-binaries.yml
     with:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -298,7 +298,7 @@ jobs:
       actions: read # Required to download image digest artifacts.
       contents: read # Required to check out the release source.
       id-token: write # Required for Workload Identity Federation when pushing images.
-    uses: ./.github/workflows/publish-oci-images.yml
+    uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -335,7 +335,7 @@ jobs:
           setup_gcloud: "true"
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -413,7 +413,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -532,7 +532,7 @@ jobs:
     permissions:
       contents: read
       actions: read # Allow the updater to download its prepared Cargo bundle.
-    uses: ./.github/workflows/update-archestra.yml
+    uses: $/.github/workflows/update-archestra.yml
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
