@@ -129,7 +129,7 @@ jobs:
       actions: read # Required to download image digest artifacts.
       contents: read # Required to check out the source that is published.
       id-token: write # Required for Workload Identity Federation when pushing images.
-    uses: ./.github/workflows/publish-oci-images.yml
+    uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.tags.outputs.tags }}
       source_commit: ${{ needs.tags.outputs.source_commit }}

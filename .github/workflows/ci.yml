@@ -43,7 +43,7 @@ jobs:
 
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82
+        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82 # v1.0.0
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
@@ -296,7 +296,7 @@ jobs:
           python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
-        uses: ./.github/actions/check-release-versions
+        uses: $/.github/actions/check-release-versions
 
   # One debug build of the runtime binary serves both checks that drive it
   # as a black box: the shipped examples and the real Claude Code harness.
@@ -319,7 +319,7 @@ jobs:
         run: rustup show
 
       - name: Cache the Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: runtime-binary
           env-vars: CARGO_PROFILE_DEV_DEBUG
@@ -388,8 +388,11 @@ jobs:
             ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
           done
 
+      # The version and its hashes are locked in .github/tools/claude-code.
       - name: Install Claude Code harness
-        run: npm install --global @anthropic-ai/claude-code@2.1.266
+        run: |
+          npm ci --prefix .github/tools/claude-code --no-audit --no-fund
+          echo "$PWD/.github/tools/claude-code/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
@@ -433,7 +436,7 @@ jobs:
         run: rustup show
 
       - name: Cache marketplace builds
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: marketplace
 
@@ -510,7 +513,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-lint
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -560,7 +563,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-tests
           env-vars: CARGO_PROFILE_TEST_DEBUG
@@ -652,7 +655,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           env-vars: CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -689,7 +692,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -728,7 +731,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -958,7 +961,7 @@ jobs:
       # runtime binary checks and the Python bindings each have their own
       # rust-cache entry.
       - name: Cache the Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
