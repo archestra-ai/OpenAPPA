@@ -305,6 +305,10 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+    /// The trajectory's label and the sources that narrowed it, for an authority bound to
+    /// the tool with `unblocks`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ifc: Option<IfcContext>,
 }
 
 impl AuthorityArtifact {
@@ -317,6 +321,7 @@ impl AuthorityArtifact {
                 .iter()
                 .map(|gap| Requirement::of(gap, chain, call.interceptions()))
                 .collect(),
+            ifc: None,
         }
     }
 }
@@ -490,6 +495,36 @@ pub struct SanitizerArtifact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     pub body: String,
+    /// For a rewrite a sanitizer bound with `unblocks` makes: why the call is blocked — each
+    /// Interceptor's answer — and the trajectory's label with the sources that narrowed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unblock: Option<UnblockContext>,
+}
+
+/// What an unblocker reads about the block it lifts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnblockContext {
+    /// The Interceptors that answered `no` or `ask`, with their reasons.
+    pub interceptors: Vec<Requirement>,
+    pub ifc: IfcContext,
+}
+
+/// The trajectory's label and where its restrictions came from: each admitted value that
+/// narrowed it, by the tool whose result it was. Names and labels only — never an earlier
+/// call's arguments or result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IfcContext {
+    pub label: WireLabel,
+    pub sources: Vec<LabelSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LabelSource {
+    /// `tool_result`, `child_return` or `provider_run`.
+    pub from: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub label: WireLabel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1407,6 +1442,7 @@ mod tests {
                     },
                 },
                 artifact: AuthorityArtifact {
+                    ifc: None,
                     tool: "send".to_string(),
                     arguments: serde_json::json!({"to": "x"}),
                     requirements: vec![Requirement::Trust {
@@ -1661,6 +1697,7 @@ mod tests {
                     parameters: None,
                 },
                 artifact: SanitizerArtifact {
+                    unblock: None,
                     tool: None,
                     body: "token=t0k3n".to_string(),
                 },

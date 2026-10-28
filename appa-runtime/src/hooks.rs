@@ -847,6 +847,17 @@ impl Dispatcher<'_> {
                 display,
                 review,
             }) => {
+                // One bound unblocker that asks nobody is applied here: the model has no
+                // choice to make. Two or more stay the model's to choose.
+                if sent.is_none()
+                    && spawn.is_none()
+                    && let [only] = offers.as_slice()
+                    && let Ok(offer) = OfferId::parse(&only.id)
+                    && self.runtime.applies_itself(&actor.root, &offer)
+                    && let Some(decision) = self.unblock(&actor, &call, &call_id, &prompt, offer).await
+                {
+                    return decision;
+                }
                 let feedback = match sent.is_some().then(|| self.runtime.peer_hint(&actor.root, &call)) {
                     Some(Ok(Some(address))) => format!(
                         "{feedback}\n[appa] A protected session under this policy uses that name. To send \
@@ -868,6 +879,54 @@ impl Dispatcher<'_> {
             }
             Err(error) => fold(error, Refusal::Deny),
         }
+    }
+
+    /// Apply the one bound unblocker a block offers, then propose the call it approved — the
+    /// same call after an authority's ruling, the rewritten one after a sanitizer's. `Some`
+    /// only when that proposal is released; anything else leaves the block as the model saw
+    /// it.
+    async fn unblock(
+        &mut self,
+        actor: &Actor,
+        call: &ProposedCall,
+        call_id: &Option<String>,
+        prompt: &Option<PromptKey>,
+        offer: OfferId,
+    ) -> Option<HookDecision> {
+        let approved = match self.runtime.execute_remedy(actor, offer).await {
+            crate::api::RemedyOutcome::Authorized { call: approved } => ProposedCall {
+                cwd: call.cwd.clone(),
+                ..approved
+            },
+            other => {
+                tracing::info!(root = %actor.root.0, ?other, "the bound unblocker did not lift the block");
+                return None;
+            }
+        };
+        let missing_start = MissingStart::OpenLate {
+            prompt: prompt.as_ref(),
+        };
+        let decided = on_actor(self.runtime, actor, missing_start, self.options, |session| {
+            let approved = approved.clone();
+            let call_id = call_id.clone();
+            let prompt = prompt.clone();
+            async move { session.on_tool_call_identified(approved, call_id, None, prompt).await }
+        })
+        .await;
+        let Ok(ToolCallDecision::Allow { dispatch: opened, .. }) = decided else {
+            tracing::info!(root = %actor.root.0, "the unblocked call was not released");
+            return None;
+        };
+        *self.dispatch = Some(opened);
+        vouch_call(self.runtime, actor, &approved);
+        let parsed =
+            |arguments: &serde_json::value::RawValue| serde_json::from_str::<serde_json::Value>(arguments.get()).ok();
+        Some(match parsed(&approved.arguments) == parsed(&call.arguments) {
+            true => HookDecision::AllowCall { spawn: None },
+            false => HookDecision::AllowRewrittenCall {
+                arguments: approved.arguments.get().to_string(),
+            },
+        })
     }
 
     async fn spawn_resume(&mut self, actor: Actor, call: ProposedCall, child: TrajectoryId) -> HookDecision {

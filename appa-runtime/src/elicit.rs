@@ -422,6 +422,7 @@ mod tests {
 
     fn artifact(arguments: serde_json::Value) -> AuthorityArtifact {
         AuthorityArtifact {
+            ifc: None,
             tool: "host/claude-code/Bash".to_string(),
             arguments,
             requirements: Vec::new(),

@@ -2091,7 +2091,10 @@ impl RuntimeEngine {
                     &sanitizer,
                     source,
                     ValueBody::new(arguments.canonical_text()),
-                    SanitizerSubject::Input { call: &call },
+                    SanitizerSubject::Input {
+                        call: &call,
+                        unblock: self.unblock_context(&views, &sanitizer, &call),
+                    },
                 ) {
                     Ok(derived) => derived,
                     Err(next) => return Ok(*next),
@@ -2259,10 +2262,14 @@ impl RuntimeEngine {
                     let registered = registry
                         .authority(&requirement.authority)
                         .expect("plans reference only registered authorities");
+                    let mut artifact = AuthorityArtifact::of(call, requirement, chain);
+                    if registered.scope.unblocks() {
+                        artifact.ifc = Some(self.ifc_context(views));
+                    }
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact::of(call, requirement, chain),
+                        artifact,
                         review,
                     });
                 }
@@ -2656,6 +2663,95 @@ impl RuntimeEngine {
         Ok(CallAnswers { annotation })
     }
 
+    /// The unblocker the runtime applies itself when this is a block's only offer: a plan of
+    /// exactly one step — the ruling of one authority, or the rewrite of one input sanitizer —
+    /// whose component the policy binds to the tool with `unblocks`. `None` for any other
+    /// plan, which stays the model's to choose.
+    pub(crate) fn sole_unblocker(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Option<Unblocker> {
+        let plan = self.engine.offer_plan(view, trajectory, &parse_offer(offer)?)?;
+        let registry = self.engine.registry();
+        match plan.steps.as_slice() {
+            [appa_engine::plan::RemedyStep::Authorize(authority)]
+                if registry.authority(authority)?.scope.unblocks() =>
+            {
+                Some(Unblocker::Authority(authority.as_str().to_string()))
+            }
+            [appa_engine::plan::RemedyStep::Derive(sanitizer)] if registry.sanitizer(sanitizer)?.scope.unblocks() => {
+                Some(Unblocker::Sanitizer)
+            }
+            _ => None,
+        }
+    }
+
+    /// The trajectory's label and each admitted value that narrowed it, by source.
+    fn ifc_context(&self, views: &Views) -> crate::consult::IfcContext {
+        let chain = self.engine.registry().trust_chain();
+        let sources = views
+            .label_sources()
+            .filter(|(label, _)| **label != Label::top())
+            .map(|(label, provenance)| {
+                let (from, tool) = match provenance {
+                    appa_engine::value::Provenance::ToolResult { dispatch } => (
+                        "tool_result",
+                        views.dispatch_tool(dispatch).map(|tool| tool.as_str().to_string()),
+                    ),
+                    appa_engine::value::Provenance::ChildReturn { .. } => ("child_return", None),
+                    appa_engine::value::Provenance::ProviderRun { tool, .. } => {
+                        ("provider_run", Some(tool.as_str().to_string()))
+                    }
+                };
+                crate::consult::LabelSource {
+                    from,
+                    tool,
+                    label: crate::consult::WireLabel::of(label, chain),
+                }
+            })
+            .collect();
+        crate::consult::IfcContext {
+            label: crate::consult::WireLabel::of(&views.current_label(), chain),
+            sources,
+        }
+    }
+
+    /// The block a sanitizer bound with `unblocks` lifts by its rewrite, or `None` for any
+    /// other sanitizer.
+    fn unblock_context(
+        &self,
+        views: &Views,
+        sanitizer: &appa_engine::names::SanitizerName,
+        call: &ResolvedCall,
+    ) -> Option<crate::consult::UnblockContext> {
+        let registry = self.engine.registry();
+        if !registry.sanitizer(sanitizer)?.scope.unblocks() {
+            return None;
+        }
+        let chain = registry.trust_chain();
+        let interceptors = call
+            .interceptions()
+            .into_iter()
+            .flat_map(|interceptions| interceptions.blocking())
+            .map(|(interceptor, verdict)| {
+                crate::consult::Requirement::of(
+                    &appa_engine::check::Gap::Intercepted {
+                        interceptor: interceptor.clone(),
+                        verdict,
+                    },
+                    chain,
+                    call.interceptions(),
+                )
+            })
+            .collect();
+        Some(crate::consult::UnblockContext {
+            interceptors,
+            ifc: self.ifc_context(views),
+        })
+    }
+
     /// The Interceptors bound to the user's prompt, in authored order.
     pub(crate) fn prompt_interceptors(&self) -> impl Iterator<Item = &crate::interceptor::Interceptor> {
         self.interceptors.on_prompt()
@@ -2929,16 +3025,21 @@ impl RuntimeEngine {
         let registered = registry
             .sanitizer(sanitizer)
             .expect("plans reference only registered sanitizers");
-        let (on, tool, parameters) = match subject {
-            SanitizerSubject::Input { call } => {
+        let (on, tool, parameters, unblock) = match subject {
+            SanitizerSubject::Input { call, unblock } => {
                 let declaration = registry
                     .declaration(call)
                     .expect("a resolved call names its registered declaration");
                 let parameters =
                     serde_json::to_value(declaration.parameters()).expect("a compiled parameter schema serializes");
-                (SanitizerPoint::ToolInput, Some(call.tool().clone()), Some(parameters))
+                (
+                    SanitizerPoint::ToolInput,
+                    Some(call.tool().clone()),
+                    Some(parameters),
+                    unblock,
+                )
             }
-            SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
+            SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None, None),
         };
         ExternalRequest::Sanitizer {
             sanitizer: sanitizer.as_str().to_string(),
@@ -2947,6 +3048,7 @@ impl RuntimeEngine {
             artifact: SanitizerArtifact {
                 tool: tool.map(|tool| tool.as_str().to_string()),
                 body: body.as_str().to_string(),
+                unblock,
             },
         }
     }
@@ -3754,9 +3856,21 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
 
 /// What a sanitizer consult judges: the arguments of the call about to run, or a value on
 /// its way in — a tool's result naming its producer, a child's return naming none.
+/// A component the policy binds to a tool with `unblocks`, as one plan applies it.
+pub(crate) enum Unblocker {
+    Authority(String),
+    Sanitizer,
+}
+
 enum SanitizerSubject<'a> {
-    Input { call: &'a ResolvedCall },
-    Output { tool: Option<ToolName> },
+    Input {
+        call: &'a ResolvedCall,
+        /// The block the rewrite lifts, for a sanitizer bound with `unblocks`.
+        unblock: Option<crate::consult::UnblockContext>,
+    },
+    Output {
+        tool: Option<ToolName>,
+    },
 }
 
 fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {
@@ -4916,7 +5030,10 @@ mod tests {
             .engine
             .resolve_call(ToolName::new("fetch"), br#"{"url":"https://example.test"}"#)
             .expect("the call resolves");
-        let (declaration, artifact) = request(SanitizerSubject::Input { call: &call });
+        let (declaration, artifact) = request(SanitizerSubject::Input {
+            call: &call,
+            unblock: None,
+        });
         assert_eq!(declaration.on, SanitizerPoint::ToolInput);
         assert_eq!(artifact.tool.as_deref(), Some("fetch"));
         assert_eq!(artifact.body, "raw");

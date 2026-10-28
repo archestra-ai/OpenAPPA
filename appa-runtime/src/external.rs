@@ -1010,6 +1010,7 @@ mod tests {
                     },
                 },
                 artifact: AuthorityArtifact {
+                    ifc: None,
                     tool: "send_message".to_string(),
                     arguments,
                     requirements: vec![],
@@ -1032,6 +1033,7 @@ mod tests {
                     parameters: None,
                 },
                 artifact: SanitizerArtifact {
+                    unblock: None,
                     tool: Some("read_file".to_string()),
                     body: body.to_string(),
                 },

@@ -3308,6 +3308,22 @@ impl Runtime {
             .max(std::time::Duration::from_secs(1))
     }
 
+    /// Whether the runtime applies this offer itself, without the model: its plan is one
+    /// unblocker the policy binds to the tool, and nobody has to be asked. A `hitl` authority
+    /// needs the person through the remedy tool's review, so its offer stays the model's.
+    pub(crate) fn applies_itself(&self, root: &TrajectoryId, quoted: &OfferId) -> bool {
+        let deployment = self.inner.deployment();
+        self.read_offer(root, quoted, |standing| {
+            standing
+                .engine
+                .sole_unblocker(standing.view, &standing.pursuer, &standing.offer)
+        })
+        .is_some_and(|unblocker| match unblocker {
+            crate::engine::Unblocker::Authority(name) => !deployment.externals.is_hitl(&name),
+            crate::engine::Unblocker::Sanitizer => true,
+        })
+    }
+
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
     #[cfg(any(test, feature = "daemon"))]
