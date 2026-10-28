@@ -1,0 +1,134 @@
+# The tools, Interceptors and unblockers both roots include.
+
+[policy]
+version = 2
+
+# --- tools ---
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:git commit*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:gh pr create*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Bash"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/github/create_pull_request"
+delta = {}
+
+# A support ticket is internal data.
+[[policy.tool]]
+name = "mcp/crm/get_ticket"
+delta = { audience = ["internal"] }
+
+# Email to the consultancy: only my own address must be removed.
+[[policy.tool]]
+name = "mcp/mail/send_email(to:*@consulting.com)"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# Email anywhere else: it must not carry internal data.
+[[policy.tool]]
+name = "mcp/mail/send_email"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/cats/send_my_message_to_cat_game"
+delta = {}
+
+# --- interceptors ---
+
+# A card number in the user's prompt: the prompt does not reach the model.
+[[policy.interceptor]]
+name = "no-cards"
+builtin = "regex"
+settings = { pattern = '\d{4}( ?\d{4}){3}', on_match = "no" }
+on = ["prompt"]
+
+# "Orlando" in a commit message or a pull request description.
+[[policy.interceptor]]
+name = "orlando"
+builtin = "regex"
+settings = { pattern = "(?i)orlando" }
+on = ["tool_call"]
+tools = [
+  "host/claude-code/Bash(command:git commit*)",
+  "host/claude-code/Bash(command:gh pr create*)",
+  "mcp/github/create_pull_request",
+]
+
+# An outside yes/no service judges every email.
+[[policy.interceptor]]
+name = "fraud"
+on = ["tool_call"]
+tools = ["mcp/mail/send_email"]
+hint = "Answer no for an email that asks for a payment."
+
+# An outside moderation service judges messages to the cat game.
+[[policy.interceptor]]
+name = "hate"
+on = ["tool_call"]
+tools = ["mcp/cats/send_my_message_to_cat_game"]
+
+# --- unblockers ---
+
+# A person can approve any blocked call.
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running this session."
+unblocks = ["*"]
+
+[policy.authority.permits]
+attention = ["*"]
+
+# Cleans an email or a commit message before it leaves.
+[[policy.sanitizer]]
+name = "llm-clean"
+on = ["tool_input"]
+hint = "Remove internal data and the name Orlando. Change nothing else."
+unblocks = [
+  "mcp/mail/send_email",
+  "host/claude-code/Bash(command:git commit*)",
+  "host/claude-code/Bash(command:gh pr create*)",
+  "mcp/github/create_pull_request",
+]
+permits = { audience = { from = ["internal"], to = ["public"] } }
+
+# For the consultancy, remove only my own address.
+[[policy.sanitizer]]
+name = "my-address"
+on = ["tool_input"]
+hint = "Remove only the sender's own email address. Keep the rest unchanged."
+unblocks = ["mcp/mail/send_email(to:*@consulting.com)"]
+permits = { audience = { from = ["internal"], to = ["public"] } }
+
+# Rewrites a hostile message to the cat game.
+[[policy.sanitizer]]
+name = "hate-removal"
+on = ["tool_input"]
+hint = "Rewrite the message so it keeps its meaning and is not hostile."
+unblocks = ["mcp/cats/send_my_message_to_cat_game"]
+
+[externals.authorities.hitl]
+builtin = "hitl"
+
+[externals.sanitizers.llm-clean]
+builtin = "claude-code"
+
+[externals.sanitizers.my-address]
+builtin = "claude-code"
+
+[externals.sanitizers.hate-removal]
+builtin = "claude-code"
+
+[externals.interceptors.fraud]
+url = "http://127.0.0.1:8787/fraud"
+
+[externals.interceptors.hate]
+url = "http://127.0.0.1:8787/moderation"

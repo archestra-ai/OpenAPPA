@@ -435,3 +435,52 @@ fn claude_code_runs_the_rewritten_input() {
         serde_json::json!({ "message": "fix for the client" })
     );
 }
+
+fn example(file: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/interceptors")
+        .join(file)
+}
+
+#[tokio::test]
+async fn the_shipped_example_opens_and_blocks_a_card_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::load(&example("appa.toml")).expect("the example validates");
+    let runtime = common::loaded_session_runtime(dir.path(), config).await;
+    assert!(matches!(
+        prompt(&runtime, "my card is 4111 1111 1111 1111").await,
+        HookDecision::Block { .. }
+    ));
+    let commit = call(
+        "host/claude-code/Bash",
+        serde_json::json!({ "command": "git commit -m 'fix for Orlando'" }),
+    );
+    // A person and the cleaner are both bound to a commit: the model chooses.
+    let decision = propose(&runtime, commit).await;
+    assert_eq!(offers(feedback(&decision)).len(), 2, "{decision:?}");
+}
+
+#[cfg(feature = "cedar")]
+#[tokio::test]
+async fn the_cedar_example_refuses_a_force_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::load(&example("with-cedar.appa.toml")).expect("the example validates");
+    let runtime = common::loaded_session_runtime(dir.path(), config).await;
+    let push = call(
+        "host/claude-code/Bash",
+        serde_json::json!({ "command": "git push origin main --force" }),
+    );
+    let decision = propose(&runtime, push).await;
+    assert!(
+        feedback(&decision).contains("force-pushing is not allowed"),
+        "{decision:?}"
+    );
+}
+
+#[cfg(not(feature = "cedar"))]
+#[test]
+fn the_cedar_example_needs_the_cedar_feature() {
+    let config = Config::load(&example("with-cedar.appa.toml")).expect("the example parses");
+    let opened = Runtime::open_in_memory(config, None, appa_runtime::api::Remedies::StandIn);
+    assert!(opened.is_err_and(|error| error.to_string().contains("--features cedar")));
+}
