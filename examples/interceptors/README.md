@@ -6,7 +6,7 @@ A Claude Code policy that covers these cases:
 |---|---|
 | A card number in the user's prompt | `no-cards` (regex) blocks the prompt. |
 | "Orlando" in a commit message or a PR description | `orlando` (regex) blocks the call. `hitl` and `llm-clean` are bound to it: the model chooses one. |
-| An email after a tool brought internal data | IFC blocks it. `llm-clean` and `hitl` are bound: the model chooses. The sanitizer reads which tool brought the data. |
+| An email after a tool brought internal data | IFC blocks it. `llm-clean` and `hitl` are bound: the model chooses. |
 | An email to `*@consulting.com` | `my-address` removes only the sender's address. |
 | A hostile message to the cat game | `hate` (a URL service) blocks it. `hate-removal` and `hitl` are bound. |
 | An email the fraud service refuses | `fraud` (a URL service) blocks it. |

@@ -2688,48 +2688,10 @@ impl RuntimeEngine {
         }
     }
 
-    /// The trajectory's label and each admitted value that narrowed it, by source.
+    /// The trajectory's label when the call was blocked.
     fn ifc_context(&self, views: &Views) -> crate::consult::IfcContext {
-        let chain = self.engine.registry().trust_chain();
-        let sources = views
-            .label_sources()
-            .filter(|(label, _)| **label != Label::top())
-            .map(|(label, provenance)| {
-                let (from, tool) = match provenance {
-                    appa_engine::value::Provenance::ToolResult { dispatch } => (
-                        "tool_result",
-                        views.dispatch_tool(dispatch).map(|tool| tool.as_str().to_string()),
-                    ),
-                    appa_engine::value::Provenance::ChildReturn { .. } => ("child_return", None),
-                    appa_engine::value::Provenance::ProviderRun { tool, .. } => {
-                        ("provider_run", Some(tool.as_str().to_string()))
-                    }
-                };
-                crate::consult::LabelSource {
-                    from,
-                    tool,
-                    label: crate::consult::WireLabel::of(label, chain),
-                }
-            })
-            .collect::<Vec<_>>();
-        // What narrowed the trajectory beyond its own values — the label it opened under, a
-        // fork's parent, a resume — is named once, without its origin.
-        let current = views.current_label();
-        let inherited = views.inherited_label();
-        let mut sources = sources;
-        if inherited != appa_engine::profile::neutral_starting_label(chain) {
-            sources.insert(
-                0,
-                crate::consult::LabelSource {
-                    from: "inherited",
-                    tool: None,
-                    label: crate::consult::WireLabel::of(&inherited, chain),
-                },
-            );
-        }
         crate::consult::IfcContext {
-            label: crate::consult::WireLabel::of(&current, chain),
-            sources,
+            label: crate::consult::WireLabel::of(&views.current_label(), self.engine.registry().trust_chain()),
         }
     }
 

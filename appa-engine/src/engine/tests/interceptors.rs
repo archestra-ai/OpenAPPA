@@ -255,36 +255,6 @@ fn a_sanitizer_claiming_no_label_change_must_name_its_tools() {
     ));
 }
 
-#[test]
-fn label_sources_name_the_tool_result_that_narrowed_the_label() {
-    // The trajectory already holds insider data, so the read does not narrow it.
-    let e = engine_at(
-        vec![internal_read()],
-        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
-    );
-    let mut log = internal_log(&e);
-    let read = call("read_internal", json!({}));
-    let dispatch = open(&e, &mut log, &read);
-    close(
-        &e,
-        &mut log,
-        &dispatch,
-        &read,
-        crate::admit::ResultAdmission::SuccessRaw {
-            body: ValueBody::new("secret"),
-        },
-    );
-    let view = viewing(&e, &log);
-    let trajectory = traj();
-    let views = view.views(&trajectory).expect("the trajectory is opened");
-    let sources: Vec<_> = views.label_sources().collect();
-    assert_eq!(sources.len(), 1);
-    let Provenance::ToolResult { dispatch: source } = sources[0].1 else {
-        panic!("a tool result is the source, got {:?}", sources[0].1);
-    };
-    assert_eq!(views.dispatch_tool(source).map(ToolName::as_str), Some("read_internal"));
-}
-
 fn rewrite(blocked: &ResolvedCall, rewritten: &ResolvedCall) -> OfferOutcome {
     OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
         sanitizer: SanitizerName::new("strip"),

@@ -509,22 +509,9 @@ pub struct UnblockContext {
     pub ifc: IfcContext,
 }
 
-/// The trajectory's label and where its restrictions came from: each admitted value that
-/// narrowed it, by the tool whose result it was. Names and labels only — never an earlier
-/// call's arguments or result.
+/// The trajectory's label when the call was blocked.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IfcContext {
-    pub label: WireLabel,
-    pub sources: Vec<LabelSource>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct LabelSource {
-    /// `tool_result`, `child_return`, `provider_run`, or `inherited` for what the trajectory
-    /// carried before its own values.
-    pub from: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
     pub label: WireLabel,
 }
 

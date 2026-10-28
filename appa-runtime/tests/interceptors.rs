@@ -408,10 +408,11 @@ url = "{sanitizer}"
         "the one bound sanitizer is applied: {decision:?}"
     );
     let request = asked.lock().unwrap()[0].clone();
-    let sources = &request["artifact"]["unblock"]["ifc"]["sources"];
-    assert_eq!(sources[0]["from"], "tool_result");
-    assert_eq!(sources[0]["tool"], "get_ticket");
-    assert_eq!(sources[0]["label"]["audience"], serde_json::json!([["internal"]]));
+    assert_eq!(
+        request["artifact"]["unblock"]["ifc"]["label"]["audience"],
+        serde_json::json!([["internal"]]),
+        "{request}"
+    );
 }
 
 #[test]
@@ -531,56 +532,5 @@ tools = ["commit"]
     assert!(
         !text.contains("interceptor orlando"),
         "the rewrite cleared orlando: {text}"
-    );
-}
-
-#[tokio::test]
-async fn a_restriction_from_before_the_trajectory_is_named_inherited() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sanitizer, asked) = external(|request| serde_json::json!({ "body": request["artifact"]["body"] })).await;
-    let policy = format!(
-        r#"
-[policy]
-version = 2
-
-[policy.deployment]
-starting_label = {{ audience = ["internal"] }}
-
-[[policy.tool]]
-name = "get_ticket"
-delta = {{ audience = ["internal"] }}
-
-[[policy.tool]]
-name = "send_email"
-requires = {{ audience = {{ contains = ["public"] }} }}
-
-[[policy.sanitizer]]
-name = "scrub"
-on = ["tool_input"]
-unblocks = ["send_email"]
-permits = {{ audience = {{ from = ["internal"], to = ["public"] }} }}
-
-{EXTERNALS}
-[externals.sanitizers.scrub]
-url = "{sanitizer}"
-"#
-    );
-    let runtime = runtime_over(&dir, &policy).await;
-    // The read restricts nothing new: the trajectory opened `internal` already.
-    let read = call("get_ticket", serde_json::json!({ "id": 7 }));
-    assert_eq!(
-        propose(&runtime, read.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    assert_eq!(ran(&runtime, read).await, HookDecision::Ack);
-    propose(&runtime, call("send_email", serde_json::json!({ "body": "hi" }))).await;
-    let request = asked.lock().unwrap()[0].clone();
-    assert_eq!(
-        request["artifact"]["unblock"]["ifc"]["sources"][1]["tool"], "get_ticket",
-        "{request}"
-    );
-    assert_eq!(
-        request["artifact"]["unblock"]["ifc"]["sources"][0]["from"], "inherited",
-        "{request}"
     );
 }
