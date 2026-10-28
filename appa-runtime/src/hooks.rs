@@ -862,8 +862,16 @@ impl Dispatcher<'_> {
                         review: presentation.review,
                     };
                 }
-                // No answer leaves the offer standing, and a refused execution changed
-                // nothing: the original block is still the model's.
+                // No answer leaves the offer standing: the original block is still the model's,
+                // with why the unblocker did not lift it.
+                crate::api::RemedyOutcome::NoAnswer { feedback: why } => {
+                    if let Ok(ToolCallDecision::Deny { feedback, .. }) = &mut decided {
+                        feedback.push_str(&format!("\n\n{why}"));
+                    }
+                }
+                crate::api::RemedyOutcome::Refused { reason } => {
+                    return fold(EventError::EngineInvariant(format!("{reason:?}")), Refusal::Deny);
+                }
                 other => {
                     tracing::warn!(root = %actor.root.0, ?other, "the bound unblocker did not lift the block");
                 }

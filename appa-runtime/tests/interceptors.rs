@@ -547,6 +547,10 @@ version = 2
 starting_label = {{ audience = ["internal"] }}
 
 [[policy.tool]]
+name = "get_ticket"
+delta = {{ audience = ["internal"] }}
+
+[[policy.tool]]
 name = "send_email"
 requires = {{ audience = {{ contains = ["public"] }} }}
 
@@ -562,8 +566,19 @@ url = "{sanitizer}"
 "#
     );
     let runtime = runtime_over(&dir, &policy).await;
+    // The read restricts nothing new: the trajectory opened `internal` already.
+    let read = call("get_ticket", serde_json::json!({ "id": 7 }));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(ran(&runtime, read).await, HookDecision::Ack);
     propose(&runtime, call("send_email", serde_json::json!({ "body": "hi" }))).await;
     let request = asked.lock().unwrap()[0].clone();
+    assert_eq!(
+        request["artifact"]["unblock"]["ifc"]["sources"][1]["tool"], "get_ticket",
+        "{request}"
+    );
     assert_eq!(
         request["artifact"]["unblock"]["ifc"]["sources"][0]["from"], "inherited",
         "{request}"

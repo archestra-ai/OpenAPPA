@@ -847,6 +847,19 @@ impl Projection {
         self.root_opening(trajectory).is_some() || self.fork_of.contains_key(trajectory)
     }
 
+    /// The fold without the values admitted on the trajectory itself: the label it opened
+    /// under, a resume's seed and what a fork inherited.
+    fn base_fold(&self, trajectory: &TrajectoryId) -> Label {
+        let mut fold = self.opened_base(trajectory);
+        if let Some(seed) = self.resumed.get(trajectory) {
+            fold.fold(seed);
+        }
+        for (_, label) in self.inherited_sources(trajectory) {
+            fold.fold(label);
+        }
+        fold
+    }
+
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
         let mut fold = self.opened_base(trajectory);
         if let Some(seed) = self.resumed.get(trajectory) {
@@ -1042,6 +1055,12 @@ impl Views<'_> {
             .flatten()
             .filter_map(|id| self.projection.value(*id))
             .map(|value| (&value.label, &value.provenance))
+    }
+
+    /// What the trajectory carried before its own values: the label it opened under, a
+    /// resume's seed and what a fork inherited, folded. Read-only audit context.
+    pub fn inherited_label(&self) -> Label {
+        self.projection.base_fold(self.trajectory)
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {

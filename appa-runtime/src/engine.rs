@@ -2715,18 +2715,15 @@ impl RuntimeEngine {
         // What narrowed the trajectory beyond its own values — the label it opened under, a
         // fork's parent, a resume — is named once, without its origin.
         let current = views.current_label();
-        let local = views.label_sources().fold(
-            appa_engine::profile::neutral_starting_label(self.engine.registry().trust_chain()),
-            |meet, (label, _)| meet.combine(label),
-        );
+        let inherited = views.inherited_label();
         let mut sources = sources;
-        if local != current {
+        if inherited != appa_engine::profile::neutral_starting_label(chain) {
             sources.insert(
                 0,
                 crate::consult::LabelSource {
                     from: "inherited",
                     tool: None,
-                    label: crate::consult::WireLabel::of(&current, chain),
+                    label: crate::consult::WireLabel::of(&inherited, chain),
                 },
             );
         }
