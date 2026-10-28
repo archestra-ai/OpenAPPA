@@ -31,7 +31,7 @@ export const BENCHMARK_HIGHLIGHT = {
       ],
     },
     {
-      title: "Attacks that succeeded",
+      title: "Successful attacks",
       rows: [
         { name: "OpenAPPA", pct: 0, subject: true },
         { name: "Claude Auto mode", pct: 10 },

@@ -10,6 +10,7 @@ import { common } from "lowlight";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
 import { BatteryCatalog } from "@/components/BatteryCatalog";
+import { BenchmarkHighlightAnimated } from "@/components/BenchmarkHighlightAnimated";
 import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { BrandAssets } from "@/components/BrandKit";
 import {
@@ -36,7 +37,7 @@ import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { CommunityNote } from "@/components/CommunityNote";
 import { Term } from "@/components/Term";
-import { YouTubeEmbed } from "@/components/YouTubeEmbed";
+import { YouTubeEmbed, YouTubeTiles } from "@/components/YouTubeEmbed";
 import { BATTERY_REVIEW_CHECKLIST, BENCHMARK_HIGHLIGHT } from "@/lib/directive-content";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
@@ -100,7 +101,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
     </details>
   ),
   "battery-rule-order": () => <BatteryRuleOrderFigure />,
-  "benchmark-highlight": () => <BenchmarkHighlight />,
+  "benchmark-highlight": () => <BenchmarkHighlightAnimated />,
   "benchmark-tldr": () => (
     <Oversimplified text={BENCHMARK_HIGHLIGHT.tldr}>
       <BenchmarkHighlight link={false} />
@@ -124,11 +125,21 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "integration-paths": () => <IntegrationPaths />,
   "sponsor-note": () => <SponsorNote />,
   "community-note": () => <CommunityNote />,
-  "video-auto-mode": () => (
-    <YouTubeEmbed title="OpenAPPA: We Beat Claude Code Auto Mode on Agent Security. Here's How" videoId="VMtZloM8HBQ" />
-  ),
-  "video-fireship": () => (
-    <YouTubeEmbed title="Fireship: Did a 50 year old military secret just solve agent prompt injection?" videoId="I_KVMFrUtPk" />
+  "videos-home": () => (
+    <YouTubeTiles
+      videos={[
+        {
+          title: "OpenAPPA: We Beat Claude Code Auto Mode on Agent Security. Here's How",
+          videoId: "VMtZloM8HBQ",
+          hint: "11 minutes, deep dive",
+        },
+        {
+          title: "Fireship: Did a 50 year old military secret just solve agent prompt injection?",
+          videoId: "I_KVMFrUtPk",
+          hint: "Quick, 5 minutes, main ideas",
+        },
+      ]}
+    />
   ),
   "video-how-it-works": () => (
     <YouTubeEmbed title="How OpenAPPA works" videoId="XKdN90IYy0Y" />
