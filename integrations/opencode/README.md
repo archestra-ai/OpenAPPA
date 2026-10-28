@@ -357,18 +357,30 @@ messages outside the mutable tool-result hook. The owned executor registers
 neither a Job nor a synthetic completion observer. OpenCode's background
 action therefore cannot convert its foreground return into a delayed message.
 
-### Background launch, collect, and cancel
+### Background launch, delivery, collect, and cancel
 
 Set `background: true` to receive an opaque task handle after prompt admission.
 The launch result contains only this plugin-generated handle. APPA authorizes
 the launch outcome before the tool returns. The child continues independently;
-the parent can run other permitted tools. Finishing alone does not change the
-parent's Label or deliver child content. Completion does not wake an idle
-parent; the parent must call `appa_collect`.
+the parent can run other permitted tools.
+
+When the child finishes, the plugin checks its final text through APPA's
+child-return boundary. Then it delivers the admitted text to the parent as a
+synthetic message that names the handle. An idle parent wakes and starts a
+turn. A busy parent receives the message after its current turn. The admitted
+return narrows the parent's Label when APPA admits it, before delivery, even if
+the parent never reads it. Cancel a task before it finishes to avoid that
+narrowing. Delivery is not an `appa_collect` call, so policy rules for
+`appa_collect` do not apply to it; the child-return check does.
 
 ```text
 appa_subagent({ agent: "general", description: "Inspect module", prompt: "…", background: true })
 → <task handle>
+… the parent continues; later it receives:
+[appencode] Background task <task handle> finished. Its APPA-admitted return follows.
+
+<APPA-admitted final text>
+
 appa_collect({ task: "<task handle>" })
 → <APPA-admitted final text>
 appa_cancel({ task: "<another task handle>" })
@@ -379,19 +391,25 @@ Only the launching root can collect or cancel a task. A handle is not
 authorization. Children cannot use these tools. Unknown handles and handles
 from other roots are refused without returning child content.
 
-#### Collection
+#### Delivery and collection
 
-`appa_collect` waits for completion, then checks the final text through APPA's
-child-return boundary. A sanitizer's replacement must be admitted before
-delivery. Only admitted text enters fresh output and content channels.
-Failed children return neither earlier prose nor raw error details.
-Simultaneous collectors share one admission boundary. Repeated collection
-returns the cached admitted text without repeating that admission.
-Collection remains an ordinary authorized tool call with its own result accounting;
-its policy declaration does not replace the child-return check.
+Delivery and `appa_collect` share one admission boundary per task. A
+sanitizer's replacement must be admitted before either one releases text. Only
+admitted text enters the message or the fresh output and content channels.
+Failed children return neither earlier prose nor raw error details; delivery
+reports only that the return is withheld. Each task produces at most one
+delivered message, and a retried delivery reuses its message ID.
 
-Lost admission replies withhold output. Retry `appa_collect` to replay the
-exact candidate or sanitizer replacement.
+Use `appa_collect` when the parent needs the result before it continues.
+It waits for completion and returns the cached admitted text without repeating
+that admission. If a collection already returned the text, delivery is skipped.
+An interrupted collection does not suppress delivery. Collection
+remains an ordinary authorized tool call with its own result accounting; its
+policy declaration does not replace the child-return check.
+
+Lost admission replies withhold output. Delivery retries the exact candidate or
+sanitizer replacement. If admission still fails, the message tells the parent
+to call `appa_collect`, which retries the same bytes.
 
 #### Cancellation and interruption
 
@@ -402,6 +420,7 @@ Cancellation returns no child content. Repeat it when settlement is unconfirmed.
 Cancellation cannot undo effects or retract an admitted return. A waiting
 collection does not prevent cancellation from stopping the child.
 
+Cancellation before admission prevents delivery.
 Uncertain launch cleanup or cancellation does not prove absence of effects.
 Diagnostics report unconfirmed cleanup; runtime failure can leave operations unsettled.
 
@@ -409,11 +428,12 @@ Diagnostics report unconfirmed cleanup; runtime failure can leave operations uns
 
 Handles last only for the current plugin activation. An APPA restart with the
 same database preserves live bindings while the plugin remains active.
-OpenCode restart or plugin reload invalidates handles. Disposal revokes owned
-tasks and attempts to stop active children; it does not adopt them on reload.
+OpenCode restart or plugin reload invalidates handles and stops delivery.
+Disposal revokes owned tasks and attempts to stop active children; it does not
+adopt them on reload.
 Disposal does not wait for idle or confirm settlement. Cancel tasks before
 reload when confirmed settlement is required. Missing outcomes remain unsettled.
-Durable OpenCode restart recovery and automatic completion notifications are deferred.
+Durable OpenCode restart recovery is deferred.
 
 ## V1 boundaries
 
@@ -486,9 +506,9 @@ how an existing integration reports child starts and checked returns.
    operation. A conversation copied from a protected parent must inherit its
    security state, not open as a neutral root. Cover resume, revert, and
    restart; copied history must not lose its restrictions.
-3. **Automatic delivery and alternate child launches.** Explicit collection
-   handles owned background returns. Automatic delivery needs checked,
-   retryable notification admission and recovery. Native Jobs and shell
+3. **Native background paths and alternate child launches.** Owned background
+   tasks deliver only admitted returns, but delivery does not survive an
+   OpenCode restart. Native Jobs and shell
    completion use synthetic messages outside the original tool-result hook.
    Commands can also create children without the subagent tool. Keep these
    paths refused until their additional flows are mediated. Observing content
@@ -534,8 +554,9 @@ policies and databases. The server tests script only model inference; plugin
 loading, native tools, session lifecycle, and remedy execution are real.
 They check inherited audience/trust, return floors, sanitizer replacement,
 concurrent identities, interruption, restart, and refused alternate launches.
-Background cases check parent progress while a child is held, explicit collection,
-collection-only narrowing, cached returns, cancellation, and lost admission replies.
+Background cases check parent progress while a child is held, delivery to an
+idle parent, narrowing at admission, cached returns, cancellation, reload, and
+lost admission replies.
 They also check ordinary root flows and replacement of all tool-result
 channels. No inference-policy enforcement is claimed.
 

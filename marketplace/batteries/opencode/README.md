@@ -12,11 +12,11 @@ remains `trusted`. Other commands require explicit root contracts.
 
 The deployment must enable `policy.deployment.context_control` for
 `appa_subagent`. AppenCode gates child returns independently of this tool rule.
-Set `background: true` to launch without waiting. The owning root uses
-`appa_collect` for checked final text or `appa_cancel` to stop the task.
+Set `background: true` to launch without waiting. When the task finishes, its
+checked final text arrives as a message to the owning root. The root can also
+use `appa_collect` to wait for that text, or `appa_cancel` to stop the task.
 These are ordinary tools; their declarations do not authorize unchecked child
-returns. Handles expire on OpenCode restart or plugin reload. Collection is
-explicit; completion does not notify or wake the parent.
+returns. Handles and delivery end on OpenCode restart or plugin reload.
 Code Mode, native subagents, and background shell requests remain refused by
 the plugin. This battery does not enable them.
 

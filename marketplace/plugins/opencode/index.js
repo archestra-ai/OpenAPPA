@@ -1222,7 +1222,7 @@ var ID13 = Schema28.String.check(Schema28.isStartingWith("msg_")).pipe(Schema28.
 ]).annotate({ identifier: "Session.Message.Info" });
 
 // integrations/opencode/appencode.ts
-import { Cause, Effect as Effect4, Schema as Schema29, Semaphore } from "effect";
+import { Cause, Effect as Effect4, Fiber, Schedule, Schema as Schema29, Semaphore } from "effect";
 import { lstat as lstat2, realpath as realpath2, stat } from "fs/promises";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, relative, resolve as resolve2, sep } from "path";
 
@@ -1477,13 +1477,55 @@ var appencode_default = Plugin.define({
     }
     let cancelTask = (task) => task.transition.withPermits(1)(Effect4.gen(function* () {
       if (task.state.status === "admitted")
-        return "Task already collected; cancellation cannot retract its return.";
+        return "Task already returned; cancellation cannot retract its return.";
       if (task.state.status === "cancelled" && task.state.settled)
         return "Task cancelled.";
       if (task.state = { status: "cancelled", settled: !1 }, revoke(task.child), yield* ctx.session.interrupt({ sessionID: task.child, resume: !1 }), yield* ctx.session.wait({ sessionID: task.child }), (yield* Effect4.tryPromise({ try: () => post("child_end", { root: task.root }, { child_id: task.child }), catch: failure })).decision !== "ack")
         throw Error("[appencode] Cancellation is not confirmed; retry cancellation.");
       return task.state = { status: "cancelled", settled: !0 }, "Task cancelled.";
-    }).pipe(Effect4.uninterruptible));
+    }).pipe(Effect4.uninterruptible)), admit = (task) => task.transition.withPermits(1)(Effect4.tryPromise({ try: async () => {
+      if (disposed || tasks.get(task.handle) !== task)
+        throw Error("[appencode] Task ownership expired.");
+      switch (task.state.status) {
+        case "admitted":
+          return task.state.value;
+        case "cancelled":
+          throw Error("[appencode] Task cancelled; its return is withheld.");
+        case "failed":
+          throw Error(task.state.message);
+        case "active":
+          break;
+      }
+      if (task.state.candidate === void 0)
+        try {
+          task.state.candidate = await childAnswer(task.child);
+        } catch {
+          throw task.state = { status: "failed", message: "[appencode] Child did not complete a valid final answer; its return is withheld." }, revoke(task.child), await post("child_end", { root: task.root }, { child_id: task.child }).catch(() => Effect4.runPromise(Effect4.logWarning("[appencode] Failed child settlement is unconfirmed."))), Error("[appencode] Child did not complete a valid final answer; its return is withheld.");
+        }
+      let returned = await post("child_end", { root: task.root }, { child_id: task.child, value: task.state.candidate });
+      if (returned.decision === "child_return") {
+        if (task.state.candidate = text(returned, "value"), (await post("child_end", { root: task.root }, { child_id: task.child, value: task.state.candidate })).decision !== "ack")
+          throw Error("[appencode] Replacement return was not admitted.");
+      } else if (returned.decision !== "ack")
+        throw Error("[appencode] Child return was not admitted; retry collection or cancel the task.");
+      let value = task.state.candidate;
+      return task.state = { status: "admitted", value, reported: !1 }, revoke(task.child), value;
+    }, catch: failure }).pipe(Effect4.uninterruptible)), watch = (task) => Effect4.gen(function* () {
+      if (yield* ctx.session.wait({ sessionID: task.child }), yield* admit(task).pipe(Effect4.retry({ times: 2, schedule: Schedule.spaced("1 second"), while: () => task.state.status === "active" }), Effect4.result), disposed || tasks.get(task.handle) !== task || task.state.status === "cancelled")
+        return;
+      let notice;
+      if (task.state.status === "admitted") {
+        if (task.state.reported)
+          return;
+        task.state.reported = !0, notice = `[appencode] Background task ${task.handle} finished. Its APPA-admitted return follows.
+
+${task.state.value}`;
+      } else if (task.state.status === "failed")
+        notice = `[appencode] Background task ${task.handle} ended without a valid final answer; its return is withheld.`;
+      else
+        notice = `[appencode] Background task ${task.handle} finished, but APPA did not admit its return. Call appa_collect to retry or appa_cancel to stop it.`;
+      yield* ctx.session.synthetic({ sessionID: task.root, id: task.notice, text: notice, delivery: "queue", resume: !0 }).pipe(Effect4.retry({ times: 2, schedule: Schedule.spaced("1 second") }));
+    }).pipe(Effect4.catchCause((cause) => Cause.hasInterrupts(cause) ? Effect4.void : Effect4.logWarning("[appencode] Background result delivery failed; appa_collect still returns it.")));
     yield* Effect4.addFinalizer(() => Effect4.gen(function* () {
       disposed = !0;
       let owned = [...tasks.values()];
@@ -1491,6 +1533,8 @@ var appencode_default = Plugin.define({
       for (let task of owned)
         revoke(task.child);
       for (let task of owned) {
+        if (task.watcher)
+          yield* Effect4.forkDetach(Fiber.interrupt(task.watcher));
         if (task.state.status === "admitted")
           continue;
         if (yield* ctx.session.interrupt({ sessionID: task.child, resume: !1 }).pipe(Effect4.catchCause(() => Effect4.logWarning("[appencode] Background cleanup is unconfirmed."))), task.state.status !== "cancelled" || !task.state.settled)
@@ -1559,7 +1603,7 @@ var appencode_default = Plugin.define({
       editor.add({
         name: "appa_subagent",
         options: { codemode: !1 },
-        description: "Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle; use appa_collect for its checked final text or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.",
+        description: "Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.",
         input: Schema29.Struct({
           agent: Schema29.String,
           description: Schema29.String,
@@ -1640,14 +1684,17 @@ var appencode_default = Plugin.define({
                   throw Error("[appencode] Background launch was not confirmed.");
                 if (disposed)
                   throw Error("[appencode] Plugin disposed during launch.");
-                return tasks.set(task, {
+                let owned = {
+                  handle: task,
                   root: call.sessionID,
                   child: child.id,
                   proposal,
                   promptID: child.promptID,
+                  notice: exports_session_message.ID.create(),
                   transition: Semaphore.makeUnsafe(1),
                   state: { status: "active" }
-                }), settled = !0, transferred = !0, { output: task, content: task };
+                };
+                return tasks.set(task, owned), owned.watcher = yield* Effect4.forkDetach(watch(owned)), settled = !0, transferred = !0, { output: task, content: task };
               }).pipe(Effect4.uninterruptible);
             yield* ctx.session.wait({ sessionID: child.id });
             let value = yield* Effect4.tryPromise({ try: () => childAnswer(child.id), catch: failure }), returned = yield* runtime("child_end", { child_id: childID, value });
@@ -1673,41 +1720,16 @@ var appencode_default = Plugin.define({
       }), editor.add({
         name: "appa_collect",
         options: { codemode: !1 },
-        description: "Wait for an owned background task and return only its APPA-admitted final text. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.",
+        description: "Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.",
         input: Schema29.Struct({ task: Schema29.String }),
         output: Schema29.String,
         execute: (input, call) => Effect4.gen(function* () {
           let task = yield* Effect4.tryPromise({ try: () => ownedTask(input.task, call.sessionID), catch: failure });
           if (task.state.status === "active")
             yield* ctx.session.wait({ sessionID: task.child });
-          let value = yield* task.transition.withPermits(1)(Effect4.tryPromise({ try: async () => {
-            if (disposed || tasks.get(input.task) !== task)
-              throw Error("[appencode] Task ownership expired.");
-            switch (task.state.status) {
-              case "admitted":
-                return task.state.value;
-              case "cancelled":
-                throw Error("[appencode] Task cancelled; its return is withheld.");
-              case "failed":
-                throw Error(task.state.message);
-              case "active":
-                break;
-            }
-            if (task.state.candidate === void 0)
-              try {
-                task.state.candidate = await childAnswer(task.child);
-              } catch {
-                throw task.state = { status: "failed", message: "[appencode] Child did not complete a valid final answer; its return is withheld." }, revoke(task.child), await post("child_end", { root: task.root }, { child_id: task.child }).catch(() => Effect4.runPromise(Effect4.logWarning("[appencode] Failed child settlement is unconfirmed."))), Error("[appencode] Child did not complete a valid final answer; its return is withheld.");
-              }
-            let returned = await post("child_end", { root: task.root }, { child_id: task.child, value: task.state.candidate });
-            if (returned.decision === "child_return") {
-              if (task.state.candidate = text(returned, "value"), (await post("child_end", { root: task.root }, { child_id: task.child, value: task.state.candidate })).decision !== "ack")
-                throw Error("[appencode] Replacement return was not admitted.");
-            } else if (returned.decision !== "ack")
-              throw Error("[appencode] Child return was not admitted; retry collection or cancel the task.");
-            let value2 = task.state.candidate;
-            return task.state = { status: "admitted", value: value2 }, revoke(task.child), value2;
-          }, catch: failure }).pipe(Effect4.uninterruptible));
+          let value = yield* admit(task);
+          if (task.state.status === "admitted")
+            task.state.reported = !0;
           if (disposed || tasks.get(input.task) !== task)
             throw Error("[appencode] Task ownership expired.");
           return { output: value, content: value };
