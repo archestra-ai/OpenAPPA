@@ -1050,6 +1050,7 @@ mod tests {
 
         fn registry(self) -> Registry {
             Registry::build_covered(RegistryConfig {
+                interceptors: Vec::new(),
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "vetted".into()]),
                 tools: self
                     .tools
@@ -1089,6 +1090,7 @@ mod tests {
     fn dispatched(tag: &str, kinds: &[&str]) -> Fact {
         let seed = seed_call(tag);
         Fact::DispatchOpened {
+            interceptions: None,
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),

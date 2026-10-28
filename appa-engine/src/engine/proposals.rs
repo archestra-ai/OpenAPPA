@@ -90,6 +90,8 @@ impl Engine {
                 .registry
                 .declaration(call)
                 .expect("a resolved call names a checkable tool");
+            check::validate_interceptions(&self.registry, declaration, call)
+                .map_err(crate::engine::interception_refusal)?;
             if let Some(annotator) = unanswered(&self.registry, declaration, call)?
                 && !unresolved.contains(&annotator)
             {
@@ -314,6 +316,7 @@ impl Engine {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
                         call.with_annotation(proposed.annotation.clone())
+                            .with_interceptions(proposed.interceptions.clone())
                             .with_file_basis(file_bases[position].clone())
                     })
                     .map_err(|error| (position, error))
@@ -531,7 +534,11 @@ fn recorded_repeat(batch: &ProposalBatch, recorded: &[ResolvedCall]) -> Option<V
             let arguments = crate::params::CanonicalArguments::parse(&proposed.arguments).ok()?;
             (&proposed.tool == call.tool()
                 && arguments.canonical_bytes() == call.canonical_arguments().canonical_bytes())
-            .then(|| call.clone().with_annotation(proposed.annotation.clone()))
+            .then(|| {
+                call.clone()
+                    .with_annotation(proposed.annotation.clone())
+                    .with_interceptions(proposed.interceptions.clone())
+            })
         })
         .collect()
 }

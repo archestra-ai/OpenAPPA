@@ -203,10 +203,12 @@ pub(crate) fn opened_call(
     tool: &ToolName,
     arguments: &crate::params::CanonicalArguments,
     annotation: &Option<PinnedAnnotation>,
+    interceptions: &Option<crate::intercept::Interceptions>,
     file_basis: &Option<crate::value::FileBasis>,
 ) -> ResolvedCall {
     ResolvedCall::new(tool.clone(), arguments.clone())
         .with_annotation(annotation.clone())
+        .with_interceptions(interceptions.clone())
         .with_file_basis(file_basis.clone())
 }
 
@@ -602,6 +604,7 @@ impl Projection {
                 receiving,
                 proposed_effects,
                 annotation,
+                interceptions,
                 file_basis,
                 subject,
                 evidence,
@@ -609,7 +612,10 @@ impl Projection {
                 proposed_label: _,
             } => {
                 release_terms.insert(dispatch.clone(), (terms.clone(), proposed_effects.clone()));
-                dispatch_calls.insert(dispatch.clone(), opened_call(tool, arguments, annotation, file_basis));
+                dispatch_calls.insert(
+                    dispatch.clone(),
+                    opened_call(tool, arguments, annotation, interceptions, file_basis),
+                );
                 receiving_bounds.insert(dispatch.clone(), receiving.clone());
                 dispatch_evidence.insert(dispatch.clone(), evidence.clone());
                 subject_dispatches.insert(subject.clone(), dispatch.clone());
@@ -996,6 +1002,42 @@ impl Views<'_> {
             .filter_map(ResolvedCall::annotation);
         let first = pins.next()?;
         pins.all(|pin| pin == first).then_some(first)
+    }
+
+    /// The answers of the Interceptors pinned to this call in an act the trajectory still has
+    /// prepared — an open offer or an unspent approval — when every standing pin agrees. The
+    /// re-proposal of a prepared call carries them, as it carries the annotation.
+    pub fn pinned_interceptions(&self, call: &ResolvedCall) -> Option<&crate::intercept::Interceptions> {
+        let offered = self
+            .projection
+            .offers
+            .values()
+            .filter(|open| &open.trajectory == self.trajectory && self.is_pending(open))
+            .filter_map(|open| self.proposed_call(&open.subject));
+        let approved = self
+            .unspent_approvals()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(*offer))
+            })
+            .map(|(_, approval)| &approval.call);
+        let digest = call.digest();
+        let mut pins = offered
+            .chain(approved)
+            .filter(|standing| standing.digest() == digest)
+            .filter_map(ResolvedCall::interceptions);
+        let first = pins.next()?;
+        pins.all(|pin| pin == first).then_some(first)
+    }
+
+    /// The values this trajectory's label folds — inherited from its fork and admitted here —
+    /// each with its label and where it came from, in fold order. Read-only audit context: what
+    /// an unblocker reads to learn which source brought a restriction. The fold never consumes it.
+    pub fn label_sources(&self) -> impl Iterator<Item = (&Label, &Provenance)> {
+        self.projection
+            .basis_sources(self.trajectory)
+            .filter_map(|(id, _)| self.projection.value(id))
+            .map(|value| (&value.label, &value.provenance))
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
@@ -1748,6 +1790,7 @@ mod tests {
         let egress = EffectKind::new("egress");
         let log = vec![
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
@@ -1779,6 +1822,7 @@ mod tests {
         let egress = EffectKind::new("egress");
         let log = vec![
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
@@ -1809,6 +1853,7 @@ mod tests {
         let egress = EffectKind::new("egress");
         let log = vec![
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
@@ -1918,6 +1963,7 @@ mod tests {
         let log = vec![
             opened("a"),
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),

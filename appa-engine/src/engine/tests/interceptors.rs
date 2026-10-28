@@ -1,0 +1,299 @@
+use super::*;
+use crate::authority::{Attends, Authority, DeclaredTransition, Mandate, Sanitizer, SanitizerPoints, Scope};
+use crate::intercept::{Interceptions, InterceptorAnswer, InterceptorDeclaration, Verdict};
+use crate::names::{AuthorityName, InterceptorName, SanitizerName, TagName};
+
+fn unblock(component: &str) -> TagName {
+    TagName::new(format!("{}{component}", Scope::UNBLOCK_PREFIX))
+}
+
+/// `commit` is judged by the `orlando` Interceptor and bound to `strip` (a sanitizer that
+/// rewrites without a label change) and to `reviewer` (an authority with no mandate of its
+/// own). `officer` attends every mark but is bound to no tool. `push` is judged by nothing.
+fn intercepting_engine() -> Engine {
+    let commit = ToolAnnotation {
+        tags: vec![unblock("strip"), unblock("reviewer")],
+        ..plain_tool("commit")
+    };
+    let cfg = RegistryConfig {
+        authorities: vec![
+            Authority {
+                name: AuthorityName::new("reviewer"),
+                mandate: Mandate::default(),
+                scope: Scope {
+                    tags: vec![unblock("reviewer")],
+                },
+                hint: None,
+            },
+            Authority {
+                name: AuthorityName::new("officer"),
+                mandate: Mandate {
+                    attends: Attends::Any,
+                    ..Mandate::default()
+                },
+                scope: Scope::default(),
+                hint: None,
+            },
+        ],
+        sanitizers: vec![Sanitizer {
+            name: SanitizerName::new("strip"),
+            on: SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: DeclaredTransition::Unchanged,
+            scope: Scope {
+                tags: vec![unblock("strip")],
+            },
+            hint: None,
+        }],
+        interceptors: vec![InterceptorDeclaration {
+            name: InterceptorName::new("orlando"),
+            scope: Scope {
+                tags: vec![unblock("strip")],
+            },
+        }],
+        ..test_config(vec![commit, plain_tool("push")])
+    };
+    open_engine(cfg)
+}
+
+fn judged(call: ResolvedCall, verdict: Verdict) -> ResolvedCall {
+    let digest = call.digest();
+    call.with_interceptions(Some(Interceptions::new(
+        digest,
+        [(
+            InterceptorName::new("orlando"),
+            InterceptorAnswer {
+                verdict,
+                reason: Some("the message names Orlando".into()),
+            },
+        )]
+        .into(),
+    )))
+}
+
+fn commit(message: &str) -> ResolvedCall {
+    call("commit", json!({ "message": message }))
+}
+
+fn decided(decision: &EngineDecision) -> (&[Released], &[Blocked]) {
+    answered(decision)
+}
+
+#[test]
+fn a_yes_releases_the_call() {
+    let e = intercepting_engine();
+    let decision = proposed(
+        &e,
+        &internal_log(&e),
+        "b1",
+        nonce(),
+        judged(commit("fix"), Verdict::Yes),
+    )
+    .unwrap();
+    let (released, blocked) = decided(&decision);
+    assert_eq!(released.len(), 1);
+    assert!(blocked.is_empty());
+}
+
+#[test]
+fn a_no_blocks_with_the_bound_unblockers_only() {
+    let e = intercepting_engine();
+    let decision = proposed(
+        &e,
+        &internal_log(&e),
+        "b1",
+        nonce(),
+        judged(commit("fix for Orlando"), Verdict::No),
+    )
+    .unwrap();
+    let (released, blocked) = decided(&decision);
+    assert!(released.is_empty());
+    assert_eq!(
+        blocked[0].block.raw.requirement_gaps,
+        vec![Gap::Intercepted {
+            interceptor: InterceptorName::new("orlando"),
+            verdict: Verdict::No,
+        }]
+    );
+    let plans = opened_offers(&appended_facts(decision));
+    let hops: Vec<_> = plans.iter().filter_map(|(_, plan)| plan.hop()).collect();
+    assert_eq!(hops, vec![&SanitizerName::new("strip")]);
+    let rulings: Vec<_> = plans
+        .iter()
+        .flat_map(|(_, plan)| plan.required.iter().map(|ruling| ruling.authority.as_str()))
+        .collect();
+    // `officer` attends every mark, but an Interceptor's answer is not a mark: only the
+    // authority bound to the tool lifts it.
+    assert_eq!(rulings, vec!["reviewer"]);
+}
+
+#[test]
+fn an_ask_is_lifted_by_a_bound_authority_and_never_by_a_rewrite() {
+    let e = intercepting_engine();
+    let decision = proposed(
+        &e,
+        &internal_log(&e),
+        "b1",
+        nonce(),
+        judged(commit("fix"), Verdict::Ask),
+    )
+    .unwrap();
+    let plans = opened_offers(&appended_facts(decision));
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].1.hop(), None);
+    assert_eq!(plans[0].1.required[0].authority.as_str(), "reviewer");
+}
+
+#[test]
+fn a_call_the_interceptor_judges_needs_its_answer() {
+    let e = intercepting_engine();
+    assert!(matches!(
+        proposed(&e, &internal_log(&e), "b1", nonce(), commit("fix")),
+        Err(TransitionError::InterceptionNeeded { interceptors }) if interceptors == [InterceptorName::new("orlando")]
+    ));
+}
+
+#[test]
+fn answers_about_another_call_or_from_a_stranger_are_refused() {
+    let e = intercepting_engine();
+    let elsewhere = commit("fix").with_interceptions(judged(commit("other"), Verdict::Yes).interceptions().cloned());
+    assert!(matches!(
+        proposed(&e, &internal_log(&e), "b1", nonce(), elsewhere),
+        Err(TransitionError::ForeignInterceptions { .. })
+    ));
+    assert!(matches!(
+        proposed(
+            &e,
+            &internal_log(&e),
+            "b2",
+            nonce(),
+            judged(call("push", json!({})), Verdict::Yes)
+        ),
+        Err(TransitionError::ForeignInterceptions { .. })
+    ));
+}
+
+#[test]
+fn a_bound_authority_approval_releases_the_judged_call() {
+    let e = intercepting_engine();
+    let mut log = internal_log(&e);
+    let blocked = judged(commit("fix for Orlando"), Verdict::No);
+    let facts = appended_facts(proposed(&e, &log, "b1", nonce(), blocked.clone()).unwrap());
+    log.extend(facts.clone());
+    let (offer, plan) = opened_offers(&facts)
+        .into_iter()
+        .find(|(_, plan)| plan.hop().is_none())
+        .expect("the ruling plan is offered");
+    let approved = execute_offer(
+        &e,
+        &log,
+        offer,
+        OfferOutcome::Approved(evidence_for(offer, &plan, "commit", log_label(&e, &log))),
+    )
+    .expect("the bound authority's ruling is admitted");
+    log.extend(appended_facts(approved));
+    let decision = proposed(&e, &log, "b2", nonce(), blocked).unwrap();
+    let (released, _) = decided(&decision);
+    assert_eq!(released.len(), 1, "the approval releases the exact judged call");
+    log.extend(appended_facts(decision));
+    assert_eq!(e.validate_replay(&log), Ok(()), "the pinned answers replay");
+}
+
+#[test]
+fn a_rewrite_the_interceptor_accepts_approves_the_rewritten_call() {
+    let e = intercepting_engine();
+    let mut log = internal_log(&e);
+    let blocked = judged(commit("fix for Orlando"), Verdict::No);
+    let facts = appended_facts(proposed(&e, &log, "b1", nonce(), blocked.clone()).unwrap());
+    log.extend(facts.clone());
+    let offer = hop_named(&facts, "strip");
+    let rewritten = judged(commit("fix for the client"), Verdict::Yes);
+    let decision = execute_offer(&e, &log, offer, rewrite(&blocked, &rewritten)).expect("the rewrite is admitted");
+    assert_eq!(approved_by(&decision).arguments(), rewritten.arguments());
+}
+
+#[test]
+fn a_rewrite_the_interceptor_still_refuses_does_not_approve() {
+    let e = intercepting_engine();
+    let mut log = internal_log(&e);
+    let blocked = judged(commit("fix for Orlando"), Verdict::No);
+    let facts = appended_facts(proposed(&e, &log, "b1", nonce(), blocked.clone()).unwrap());
+    log.extend(facts.clone());
+    let offer = hop_named(&facts, "strip");
+    let still = judged(commit("fix for ORLANDO"), Verdict::No);
+    let outcome = execute_offer(&e, &log, offer, rewrite(&blocked, &still));
+    assert!(
+        !matches!(outcome.as_ref().map(offer_answer), Ok(OfferFollowUp::Approved { .. })),
+        "a rewrite that clears nothing approves nothing: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_sanitizer_claiming_no_label_change_must_name_its_tools() {
+    let cfg = RegistryConfig {
+        sanitizers: vec![Sanitizer {
+            name: SanitizerName::new("strip"),
+            on: SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: DeclaredTransition::Unchanged,
+            scope: Scope::default(),
+            hint: None,
+        }],
+        ..test_config(vec![plain_tool("commit")])
+    };
+    assert!(matches!(
+        crate::registry::Registry::build_covered(cfg),
+        Err(crate::registry::LoadError::UnchangedSanitizer(name)) if name == "strip"
+    ));
+}
+
+#[test]
+fn label_sources_name_the_tool_result_that_narrowed_the_label() {
+    // The trajectory already holds insider data, so the read does not narrow it.
+    let e = engine_at(
+        vec![internal_read()],
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    );
+    let mut log = internal_log(&e);
+    let read = call("read_internal", json!({}));
+    let dispatch = open(&e, &mut log, &read);
+    close(
+        &e,
+        &mut log,
+        &dispatch,
+        &read,
+        crate::admit::ResultAdmission::SuccessRaw {
+            body: ValueBody::new("secret"),
+        },
+    );
+    let view = viewing(&e, &log);
+    let trajectory = traj();
+    let views = view.views(&trajectory).expect("the trajectory is opened");
+    let sources: Vec<_> = views.label_sources().collect();
+    assert_eq!(sources.len(), 1);
+    let Provenance::ToolResult { dispatch: source } = sources[0].1 else {
+        panic!("a tool result is the source, got {:?}", sources[0].1);
+    };
+    assert_eq!(views.dispatch_tool(source).map(ToolName::as_str), Some("read_internal"));
+}
+
+fn rewrite(blocked: &ResolvedCall, rewritten: &ResolvedCall) -> OfferOutcome {
+    OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+        sanitizer: SanitizerName::new("strip"),
+        source: crate::value::RawResultDigest::of(blocked.canonical_arguments().canonical_bytes()),
+        derived: ValueBody::new(String::from_utf8(rewritten.canonical_arguments().canonical_bytes().to_vec()).unwrap()),
+        annotation: None,
+        interceptions: rewritten.interceptions().cloned(),
+    })
+}
+
+fn log_label(e: &Engine, log: &[Fact]) -> Label {
+    viewing(e, log)
+        .views(&traj())
+        .expect("the trajectory is opened")
+        .current_label()
+}

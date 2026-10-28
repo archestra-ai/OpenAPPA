@@ -6,6 +6,7 @@ mod audience;
 mod config;
 mod convert;
 mod error;
+mod interceptor;
 mod raw;
 #[cfg(test)]
 mod tests;
@@ -14,3 +15,4 @@ pub use annotator::{AnnotatorBinding, AnnotatorBuiltin, ToolCallSource};
 pub use config::Config;
 pub use convert::{parse_delta, parse_requires};
 pub use error::ConfigError;
+pub use interceptor::{InterceptorBinding, InterceptorBuiltin, InterceptorSteps};

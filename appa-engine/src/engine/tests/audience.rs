@@ -1753,11 +1753,13 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
                 receiving,
                 proposed_effects,
                 annotation,
+                interceptions,
                 file_basis,
                 subject,
                 evidence,
                 terms,
             } => Fact::DispatchOpened {
+                interceptions,
                 trajectory,
                 dispatch,
                 tool,

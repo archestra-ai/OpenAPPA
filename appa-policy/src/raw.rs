@@ -18,6 +18,8 @@ pub(crate) struct RawConfig {
     pub(crate) sanitizer: Vec<RawSanitizer>,
     #[serde(default)]
     pub(crate) annotator: Vec<RawAnnotator>,
+    #[serde(default)]
+    pub(crate) interceptor: Vec<RawInterceptor>,
     pub(crate) audience: Option<RawAudience>,
     pub(crate) limits: Option<RawLimits>,
     pub(crate) deployment: Option<RawDeployment>,
@@ -194,6 +196,9 @@ pub(crate) struct RawAuthority {
     pub(crate) permits: RawPermits,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
+    /// The tools this authority is bound to unblock, by selector.
+    #[serde(default)]
+    pub(crate) unblocks: Vec<String>,
     pub(crate) implementation: Option<toml::Value>,
 }
 
@@ -217,8 +222,25 @@ pub(crate) struct RawSanitizer {
     pub(crate) hint: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
-    pub(crate) permits: RawSanitizerPermits,
+    /// The tools this sanitizer is bound to unblock, by selector.
+    #[serde(default)]
+    pub(crate) unblocks: Vec<String>,
+    /// Omitted only beside `unblocks`: the sanitizer rewrites content and claims no label change.
+    pub(crate) permits: Option<RawSanitizerPermits>,
     pub(crate) implementation: Option<toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawInterceptor {
+    pub(crate) name: String,
+    pub(crate) on: Vec<String>,
+    /// The tools a `tool_call` Interceptor judges, by selector. Omitted: every tool.
+    pub(crate) tools: Option<Vec<String>>,
+    pub(crate) builtin: Option<String>,
+    pub(crate) settings: Option<toml::Table>,
+    #[serde(default)]
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Deserialize)]

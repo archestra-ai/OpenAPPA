@@ -1032,10 +1032,14 @@ fn substituted_call(
     call: &ResolvedCall,
     body: &ValueBody,
     annotation: Option<&crate::contract::PinnedAnnotation>,
+    interceptions: Option<&crate::intercept::Interceptions>,
 ) -> Result<ResolvedCall, TransitionError> {
     let (rewritten, declaration) =
         select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
-    let substituted = rewritten.with_annotation(annotation.cloned());
+    let substituted = rewritten
+        .with_annotation(annotation.cloned())
+        .with_interceptions(interceptions.cloned());
+    check::validate_interceptions(registry, declaration, &substituted).map_err(interception_refusal)?;
     match check::validate_annotation(registry, declaration, &substituted) {
         Ok(()) => {}
         Err(check::AnnotationRefusal::Needed(annotator)) => {
@@ -1046,6 +1050,16 @@ fn substituted_call(
         Err(_) => return Err(TransitionError::SanitizerUnapplicable),
     }
     Ok(substituted)
+}
+
+/// The transition error for interceptions that do not fit their call.
+pub(crate) fn interception_refusal(refusal: crate::intercept::InterceptionRefusal) -> TransitionError {
+    match refusal {
+        crate::intercept::InterceptionRefusal::Needed(interceptors) => {
+            TransitionError::InterceptionNeeded { interceptors }
+        }
+        crate::intercept::InterceptionRefusal::Foreign(reason) => TransitionError::ForeignInterceptions { reason },
+    }
 }
 
 /// The view's projection with `facts` folded in, for a decision that reads its own records.
@@ -1096,6 +1110,7 @@ fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::proj
                     source: RawResultDigest::of(&[]),
                     derived: ValueBody::new(""),
                     annotation: None,
+                    interceptions: None,
                 })
             }
             Some(sanitizer) if !sanitizer.is_attest_schema() => OfferOutcome::Derived(Evidence::Sanitizer {

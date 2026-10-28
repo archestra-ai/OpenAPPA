@@ -37,6 +37,7 @@ fn ordinary_and_forked_openings_preserve_stored_bytes_and_replay() {
         profile: ProfileDeclaration::no_coverage(&chain),
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain,
             tools: vec![],
             annotators: vec![],
@@ -114,6 +115,7 @@ fn a_principal_opening_forks_with_its_principal_and_replay_holds_it_to_shape() {
         profile: ProfileDeclaration::no_coverage(&chain),
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain,
             tools: vec![],
             annotators: vec![],

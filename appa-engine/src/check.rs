@@ -11,10 +11,11 @@ use crate::contract::{
     ToolDeclaration,
 };
 use crate::fact::EffectKind;
+use crate::intercept::{InterceptionRefusal, Verdict};
 use crate::label::{
     Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
-use crate::names::{AnnotatorName, AudienceArgument, MarkName};
+use crate::names::{AnnotatorName, AudienceArgument, InterceptorName, MarkName};
 use crate::projection::Views;
 use crate::value::ResolvedCall;
 
@@ -23,11 +24,22 @@ use crate::value::ResolvedCall;
 /// membership snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gap {
-    TrustFloor { required: Trust, actual: Trust },
-    Includes { recipients: DeclaredAudience },
+    TrustFloor {
+        required: Trust,
+        actual: Trust,
+    },
+    Includes {
+        recipients: DeclaredAudience,
+    },
     Prior(EffectKind),
     NoPrior(EffectKind),
     Attention(MarkName),
+    /// An Interceptor answered `no` or `ask` about the call. Only a component the policy binds
+    /// to the tool with `unblocks` lifts it.
+    Intercepted {
+        interceptor: InterceptorName,
+        verdict: Verdict,
+    },
 }
 
 /// A voluntary narrowing of the release frontier: committing this call moves the trajectory's
@@ -195,6 +207,16 @@ pub(crate) fn evaluate_state(
     for mark in annotation.requires.attention_marks() {
         gaps.push(Gap::Attention(mark.clone()));
     }
+    if let CallReads::Resolved(call) = reads
+        && let Some(interceptions) = call.interceptions()
+    {
+        for (interceptor, verdict) in interceptions.blocking() {
+            gaps.push(Gap::Intercepted {
+                interceptor: interceptor.clone(),
+                verdict,
+            });
+        }
+    }
     let mut seen = Vec::with_capacity(gaps.len());
     for gap in gaps {
         if !seen.contains(&gap) {
@@ -337,6 +359,44 @@ pub(crate) enum AnnotationRefusal {
     Foreign(String),
     #[error("the pinned annotation is outside its mandate: {0}")]
     OutsidePolicy(String),
+}
+
+/// Hold a call's interceptions to its declaration: the call carries exactly the answers of the
+/// Interceptors that judge a call to this declaration, pinned to its own canonical digest. The
+/// one validator the live check and replay both consume.
+pub(crate) fn validate_interceptions(
+    registry: &crate::registry::Registry,
+    declaration: &ToolDeclaration,
+    call: &ResolvedCall,
+) -> Result<(), InterceptionRefusal> {
+    let expected: Vec<&InterceptorName> = registry
+        .interceptors_judging(declaration.tags())
+        .map(|interceptor| &interceptor.name)
+        .collect();
+    let Some(interceptions) = call.interceptions() else {
+        return match expected.is_empty() {
+            true => Ok(()),
+            false => Err(InterceptionRefusal::Needed(expected.into_iter().cloned().collect())),
+        };
+    };
+    if interceptions.call() != &call.digest() {
+        return Err(InterceptionRefusal::Foreign("the answers judge another call".into()));
+    }
+    let missing: Vec<InterceptorName> = expected
+        .iter()
+        .filter(|name| !interceptions.answers().contains_key(**name))
+        .map(|name| (*name).clone())
+        .collect();
+    if !missing.is_empty() {
+        return Err(InterceptionRefusal::Needed(missing));
+    }
+    if let Some(stranger) = interceptions.answers().keys().find(|name| !expected.contains(name)) {
+        return Err(InterceptionRefusal::Foreign(format!(
+            "interceptor {} does not judge this tool",
+            stranger.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Hold a call's annotation evidence to its declaration: a static declaration is its own
@@ -491,6 +551,7 @@ mod tests {
     /// call by `classifier`.
     fn registry(annotators: Vec<AnnotatorDeclaration>) -> Registry {
         Registry::build_covered(RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolDeclaration::Declared(ToolAnnotation {

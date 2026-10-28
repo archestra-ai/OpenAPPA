@@ -91,6 +91,7 @@ pub(super) fn annotator_with_readers(name: &str, readers: &[&str]) -> crate::reg
 
 pub(super) fn test_config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
     RegistryConfig {
+        interceptors: Vec::new(),
         annotators: vec![],
         trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
         tools: declared(tools),
@@ -444,6 +445,7 @@ pub(super) fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
 
 pub(super) fn raw(call: &ResolvedCall) -> crate::transition::ProposedCall {
     crate::transition::ProposedCall {
+        interceptions: call.interceptions().cloned(),
         tool: call.tool().clone(),
         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
         annotation: call.annotation().cloned(),
@@ -595,6 +597,7 @@ pub(super) fn post_tool(name: &str, tags: Vec<crate::names::TagName>) -> ToolAnn
 
 pub(super) fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
     OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+        interceptions: None,
         sanitizer: crate::names::SanitizerName::new("redact"),
         source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
         derived: ValueBody::new(replacement),

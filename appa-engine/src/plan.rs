@@ -61,6 +61,7 @@ use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, CallRole, Gap, Narrowing, RawBlock};
 use crate::contract::{StaticAnnotation, ToolAnnotation, ToolDeclaration};
 use crate::fact::{CrossingReturn, EffectKind, EffectSet, ReturnPolicy, ReturnRoute, ReturnSanitizer};
+use crate::intercept::Verdict;
 use crate::label::{
     Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
 };
@@ -896,7 +897,7 @@ pub(crate) fn gap_power_cmp(
             let b: BTreeSet<&EffectKind> = b.waivers.iter().collect();
             inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
         }
-        Gap::Attention(_) => Some(Ordering::Equal),
+        Gap::Attention(_) | Gap::Intercepted { .. } => Some(Ordering::Equal),
         // These gaps have no covering authority by construction (`enumerate_assignments` returns
         // `None`), so no assignment reaching this comparison carries one.
         Gap::Prior(_) => Some(Ordering::Equal),
@@ -1036,7 +1037,19 @@ fn input_hops(
     if matches!(role, CallRole::MarkedSpawn(_)) {
         return Vec::new();
     }
-    if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
+    let includes = gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. }));
+    // A `no` an Interceptor gave is lifted by a rewrite every Interceptor then judges afresh;
+    // an `ask` waits for an authority.
+    let refused = gaps.iter().any(|gap| {
+        matches!(
+            gap,
+            Gap::Intercepted {
+                verdict: Verdict::No,
+                ..
+            }
+        )
+    });
+    if !includes && !refused {
         return Vec::new();
     }
     let released = stage.released(current);
@@ -1049,7 +1062,10 @@ fn input_hops(
             // shrinking the menu.
             needs
                 .take(sanitizer.derive_input(&released, &contract.tags, context))
-                .is_some_and(|derived| clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs))
+                .is_some_and(|derived| {
+                    (refused && sanitizer.scope.unblocks())
+                        || clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs)
+                })
         })
         .map(|sanitizer| sanitizer.name.clone())
         .collect()
@@ -1374,7 +1390,7 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
 pub(crate) fn attest_fits(transition: &DeclaredTransition, label: &Label) -> bool {
     match transition {
         DeclaredTransition::Trust { to, .. } => label.meets_floor(*to),
-        DeclaredTransition::Audience { .. } => false,
+        DeclaredTransition::Audience { .. } | DeclaredTransition::Unchanged => false,
     }
 }
 
@@ -1434,6 +1450,9 @@ pub(crate) fn gap_cover(
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
+        // An Interceptor's answer is lifted only where the policy binds the authority to the
+        // tool: `unblocks` is both its jurisdiction and its power over the answer.
+        Gap::Intercepted { .. } => Evaluation::of_exact(authority.scope.unblocks() && authority.scope.covers(tags)),
         Gap::Prior(_) => Evaluation::Fails,
     }
 }
@@ -1515,7 +1534,11 @@ pub(crate) fn direct_clears(tool: &ToolAnnotation, gaps: &[Gap]) -> Vec<Gap> {
     gaps.iter()
         .filter(|gap| match gap {
             Gap::Prior(kind) => tool.emits.contains(kind),
-            Gap::TrustFloor { .. } | Gap::Includes { .. } | Gap::NoPrior(_) | Gap::Attention(_) => false,
+            Gap::TrustFloor { .. }
+            | Gap::Includes { .. }
+            | Gap::NoPrior(_)
+            | Gap::Attention(_)
+            | Gap::Intercepted { .. } => false,
         })
         .cloned()
         .collect()
@@ -1578,6 +1601,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            interceptors: Vec::new(),
             annotators: vec![],
             trust_chain: chain(),
             tools: declared(tools),
@@ -2744,6 +2768,7 @@ mod tests {
             requires: Requires::default(),
         };
         Fact::DispatchOpened {
+            interceptions: None,
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
@@ -3646,6 +3671,7 @@ mod tests {
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
                 Gap::Attention(mark) => authority.mandate.attends.covers(mark),
+                Gap::Intercepted { .. } => authority.scope.unblocks(),
                 Gap::Prior(_) => false,
             })
         }
@@ -4099,6 +4125,7 @@ mod tests {
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.covers(mark),
+                    Gap::Intercepted { .. } => scoped && authority.scope.unblocks(),
                     Gap::Prior(_) => false,
                 }
             };
@@ -4159,7 +4186,7 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Prior(_) => Some(O::Equal),
+                    Gap::Attention(_) | Gap::Intercepted { .. } | Gap::Prior(_) => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

@@ -74,6 +74,7 @@ pub(crate) fn opened_dispatch(
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
         annotation: call.annotation().cloned(),
+        interceptions: call.interceptions().cloned(),
         file_basis: call.file_basis().cloned(),
         evidence: act.pinned().clone(),
         subject,

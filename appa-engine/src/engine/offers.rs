@@ -295,6 +295,7 @@ impl Engine {
             source,
             derived: body,
             annotation,
+            interceptions,
         } = evidence
         else {
             return Err(TransitionError::EvidenceMismatch);
@@ -317,7 +318,7 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let substituted = substituted_call(&self.registry, call, body, annotation.as_ref())?;
+        let substituted = substituted_call(&self.registry, call, body, annotation.as_ref(), interceptions.as_ref())?;
         let contract = self
             .registry
             .annotation_of(&substituted)

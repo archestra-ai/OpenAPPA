@@ -127,6 +127,7 @@ mod tests {
             .count() as u32;
         let dispatch = DispatchId::new(trajectory.clone(), call.digest(), occurrence);
         log.push(Fact::DispatchOpened {
+            interceptions: None,
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
@@ -309,6 +310,7 @@ mod tests {
         let call = ResolvedCall::new(ToolName::new("send"), crate::params::test_arguments(&json!({})));
         let dispatch = DispatchId::new(child(), call.digest(), 0);
         log.push(Fact::DispatchOpened {
+            interceptions: None,
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
@@ -432,6 +434,7 @@ mod tests {
         let call = ResolvedCall::new(ToolName::new("send"), crate::params::test_arguments(&json!({})));
         let dispatch = DispatchId::new(child(), call.digest(), 0);
         log.push(Fact::DispatchOpened {
+            interceptions: None,
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),

@@ -508,6 +508,7 @@ mod tests {
             annotator: crate::names::AnnotatorName::new("directory"),
         };
         Registry::build_covered(RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolDeclaration::Declared(get),
@@ -549,6 +550,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             annotation: call.annotation().cloned(),
+            interceptions: call.interceptions().cloned(),
             file_basis: call.file_basis().cloned(),
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
@@ -982,6 +984,7 @@ mod tests {
             requires: Default::default(),
         };
         let reg = Registry::build_covered(RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolDeclaration::Declared(get)],
             annotators: vec![],

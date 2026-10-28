@@ -36,6 +36,10 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
+name_newtype!(
+    /// A tool-call or prompt check the policy declares under `[[policy.interceptor]]`.
+    InterceptorName
+);
 name_newtype!(GroupName);
 name_newtype!(
     /// An audience provider: the namespace of one registered audience source, and the prefix

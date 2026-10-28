@@ -649,6 +649,9 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
+    /// The tool-call Interceptors, by name. A call they judge carries their answers.
+    #[serde(default)]
+    pub interceptors: Vec<crate::intercept::InterceptorDeclaration>,
     /// The audience side of the policy: registered sources, the chain mappings, the configured
     /// named audiences, and the identity implementation. All of it is policy meaning; how a
     /// deployment reaches a source or the identity implementation never enters.
@@ -680,6 +683,12 @@ pub enum LoadError {
     WildcardPlaceholderMandate(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
+    #[error("duplicate interceptor: {0}")]
+    DuplicateInterceptor(String),
+    #[error(
+        "sanitizer {0} declares no label change: such a sanitizer rewrites tool input only and must name the tools it unblocks"
+    )]
+    UnchangedSanitizer(String),
     #[error("malformed tool selector {0:?}")]
     MalformedToolSelector(String),
     #[error("provider-run tool {0} cannot use an argument selector")]
@@ -1107,6 +1116,7 @@ pub struct Registry {
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
+    interceptors: Vec<crate::intercept::InterceptorDeclaration>,
     audience: AudienceRegistry,
     /// The declared audience configuration as loaded — what the policy identity carries;
     /// the validated registry beside it is derived and never serialized.
@@ -1182,6 +1192,13 @@ impl Registry {
                         format!("{} from", context())
                     })?);
                     direct.extend(check_declared(&audience, to, || format!("{} to", context()))?);
+                }
+                // A sanitizer claiming no label change does one job: the rewrite that lifts an
+                // Interceptor's `no` on the tools the policy binds it to.
+                DeclaredTransition::Unchanged => {
+                    if sanitizer.on.output || !sanitizer.scope.unblocks() {
+                        return Err(LoadError::UnchangedSanitizer(sanitizer.name.as_str().to_string()));
+                    }
                 }
             }
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
@@ -1338,7 +1355,9 @@ impl Registry {
 
         let mut seen_authorities = BTreeMap::new();
         for authority in &config.authorities {
-            if authority.mandate.is_empty() {
+            // An authority bound with `unblocks` covers its tools' Interceptor answers whatever
+            // its mandate says, so its mandate may be empty.
+            if authority.mandate.is_empty() && !authority.scope.unblocks() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
             if authority.mandate.attends.named().iter().any(MarkName::is_blocked) {
@@ -1480,6 +1499,11 @@ impl Registry {
                 ordered.push((name.clone(), *ordinal));
             }
         }
+        let mut interceptors = config.interceptors;
+        interceptors.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(pair) = interceptors.windows(2).find(|pair| pair[0].name == pair[1].name) {
+            return Err(LoadError::DuplicateInterceptor(pair[0].name.as_str().to_string()));
+        }
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_vocabulary,
@@ -1492,6 +1516,7 @@ impl Registry {
             authorities: config.authorities,
             attention_marks,
             sanitizers,
+            interceptors,
             audience,
             audience_config: config.audience,
             profile,
@@ -1812,6 +1837,21 @@ impl Registry {
     pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
         self.sanitizers.values()
     }
+
+    /// The tool-call Interceptors, in name order.
+    pub fn interceptors(&self) -> &[crate::intercept::InterceptorDeclaration] {
+        &self.interceptors
+    }
+
+    /// The Interceptors that judge a call to a declaration carrying `tags`, in name order.
+    pub fn interceptors_judging<'a>(
+        &'a self,
+        tags: &'a [TagName],
+    ) -> impl Iterator<Item = &'a crate::intercept::InterceptorDeclaration> + 'a {
+        self.interceptors
+            .iter()
+            .filter(move |interceptor| interceptor.judges(tags))
+    }
 }
 
 #[cfg(test)]
@@ -2100,6 +2140,7 @@ mod tests {
 
     fn base() -> RegistryConfig {
         RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain(),
             tools: vec![],
             annotators: vec![],

@@ -27,6 +27,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
     );
     let at = |sanitizers: Vec<crate::authority::Sanitizer>, revision: u64| {
         open_engine(RegistryConfig {
+            interceptors: Vec::new(),
             annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: declared(vec![fetch.clone()]),
@@ -721,6 +722,7 @@ fn offer_consults_names_the_external_work_each_offer_needs() {
     assert_eq!(
         e.offer_consults(&viewing(&e, &spent), &traj(), &input_hop),
         Ok(OfferConsult::Replay(OfferOutcome::Derived(Evidence::Rewrite {
+            interceptions: None,
             sanitizer: crate::names::SanitizerName::new("redact"),
             source: crate::value::RawResultDigest::of(&[]),
             derived: ValueBody::new(""),

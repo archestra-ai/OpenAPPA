@@ -164,6 +164,19 @@ impl Scope {
     pub fn is_unscoped(&self) -> bool {
         self.tags.is_empty()
     }
+
+    /// The tag the policy compiler gives every tool a component `unblocks`, and that
+    /// component's scope: `unblock:<component>`. The prefix is reserved; policy tags never
+    /// carry it.
+    pub const UNBLOCK_PREFIX: &'static str = "unblock:";
+
+    /// Does the policy bind this component to its tools with `unblocks`? Such a component
+    /// is the one kind that lifts an Interceptor's answer.
+    pub fn unblocks(&self) -> bool {
+        self.tags
+            .iter()
+            .any(|tag| tag.as_str().starts_with(Self::UNBLOCK_PREFIX))
+    }
 }
 
 /// An authority declaration: its name, what it may cover, and where. The implementation (inline fn
@@ -197,6 +210,10 @@ pub enum DeclaredTransition {
         from_floor: Trust,
         to: Trust,
     },
+    /// The sanitizer rewrites content and claims no label change: a sanitizer the policy binds
+    /// with `unblocks` and gives no `permits`. It lifts only an Interceptor's `no`, by a
+    /// rewrite every Interceptor judges afresh.
+    Unchanged,
 }
 
 impl DeclaredTransition {
@@ -214,6 +231,7 @@ impl DeclaredTransition {
                 from_floor: *from_floor,
                 to: *to,
             },
+            DeclaredTransition::Unchanged => Transition::Unchanged,
         }
     }
 
@@ -231,6 +249,7 @@ impl DeclaredTransition {
                 !matches!(raw.covers(&widest, context), Evaluation::Fails)
             }
             DeclaredTransition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
+            DeclaredTransition::Unchanged => true,
         }
     }
 }
@@ -249,6 +268,7 @@ pub enum Transition {
         from_floor: Trust,
         to: Trust,
     },
+    Unchanged,
 }
 
 impl Transition {
@@ -257,6 +277,7 @@ impl Transition {
         match self {
             Transition::Audience { from_includes, .. } => raw.covers(from_includes, context),
             Transition::Trust { from_floor, .. } => Evaluation::of_exact(raw.meets_floor(*from_floor)),
+            Transition::Unchanged => Evaluation::Holds,
         }
     }
 
@@ -266,6 +287,7 @@ impl Transition {
         match self {
             Transition::Audience { to, .. } => Label::new(raw.trust, to.clone()),
             Transition::Trust { to, .. } => Label::new(*to, raw.audience.clone()),
+            Transition::Unchanged => raw.clone(),
         }
     }
 }

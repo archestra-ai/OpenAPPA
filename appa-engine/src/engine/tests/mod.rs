@@ -23,6 +23,7 @@ mod common;
 mod confined;
 mod contracts;
 mod forks;
+mod interceptors;
 mod laws;
 mod offers;
 mod openings;

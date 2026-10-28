@@ -63,6 +63,7 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj(),
                 dispatch,
                 tool: proposal.tool().clone(),
@@ -139,6 +140,7 @@ fn provider_run_tools_leave_every_plan_family() {
 
 fn raw_call(tool: &str, arguments: &[u8]) -> crate::transition::ProposedCall {
     crate::transition::ProposedCall {
+        interceptions: None,
         tool: ToolName::new(tool),
         arguments: arguments.to_vec(),
         annotation: None,
