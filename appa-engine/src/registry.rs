@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
-use crate::authority::{Authority, DeclaredTransition, Sanitizer};
+use crate::authority::{Authority, DeclaredTransition, Sanitizer, Scope};
 use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
@@ -685,6 +685,8 @@ pub enum LoadError {
     DuplicateTool(String),
     #[error("duplicate interceptor: {0}")]
     DuplicateInterceptor(String),
+    #[error("{0} carries a reserved binding tag that is not its own")]
+    ForeignUnblockTag(String),
     #[error(
         "sanitizer {0} declares no label change: such a sanitizer rewrites tool input only and must name the tools it unblocks"
     )]
@@ -1167,6 +1169,12 @@ impl Registry {
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
+            if !sanitizer
+                .scope
+                .owns_unblock_tags(&Scope::sanitizer_unblock_tag(sanitizer.name.as_str()))
+            {
+                return Err(LoadError::ForeignUnblockTag(sanitizer.name.as_str().to_string()));
+            }
             let context = || format!("sanitizer {}", sanitizer.name.as_str());
             if sanitizer.name.is_attest_schema() {
                 if matches!(sanitizer.transition, DeclaredTransition::Audience { .. }) {
@@ -1357,6 +1365,12 @@ impl Registry {
         for authority in &config.authorities {
             // An authority bound with `unblocks` covers its tools' Interceptor answers whatever
             // its mandate says, so its mandate may be empty.
+            if !authority
+                .scope
+                .owns_unblock_tags(&Scope::authority_unblock_tag(authority.name.as_str()))
+            {
+                return Err(LoadError::ForeignUnblockTag(authority.name.as_str().to_string()));
+            }
             if authority.mandate.is_empty() && !authority.scope.unblocks() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
@@ -1497,6 +1511,16 @@ impl Registry {
                 && let Some(ordered) = mcp_order.get_mut(leaf)
             {
                 ordered.push((name.clone(), *ordinal));
+            }
+        }
+        for interceptor in &config.interceptors {
+            let own = TagName::new(format!(
+                "{}{}",
+                crate::intercept::InterceptorDeclaration::TAG_PREFIX,
+                interceptor.name.as_str()
+            ));
+            if !interceptor.scope.is_unscoped() && interceptor.scope.tags != [own] {
+                return Err(LoadError::ForeignUnblockTag(interceptor.name.as_str().to_string()));
             }
         }
         let mut interceptors = config.interceptors;

@@ -15,7 +15,7 @@ use crate::intercept::{InterceptionRefusal, Verdict};
 use crate::label::{
     Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
-use crate::names::{AnnotatorName, AudienceArgument, InterceptorName, MarkName};
+use crate::names::{AnnotatorName, AudienceArgument, InterceptorName, MarkName, TagName};
 use crate::projection::Views;
 use crate::value::ResolvedCall;
 
@@ -397,6 +397,14 @@ pub(crate) fn validate_interceptions(
         )));
     }
     Ok(())
+}
+
+/// Does a rewrite keep every Interceptor that judged the call it replaces? A rewrite that
+/// selects a declaration fewer Interceptors judge would step past the ones it left behind.
+pub(crate) fn keeps_interceptors(registry: &crate::registry::Registry, before: &[TagName], after: &[TagName]) -> bool {
+    registry
+        .interceptors_judging(before)
+        .all(|interceptor| interceptor.judges(after))
 }
 
 /// Hold a call's annotation evidence to its declaration: a static declaration is its own

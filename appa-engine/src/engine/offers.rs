@@ -318,6 +318,7 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let judged_before = contract.tags.clone();
         let substituted = substituted_call(&self.registry, call, body, annotation.as_ref(), interceptions.as_ref())?;
         let contract = self
             .registry
@@ -325,8 +326,10 @@ impl Engine {
             .expect("a validated call resolves its annotation");
         // The sanitizer's jurisdiction reaches the contract the rewrite selects as well as the
         // one the offer was planned on: a rewrite is no way past a tag that keeps sanitizers off
-        // a contract.
-        if !registered.applies_to(&contract.tags) {
+        // a contract, nor past an Interceptor that judged the call it replaces.
+        if !registered.applies_to(&contract.tags)
+            || !crate::check::keeps_interceptors(&self.registry, &judged_before, &contract.tags)
+        {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 

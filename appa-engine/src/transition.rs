@@ -1483,7 +1483,9 @@ impl<'a> Sequence<'a> {
             }
             _ => return Err(TransitionRefusal::ForgedEvidence),
         };
-        if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err() {
+        if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err()
+            || crate::check::validate_interceptions(self.engine.registry(), entry, call).is_err()
+        {
             return Err(TransitionRefusal::ForgedEvidence);
         }
         let checked = match checked.bound_to(call.arguments()) {
@@ -2512,7 +2514,9 @@ impl<'a> Sequence<'a> {
                 .ok_or(TransitionRefusal::InvalidPayload(
                     crate::params::ArgumentError::NoMatchingContract,
                 ))?;
-            if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err() {
+            if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err()
+                || crate::check::validate_interceptions(self.engine.registry(), declaration, call).is_err()
+            {
                 return Err(TransitionRefusal::ForgedEvidence);
             }
         }
@@ -3292,10 +3296,15 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
         // Annotation evidence binds the exact canonical call: whatever declaration the rewrite
         // selects, the pin the record carries is judged afresh against it.
-        if crate::check::validate_annotation(registry, declaration, call).is_err() {
+        if crate::check::validate_annotation(registry, declaration, call).is_err()
+            || crate::check::validate_interceptions(registry, declaration, call).is_err()
+        {
             return Err(TransitionRefusal::ForgedEvidence);
         }
         let contract = annotation_or_unknown(registry, call)?;
+        if !crate::check::keeps_interceptors(registry, &before_contract.tags, &contract.tags) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
         contract
             .parameters
             .validate(call.arguments())

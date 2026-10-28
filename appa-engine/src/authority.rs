@@ -143,7 +143,8 @@ impl Mandate {
 
 /// A component's jurisdiction: the tags it covers. Empty = everything (small configs stay
 /// small). Authorities and sanitizers route by this one shape.
-/// Attention gaps ignore scope — they route by their own currency (the attended mark).
+/// Attention gaps ignore scope — they route by their own currency (the attended mark) —
+/// except for an authority the policy binds with `unblocks`, whose binding is its jurisdiction.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
     pub tags: Vec<TagName>,
@@ -176,6 +177,25 @@ impl Scope {
         self.tags
             .iter()
             .any(|tag| tag.as_str().starts_with(Self::UNBLOCK_PREFIX))
+    }
+
+    /// The tag `unblocks` gives the tools an authority is bound to, and the authority's scope.
+    pub fn authority_unblock_tag(authority: &str) -> TagName {
+        TagName::new(format!("{}authority:{authority}", Self::UNBLOCK_PREFIX))
+    }
+
+    /// The tag `unblocks` gives the tools a sanitizer is bound to, and the sanitizer's scope.
+    pub fn sanitizer_unblock_tag(sanitizer: &str) -> TagName {
+        TagName::new(format!("{}sanitizer:{sanitizer}", Self::UNBLOCK_PREFIX))
+    }
+
+    /// Is this a component's scope that carries only its own unblock tag, or none at all?
+    /// A reserved tag naming another component would borrow that component's binding.
+    pub(crate) fn owns_unblock_tags(&self, own: &TagName) -> bool {
+        match self.unblocks() {
+            false => true,
+            true => self.tags.len() == 1 && &self.tags[0] == own,
+        }
     }
 }
 

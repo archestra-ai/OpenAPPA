@@ -1448,8 +1448,11 @@ pub(crate) fn gap_cover(
             }
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
-        // Attention routes by its own currency — the attended mark — never by scope.
-        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
+        // Attention routes by its own currency — the attended mark. Scope binds it only for
+        // an authority the policy binds with `unblocks`: that binding is its whole jurisdiction.
+        Gap::Attention(mark) => Evaluation::of_exact(
+            mandate.attends.covers(mark) && (!authority.scope.unblocks() || authority.scope.covers(tags)),
+        ),
         // An Interceptor's answer is lifted only where the policy binds the authority to the
         // tool: `unblocks` is both its jurisdiction and its power over the answer.
         Gap::Intercepted { .. } => Evaluation::of_exact(authority.scope.unblocks() && authority.scope.covers(tags)),
@@ -4124,7 +4127,9 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
-                    Gap::Attention(mark) => authority.mandate.attends.covers(mark),
+                    Gap::Attention(mark) => {
+                        authority.mandate.attends.covers(mark) && (!authority.scope.unblocks() || scoped)
+                    }
                     Gap::Intercepted { .. } => scoped && authority.scope.unblocks(),
                     Gap::Prior(_) => false,
                 }

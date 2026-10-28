@@ -3,8 +3,8 @@ use crate::authority::{Attends, Authority, DeclaredTransition, Mandate, Sanitize
 use crate::intercept::{Interceptions, InterceptorAnswer, InterceptorDeclaration, Verdict};
 use crate::names::{AuthorityName, InterceptorName, SanitizerName, TagName};
 
-fn unblock(component: &str) -> TagName {
-    TagName::new(format!("{}{component}", Scope::UNBLOCK_PREFIX))
+fn judged_by_orlando() -> TagName {
+    TagName::new(format!("{}orlando", InterceptorDeclaration::TAG_PREFIX))
 }
 
 /// `commit` is judged by the `orlando` Interceptor and bound to `strip` (a sanitizer that
@@ -12,7 +12,11 @@ fn unblock(component: &str) -> TagName {
 /// own). `officer` attends every mark but is bound to no tool. `push` is judged by nothing.
 fn intercepting_engine() -> Engine {
     let commit = ToolAnnotation {
-        tags: vec![unblock("strip"), unblock("reviewer")],
+        tags: vec![
+            Scope::sanitizer_unblock_tag("strip"),
+            Scope::authority_unblock_tag("reviewer"),
+            judged_by_orlando(),
+        ],
         ..plain_tool("commit")
     };
     let cfg = RegistryConfig {
@@ -21,7 +25,7 @@ fn intercepting_engine() -> Engine {
                 name: AuthorityName::new("reviewer"),
                 mandate: Mandate::default(),
                 scope: Scope {
-                    tags: vec![unblock("reviewer")],
+                    tags: vec![Scope::authority_unblock_tag("reviewer")],
                 },
                 hint: None,
             },
@@ -43,14 +47,14 @@ fn intercepting_engine() -> Engine {
             },
             transition: DeclaredTransition::Unchanged,
             scope: Scope {
-                tags: vec![unblock("strip")],
+                tags: vec![Scope::sanitizer_unblock_tag("strip")],
             },
             hint: None,
         }],
         interceptors: vec![InterceptorDeclaration {
             name: InterceptorName::new("orlando"),
             scope: Scope {
-                tags: vec![unblock("strip")],
+                tags: vec![judged_by_orlando()],
             },
         }],
         ..test_config(vec![commit, plain_tool("push")])
@@ -296,4 +300,131 @@ fn log_label(e: &Engine, log: &[Fact]) -> Label {
         .views(&traj())
         .expect("the trajectory is opened")
         .current_label()
+}
+
+fn without_interceptions(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.remove("interceptions");
+            fields.values_mut().for_each(without_interceptions);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(without_interceptions),
+        _ => {}
+    }
+}
+
+#[test]
+fn replay_refuses_a_log_that_lost_the_answers() {
+    let e = intercepting_engine();
+    let mut log = internal_log(&e);
+    let judged = judged(commit("fix"), Verdict::Yes);
+    log.extend(appended_facts(proposed(&e, &log, "b1", nonce(), judged).unwrap()));
+    assert_eq!(e.validate_replay(&log), Ok(()));
+    let mut forged = serde_json::to_value(&log).unwrap();
+    without_interceptions(&mut forged);
+    let forged: Vec<Fact> = serde_json::from_value(forged).unwrap();
+    assert!(
+        e.validate_replay(&forged).is_err(),
+        "a judged call without its answers does not replay"
+    );
+}
+
+#[test]
+fn a_bound_authority_attends_only_on_its_tools() {
+    let restricted = ToolAnnotation {
+        requires: Requires {
+            attention: vec![MarkName::new("review")],
+            ..Requires::default()
+        },
+        ..plain_tool("restricted")
+    };
+    let safe = ToolAnnotation {
+        tags: vec![Scope::authority_unblock_tag("lead")],
+        ..plain_tool("safe")
+    };
+    let e = open_engine(RegistryConfig {
+        authorities: vec![Authority {
+            name: AuthorityName::new("lead"),
+            mandate: Mandate {
+                attends: Attends::Any,
+                ..Mandate::default()
+            },
+            scope: Scope {
+                tags: vec![Scope::authority_unblock_tag("lead")],
+            },
+            hint: None,
+        }],
+        ..test_config(vec![restricted, safe])
+    });
+    let decision = proposed(&e, &internal_log(&e), "b1", nonce(), call("restricted", json!({}))).unwrap();
+    assert!(
+        opened_offers(&appended_facts(decision)).is_empty(),
+        "an authority bound to `safe` approves nothing on `restricted`"
+    );
+}
+
+#[test]
+fn a_component_cannot_carry_another_components_binding() {
+    let cfg = RegistryConfig {
+        authorities: vec![Authority {
+            name: AuthorityName::new("lead"),
+            mandate: Mandate::default(),
+            scope: Scope {
+                tags: vec![Scope::sanitizer_unblock_tag("strip")],
+            },
+            hint: None,
+        }],
+        ..test_config(vec![plain_tool("commit")])
+    };
+    assert!(matches!(
+        crate::registry::Registry::build_covered(cfg),
+        Err(crate::registry::LoadError::ForeignUnblockTag(name)) if name == "lead"
+    ));
+}
+
+#[test]
+fn a_rewrite_cannot_leave_the_interceptor_behind() {
+    // Only commits starting "release" are judged; a rewrite to any other message selects the
+    // plain declaration, which no Interceptor judges.
+    let judged_release = ToolAnnotation {
+        name: ToolName::new("commit(message:release*)"),
+        tags: vec![Scope::sanitizer_unblock_tag("strip"), judged_by_orlando()],
+        ..plain_tool("commit")
+    };
+    let plain = ToolAnnotation {
+        tags: vec![Scope::sanitizer_unblock_tag("strip")],
+        ..plain_tool("commit")
+    };
+    let e = open_engine(RegistryConfig {
+        sanitizers: vec![Sanitizer {
+            name: SanitizerName::new("strip"),
+            on: SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: DeclaredTransition::Unchanged,
+            scope: Scope {
+                tags: vec![Scope::sanitizer_unblock_tag("strip")],
+            },
+            hint: None,
+        }],
+        interceptors: vec![InterceptorDeclaration {
+            name: InterceptorName::new("orlando"),
+            scope: Scope {
+                tags: vec![judged_by_orlando()],
+            },
+        }],
+        ..test_config(vec![judged_release, plain])
+    });
+    let mut log = internal_log(&e);
+    let blocked = judged(commit("release for Orlando"), Verdict::No);
+    let facts = appended_facts(proposed(&e, &log, "b1", nonce(), blocked.clone()).unwrap());
+    log.extend(facts.clone());
+    let offer = hop_named(&facts, "strip");
+    let escaped = commit("chore");
+    let outcome = execute_offer(&e, &log, offer, rewrite(&blocked, &escaped));
+    assert!(
+        !matches!(outcome.as_ref().map(offer_answer), Ok(OfferFollowUp::Approved { .. })),
+        "a rewrite onto a declaration no Interceptor judges is not approved: {outcome:?}"
+    );
 }
