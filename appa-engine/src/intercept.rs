@@ -35,29 +35,35 @@ pub struct InterceptorAnswer {
 }
 
 /// Every answer the call's Interceptors gave, pinned to the canonical digest of the call they
-/// judged. A rewrite is a new call and is judged afresh.
+/// judged. A rewrite is a new call and is judged afresh. The parts live behind one box, as a
+/// pinned annotation's do: the pin rides every call record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Interceptions {
+#[serde(transparent)]
+pub struct Interceptions(Box<InterceptionParts>);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct InterceptionParts {
     call: CanonicalDigest,
     answers: BTreeMap<InterceptorName, InterceptorAnswer>,
 }
 
 impl Interceptions {
     pub fn new(call: CanonicalDigest, answers: BTreeMap<InterceptorName, InterceptorAnswer>) -> Self {
-        Interceptions { call, answers }
+        Interceptions(Box::new(InterceptionParts { call, answers }))
     }
 
     pub fn call(&self) -> &CanonicalDigest {
-        &self.call
+        &self.0.call
     }
 
     pub fn answers(&self) -> &BTreeMap<InterceptorName, InterceptorAnswer> {
-        &self.answers
+        &self.0.answers
     }
 
     /// The answers that block the call: every `no` and `ask`, in interceptor name order.
     pub fn blocking(&self) -> impl Iterator<Item = (&InterceptorName, Verdict)> {
-        self.answers
+        self.0
+            .answers
             .iter()
             .filter(|(_, answer)| answer.verdict != Verdict::Yes)
             .map(|(name, answer)| (name, answer.verdict))
@@ -65,7 +71,7 @@ impl Interceptions {
 
     /// The reason `interceptor` gave, when it gave one.
     pub fn reason(&self, interceptor: &InterceptorName) -> Option<&str> {
-        self.answers.get(interceptor)?.reason.as_deref()
+        self.0.answers.get(interceptor)?.reason.as_deref()
     }
 }
 
