@@ -206,21 +206,13 @@ async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
         let (status, answer) = call(runtime, event).await;
         assert_eq!(status, 200, "{name} answered {answer}");
         match name {
-            "PreToolUse" => assert_released(event, &answer),
+            "PreToolUse" => assert_eq!(
+                answer["hookSpecificOutput"]["permissionDecision"], "allow",
+                "{name} {} is released: {answer}",
+                event["tool_name"]
+            ),
             _ => assert_eq!(answer, serde_json::json!({}), "{name} carries no opinion: {answer}"),
         }
-    }
-}
-
-/// A released call answers `allow`, except in auto mode, where it is left to Claude Code's
-/// classifier with no decision.
-fn assert_released(event: &serde_json::Value, answer: &serde_json::Value) {
-    match event["permission_mode"].as_str() {
-        Some("auto") => assert_eq!(answer, &serde_json::json!({}), "released to the classifier: {answer}"),
-        _ => assert_eq!(
-            answer["hookSpecificOutput"]["permissionDecision"], "allow",
-            "released: {answer}"
-        ),
     }
 }
 
@@ -329,12 +321,13 @@ async fn the_synchronous_recording_crosses_the_return_at_the_subagents_stop() {
     next_child_call["tool_use_id"] = serde_json::json!("toolu_test_after_return");
     let (status, answer) = call(&runtime, &next_child_call).await;
     assert_eq!(status, 200);
-    // A return leaves the subagent live to work on.
-    assert_released(&next_child_call, &answer);
-    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
-    let (status, answer) = call(&runtime, &proposal).await;
+    assert_eq!(
+        answer["hookSpecificOutput"]["permissionDecision"], "allow",
+        "a return leaves the subagent live to work on: {answer}"
+    );
+    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
     assert_eq!(status, 200);
-    assert_released(&proposal, &answer);
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
 }
 
 #[tokio::test]
@@ -352,11 +345,12 @@ async fn the_asynchronous_recording_returns_while_the_parent_is_free() {
         "the launch acknowledgement crosses nothing"
     );
 
-    // The acknowledgement closed the spawn call, so the parent proposes freely.
-    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
-    let (status, answer) = call(&runtime, &proposal).await;
+    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
     assert_eq!(status, 200);
-    assert_released(&proposal, &answer);
+    assert_eq!(
+        answer["hookSpecificOutput"]["permissionDecision"], "allow",
+        "the acknowledgement closed the spawn call, so the parent proposes freely: {answer}"
+    );
 
     // The parent's turn ends, a helper stops, and the subagent works on.
     replay(&runtime, &events[ack + 1..stop]).await;
@@ -750,10 +744,9 @@ async fn an_agent_result_naming_another_subagent_is_withheld() {
         "only the subagent's own stop crossed"
     );
 
-    let proposal = as_root(hook(&events, "PreToolUse", Some("Bash"), true));
-    let (status, answer) = call(&runtime, &proposal).await;
+    let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
     assert_eq!(status, 200);
-    assert_released(&proposal, &answer);
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
 }
 
 #[tokio::test]
