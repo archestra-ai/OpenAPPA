@@ -4,7 +4,7 @@ import { Agent } from '@opencode/schema/agent'
 import { Model } from '@opencode/schema/model'
 import { SessionMessage } from '@opencode/schema/session-message'
 import { Tool } from '@opencode/schema/tool'
-import { Cause, Effect, Schema, Semaphore } from 'effect'
+import { Cause, Effect, Fiber, Schedule, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { refusal } from './refusal'
@@ -14,11 +14,14 @@ type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
 type Actor = { root: string; child?: string }
 type Task = {
-  root: Tool.Context['sessionID']; child: Tool.Context['sessionID']; proposal: Proposal
+  handle: string; root: Tool.Context['sessionID']; child: Tool.Context['sessionID']; proposal: Proposal
   promptID: SessionMessage.ID
+  // The parent's notice keeps one ID, so a retried delivery cannot duplicate it.
+  notice: SessionMessage.ID
+  watcher?: Fiber.Fiber<void>
   transition: Semaphore.Semaphore
   state: { status: 'active'; candidate?: string }
-    | { status: 'admitted'; value: string }
+    | { status: 'admitted'; value: string; reported: boolean }
     | { status: 'cancelled'; settled: boolean }
     | { status: 'failed'; message: string }
 }
@@ -141,7 +144,7 @@ export default Plugin.define({
     }
 
     const cancelTask = (task: Task) => task.transition.withPermits(1)(Effect.gen(function* () {
-      if (task.state.status === 'admitted') return 'Task already collected; cancellation cannot retract its return.'
+      if (task.state.status === 'admitted') return 'Task already returned; cancellation cannot retract its return.'
       if (task.state.status === 'cancelled' && task.state.settled) return 'Task cancelled.'
       // Revoke before the host can admit another child tool call. A lost stop or
       // runtime reply leaves cancellation retryable, never reported as settled.
@@ -155,12 +158,78 @@ export default Plugin.define({
       return 'Task cancelled.'
     }).pipe(Effect.uninterruptible))
 
+    // Admit a finished child's return through APPA, once. Callers wait for the
+    // child first: holding the permit while waiting would block cancellation.
+    // Callers mark the value reported only after they release it.
+    const admit = (task: Task) => task.transition.withPermits(1)(Effect.tryPromise({ try: async () => {
+      if (disposed || tasks.get(task.handle) !== task) throw new Error('[appencode] Task ownership expired.')
+      switch (task.state.status) {
+        case 'admitted': return task.state.value
+        case 'cancelled': throw new Error('[appencode] Task cancelled; its return is withheld.')
+        case 'failed': throw new Error(task.state.message)
+        case 'active': break
+      }
+      if (task.state.candidate === undefined) {
+        try { task.state.candidate = await childAnswer(task.child) }
+        catch {
+          const message = '[appencode] Child did not complete a valid final answer; its return is withheld.'
+          task.state = { status: 'failed', message }
+          revoke(task.child)
+          await post('child_end', { root: task.root }, { child_id: task.child }).catch(() =>
+            Effect.runPromise(Effect.logWarning('[appencode] Failed child settlement is unconfirmed.')))
+          throw new Error(message)
+        }
+      }
+      const returned = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
+      if (returned.decision === 'child_return') {
+        // Retain the exact next admission before sending it. A lost reply
+        // can replay these bytes, including a sanitizer's replacement.
+        task.state.candidate = text(returned, 'value')
+        const echoed = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
+        if (echoed.decision !== 'ack') throw new Error('[appencode] Replacement return was not admitted.')
+      } else if (returned.decision !== 'ack') {
+        throw new Error('[appencode] Child return was not admitted; retry collection or cancel the task.')
+      }
+      const value = task.state.candidate
+      task.state = { status: 'admitted', value, reported: false }
+      revoke(task.child)
+      return value
+    }, catch: failure }).pipe(Effect.uninterruptible))
+
+    // Deliver a finished task to its root without a collection call. Only
+    // APPA-admitted bytes or plugin-authored status text reach the root; the
+    // root wakes if idle and reads the notice after its current turn if busy.
+    const watch = (task: Task) => Effect.gen(function* () {
+      yield* ctx.session.wait({ sessionID: task.child })
+      yield* admit(task).pipe(
+        Effect.retry({ times: 2, schedule: Schedule.spaced('1 second'), while: () => task.state.status === 'active' }),
+        Effect.result)
+      if (disposed || tasks.get(task.handle) !== task || task.state.status === 'cancelled') return
+      let notice: string
+      if (task.state.status === 'admitted') {
+        // A collection that already returned the text makes the notice redundant.
+        if (task.state.reported) return
+        task.state.reported = true
+        notice = `[appencode] Background task ${task.handle} finished. Its APPA-admitted return follows.\n\n${task.state.value}`
+      } else if (task.state.status === 'failed') {
+        notice = `[appencode] Background task ${task.handle} ended without a valid final answer; its return is withheld.`
+      } else {
+        notice = `[appencode] Background task ${task.handle} finished, but APPA did not admit its return. Call appa_collect to retry or appa_cancel to stop it.`
+      }
+      yield* ctx.session.synthetic({ sessionID: task.root, id: task.notice, text: notice, delivery: 'queue', resume: true }).pipe(
+        Effect.retry({ times: 2, schedule: Schedule.spaced('1 second') }))
+    }).pipe(Effect.catchCause(cause => Cause.hasInterrupts(cause) ? Effect.void
+      : Effect.logWarning('[appencode] Background result delivery failed; appa_collect still returns it.')))
+
     yield* Effect.addFinalizer(() => Effect.gen(function* () {
       disposed = true
       const owned = [...tasks.values()]
       tasks.clear()
       for (const task of owned) revoke(task.child)
       for (const task of owned) {
+        // Stop delivery without joining: the watcher may be waiting on the
+        // same child execution whose release is running this finalizer.
+        if (task.watcher) yield* Effect.forkDetach(Fiber.interrupt(task.watcher))
         if (task.state.status === 'admitted') continue
         // Disposal can run inside the child's graph release. Joining that
         // execution here would wait on this finalizer itself. Request a stop,
@@ -254,7 +323,7 @@ export default Plugin.define({
       editor.add({
         name: 'appa_subagent',
         options: { codemode: false },
-        description: 'Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle; use appa_collect for its checked final text or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.',
+        description: 'Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.',
         input: Schema.Struct({
           agent: Schema.String,
           description: Schema.String,
@@ -351,8 +420,10 @@ export default Plugin.define({
                 const acknowledged = yield* runtime('spawn_result', backgroundReport)
                 if (acknowledged.decision !== 'ack') throw new Error('[appencode] Background launch was not confirmed.')
                 if (disposed) throw new Error('[appencode] Plugin disposed during launch.')
-                tasks.set(task, { root: call.sessionID, child: child.id, proposal, promptID: child.promptID,
-                  transition: Semaphore.makeUnsafe(1), state: { status: 'active' } })
+                const owned: Task = { handle: task, root: call.sessionID, child: child.id, proposal, promptID: child.promptID,
+                  notice: SessionMessage.ID.create(), transition: Semaphore.makeUnsafe(1), state: { status: 'active' } }
+                tasks.set(task, owned)
+                owned.watcher = yield* Effect.forkDetach(watch(owned))
                 settled = true
                 transferred = true
                 return { output: task, content: task }
@@ -383,7 +454,7 @@ export default Plugin.define({
       editor.add({
         name: 'appa_collect',
         options: { codemode: false },
-        description: 'Wait for an owned background task and return only its APPA-admitted final text. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.',
+        description: 'Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.',
         input: Schema.Struct({ task: Schema.String }),
         output: Schema.String,
         execute: (input, call) => Effect.gen(function* () {
@@ -391,40 +462,9 @@ export default Plugin.define({
           // Never hold the transition permit while waiting: cancellation must be
           // able to stop a child whose collector is blocked here.
           if (task.state.status === 'active') yield* ctx.session.wait({ sessionID: task.child })
-          const value = yield* task.transition.withPermits(1)(Effect.tryPromise({ try: async () => {
-            if (disposed || tasks.get(input.task) !== task) throw new Error('[appencode] Task ownership expired.')
-            switch (task.state.status) {
-              case 'admitted': return task.state.value
-              case 'cancelled': throw new Error('[appencode] Task cancelled; its return is withheld.')
-              case 'failed': throw new Error(task.state.message)
-              case 'active': break
-            }
-            if (task.state.candidate === undefined) {
-              try { task.state.candidate = await childAnswer(task.child) }
-              catch {
-                const message = '[appencode] Child did not complete a valid final answer; its return is withheld.'
-                task.state = { status: 'failed', message }
-                revoke(task.child)
-                await post('child_end', { root: task.root }, { child_id: task.child }).catch(() =>
-                  Effect.runPromise(Effect.logWarning('[appencode] Failed child settlement is unconfirmed.')))
-                throw new Error(message)
-              }
-            }
-            const returned = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
-            if (returned.decision === 'child_return') {
-              // Retain the exact next admission before sending it. A lost reply
-              // can replay these bytes, including a sanitizer's replacement.
-              task.state.candidate = text(returned, 'value')
-              const echoed = await post('child_end', { root: task.root }, { child_id: task.child, value: task.state.candidate })
-              if (echoed.decision !== 'ack') throw new Error('[appencode] Replacement return was not admitted.')
-            } else if (returned.decision !== 'ack') {
-              throw new Error('[appencode] Child return was not admitted; retry collection or cancel the task.')
-            }
-            const value = task.state.candidate
-            task.state = { status: 'admitted', value }
-            revoke(task.child)
-            return value
-          }, catch: failure }).pipe(Effect.uninterruptible))
+          const value = yield* admit(task)
+          // Marked only once released: an interrupted collection leaves delivery pending.
+          if (task.state.status === 'admitted') task.state.reported = true
           if (disposed || tasks.get(input.task) !== task) throw new Error('[appencode] Task ownership expired.')
           return { output: value, content: value }
         }).pipe(Effect.catchCause(cause => Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.fail(failure(Cause.squash(cause))))),
