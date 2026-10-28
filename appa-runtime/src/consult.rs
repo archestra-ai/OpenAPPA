@@ -520,7 +520,8 @@ pub struct IfcContext {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LabelSource {
-    /// `tool_result`, `child_return` or `provider_run`.
+    /// `tool_result`, `child_return`, `provider_run`, or `inherited` for what the trajectory
+    /// carried before its own values.
     pub from: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,

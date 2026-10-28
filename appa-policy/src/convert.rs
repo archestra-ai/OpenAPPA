@@ -270,7 +270,8 @@ impl RawAuthority {
         let ctx = format!("authority {}", self.name);
         let mandate = self.permits.convert(chain, &ctx)?;
         let hint = parse_hint(self.hint, &ctx)?;
-        let scope = component_scope(&self.name, self.tags, &self.unblocks, tools, &ctx)?;
+        let own = Scope::authority_unblock_tag(&self.name);
+        let scope = component_scope(own, self.tags, &self.unblocks, tools, &ctx)?;
         Ok(Authority {
             name: AuthorityName::new(self.name),
             mandate,
@@ -283,7 +284,7 @@ impl RawAuthority {
 /// A component's scope: its `tags`, or the reserved tag `unblocks` gives it and the tools it
 /// names. A component writes one of the two.
 fn component_scope(
-    name: &str,
+    own: TagName,
     tags: Vec<String>,
     unblocks: &[String],
     tools: &mut [ToolDeclaration],
@@ -294,7 +295,7 @@ fn component_scope(
         (_, true) => Ok(Scope {
             tags: tags.into_iter().map(TagName::new).collect(),
         }),
-        (true, false) => crate::interceptor::unblock_scope(name, unblocks, tools, ctx),
+        (true, false) => crate::interceptor::unblock_scope(own, unblocks, tools, ctx),
         (false, false) => Err(ConfigError::UnblocksWithTags {
             context: ctx.to_string(),
         }),
@@ -339,7 +340,8 @@ impl RawSanitizer {
         };
         let ctx = format!("sanitizer {}", self.name);
         let hint = parse_hint(self.hint, &ctx)?;
-        let scope = component_scope(&self.name, self.tags, &self.unblocks, tools, &ctx)?;
+        let own = Scope::sanitizer_unblock_tag(&self.name);
+        let scope = component_scope(own, self.tags, &self.unblocks, tools, &ctx)?;
         Ok(Sanitizer {
             name: SanitizerName::new(self.name),
             on,

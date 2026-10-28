@@ -1703,12 +1703,12 @@ fn unblocks_binds_each_component_to_the_tools_it_names() {
     let config = load(INTERCEPTED).expect("the policy compiles");
     assert_eq!(
         tool_tags(&config, "commit"),
-        ["intercept:orlando", "unblock:hitl", "unblock:strip"]
+        ["intercept:orlando", "unblock:authority:hitl", "unblock:sanitizer:strip"]
     );
-    assert_eq!(tool_tags(&config, "send_email"), ["unblock:hitl"]);
+    assert_eq!(tool_tags(&config, "send_email"), ["unblock:authority:hitl"]);
     assert_eq!(
         tool_tags(&config, "send_email(to:*@consulting.com)"),
-        ["unblock:hitl", "unblock:my-address"]
+        ["unblock:authority:hitl", "unblock:sanitizer:my-address"]
     );
     let strip = config
         .registry_config()
@@ -1749,7 +1749,10 @@ fn a_sanitizer_without_permits_must_unblock_and_tags_never_use_reserved_prefixes
         "name = \"strip\"\non = [\"tool_input\"]",
     );
     assert!(matches!(load(&unbound), Err(ConfigError::SanitizerWithoutPermits { name }) if name == "strip"));
-    let reserved = INTERCEPTED.replace("name = \"commit\"\n", "name = \"commit\"\ntags = [\"unblock:hitl\"]\n");
+    let reserved = INTERCEPTED.replace(
+        "name = \"commit\"\n",
+        "name = \"commit\"\ntags = [\"unblock:authority:hitl\"]\n",
+    );
     assert!(matches!(load(&reserved), Err(ConfigError::ReservedTag { .. })));
 }
 
@@ -1766,4 +1769,21 @@ settings = { pattern = "\\d"#,
     assert!(matches!(load(&builtin), Err(ConfigError::BadInterceptor { .. })));
     let prompt_tools = INTERCEPTED.replace(r#"on = ["prompt"]"#, "on = [\"prompt\"]\ntools = [\"commit\"]");
     assert!(matches!(load(&prompt_tools), Err(ConfigError::BadInterceptor { .. })));
+}
+
+#[test]
+fn an_interceptor_name_is_unique_across_steps() {
+    let twice = INTERCEPTED.replace(r#"name = "no-cards""#, r#"name = "orlando""#);
+    assert!(matches!(load(&twice), Err(ConfigError::BadInterceptor { name, .. }) if name == "orlando"));
+}
+
+#[test]
+fn an_authority_and_a_sanitizer_of_one_name_keep_their_own_tools() {
+    let shared = INTERCEPTED.replace(r#"name = "strip""#, r#"name = "hitl""#);
+    let config = load(&shared).expect("the policy compiles");
+    assert_eq!(
+        tool_tags(&config, "commit"),
+        ["intercept:orlando", "unblock:authority:hitl", "unblock:sanitizer:hitl"]
+    );
+    assert_eq!(tool_tags(&config, "send_email"), ["unblock:authority:hitl"]);
 }

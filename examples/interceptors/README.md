@@ -20,3 +20,14 @@ Files:
 
 The `fraud` and `hate` Interceptors call `http://127.0.0.1:8787`. A service there answers
 `{"version": 1, "answer": {"verdict": "yes" | "no" | "ask", "reason": "..."}}`.
+
+## Limits of this prototype
+
+- An Interceptor's `tools` entry with an argument clause, such as `Bash(command:git commit*)`,
+  judges only calls that select that rule. A model that spells the command differently, such
+  as `cd . && git commit ...`, selects the plain `Bash` rule. Bind the Interceptor to `Bash` to
+  judge every command.
+- Cedar names a tool by its full identity: `Tool::"host/claude-code/Bash"`, not `Tool::"Bash"`.
+- A message from a peer session is not a user prompt: prompt Interceptors do not judge it.
+- `unblocks` binds a component to tools, not to one Interceptor: a bound authority lifts every
+  Interceptor's answer on those tools, and a bound sanitizer's rewrite must satisfy all of them.

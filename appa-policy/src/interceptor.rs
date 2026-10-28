@@ -68,10 +68,17 @@ pub(crate) fn compile_interceptors(
     raw: Vec<RawInterceptor>,
     tools: &mut [ToolDeclaration],
 ) -> Result<CompiledInterceptors, ConfigError> {
-    let mut bindings = Vec::new();
+    let mut bindings: Vec<(InterceptorName, InterceptorBinding)> = Vec::new();
     let mut declarations = Vec::new();
     for interceptor in raw {
         let name = interceptor.name;
+        // One name names one Interceptor, whatever steps it judges.
+        if bindings.iter().any(|(bound, _)| bound.as_str() == name) {
+            return Err(ConfigError::BadInterceptor {
+                name,
+                reason: "another [[interceptor]] has this name".into(),
+            });
+        }
         if name.is_empty() {
             return Err(ConfigError::BadInterceptor {
                 name,
@@ -137,15 +144,14 @@ pub(crate) fn compile_interceptors(
     Ok(CompiledInterceptors { bindings, declarations })
 }
 
-/// The scope `unblocks` gives a component: the component's own reserved tag, added to every
-/// tool declaration the selectors name.
+/// The scope `unblocks` gives a component: its own reserved tag — `own`, qualified by the
+/// component's kind — added to every tool declaration the selectors name.
 pub(crate) fn unblock_scope(
-    component: &str,
+    tag: TagName,
     selectors: &[String],
     tools: &mut [ToolDeclaration],
     context: &str,
 ) -> Result<Scope, ConfigError> {
-    let tag = TagName::new(format!("{}{component}", Scope::UNBLOCK_PREFIX));
     bind_tools(selectors, tools, &tag, context)?;
     Ok(Scope { tags: vec![tag] })
 }

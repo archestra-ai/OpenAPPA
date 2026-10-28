@@ -3320,7 +3320,12 @@ impl Runtime {
         })
         .is_some_and(|unblocker| match unblocker {
             crate::engine::Unblocker::Authority(name) => !deployment.externals.is_hitl(&name),
-            crate::engine::Unblocker::Sanitizer => true,
+            // A rewrite reaches the tool only through a harness that runs the arguments it is
+            // handed; of the served adapters, only Claude Code does.
+            crate::engine::Unblocker::Sanitizer => !matches!(
+                self.inner.shared.naming,
+                ToolNaming::Canonical { adapter } if adapter.name != AdapterName::ClaudeCode
+            ),
         })
     }
 

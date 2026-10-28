@@ -1030,13 +1030,17 @@ impl Views<'_> {
         pins.all(|pin| pin == first).then_some(first)
     }
 
-    /// The values this trajectory's label folds — inherited from its fork and admitted here —
-    /// each with its label and where it came from, in fold order. Read-only audit context: what
-    /// an unblocker reads to learn which source brought a restriction. The fold never consumes it.
+    /// The values admitted on this trajectory itself, each with its label and where it came
+    /// from, in admission order. What a fork inherited, a resume seeded and the trajectory
+    /// opened under are not among them. Read-only audit context: what an unblocker reads to
+    /// learn which tool brought a restriction. The fold never consumes it.
     pub fn label_sources(&self) -> impl Iterator<Item = (&Label, &Provenance)> {
         self.projection
-            .basis_sources(self.trajectory)
-            .filter_map(|(id, _)| self.projection.value(id))
+            .local
+            .get(self.trajectory)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.projection.value(*id))
             .map(|value| (&value.label, &value.provenance))
     }
 

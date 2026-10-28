@@ -484,3 +484,27 @@ fn the_cedar_example_needs_the_cedar_feature() {
     let opened = Runtime::open_in_memory(config, None, appa_runtime::api::Remedies::StandIn);
     assert!(opened.is_err_and(|error| error.to_string().contains("--features cedar")));
 }
+
+#[tokio::test]
+async fn a_rewrite_that_fixes_nothing_leaves_a_fresh_block() {
+    let dir = tempfile::tempdir().unwrap();
+    // The sanitizer answers the arguments unchanged: the Interceptor still refuses them.
+    let (sanitizer, _) = external(|request| serde_json::json!({ "body": request["artifact"]["body"] })).await;
+    let runtime = runtime_over(&dir, &commit_policy(&sanitizer, "")).await;
+    let decision = propose(
+        &runtime,
+        call("commit", serde_json::json!({ "message": "fix for Orlando" })),
+    )
+    .await;
+    let text = feedback(&decision);
+    assert!(text.contains("interceptor orlando refuses the call"), "{text}");
+    // The block the model reads is the fresh one: every offer it names still stands.
+    for offer in offers(text) {
+        if let RemedyOutcome::Declined { presentation } = runtime.execute_remedy(&actor(), offer).await {
+            assert!(
+                !presentation.feedback.contains("no longer stands"),
+                "a spent offer is shown: {text}"
+            );
+        }
+    }
+}

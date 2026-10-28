@@ -2711,9 +2711,27 @@ impl RuntimeEngine {
                     label: crate::consult::WireLabel::of(label, chain),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // What narrowed the trajectory beyond the deployment's starting label and its own
+        // values — a fork's parent, a resume — is named once, without its origin.
+        let current = views.current_label();
+        let local = views.label_sources().fold(
+            self.engine.registry().profile().starting_label().clone(),
+            |meet, (label, _)| meet.combine(label),
+        );
+        let mut sources = sources;
+        if local != current {
+            sources.insert(
+                0,
+                crate::consult::LabelSource {
+                    from: "inherited",
+                    tool: None,
+                    label: crate::consult::WireLabel::of(&current, chain),
+                },
+            );
+        }
         crate::consult::IfcContext {
-            label: crate::consult::WireLabel::of(&views.current_label(), chain),
+            label: crate::consult::WireLabel::of(&current, chain),
             sources,
         }
     }

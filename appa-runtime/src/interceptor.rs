@@ -160,9 +160,20 @@ impl Interceptor {
         match &self.judge {
             Judge::Bound => None,
             Judge::Regex { pattern, on_match } => {
+                // A call is matched as its RFC 8785 canonical text, the bytes its identity
+                // digests: two spellings of one call never get two answers.
                 let text = match step {
                     InterceptedStep::Prompt { prompt } => prompt.clone(),
-                    InterceptedStep::ToolCall { arguments, .. } => arguments.to_string(),
+                    InterceptedStep::ToolCall { arguments, .. } => match serde_json_canonicalizer::to_string(arguments)
+                    {
+                        Ok(canonical) => canonical,
+                        Err(error) => {
+                            return Some(Err(NoVerdict {
+                                interceptor: self.name.as_str().to_string(),
+                                reason: format!("the arguments have no canonical text: {error}"),
+                            }));
+                        }
+                    },
                 };
                 Some(Ok(match pattern.is_match(&text) {
                     true => InterceptorAnswer {
@@ -208,7 +219,7 @@ fn cedar_answer(policies: &cedar_policy::PolicySet, step: &InterceptedStep) -> R
         InterceptedStep::ToolCall { tool, arguments } => (
             "tool_call",
             format!("Tool::{}", serde_json::Value::String(tool.clone())),
-            serde_json::json!({ "arguments": cedar_value(arguments) }),
+            serde_json::json!({ "arguments": cedar_value(arguments)? }),
         ),
     };
     let uid = |text: &str| cedar_policy::EntityUid::from_str(text).map_err(|error| error.to_string());
@@ -251,20 +262,21 @@ fn cedar_answer(policies: &cedar_policy::PolicySet, step: &InterceptedStep) -> R
 }
 
 #[cfg(feature = "cedar")]
-/// A call's arguments as a Cedar record: Cedar has no floats and no null, so a float reads
-/// as its decimal text and a null field is left out.
-fn cedar_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
+/// A call's arguments as a Cedar record. Cedar has no floats: a float reads as its decimal
+/// text. Cedar has no null either, and dropping one would let a rule that tests `has` read a
+/// different call, so a null is no answer.
+fn cedar_value(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(match value {
+        serde_json::Value::Null => return Err("an argument is null, which Cedar cannot represent".into()),
         serde_json::Value::Number(number) if !number.is_i64() => serde_json::Value::String(number.to_string()),
-        serde_json::Value::Array(items) => items.iter().filter(|item| !item.is_null()).map(cedar_value).collect(),
+        serde_json::Value::Array(items) => items.iter().map(cedar_value).collect::<Result<_, _>>()?,
         serde_json::Value::Object(fields) => fields
             .iter()
-            .filter(|(_, field)| !field.is_null())
-            .map(|(key, field)| (key.clone(), cedar_value(field)))
-            .collect::<serde_json::Map<_, _>>()
+            .map(|(key, field)| Ok((key.clone(), cedar_value(field)?)))
+            .collect::<Result<serde_json::Map<_, _>, String>>()?
             .into(),
         other => other.clone(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -326,6 +338,17 @@ mod tests {
     }
 
     #[test]
+    fn a_regex_reads_the_canonical_call_whatever_its_spelling() {
+        let ordered = compiled(
+            InterceptorBuiltin::Regex,
+            serde_json::json!({ "pattern": r#"\{"a":1,"b":2\}"# }),
+        )
+        .unwrap();
+        let spelled: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
+        assert_eq!(verdict(&ordered, &call("t", spelled)), Verdict::No);
+    }
+
+    #[test]
     fn a_regex_refuses_bad_settings() {
         assert!(compiled(InterceptorBuiltin::Regex, serde_json::json!({ "pattern": "(" })).is_err());
         assert!(compiled(InterceptorBuiltin::Regex, serde_json::json!({ "patern": "a" })).is_err());
@@ -342,12 +365,12 @@ mod tests {
     const RULES: &str = r#"
         @id("no-orlando-commits")
         @reason("commit messages must not name Orlando")
-        forbid (principal, action == Action::"tool_call", resource == Tool::"Bash")
+        forbid (principal, action == Action::"tool_call", resource == Tool::"host/claude-code/Bash")
         when { context.arguments has command && context.arguments.command like "*Orlando*" };
 
         @verdict("ask")
         @reason("a push needs a person")
-        forbid (principal, action == Action::"tool_call", resource == Tool::"Bash")
+        forbid (principal, action == Action::"tool_call", resource == Tool::"host/claude-code/Bash")
         when { context.arguments has command && context.arguments.command like "git push*" };
     "#;
 
@@ -355,7 +378,12 @@ mod tests {
     #[test]
     fn cedar_answers_no_for_a_matching_forbid_and_ask_where_it_says_so() {
         let rules = compiled(InterceptorBuiltin::Cedar, serde_json::json!({ "policies": RULES })).unwrap();
-        let bash = |command: &str| call("Bash", serde_json::json!({ "command": command, "timeout": 1.5 }));
+        let bash = |command: &str| {
+            call(
+                "host/claude-code/Bash",
+                serde_json::json!({ "command": command, "timeout": 1.5 }),
+            )
+        };
         assert_eq!(verdict(&rules, &bash("ls")), Verdict::Yes);
         let refused = rules
             .judge_locally(&bash("git commit -m 'for Orlando'"))
@@ -367,6 +395,13 @@ mod tests {
         assert_eq!(
             verdict(&rules, &call("Read", serde_json::json!({ "path": "x" }))),
             Verdict::Yes
+        );
+        assert!(
+            rules
+                .judge_locally(&call("host/claude-code/Bash", serde_json::json!({ "command": null })))
+                .unwrap()
+                .is_err(),
+            "a null argument is no answer"
         );
     }
 
