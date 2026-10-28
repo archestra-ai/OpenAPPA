@@ -1315,6 +1315,12 @@ pub(crate) fn refusal_detail(refusal: appa_runtime_api::ParseRefusal) -> String 
 }
 
 impl Runtime {
+    /// Whether the serving deployment binds any Interceptor to the user's prompt. A prompt
+    /// with none to ask opens no session.
+    pub(crate) fn intercepts_prompts(&self) -> bool {
+        self.inner.deployment().resident.prompt_interceptors().next().is_some()
+    }
+
     /// Embed the existing runtime over host-managed storage without changing
     /// policy naming, hook semantics, or starting an HTTP server.
     pub fn open_with_store(
@@ -3926,6 +3932,15 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // A builtin Interceptor's settings compile here, so a regex or Cedar text that does not
+    // parse refuses the deployment; every other Interceptor is bound exactly once.
+    let interceptors = crate::interceptor::Interceptors::compile(policy)
+        .map_err(|error| OpenError::UnsupportedPolicy(error.to_string()))?;
+    bound_exactly(
+        "interceptor",
+        interceptors.bound().map(appa_engine::names::InterceptorName::as_str),
+        &externals.interceptors,
+    )?;
     // A model profile loads without its key, so a battery installs before the key is
     // exported; a deployment that consults the profile needs the key to open.
     use crate::config::Implementation;

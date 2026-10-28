@@ -751,6 +751,7 @@ impl TryFrom<&HookDecision> for StoredOutcome {
             HookDecision::ReplaceOutput { output } => Ok(Self::Replace { output: output.clone() }),
             HookDecision::Ack => Err(refused("the read was acknowledged without an admitted body")),
             HookDecision::AllowCall { .. }
+            | HookDecision::AllowRewrittenCall { .. }
             | HookDecision::PassControl
             | HookDecision::Context { .. }
             | HookDecision::ChildReturn { .. }

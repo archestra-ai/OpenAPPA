@@ -534,7 +534,7 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
         | HookDecision::Context { .. }
         | HookDecision::ChildReturn { .. }
         | HookDecision::DeliverValue { .. } => (HookOutcome::Acked, Vec::new()),
-        HookDecision::AllowCall { .. } => (HookOutcome::Allowed, Vec::new()),
+        HookDecision::AllowCall { .. } | HookDecision::AllowRewrittenCall { .. } => (HookOutcome::Allowed, Vec::new()),
         HookDecision::PassControl => (HookOutcome::PassControl, Vec::new()),
         HookDecision::DenyCall { offers, .. } => (
             HookOutcome::Denied,
@@ -576,7 +576,7 @@ async fn dispatch_event(
             settles,
             peer,
             title,
-        } => dispatcher.prompt(actor, text, settles, peer, title),
+        } => dispatcher.prompt(actor, text, settles, peer, title).await,
         HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
         HookEvent::ToolCall {
             actor,
@@ -685,7 +685,7 @@ impl Dispatcher<'_> {
     /// A peer frame is not the user's turn: it may arrive in the middle of one, so it leaves
     /// no mark. It enters only when it does not narrow the session; otherwise it is held and
     /// the prompt blocked, and a message that can be neither refuses the prompt.
-    fn prompt(
+    async fn prompt(
         &mut self,
         actor: Actor,
         text: String,
@@ -712,6 +712,23 @@ impl Dispatcher<'_> {
                 }
             },
             None => {
+                // The prompt's Interceptors judge it before it leaves a mark: a blocked
+                // prompt never reaches the model, so it starts no turn.
+                let judged = match self.runtime.intercepts_prompts() {
+                    false => Ok(None),
+                    true => {
+                        on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+                            let text = text.clone();
+                            async move { session.intercept_prompt(&text).await }
+                        })
+                        .await
+                    }
+                };
+                match judged {
+                    Ok(Some(reason)) => return with_peer_notices(self.runtime, &actor, block(reason)),
+                    Ok(None) => {}
+                    Err(error) => return refuse(error),
+                }
                 if let Err(error) = self.runtime.record_prompt(&actor) {
                     tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
                 }

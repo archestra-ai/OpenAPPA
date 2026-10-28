@@ -147,6 +147,7 @@ pub enum ExternalRole {
     Annotator,
     AudienceSource,
     ContextProvider,
+    Interceptor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -220,6 +221,7 @@ impl From<crate::consult::ConsultKind> for ExternalRole {
             crate::consult::ConsultKind::Annotation => ExternalRole::Annotator,
             crate::consult::ConsultKind::AudienceSource => ExternalRole::AudienceSource,
             crate::consult::ConsultKind::Context => ExternalRole::ContextProvider,
+            crate::consult::ConsultKind::Interceptor => ExternalRole::Interceptor,
         }
     }
 }

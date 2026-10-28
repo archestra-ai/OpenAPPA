@@ -600,6 +600,12 @@ pub enum HookDecision {
     AllowCall {
         spawn: Option<SpawnBinding>,
     },
+    /// The call runs, with `arguments` in place of the ones the model proposed: the one
+    /// sanitizer bound to unblock it rewrote them, and every check passed the rewrite. The
+    /// arguments are the complete canonical JSON object, never a patch.
+    AllowRewrittenCall {
+        arguments: String,
+    },
     PassControl,
     /// The call is blocked; `feedback` tells the model why — a requirement
     /// the trajectory's label does not meet, or the narrowing the call would

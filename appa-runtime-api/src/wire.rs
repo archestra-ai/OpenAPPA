@@ -1197,6 +1197,7 @@ fn child_host_id(root: &TrajectoryId, child: &TrajectoryId) -> Result<String, Pa
 pub enum DecisionName {
     Ack,
     AllowCall,
+    AllowRewrittenCall,
     PassControl,
     DenyCall,
     Block,
@@ -1299,6 +1300,10 @@ impl WireDecision {
                 spawn_binding: spawn.as_ref().map(|binding| binding.0.clone()),
                 ..Self::bare(DecisionName::AllowCall)
             },
+            HookDecision::AllowRewrittenCall { arguments } => Self {
+                value: Some(arguments.clone()),
+                ..Self::bare(DecisionName::AllowRewrittenCall)
+            },
             HookDecision::PassControl => Self::bare(DecisionName::PassControl),
             HookDecision::DenyCall {
                 feedback,
@@ -1381,6 +1386,9 @@ impl WireDecision {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
                 spawn: self.spawn_binding.map(SpawnBinding),
+            },
+            DecisionName::AllowRewrittenCall => HookDecision::AllowRewrittenCall {
+                arguments: required("value", self.value)?,
             },
             DecisionName::PassControl => HookDecision::PassControl,
             DecisionName::DenyCall => HookDecision::DenyCall {

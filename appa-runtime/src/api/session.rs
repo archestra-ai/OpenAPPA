@@ -447,6 +447,68 @@ impl Session {
     /// rather than a refusal — a turn ends for reasons the engine does
     /// not model.
     ///
+    /// Ask every Interceptor bound to the user's prompt about it, before the model reads it.
+    /// `Some` is the reason the prompt is blocked: an Interceptor answered `no`, or `ask` —
+    /// a prompt cannot wait for an approval, so an `ask` blocks it too. An Interceptor that
+    /// gives no answer refuses the prompt.
+    pub(crate) async fn intercept_prompt(&self, text: &str) -> Result<Option<String>, EventError> {
+        let deployment = self.deployment();
+        if deployment.resident.prompt_interceptors().next().is_none() {
+            return Ok(None);
+        }
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let label = policy
+            .engine()
+            .wire_label(&view, &self.trajectory)
+            .ok_or_else(|| EventError::EngineInvariant("a prompt for a trajectory the log has not opened".into()))?;
+        let step = crate::consult::InterceptedStep::Prompt {
+            prompt: text.to_string(),
+        };
+        let mut blocked = Vec::new();
+        for interceptor in policy.engine().prompt_interceptors() {
+            let name = interceptor.name.as_str();
+            let answer = match interceptor.judge_locally(&step) {
+                Some(Ok(answer)) => answer,
+                Some(Err(failure)) => {
+                    return Err(EventError::annotation_refused(
+                        format!("interceptor:{}", failure.interceptor),
+                        failure.reason,
+                    ));
+                }
+                None => {
+                    let consult = Consult::interceptor(
+                        name,
+                        interceptor.hint.clone(),
+                        crate::consult::InterceptorArtifact {
+                            step: step.clone(),
+                            label: label.clone(),
+                        },
+                    );
+                    let answer = match self.timed_consult(&consult, None, None, Occasion::Other, None).await {
+                        ConsultOutcome::Answer(answer) => crate::consult::InterceptorWireAnswer::from_wire(&answer)
+                            .ok_or_else(|| "the answer is not {\"verdict\", \"reason\"?}".to_string()),
+                        ConsultOutcome::NoAnswer(reason) => Err(reason.diagnostic()),
+                    };
+                    answer.map_err(|reason| EventError::annotation_refused(format!("interceptor:{name}"), reason))?
+                }
+            };
+            tracing::info!(interceptor = name, verdict = ?answer.verdict, "an interceptor judged the prompt");
+            let why = answer.reason.map_or_else(String::new, |reason| format!(": {reason}"));
+            match answer.verdict {
+                appa_engine::intercept::Verdict::Yes => {}
+                appa_engine::intercept::Verdict::No => {
+                    blocked.push(format!("interceptor {name} refuses the prompt{why}"))
+                }
+                appa_engine::intercept::Verdict::Ask => blocked.push(format!(
+                    "interceptor {name} asks for approval{why}; a prompt cannot wait for one, so it is blocked"
+                )),
+            }
+        }
+        Ok((!blocked.is_empty()).then(|| format!("[appa] Blocked: {}.", blocked.join("; "))))
+    }
+
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
@@ -1896,6 +1958,37 @@ impl Session {
                     call: *call,
                     answer,
                     context,
+                }
+            }
+            ExternalRequest::Interception {
+                interceptor,
+                call,
+                label,
+                hint,
+                artifact,
+            } => {
+                let consult = Consult::interceptor(interceptor, hint.clone(), artifact.clone());
+                // An Interceptor that does not answer refuses the call, as an Annotator does:
+                // a missing answer is never a `no` an unblocker could lift.
+                let answer = match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
+                    ConsultOutcome::Answer(answer) => crate::consult::InterceptorWireAnswer::from_wire(&answer)
+                        .ok_or_else(|| "the answer is not {\"verdict\", \"reason\"?}".to_string()),
+                    ConsultOutcome::NoAnswer(reason) => Err(reason.diagnostic()),
+                };
+                match answer {
+                    Ok(answer) => ExternalEvidence::Interception {
+                        interceptor: interceptor.clone(),
+                        call: *call,
+                        label: label.clone(),
+                        answer,
+                    },
+                    Err(reason) => {
+                        tracing::warn!(interceptor, reason, "an interceptor consult produced no answer");
+                        return Err(EventError::annotation_refused(
+                            format!("interceptor:{interceptor}"),
+                            reason,
+                        ));
+                    }
                 }
             }
             ExternalRequest::AudienceSource {

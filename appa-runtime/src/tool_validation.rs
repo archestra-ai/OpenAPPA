@@ -326,6 +326,9 @@ pub fn resolve(
     };
     let mut covered = BTreeSet::new();
     let mut declared_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Every authored tool rule, selector and all, to the rules it resolved to: what an
+    // `unblocks` or Interceptor `tools` entry naming it exactly now names.
+    let mut resolved_rules: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut unresolved = BTreeSet::new();
     if let Some(tools) = policy.get_mut("tool").and_then(toml::Value::as_array_mut) {
         for mut tool in std::mem::take(tools) {
@@ -365,6 +368,10 @@ pub fn resolve(
                         .entry(bare(&name).0.to_owned())
                         .or_default()
                         .extend(names.iter().map(|name| bare(name).0.to_owned()));
+                    resolved_rules
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(names.iter().cloned());
                 }
                 Ok(None) => {
                     unresolved.insert(name.clone());
@@ -406,6 +413,37 @@ pub fn resolve(
                         Err(error) => report.errors.push(error),
                     }
                 }
+            }
+        }
+    }
+    // `unblocks` and Interceptor `tools` name tools as the policy wrote them: a rule written
+    // exactly names the rules it resolved to, a bare name names every rule of that tool, and
+    // `*` stays. A name no rule resolves stays as written, for the compiler to refuse.
+    let bindings = [
+        ("authority", "unblocks"),
+        ("sanitizer", "unblocks"),
+        ("interceptor", "tools"),
+    ];
+    for (kind, field) in bindings {
+        let Some(entries) = policy.get_mut(kind).and_then(toml::Value::as_array_mut) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(names) = entry.get_mut(field).and_then(toml::Value::as_array_mut) else {
+                continue;
+            };
+            for value in std::mem::take(names) {
+                let Some(name) = value.as_str().map(str::to_owned) else {
+                    names.push(value);
+                    continue;
+                };
+                let rewritten: Vec<String> = match (resolved_rules.get(&name), declared_names.get(&name)) {
+                    _ if name == "*" => vec![name],
+                    (Some(rules), _) => rules.clone(),
+                    (None, Some(bare)) => bare.iter().cloned().collect(),
+                    (None, None) => vec![name],
+                };
+                names.extend(rewritten.into_iter().map(toml::Value::String));
             }
         }
     }

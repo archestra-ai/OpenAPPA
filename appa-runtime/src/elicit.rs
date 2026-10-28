@@ -409,6 +409,10 @@ fn requirement_text(requirement: &Requirement) -> String {
         } => format!("the readers must include {count} required recipient(s)"),
         Requirement::Effect { excludes } => format!("no prior {excludes} effect may have happened"),
         Requirement::Attention { mark } => format!("attention: {mark}"),
+        Requirement::Interceptor { name, reason, .. } => match reason {
+            Some(reason) => format!("interceptor {name}: {reason}"),
+            None => format!("interceptor {name} refused the call"),
+        },
     }
 }
 
