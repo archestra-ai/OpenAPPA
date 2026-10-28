@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
-use crate::consult::{AuthorityAnswer, Consult, ConsultBody};
-use crate::secrets::redact_secrets;
+use crate::consult::{AuthorityAnswer, Consult, ConsultBody, SanitizerPoint};
+use crate::secrets::redact_secret_leaf;
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
 use appa_runtime_api::Ruling;
 
@@ -68,14 +68,51 @@ impl Stock {
     pub(crate) fn answer(self, consult: &Consult) -> Option<serde_json::Value> {
         match (self, &consult.body) {
             (Stock::Approve, ConsultBody::Authority { .. }) => Some(AuthorityAnswer::to_wire(Ruling::Approve)),
-            (Stock::RedactEmail, ConsultBody::Sanitizer { artifact, .. }) => {
-                Some(serde_json::json!({ "body": redact_email(&artifact.body) }))
+            (Stock::RedactEmail, ConsultBody::Sanitizer { declaration, artifact }) => {
+                Some(serde_json::json!({ "body": derive(declaration.on, &artifact.body, redact_email_leaf) }))
             }
-            (Stock::RedactSecrets, ConsultBody::Sanitizer { artifact, .. }) => {
-                Some(serde_json::json!({ "body": redact_secrets(&artifact.body) }))
+            (Stock::RedactSecrets, ConsultBody::Sanitizer { declaration, artifact }) => {
+                Some(serde_json::json!({ "body": derive(declaration.on, &artifact.body, redact_secret_leaf) }))
             }
             _ => None,
         }
+    }
+}
+
+/// The body a stock sanitizer derives. A `tool_input` body is the call's JSON arguments:
+/// the pass rewrites each scalar on its own, given the field that holds it, so a match
+/// never reaches past a closing quote or into an escape, and the derivation stays JSON.
+/// Any other body is text, rewritten whole as one unnamed string.
+fn derive(on: SanitizerPoint, body: &str, pass: fn(Option<&str>, &mut serde_json::Value)) -> String {
+    match (on, serde_json::from_str::<serde_json::Value>(body)) {
+        (SanitizerPoint::ToolInput, Ok(mut arguments)) => {
+            rewrite_leaves(&mut arguments, None, pass);
+            arguments.to_string()
+        }
+        _ => {
+            let mut text = serde_json::Value::String(body.to_string());
+            pass(None, &mut text);
+            match text {
+                serde_json::Value::String(text) => text,
+                _ => unreachable!("a pass keeps a string outside any field a string"),
+            }
+        }
+    }
+}
+
+fn rewrite_leaves(value: &mut serde_json::Value, field: Option<&str>, pass: fn(Option<&str>, &mut serde_json::Value)) {
+    match value {
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|item| rewrite_leaves(item, field, pass)),
+        serde_json::Value::Object(fields) => fields
+            .iter_mut()
+            .for_each(|(key, item)| rewrite_leaves(item, Some(key), pass)),
+        leaf => pass(field, leaf),
+    }
+}
+
+fn redact_email_leaf(_field: Option<&str>, leaf: &mut serde_json::Value) {
+    if let serde_json::Value::String(text) = leaf {
+        *text = redact_email(text);
     }
 }
 
@@ -414,6 +451,55 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(redact_email(input), expected, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn a_stock_tool_input_rewrite_masks_values_and_stays_json() {
+        use crate::consult::{DeclaredSanitizerTransition, SanitizerArtifact, SanitizerDeclaration};
+        let derived = |stock: Stock, arguments: serde_json::Value| {
+            let consult = Consult {
+                name: "redactor".to_string(),
+                body: ConsultBody::Sanitizer {
+                    declaration: SanitizerDeclaration {
+                        hint: None,
+                        on: SanitizerPoint::ToolInput,
+                        permits: DeclaredSanitizerTransition::Trust {
+                            from: "suspicious".to_string(),
+                            to: "trusted".to_string(),
+                        },
+                        parameters: None,
+                    },
+                    artifact: SanitizerArtifact {
+                        tool: Some("mcp/reports/export".to_string()),
+                        body: arguments.to_string(),
+                    },
+                },
+            };
+            let answer = stock.answer(&consult).expect("a sanitizer consult is answered");
+            serde_json::from_str::<serde_json::Value>(answer["body"].as_str().expect("a body"))
+                .expect("the derivation is JSON")
+        };
+        // Each address ends its string or follows an escape: a text pass over the
+        // serialized arguments takes the quote or the escape with it.
+        assert_eq!(
+            derived(
+                Stock::RedactEmail,
+                serde_json::json!({"body": "mail bob@example.com", "cc": ["line\nann@corp.example"], "n": 2})
+            ),
+            serde_json::json!({"body": "mail [redacted-email]", "cc": ["line\n[redacted-email]"], "n": 2})
+        );
+        assert_eq!(
+            derived(
+                Stock::RedactSecrets,
+                serde_json::json!({"note": "see\nZq8xK2pLm9Vt4Rb7Wy3Nc6Hd", "password": "a\"b", "api_key": 12345, "limit": 3})
+            ),
+            serde_json::json!({
+                "note": "see\n[redacted-secret]",
+                "password": "[redacted-secret]",
+                "api_key": "[redacted-secret]",
+                "limit": 3
+            })
+        );
     }
 
     #[test]

@@ -343,7 +343,7 @@ async fn the_stand_in_owns_its_answers_and_live_remedies_rewrite() {
         Runtime::open_in_memory(Config::load(&path).expect("the fixture validates"), None, remedies)
             .expect("the deployment opens in memory")
     };
-    let text = "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/reports/export {\n  body: \"write to bob@example.com today\"\n}\nexpect sanitizer redactor\n";
+    let text = "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/reports/export {\n  body: \"write to bob@example.com\"\n}\nexpect sanitizer redactor\n";
     let traces = [
         trace("export.appa", text),
         trace("wipe.appa", "mcp/ops/wipe {}\nexpect authority approver\n"),
@@ -375,7 +375,7 @@ async fn the_stand_in_owns_its_answers_and_live_remedies_rewrite() {
     );
 
     let live = run(&open(Remedies::Live), &traces).await;
-    let rewritten = serde_json::json!({"body": "write to [redacted-email] today"});
+    let rewritten = serde_json::json!({"body": "write to [redacted-email]"});
     assert_eq!(
         outcomes(&live[0])[1],
         (

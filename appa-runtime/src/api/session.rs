@@ -4316,12 +4316,13 @@ context_control = true
     #[tokio::test]
     async fn an_unusable_derivation_leaves_the_offer_standing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(
-            substituting_config(SUBSTITUTED_SEND, None),
-            dir.path().join("appa.db"),
-            None,
-        )
-        .expect("the deployment opens");
+        // Only the unredacted body satisfies the call's schema, so the derivation fails it.
+        let policy = SUBSTITUTED_SEND.replace(
+            r#"body = { type = "string" }"#,
+            r#"body = { type = "string", enum = ["mail alice@corp.example"] }"#,
+        );
+        let runtime = Runtime::open(substituting_config(&policy, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let read = ProposedCall {
             tool: "read_hr".to_string(),
