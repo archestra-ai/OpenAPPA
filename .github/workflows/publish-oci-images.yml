@@ -112,7 +112,7 @@ jobs:
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ inputs.release_ref }}
           source_commit: ${{ inputs.source_commit }}
@@ -368,7 +368,7 @@ jobs:
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ inputs.release_ref }}
           source_commit: ${{ inputs.source_commit }}
