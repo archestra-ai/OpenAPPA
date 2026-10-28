@@ -93,8 +93,10 @@ impl Config {
         validate_annotator_inputs(&tools, &annotators)?;
 
         let mut tools = tools;
-        let (interceptors, interceptor_declarations) =
-            crate::interceptor::compile_interceptors(raw.interceptor, &mut tools)?;
+        let crate::interceptor::CompiledInterceptors {
+            bindings: interceptors,
+            declarations: interceptor_declarations,
+        } = crate::interceptor::compile_interceptors(raw.interceptor, &mut tools)?;
 
         let mut authorities = Vec::new();
         for a in raw.authority {

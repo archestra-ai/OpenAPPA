@@ -57,12 +57,17 @@ pub struct InterceptorBinding {
     pub hint: Option<String>,
 }
 
-/// Compile every `[[interceptor]]`: the runtime bindings, and the tool-call Interceptors the
-/// engine pins answers for, each scoped to the tools it names.
+/// Every `[[interceptor]]` compiled: the runtime bindings in authored order, and the
+/// tool-call Interceptors the engine pins answers for, each scoped to the tools it names.
+pub(crate) struct CompiledInterceptors {
+    pub(crate) bindings: Vec<(InterceptorName, InterceptorBinding)>,
+    pub(crate) declarations: Vec<InterceptorDeclaration>,
+}
+
 pub(crate) fn compile_interceptors(
     raw: Vec<RawInterceptor>,
     tools: &mut [ToolDeclaration],
-) -> Result<(Vec<(InterceptorName, InterceptorBinding)>, Vec<InterceptorDeclaration>), ConfigError> {
+) -> Result<CompiledInterceptors, ConfigError> {
     let mut bindings = Vec::new();
     let mut declarations = Vec::new();
     for interceptor in raw {
@@ -129,7 +134,7 @@ pub(crate) fn compile_interceptors(
             },
         ));
     }
-    Ok((bindings, declarations))
+    Ok(CompiledInterceptors { bindings, declarations })
 }
 
 /// The scope `unblocks` gives a component: the component's own reserved tag, added to every
