@@ -274,9 +274,11 @@ url = "{moderator}"
         HookDecision::AllowCall { spawn: None }
     );
     let request = asked.lock().unwrap()[0].clone();
-    assert_eq!(request["artifact"]["requirements"][0]["name"], "hate");
+    // The `block` mark, then the Interceptor whose `no` added it.
+    assert_eq!(request["artifact"]["requirements"][0]["mark"], "block");
+    assert_eq!(request["artifact"]["requirements"][1]["name"], "hate");
     assert_eq!(
-        request["artifact"]["requirements"][0]["reason"],
+        request["artifact"]["requirements"][1]["reason"],
         "the message is hostile"
     );
     assert!(request["artifact"]["ifc"]["label"].is_object(), "{request}");
@@ -350,7 +352,7 @@ builtin = "approve"
 }
 
 #[tokio::test]
-async fn the_sanitizer_reads_which_tool_brought_the_internal_data() {
+async fn the_sanitizer_reads_the_label_that_blocked_the_email() {
     let dir = tempfile::tempdir().unwrap();
     let (sanitizer, asked) = external(|request| {
         serde_json::json!({ "body": request["artifact"]["body"].as_str().unwrap().replace("Q3 numbers", "[removed]") })

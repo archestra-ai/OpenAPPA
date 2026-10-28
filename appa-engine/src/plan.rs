@@ -65,7 +65,7 @@ use crate::intercept::Verdict;
 use crate::label::{
     Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
 };
-use crate::names::{AuthorityName, SanitizerName, TagName};
+use crate::names::{AuthorityName, InterceptorName, SanitizerName, TagName};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{ResolvedCall, ToolName};
@@ -897,7 +897,7 @@ pub(crate) fn gap_power_cmp(
             let b: BTreeSet<&EffectKind> = b.waivers.iter().collect();
             inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
         }
-        Gap::Attention(_) | Gap::Intercepted { .. } => Some(Ordering::Equal),
+        Gap::Attention(_) => Some(Ordering::Equal),
         // These gaps have no covering authority by construction (`enumerate_assignments` returns
         // `None`), so no assignment reaching this comparison carries one.
         Gap::Prior(_) => Some(Ordering::Equal),
@@ -1038,17 +1038,16 @@ fn input_hops(
         return Vec::new();
     }
     let includes = gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. }));
-    // A `no` an Interceptor gave is lifted by a rewrite every Interceptor then judges afresh;
-    // an `ask` waits for an authority.
-    let refused = gaps.iter().any(|gap| {
-        matches!(
-            gap,
-            Gap::Intercepted {
-                verdict: Verdict::No,
-                ..
-            }
-        )
-    });
+    // The `block` an Interceptor's `no` added is cleared by a rewrite every Interceptor then
+    // judges afresh; one the contract requires itself stays whatever the arguments say.
+    let refused = gaps
+        .iter()
+        .any(|gap| matches!(gap, Gap::Attention(mark) if mark.is_block()))
+        && !contract
+            .requires
+            .attention_marks()
+            .iter()
+            .any(crate::names::MarkName::is_block);
     if !includes && !refused {
         return Vec::new();
     }
@@ -1072,16 +1071,31 @@ fn input_hops(
 }
 
 /// Does a validated substitution strictly improve the call candidate it replaces?
-pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome) -> bool {
+/// One `block` stands for every Interceptor that said `no`, so a rewrite that leaves the gaps
+/// as they were still helps when fewer Interceptors block the call.
+pub(crate) fn substitution_helps(
+    before: &RawBlock,
+    before_call: &ResolvedCall,
+    after: &check::CheckOutcome,
+    after_call: &ResolvedCall,
+) -> bool {
     let after = match after {
         check::CheckOutcome::Allow => return !before.requirement_gaps.is_empty(),
         check::CheckOutcome::Block(raw) => raw,
     };
-    after.requirement_gaps.len() < before.requirement_gaps.len()
-        && after
-            .requirement_gaps
-            .iter()
-            .all(|gap| before.requirement_gaps.contains(gap))
+    let blocking = |call: &ResolvedCall| -> Vec<(InterceptorName, Verdict)> {
+        call.interceptions()
+            .into_iter()
+            .flat_map(|answers| answers.blocking().map(|(name, verdict)| (name.clone(), verdict)))
+            .collect()
+    };
+    let (was, now) = (blocking(before_call), blocking(after_call));
+    let fewer_interceptors = now.len() < was.len() && now.iter().all(|answer| was.contains(answer));
+    after
+        .requirement_gaps
+        .iter()
+        .all(|gap| before.requirement_gaps.contains(gap))
+        && (after.requirement_gaps.len() < before.requirement_gaps.len() || fewer_interceptors)
 }
 
 fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>, needs: &mut NeededAtoms) -> bool {
@@ -1449,13 +1463,12 @@ pub(crate) fn gap_cover(
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark. Scope binds it only for
-        // an authority the policy binds with `unblocks`: that binding is its whole jurisdiction.
+        // an authority the policy binds with `unblocks`: that binding is its whole jurisdiction,
+        // and it lifts `block` there without naming it.
         Gap::Attention(mark) => Evaluation::of_exact(
-            mandate.attends.covers(mark) && (!authority.scope.unblocks() || authority.scope.covers(tags)),
+            (mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks()))
+                && (!authority.scope.unblocks() || authority.scope.covers(tags)),
         ),
-        // An Interceptor's answer is lifted only where the policy binds the authority to the
-        // tool: `unblocks` is both its jurisdiction and its power over the answer.
-        Gap::Intercepted { .. } => Evaluation::of_exact(authority.scope.unblocks() && authority.scope.covers(tags)),
         Gap::Prior(_) => Evaluation::Fails,
     }
 }
@@ -1537,11 +1550,7 @@ pub(crate) fn direct_clears(tool: &ToolAnnotation, gaps: &[Gap]) -> Vec<Gap> {
     gaps.iter()
         .filter(|gap| match gap {
             Gap::Prior(kind) => tool.emits.contains(kind),
-            Gap::TrustFloor { .. }
-            | Gap::Includes { .. }
-            | Gap::NoPrior(_)
-            | Gap::Attention(_)
-            | Gap::Intercepted { .. } => false,
+            Gap::TrustFloor { .. } | Gap::Includes { .. } | Gap::NoPrior(_) | Gap::Attention(_) => false,
         })
         .cloned()
         .collect()
@@ -3590,7 +3599,7 @@ mod tests {
         let denied = requiring(
             "denied",
             Requires {
-                attention: vec![MarkName::new(MarkName::BLOCKED)],
+                attention: vec![MarkName::new(MarkName::HARD_BLOCK)],
                 ..Requires::default()
             },
         );
@@ -3673,8 +3682,9 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
-                Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                Gap::Intercepted { .. } => authority.scope.unblocks(),
+                Gap::Attention(mark) => {
+                    authority.mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks())
+                }
                 Gap::Prior(_) => false,
             })
         }
@@ -4128,9 +4138,9 @@ mod tests {
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
                     Gap::Attention(mark) => {
-                        authority.mandate.attends.covers(mark) && (!authority.scope.unblocks() || scoped)
+                        (authority.mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks()))
+                            && (!authority.scope.unblocks() || scoped)
                     }
-                    Gap::Intercepted { .. } => scoped && authority.scope.unblocks(),
                     Gap::Prior(_) => false,
                 }
             };
@@ -4191,7 +4201,7 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Intercepted { .. } | Gap::Prior(_) => Some(O::Equal),
+                    Gap::Attention(_) | Gap::Prior(_) => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

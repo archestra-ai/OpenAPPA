@@ -3338,7 +3338,7 @@ impl<'a> Sequence<'a> {
         let next = CallStage::substituting(derived, lineage.clone());
         let after =
             crate::check::evaluate(&contract, &views, call, &next, role, &context).map_err(TransitionRefusal::from)?;
-        if !crate::plan::substitution_helps(&before, &after) {
+        if !crate::plan::substitution_helps(&before, predecessor, &after, call) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         // The live hop's act gated the standing block's whole atom set before offering.

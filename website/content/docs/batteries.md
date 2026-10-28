@@ -210,12 +210,12 @@ version = 2
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["hard-block"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl *)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["hard-block"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.annotator]]
@@ -232,7 +232,7 @@ annotator = "local.read-sensitivity"
 command = ["python3", "./local/read-sensitivity.py"]
 ```
 
-`blocked` is the reserved mark no authority can permit, so both `kubectl` contracts have no remedy, even under the plugin's catch-all `hitl` authority.
+`hard-block` is the reserved mark no authority can permit, so both `kubectl` contracts have no remedy, even under the plugin's catch-all `hitl` authority.
 Every other Bash call reaches the battery's model annotator. The root also
 replaces the battery's `host/claude-code/Read` rules with a local script.
 

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::Scope;
-use crate::names::{InterceptorName, TagName};
+use crate::names::{InterceptorName, MarkName, TagName};
 use crate::value::CanonicalDigest;
 
 /// One Interceptor's answer about one call.
@@ -21,8 +21,19 @@ pub enum Verdict {
     /// The call is blocked until a bound authority approves it or a bound input sanitizer
     /// rewrites it into a call the Interceptor answers `yes` for.
     No,
-    /// The call is blocked until a bound authority approves it.
+    /// The call is blocked until an authority attending `human-approval` approves it.
     Ask,
+}
+
+impl Verdict {
+    /// The attention mark the answer adds to the call, or `None` for `yes`.
+    pub fn mark(self) -> Option<MarkName> {
+        match self {
+            Verdict::Yes => None,
+            Verdict::No => Some(MarkName::new(MarkName::BLOCK)),
+            Verdict::Ask => Some(MarkName::new(MarkName::HUMAN_APPROVAL)),
+        }
+    }
 }
 
 /// An Interceptor's answer with its stated reason. The reason is what feedback and unblockers
@@ -67,6 +78,12 @@ impl Interceptions {
             .iter()
             .filter(|(_, answer)| answer.verdict != Verdict::Yes)
             .map(|(name, answer)| (name, answer.verdict))
+    }
+
+    /// The Interceptors whose answer added `mark` to the call, in interceptor name order.
+    pub fn behind<'a>(&'a self, mark: &'a MarkName) -> impl Iterator<Item = (&'a InterceptorName, Verdict)> + 'a {
+        self.blocking()
+            .filter(move |(_, verdict)| verdict.mark().as_ref() == Some(mark))
     }
 
     /// The reason `interceptor` gave, when it gave one.

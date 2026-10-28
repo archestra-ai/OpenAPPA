@@ -48,9 +48,9 @@ impl TryFrom<String> for Hint {
 }
 
 /// The attention marks an authority's ruling may attend. A catch-all covers every mark the
-/// policy declares except the reserved denial, [`MarkName::BLOCKED`]: one human authority
+/// policy declares except the reserved denial, [`MarkName::HARD_BLOCK`]: one human authority
 /// serves a single-reviewer deployment without naming each battery's mark, and a contract
-/// requiring `blocked` stays unremediable under it.
+/// requiring `hard-block` stays unremediable under it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Attends {
     Named(Vec<MarkName>),
@@ -70,7 +70,7 @@ impl Attends {
     pub fn covers(&self, mark: &MarkName) -> bool {
         match self {
             Attends::Named(marks) => marks.contains(mark),
-            Attends::Any => !mark.is_blocked(),
+            Attends::Any => !mark.is_hard_block(),
         }
     }
 

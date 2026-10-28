@@ -141,7 +141,7 @@ decide two things from its name and description:
 
 Apply these rules:
 
-- The reserved `blocked` mark denies a call outright and no Authority can
+- The reserved `hard-block` mark denies a call outright and no Authority can
   permit it; use it only where a sanitizer that would make the flow safe does
   not exist.
 - A tool whose result someone other than the requester can write (a web page,

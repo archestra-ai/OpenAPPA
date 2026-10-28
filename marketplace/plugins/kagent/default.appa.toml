@@ -105,7 +105,7 @@ context_control = true
 
 # The human behind every attention mark, `human-approval` and the
 # batteries' review marks alike (`*` — every mark but the reserved
-# `blocked`), and the one who may vouch data below `trusted` or an
+# `hard-block`), and the one who may vouch data below `trusted` or an
 # audience up to `public` for one call. On kagent the plugin asks the
 # person through the stock approval flow (Approve/Reject) and returns
 # the ruling with the control call; no answer grants nothing, and the

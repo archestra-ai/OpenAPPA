@@ -711,7 +711,7 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
-    #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
+    #[error("authority {0} permits `hard-block`, the reserved mark no authority may attend")]
     ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
@@ -1374,7 +1374,7 @@ impl Registry {
             if authority.mandate.is_empty() && !authority.scope.unblocks() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
-            if authority.mandate.attends.named().iter().any(MarkName::is_blocked) {
+            if authority.mandate.attends.named().iter().any(MarkName::is_hard_block) {
                 return Err(LoadError::ReservedMark(authority.name.as_str().to_string()));
             }
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
@@ -1391,7 +1391,7 @@ impl Registry {
         }
 
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
-        // deliberately use the reserved `blocked` as an unremediable denial while registering
+        // deliberately use the reserved `hard-block` as an unremediable denial while registering
         // no authority at all. An Annotator must be able to produce those marks, but still
         // remains confined to names the policy declares somewhere — and an annotator's own
         // explicit mark bound is itself such a declaration. A catch-all mandate names
@@ -2259,7 +2259,7 @@ mod tests {
     #[test]
     fn static_requirements_declare_attention_vocabulary_without_an_authority() {
         let mut blocked = tool("blocked");
-        blocked.requires.attention = vec![MarkName::new("blocked")];
+        blocked.requires.attention = vec![MarkName::new(MarkName::HARD_BLOCK)];
         let mut cfg = base();
         cfg.tools = declared(vec![blocked]);
 
@@ -2267,7 +2267,7 @@ mod tests {
 
         assert_eq!(
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
-            ["blocked"]
+            ["hard-block"]
         );
     }
 
@@ -2276,7 +2276,7 @@ mod tests {
         let mut review = tool("review");
         review.requires.attention = vec![MarkName::new("sentry-review")];
         let mut denied = tool("denied");
-        denied.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        denied.requires.attention = vec![MarkName::new(MarkName::HARD_BLOCK)];
         let mut cfg = base();
         cfg.tools = declared(vec![review, denied]);
         cfg.authorities = vec![Authority {
@@ -2295,10 +2295,10 @@ mod tests {
             .expect("the catch-all registers");
 
         assert!(anyone.mandate.attends.covers(&MarkName::new("sentry-review")));
-        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::BLOCKED)));
+        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::HARD_BLOCK)));
         assert_eq!(
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
-            ["blocked", "sentry-review"],
+            ["hard-block", "sentry-review"],
             "a catch-all names nothing; the vocabulary is the tools' marks"
         );
     }
@@ -2309,7 +2309,7 @@ mod tests {
         cfg.authorities = vec![Authority {
             name: AuthorityName::new("overreach"),
             mandate: Mandate {
-                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
+                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::HARD_BLOCK)]),
                 ..Mandate::default()
             },
             scope: Scope::default(),

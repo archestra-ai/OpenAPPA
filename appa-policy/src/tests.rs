@@ -520,7 +520,7 @@ fn a_catch_all_attention_permit_loads_and_the_wildcard_never_mixes_with_names() 
         Err(ConfigError::MixedAttentionWildcard { context }) if context == "authority anyone"
     ));
 
-    let reserved = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"blocked\"]\n";
+    let reserved = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"hard-block\"]\n";
     assert!(matches!(
         load(reserved),
         Err(ConfigError::Registry(LoadError::ReservedMark(name))) if name == "anyone"

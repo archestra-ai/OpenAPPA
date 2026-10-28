@@ -336,7 +336,7 @@ impl Engine {
         let next = CallStage::substituting(label.clone(), lineage.clone());
         let role = views.call_role(&recorded.subject);
         let after = check::evaluate(&contract, views, &substituted, &next, role, &self.context(under))?;
-        if !plan::substitution_helps(raw, &after) {
+        if !plan::substitution_helps(raw, call, &after, &substituted) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
         let derived = DerivedCandidate::Call {

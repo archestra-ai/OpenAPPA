@@ -1,7 +1,7 @@
 use super::*;
 use crate::authority::{Attends, Authority, DeclaredTransition, Mandate, Sanitizer, SanitizerPoints, Scope};
 use crate::intercept::{Interceptions, InterceptorAnswer, InterceptorDeclaration, Verdict};
-use crate::names::{AuthorityName, InterceptorName, SanitizerName, TagName};
+use crate::names::{AuthorityName, InterceptorName, MarkName, SanitizerName, TagName};
 
 fn judged_by_orlando() -> TagName {
     TagName::new(format!("{}orlando", InterceptorDeclaration::TAG_PREFIX))
@@ -102,7 +102,7 @@ fn a_yes_releases_the_call() {
 }
 
 #[test]
-fn a_no_blocks_with_the_bound_unblockers_only() {
+fn a_no_adds_block_which_a_bound_or_catch_all_authority_lifts() {
     let e = intercepting_engine();
     let decision = proposed(
         &e,
@@ -116,10 +116,7 @@ fn a_no_blocks_with_the_bound_unblockers_only() {
     assert!(released.is_empty());
     assert_eq!(
         blocked[0].block.raw.requirement_gaps,
-        vec![Gap::Intercepted {
-            interceptor: InterceptorName::new("orlando"),
-            verdict: Verdict::No,
-        }]
+        vec![Gap::Attention(MarkName::new(MarkName::BLOCK))]
     );
     let plans = opened_offers(&appended_facts(decision));
     let hops: Vec<_> = plans.iter().filter_map(|(_, plan)| plan.hop()).collect();
@@ -128,13 +125,12 @@ fn a_no_blocks_with_the_bound_unblockers_only() {
         .iter()
         .flat_map(|(_, plan)| plan.required.iter().map(|ruling| ruling.authority.as_str()))
         .collect();
-    // `officer` attends every mark, but an Interceptor's answer is not a mark: only the
-    // authority bound to the tool lifts it.
-    assert_eq!(rulings, vec!["reviewer"]);
+    // `block` is a mark: `officer` attends every mark, and `reviewer` lifts it where it is bound.
+    assert_eq!(rulings, vec!["reviewer", "officer"]);
 }
 
 #[test]
-fn an_ask_is_lifted_by_a_bound_authority_and_never_by_a_rewrite() {
+fn an_ask_is_lifted_by_an_authority_attending_human_approval_and_never_by_a_rewrite() {
     let e = intercepting_engine();
     let decision = proposed(
         &e,
@@ -147,7 +143,8 @@ fn an_ask_is_lifted_by_a_bound_authority_and_never_by_a_rewrite() {
     let plans = opened_offers(&appended_facts(decision));
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].1.hop(), None);
-    assert_eq!(plans[0].1.required[0].authority.as_str(), "reviewer");
+    // `reviewer` is bound to the tool but does not attend `human-approval`.
+    assert_eq!(plans[0].1.required[0].authority.as_str(), "officer");
 }
 
 #[test]

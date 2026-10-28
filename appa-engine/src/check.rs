@@ -11,7 +11,7 @@ use crate::contract::{
     ToolDeclaration,
 };
 use crate::fact::EffectKind;
-use crate::intercept::{InterceptionRefusal, Verdict};
+use crate::intercept::InterceptionRefusal;
 use crate::label::{
     Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
@@ -33,13 +33,9 @@ pub enum Gap {
     },
     Prior(EffectKind),
     NoPrior(EffectKind),
+    /// A mark the contract requires, or one an Interceptor's answer added: `block` for `no`,
+    /// `human-approval` for `ask`.
     Attention(MarkName),
-    /// An Interceptor answered `no` or `ask` about the call. Only a component the policy binds
-    /// to the tool with `unblocks` lifts it.
-    Intercepted {
-        interceptor: InterceptorName,
-        verdict: Verdict,
-    },
 }
 
 /// A voluntary narrowing of the release frontier: committing this call moves the trajectory's
@@ -210,12 +206,12 @@ pub(crate) fn evaluate_state(
     if let CallReads::Resolved(call) = reads
         && let Some(interceptions) = call.interceptions()
     {
-        for (interceptor, verdict) in interceptions.blocking() {
-            gaps.push(Gap::Intercepted {
-                interceptor: interceptor.clone(),
-                verdict,
-            });
-        }
+        gaps.extend(
+            interceptions
+                .blocking()
+                .filter_map(|(_, verdict)| verdict.mark())
+                .map(Gap::Attention),
+        );
     }
     let mut seen = Vec::with_capacity(gaps.len());
     for gap in gaps {

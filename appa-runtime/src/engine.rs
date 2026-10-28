@@ -1850,7 +1850,6 @@ impl RuntimeEngine {
                     Gap::Prior(_) => "prior",
                     Gap::NoPrior(_) => "no_prior",
                     Gap::Attention(_) => "attention",
-                    Gap::Intercepted { .. } => "intercepted",
                 }
             })
             .collect();
@@ -2707,20 +2706,13 @@ impl RuntimeEngine {
         if !registry.sanitizer(sanitizer)?.scope.unblocks() {
             return None;
         }
-        let chain = registry.trust_chain();
         let interceptors = call
             .interceptions()
             .into_iter()
-            .flat_map(|interceptions| interceptions.blocking())
-            .map(|(interceptor, verdict)| {
-                crate::consult::Requirement::of(
-                    &appa_engine::check::Gap::Intercepted {
-                        interceptor: interceptor.clone(),
-                        verdict,
-                    },
-                    chain,
-                    call.interceptions(),
-                )
+            .flat_map(|interceptions| {
+                interceptions.blocking().map(|(interceptor, verdict)| {
+                    crate::consult::Requirement::interceptor(interceptor, verdict, interceptions)
+                })
             })
             .collect();
         Some(crate::consult::UnblockContext {
@@ -4104,15 +4096,28 @@ fn gap_text(
         },
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
-        Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
-        Gap::Intercepted { interceptor, verdict } => {
-            let answered = match verdict {
-                appa_engine::intercept::Verdict::Ask => "asks for approval",
-                appa_engine::intercept::Verdict::No | appa_engine::intercept::Verdict::Yes => "refuses the call",
-            };
-            match interceptions.and_then(|answers| answers.reason(interceptor)) {
-                Some(reason) => format!("interceptor {} {answered}: {reason}", interceptor.as_str()),
-                None => format!("interceptor {} {answered}", interceptor.as_str()),
+        Gap::Attention(mark) => {
+            // A mark an Interceptor's answer added names that Interceptor and its reason.
+            let behind: Vec<String> = interceptions
+                .into_iter()
+                .flat_map(|answers| {
+                    answers.behind(mark).map(|(interceptor, verdict)| {
+                        let answered = match verdict {
+                            appa_engine::intercept::Verdict::Ask => "asks for approval",
+                            appa_engine::intercept::Verdict::No | appa_engine::intercept::Verdict::Yes => {
+                                "refuses the call"
+                            }
+                        };
+                        match answers.reason(interceptor) {
+                            Some(reason) => format!("interceptor {} {answered}: {reason}", interceptor.as_str()),
+                            None => format!("interceptor {} {answered}", interceptor.as_str()),
+                        }
+                    })
+                })
+                .collect();
+            match behind.is_empty() {
+                true => format!("requires attention: {}", mark.as_str()),
+                false => format!("requires attention: {} ({})", mark.as_str(), behind.join("; ")),
             }
         }
     }

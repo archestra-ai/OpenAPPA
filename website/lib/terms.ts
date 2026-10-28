@@ -140,9 +140,11 @@ const TERMS = {
   attention:
     "Named approvals required for each tool call. An earlier approval does not satisfy a later call. Authorities can give the approvals listed in their permits.attention, regardless of their tags.",
   "permits.attention":
-    "The named approvals an authority can give for a call. [\"*\"] alone means every mark the policy declares except blocked. Annotators can require only marks the policy declares.",
-  blocked:
+    "The named approvals an authority can give for a call. [\"*\"] alone means every mark the policy declares except hard-block. Annotators can require only marks the policy declares.",
+  "hard-block":
     "The reserved attention mark that denies a call outright. No authority can permit it and a [\"*\"] permit does not cover it, so a tool that requires it has no remedy.",
+  block:
+    "The reserved attention mark an Interceptor's no adds to a call. An authority that permits it, or that the policy binds to the tool with unblocks, can lift it.",
   'builtin = "hitl"':
     "Asks a person to approve or deny the call through the agent integration.",
   'builtin = "approve"':

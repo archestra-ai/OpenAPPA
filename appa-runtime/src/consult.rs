@@ -319,7 +319,7 @@ impl AuthorityArtifact {
             requirements: requirement
                 .covers
                 .iter()
-                .map(|gap| Requirement::of(gap, chain, call.interceptions()))
+                .flat_map(|gap| Requirement::with_interceptors(gap, chain, call.interceptions()))
                 .collect(),
             ifc: None,
         }
@@ -373,11 +373,40 @@ impl Serialize for AudienceRequirement {
 impl Requirement {
     /// Project one assigned gap. A `prior` gap is never assigned to an authority — no
     /// mandate covers it — so meeting one here is a broken planning invariant.
-    pub fn of(
+    /// Project one assigned gap, followed by each Interceptor whose answer added its mark.
+    pub fn with_interceptors(
         gap: &Gap,
         chain: &TrustChain,
         interceptions: Option<&appa_engine::intercept::Interceptions>,
+    ) -> Vec<Requirement> {
+        let behind = match gap {
+            Gap::Attention(mark) => interceptions
+                .into_iter()
+                .flat_map(|answers| {
+                    answers
+                        .behind(mark)
+                        .map(|(interceptor, verdict)| Requirement::interceptor(interceptor, verdict, answers))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        std::iter::once(Requirement::of(gap, chain)).chain(behind).collect()
+    }
+
+    /// One Interceptor's blocking answer, with the reason it gave.
+    pub fn interceptor(
+        interceptor: &appa_engine::names::InterceptorName,
+        verdict: appa_engine::intercept::Verdict,
+        answers: &appa_engine::intercept::Interceptions,
     ) -> Requirement {
+        Requirement::Interceptor {
+            name: interceptor.as_str().to_string(),
+            verdict,
+            reason: answers.reason(interceptor).map(str::to_string),
+        }
+    }
+
+    pub fn of(gap: &Gap, chain: &TrustChain) -> Requirement {
         match gap {
             Gap::TrustFloor { required, .. } => Requirement::Trust {
                 required: rank_name(chain, *required),
@@ -395,13 +424,6 @@ impl Requirement {
             },
             Gap::Attention(mark) => Requirement::Attention {
                 mark: mark.as_str().to_string(),
-            },
-            Gap::Intercepted { interceptor, verdict } => Requirement::Interceptor {
-                name: interceptor.as_str().to_string(),
-                verdict: *verdict,
-                reason: interceptions
-                    .and_then(|answers| answers.reason(interceptor))
-                    .map(str::to_string),
             },
             Gap::Prior(_) => {
                 unreachable!("authorities are assigned only coverable gaps; a prior gap has no mandate")
@@ -1140,7 +1162,7 @@ mod tests {
             Gap::Attention(MarkName::new("review")),
         ]
         .iter()
-        .map(|gap| serde_json::to_value(Requirement::of(gap, &chain, None)).expect("serializes"))
+        .map(|gap| serde_json::to_value(Requirement::of(gap, &chain)).expect("serializes"))
         .collect::<Vec<_>>();
         assert_eq!(
             projected,
