@@ -402,6 +402,27 @@ impl SessionInner {
                 }
                 Ok(Decision::Allowed { call, binding })
             }
+            // The one sanitizer bound to unblock the call rewrote it: the host runs the
+            // rewritten arguments, and reports that call.
+            HookDecision::AllowRewrittenCall { arguments } => {
+                let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
+                    return failed("the rewritten arguments are not JSON".to_string());
+                };
+                let rewritten = ProposedCall { arguments, ..call };
+                let pending = Pending {
+                    call: rewritten.clone(),
+                };
+                match call_id {
+                    Some(call_id) => {
+                        self.identified.insert(call_id.to_string(), pending);
+                    }
+                    None => *self.slot(child)? = Some(pending),
+                }
+                Ok(Decision::Allowed {
+                    call: rewritten,
+                    binding: None,
+                })
+            }
             HookDecision::DenyCall { feedback, offers, .. } => Ok(Decision::Blocked { feedback, offers }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),

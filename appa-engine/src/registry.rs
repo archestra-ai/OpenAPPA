@@ -1519,7 +1519,11 @@ impl Registry {
                 crate::intercept::InterceptorDeclaration::TAG_PREFIX,
                 interceptor.name.as_str()
             ));
-            if !interceptor.scope.is_unscoped() && interceptor.scope.tags != [own] {
+            let reserved = |tag: &TagName| {
+                tag.as_str()
+                    .starts_with(crate::intercept::InterceptorDeclaration::TAG_PREFIX)
+            };
+            if interceptor.scope.tags.iter().any(|tag| reserved(tag) && tag != &own) {
                 return Err(LoadError::ForeignUnblockTag(interceptor.name.as_str().to_string()));
             }
         }

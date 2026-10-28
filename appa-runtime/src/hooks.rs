@@ -837,24 +837,37 @@ impl Dispatcher<'_> {
             && let Ok(offer) = OfferId::parse(&only.id)
             && self.runtime.applies_itself(&actor.root, &offer)
         {
-            let approved = match self.runtime.execute_remedy(&actor, offer).await {
-                crate::api::RemedyOutcome::Authorized { call: approved } => ProposedCall {
-                    cwd: call.cwd.clone(),
-                    ..approved
-                },
-                other => {
-                    tracing::info!(root = %actor.root.0, ?other, "the bound unblocker did not lift the block");
-                    call.clone()
+            match self.runtime.execute_remedy(&actor, offer).await {
+                crate::api::RemedyOutcome::Authorized { call: approved } => {
+                    let approved = ProposedCall {
+                        cwd: call.cwd.clone(),
+                        ..approved
+                    };
+                    decided = on_actor(self.runtime, &actor, missing_start, self.options, |session| {
+                        let approved = approved.clone();
+                        let call_id = call_id.clone();
+                        let prompt = prompt.clone();
+                        async move { session.on_tool_call_identified(approved, call_id, None, prompt).await }
+                    })
+                    .await;
+                    released = approved;
                 }
-            };
-            decided = on_actor(self.runtime, &actor, missing_start, self.options, |session| {
-                let approved = approved.clone();
-                let call_id = call_id.clone();
-                let prompt = prompt.clone();
-                async move { session.on_tool_call_identified(approved, call_id, None, prompt).await }
-            })
-            .await;
-            released = approved;
+                // The attempt moved the block — a denial, or a rewrite that cleared part of
+                // it: what the model reads is the block as it stands now.
+                crate::api::RemedyOutcome::Declined { presentation } => {
+                    *self.presentation = Some(presentation.clone());
+                    return HookDecision::DenyCall {
+                        feedback: presentation.feedback,
+                        offers: presentation.offers,
+                        review: presentation.review,
+                    };
+                }
+                // No answer leaves the offer standing, and a refused execution changed
+                // nothing: the original block is still the model's.
+                other => {
+                    tracing::warn!(root = %actor.root.0, ?other, "the bound unblocker did not lift the block");
+                }
+            }
         }
         match decided {
             Ok(ToolCallDecision::Allow {

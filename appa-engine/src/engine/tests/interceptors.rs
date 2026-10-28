@@ -428,3 +428,21 @@ fn a_rewrite_cannot_leave_the_interceptor_behind() {
         "a rewrite onto a declaration no Interceptor judges is not approved: {outcome:?}"
     );
 }
+
+#[test]
+fn an_interceptor_may_judge_tools_by_an_ordinary_tag() {
+    let reviewed = ToolAnnotation {
+        tags: vec![TagName::new("reviewed")],
+        ..plain_tool("commit")
+    };
+    let cfg = RegistryConfig {
+        interceptors: vec![InterceptorDeclaration {
+            name: InterceptorName::new("check"),
+            scope: Scope {
+                tags: vec![TagName::new("reviewed")],
+            },
+        }],
+        ..test_config(vec![reviewed])
+    };
+    assert!(crate::registry::Registry::build_covered(cfg).is_ok());
+}

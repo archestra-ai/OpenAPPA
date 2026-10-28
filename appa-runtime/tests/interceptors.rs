@@ -508,3 +508,64 @@ async fn a_rewrite_that_fixes_nothing_leaves_a_fresh_block() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_rewrite_that_clears_one_refusal_shows_the_one_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sanitizer, _) = external(strip_orlando).await;
+    let second = r#"[[policy.interceptor]]
+name = "secrets"
+builtin = "regex"
+settings = { pattern = "password" }
+on = ["tool_call"]
+tools = ["commit"]
+"#;
+    let runtime = runtime_over(&dir, &commit_policy(&sanitizer, second)).await;
+    let decision = propose(
+        &runtime,
+        call("commit", serde_json::json!({ "message": "Orlando's password" })),
+    )
+    .await;
+    let text = feedback(&decision);
+    assert!(text.contains("interceptor secrets refuses the call"), "{text}");
+    assert!(
+        !text.contains("interceptor orlando"),
+        "the rewrite cleared orlando: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_restriction_from_before_the_trajectory_is_named_inherited() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sanitizer, asked) = external(|request| serde_json::json!({ "body": request["artifact"]["body"] })).await;
+    let policy = format!(
+        r#"
+[policy]
+version = 2
+
+[policy.deployment]
+starting_label = {{ audience = ["internal"] }}
+
+[[policy.tool]]
+name = "send_email"
+requires = {{ audience = {{ contains = ["public"] }} }}
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_input"]
+unblocks = ["send_email"]
+permits = {{ audience = {{ from = ["internal"], to = ["public"] }} }}
+
+{EXTERNALS}
+[externals.sanitizers.scrub]
+url = "{sanitizer}"
+"#
+    );
+    let runtime = runtime_over(&dir, &policy).await;
+    propose(&runtime, call("send_email", serde_json::json!({ "body": "hi" }))).await;
+    let request = asked.lock().unwrap()[0].clone();
+    assert_eq!(
+        request["artifact"]["unblock"]["ifc"]["sources"][0]["from"], "inherited",
+        "{request}"
+    );
+}
