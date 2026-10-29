@@ -135,6 +135,8 @@ jobs:
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'website-chat-playground/**'
+              # Generated from the service's `WireEvent`; its test fails on drift.
+              - 'website/components/playground/wire-events.ts'
               - 'bench/corp-agent/**'
               - 'bench/corp-systems/**'
               - 'bench/corp/policies/**'

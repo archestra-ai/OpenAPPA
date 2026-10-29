@@ -4015,6 +4015,7 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "http-body-util",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

@@ -29,6 +29,9 @@ tempfile = "3"
 # frame by frame. Both already ride in under axum.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# The schema of `WireEvent`, rendered into the website's copy of it. Already
+# in the tree through appa-runtime.
+schemars = "1"
 
 [[bin]]
 name = "appa-demo"
