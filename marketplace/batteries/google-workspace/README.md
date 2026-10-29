@@ -1,8 +1,10 @@
 # Google Workspace battery
 
 Rules for the claude.ai Google Drive connector, all 11 of its tools,
-and the `google-workspace` audience source, which builds a policy's
-audiences from the Workspace directory.
+the `google-workspace` audience source, which builds a policy's
+audiences from the Workspace directory, and the
+`google-workspace.drive-readers` annotator, which asks Drive who reads
+the target of a write.
 
 ## Rules
 
@@ -15,10 +17,27 @@ connection reaches. Anyone, inside or outside the organization, can
 share a file with the viewer or comment on one, so the text is
 untrusted.
 
-*Writes* — `create_file`, `copy_file`, `update_file`, `trash_file` need
-trusted data that `internal` may see, and record
-`google-workspace.changed`. A trashed file can be restored, so trashing
-needs no review.
+*Writes* — `create_file`, `copy_file`, `update_file` need trusted data
+that the target's readers may see. Drive gives a file the sharing of
+its folder, so the `google-workspace.drive-readers` annotator lists the
+permissions of the folder a file is created or copied into, and of the
+file that `update_file` renames or moves:
+
+| Target readers | Requirement |
+|---|---|
+| Only the viewer, as in the viewer's My Drive root | `self` |
+| Active Workspace users, the Workspace's own domain, or groups whose members all are | `internal` |
+| Anyone with the link, a published file, another domain, an outside account, or readers the token may not list | `public` |
+
+`copy_file` and a move by `update_file` also send the source file's
+content on Google's side, so the answer forwards the audience that
+already reads it: `public` when anyone may, `internal` when the
+Workspace's domain may, else `self`. Copying a file only the viewer
+reads into a folder the organization reads is refused.
+
+`trash_file` needs trusted data that `internal` may see. A trashed file
+can be restored, so trashing needs no review. Every write records
+`google-workspace.changed`.
 
 *Sharing* — `share_file` exposes the whole file, which is not a value
 the policy tracks. It needs public input and the
@@ -41,11 +60,16 @@ builtin = "hitl"
 ## Limits
 
 A doc read through this battery is `self` data, even when the whole
-organization can see it: the file's sharing never reaches the policy. A
-trajectory that reads a file cannot then write to Drive or send what it
-read to `internal` without a remedy. A root rule can label one file by
+organization can see it: the read tools never report sharing. A
+trajectory that reads a file can then write only into a Drive target
+the viewer alone reads, and cannot send what it read to `internal`
+without a remedy. A root rule can label one file by
 argument, for a file the organization shares with `internal`; root
 rules run first.
+
+A write is checked against the target's sharing when the call is
+annotated. Sharing that changes later, for example a folder someone
+shares outside the organization after the write, is not seen.
 
 The Gmail and Calendar connectors are not covered. A tool the policy
 does not name is blocked, so add root rules for them.
@@ -53,17 +77,20 @@ does not name is blocked, so add root rules for them.
 ```sh
 cargo test --locked -p appa --test marketplace
 python3 marketplace/batteries/google-workspace/test_audience_source.py
+python3 marketplace/batteries/google-workspace/test_drive_readers.py
 ```
 
 ## Credentials
 
-The tool rules need no credential. The audience source does: the
+The audience source and the write annotator need a credential. The
 `self`, `internal`, and group audiences come from the Admin SDK
-Directory API, called with the organization's own OAuth client.
+Directory API, and a write target's readers from the Drive API, called
+with the organization's own OAuth client.
 
 A Workspace admin sets it up once per organization:
 
-1. Create a Google Cloud project and enable the Admin SDK API.
+1. Create a Google Cloud project and enable the Admin SDK API and the
+   Google Drive API.
 2. Configure the OAuth consent screen as *Internal*. Only accounts in
    the organization can use the client, and Google does not review it.
 3. Create an OAuth client of type *Desktop app* and share its client
@@ -129,6 +156,20 @@ operation without recording a decision; nothing is guessed.
 Reads are directory-wide: `full-members` pages through every account.
 Size `externals.timeout_ms` and `externals.max_body_bytes` for your
 Workspace, not for a single annotation.
+
+**`drive-readers.py`** — the `google-workspace.drive-readers`
+annotator. It reads the token from the same
+`APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`, which also needs the
+`drive.metadata.readonly` scope. It lists Drive permissions with
+`supportsAllDrives` and published views, and checks each user and group
+grantee against the directory. A 403 is an answer: a target needs
+`public` data and a source's content stays with the viewer. Any other
+API error stops the call. Its mandate admits `self` and `internal`;
+the script refuses another one (exit status 2) before it reads the
+token.
+
+**`test_drive_readers.py`** — fixture tests over recorded Drive and
+directory payloads, no network.
 
 **`test_audience_source.py`** — fixture tests over recorded Google API
 payloads, no network. Run with `python3 test_audience_source.py`.
