@@ -232,7 +232,20 @@ fn watch_git_identity(repository: &Path) {
             } else {
                 repository.join(path)
             };
-            println!("cargo:rerun-if-changed={}", path.display());
+            if path.is_file() {
+                println!("cargo:rerun-if-changed={}", path.display());
+                continue;
+            }
+            // A packed ref has no file of its own, and Cargo reruns this script on every
+            // build while a watched path is missing. Its value lives in `packed-refs`; the
+            // nearest existing directory sees the loose file the next commit writes.
+            let packed = git(repository, &["rev-parse", "--git-path", "packed-refs"]).map(|path| repository.join(path));
+            if let Some(packed) = packed.filter(|packed| packed.is_file()) {
+                println!("cargo:rerun-if-changed={}", packed.display());
+            }
+            if let Some(directory) = path.ancestors().skip(1).find(|ancestor| ancestor.is_dir()) {
+                println!("cargo:rerun-if-changed={}", directory.display());
+            }
         }
     }
 }
