@@ -77,6 +77,13 @@ propose narrowly scoped root contracts for needed commands. Do not add a
 universal shell rule to make setup work. Identify private paths and public
 destinations with the operator when tool descriptions cannot establish them.
 
+`appa_subagent` is the only child-launch identity. `background: true` returns
+an owned task handle. `appa_collect` and `appa_cancel` are ordinary tools,
+not launches. Preserve their declarations when enabling background delegation.
+A finished task's admitted return arrives as a message to the owning root.
+Delivery and collection both require APPA's independent child-return check.
+Handles and delivery end on OpenCode restart or plugin reload.
+
 Do not invent credentials, provider facts, tools, or an Annotator. If a battery
 needs unavailable credentials or root support, explain the missing requirement.
 Do not include a credential-dependent configuration until the operator has
