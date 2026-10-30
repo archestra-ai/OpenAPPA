@@ -1320,7 +1320,7 @@ mod tests {
         )
         .await;
         match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
-            Ok(Ok(decision)) => (status, (codec.render)(claude_hook_json, &event, &decision)),
+            Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
             _ => (status, answer),
         }
     }

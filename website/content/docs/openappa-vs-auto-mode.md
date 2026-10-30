@@ -33,21 +33,6 @@ This does not mean OpenAPPA rejects LLM classification. Real-world agent workflo
 
 The architectural difference is composability. In Claude Code and Codex, the LLM classifier acts as the unconstrained outer boundary: if it hallucinates or misinterprets an injection, the action executes. In OpenAPPA, model classifiers run inside mathematical bounds. An annotator or authority operates strictly within its declared mandate and permits. The outer information-flow engine maintains the global invariants: once data is labeled, it cannot legally flow into an unauthorized sink regardless of what any downstream model concludes. This architecture provides the best of both worlds: semantic flexibility where needed, backed by deterministic enforcement that cannot be bypassed.
 
-## Running both
-
-OpenAPPA and Claude Code's auto mode check different properties. OpenAPPA checks where data can flow. The auto mode classifier checks whether an action is destructive, irreversible, or out of scope. OpenAPPA does not label actions by those properties.
-
-In an auto mode session, OpenAPPA is the deterministic floor and the classifier is a second gate above it:
-
-| OpenAPPA decision | Hook answer | Result |
-|---|---|---|
-| Blocks the flow | `deny`, with remedy plans | The call does not run. The classifier cannot release it. |
-| Allows the flow | No decision | The classifier reviews the call and can deny it. |
-
-A `PreToolUse` hook that answers `allow` skips the classifier, including its `hard_deny` rules. For this reason, OpenAPPA answers an allowed call with no decision in auto mode. In other permission modes, OpenAPPA answers `allow`, so an allowed call runs without a prompt.
-
-When the classifier denies a call that OpenAPPA allowed, Claude Code sends a `PermissionDenied` hook. OpenAPPA records that call as a failed run.
-
 | | Claude Code Auto Mode | Codex Auto-Review | OpenAPPA |
 |---|:---:|:---:|:---:|
 | Primary evaluation mechanism | Classifier model | Reviewer LLM agent | Deterministic policy engine |
@@ -59,6 +44,25 @@ When the classifier denies a call that OpenAPPA allowed, Claude Code sends a `Pe
 | Returns structured remedy plans | ✕ | ✕ | ✓ |
 | Works across multiple agent runtimes | ✕ | ✕ | ✓ |
 
+## Choose OpenAPPA or auto mode per session
+
+OpenAPPA and Claude Code auto mode are mutually exclusive permission boundaries:
+
+| Goal | Command |
+|---|---|
+| Deterministic information-flow enforcement | `clappa` |
+| Model-based review of proposed actions | `claude --permission-mode auto` |
+
+`clappa` removes auto mode from the interactive selector. It also refuses this invocation:
+
+```sh
+clappa --permission-mode auto
+```
+
+If an auto-mode call still reaches an OpenAPPA hook, the hook blocks that call. The session stays open. Press Shift+Tab to select Manual mode, then retry.
+
+Neither boundary provides an operating-system sandbox. To restrict filesystem access, network access, credentials, or destructive commands, run the session inside an OS sandbox or container.
+
 ## Deployment and integration
 
 | | Claude Code Auto Mode | Codex Auto-Review | OpenAPPA |
@@ -67,4 +71,4 @@ When the classifier denies a call that OpenAPPA allowed, Claude Code sends a `Pe
 | Boundary enforcement | In-client classifier check before tool execution | Reviewer agent evaluates boundary crossings | Host hook or gateway blocks dispatch before tool execution |
 | Agent scope | Claude Code sessions only | Codex sessions only | Universal: [Claude Code](/claude-code), [kagent](/kagent), Python SDK, or custom harnesses |
 
-OpenAPPA does not require abandoning agent CLIs. OpenAPPA's [Claude Code integration](/claude-code) registers as a `PreToolUse` and `PostToolUse` hook. Claude Code continues to generate commands, while OpenAPPA tracks data flows and enforces policy contracts beneath it. This gives autonomous runs mathematical security guarantees without prompt fatigue.
+OpenAPPA does not require abandoning agent CLIs. OpenAPPA's [Claude Code integration](/claude-code) registers as a `PreToolUse` and `PostToolUse` hook. Claude Code continues to generate commands, while OpenAPPA tracks data flows and enforces policy contracts beneath it.

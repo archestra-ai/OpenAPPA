@@ -56,7 +56,7 @@ pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u
     )
     .await;
     match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
-        Ok(Ok(decision)) => (status, (codec.render)(&body, &event, &decision)),
+        Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
         _ => (status, answer),
     }
 }
