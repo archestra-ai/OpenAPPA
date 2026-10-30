@@ -125,6 +125,20 @@ pub struct PendingReview {
     pub text: String,
 }
 
+/// Why `appa runtime sanitize` cannot build a sanitizer consult for one value.
+#[cfg(feature = "daemon")]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UnownedSanitizer {
+    #[error("the policy registers no sanitizer {0}")]
+    Unregistered(String),
+    #[error("sanitizer {0} is not registered on this point")]
+    Unapplied(String),
+    #[error("a tool_input value names the tool whose arguments it is")]
+    NoTool,
+    #[error(transparent)]
+    Call(#[from] EngineError),
+}
+
 /// One external consult the session must resolve before the same semantic
 /// event replays with the answer attached.
 #[derive(Debug, Clone, PartialEq)]
@@ -2701,6 +2715,63 @@ impl RuntimeEngine {
             .map(|annotator| self.annotation_request(annotator, declaration, &resolved, cwd)))
     }
 
+    /// The consult an offer of `sanitizer` raises on one value, built as the live offer
+    /// builds it: at `tool_output` the value is the result `tool` returned, or a child's
+    /// return when `tool` is `None`; at `tool_input` it is the arguments of a call of `tool`,
+    /// sent in their canonical text. `appa runtime sanitize` only: no trajectory is read or
+    /// changed, so the engine's plan is not asked whether it would offer the sanitizer here.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn sanitizer_owed(
+        &self,
+        sanitizer: &str,
+        on: SanitizerPoint,
+        tool: Option<&str>,
+        value: &str,
+    ) -> Result<crate::consult::Consult, UnownedSanitizer> {
+        let name = appa_engine::names::SanitizerName::new(sanitizer.to_string());
+        let registered = self
+            .engine
+            .registry()
+            .sanitizer(&name)
+            .ok_or_else(|| UnownedSanitizer::Unregistered(sanitizer.to_string()))?;
+        let applies = match on {
+            SanitizerPoint::ToolOutput => registered.on.output,
+            SanitizerPoint::ToolInput => registered.on.input,
+        };
+        if !applies {
+            return Err(UnownedSanitizer::Unapplied(sanitizer.to_string()));
+        }
+        let (declaration, artifact) = match on {
+            SanitizerPoint::ToolOutput => self.sanitizer_consult(
+                &name,
+                ValueBody::new(value),
+                SanitizerSubject::Output {
+                    tool: tool.map(ToolName::new),
+                },
+            ),
+            SanitizerPoint::ToolInput => {
+                let call = self
+                    .engine
+                    .resolve_call(ToolName::new(tool.ok_or(UnownedSanitizer::NoTool)?), value.as_bytes())?;
+                let arguments = ValueBody::new(call.canonical_arguments().canonical_text());
+                self.sanitizer_consult(&name, arguments, SanitizerSubject::Input { call: &call })
+            }
+        };
+        Ok(crate::consult::Consult {
+            name: sanitizer.to_string(),
+            body: crate::consult::ConsultBody::Sanitizer { declaration, artifact },
+        })
+    }
+
+    /// Whether a `tool_input` rewrite is still a call of `tool`: the first check the engine
+    /// makes of a rewrite before it substitutes it. `appa runtime sanitize` only.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn rewrite_resolves(&self, tool: &str, derived: &str) -> bool {
+        self.engine
+            .resolve_call(ToolName::new(tool), derived.as_bytes())
+            .is_ok()
+    }
+
     /// What one annotation consult declares: the Annotator's trusted hint, the mandate
     /// vocabulary bound to this call — a selector placeholder in it names the collection the
     /// call's arguments spell — and the input names its artifact carries.
@@ -2786,6 +2857,22 @@ impl RuntimeEngine {
         body: ValueBody,
         subject: SanitizerSubject<'_>,
     ) -> ExternalRequest {
+        let (declaration, artifact) = self.sanitizer_consult(sanitizer, body, subject);
+        ExternalRequest::Sanitizer {
+            sanitizer: sanitizer.as_str().to_string(),
+            source,
+            declaration,
+            artifact,
+        }
+    }
+
+    /// The declaration and artifact of one sanitizer consult, whoever raises it.
+    fn sanitizer_consult(
+        &self,
+        sanitizer: &appa_engine::names::SanitizerName,
+        body: ValueBody,
+        subject: SanitizerSubject<'_>,
+    ) -> (SanitizerDeclaration, SanitizerArtifact) {
         let registry = self.engine.registry();
         let registered = registry
             .sanitizer(sanitizer)
@@ -2801,15 +2888,13 @@ impl RuntimeEngine {
             }
             SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
         };
-        ExternalRequest::Sanitizer {
-            sanitizer: sanitizer.as_str().to_string(),
-            source,
-            declaration: SanitizerDeclaration::of(registered, on, registry.trust_chain(), parameters),
-            artifact: SanitizerArtifact {
+        (
+            SanitizerDeclaration::of(registered, on, registry.trust_chain(), parameters),
+            SanitizerArtifact {
                 tool: tool.map(|tool| tool.as_str().to_string()),
                 body: body.as_str().to_string(),
             },
-        }
+        )
     }
 
     /// The sanitizer's derivation from the evidence gathered so far, or what the offer does

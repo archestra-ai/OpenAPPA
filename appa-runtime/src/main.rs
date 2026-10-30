@@ -110,6 +110,23 @@ enum RuntimeCommand {
         #[arg(long, default_value = "4")]
         concurrency: std::num::NonZeroUsize,
     },
+    /// Ask the policy's sanitizers about the values on standard input, without a session.
+    #[command(hide = true)]
+    Sanitize {
+        /// How many times each value is asked.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+
+        /// How many values are in flight at once.
+        #[arg(long, default_value = "4")]
+        concurrency: std::num::NonZeroUsize,
+    },
+}
+
+/// A hidden command that asks one kind of the policy's externals about listed inputs.
+enum Offline {
+    Annotate,
+    Sanitize,
 }
 
 /// `appa runtime ensure`: the start every protected SessionStart performs, run
@@ -449,10 +466,11 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
-    let annotating = match args.command {
+    let offline = match args.command {
         Some(RuntimeCommand::Ensure { target, data_dir }) => return ensure(&target, args.config, data_dir),
         Some(RuntimeCommand::Stop { target }) => return stop(&target),
-        Some(RuntimeCommand::Annotate { repeat, concurrency }) => Some((repeat, concurrency)),
+        Some(RuntimeCommand::Annotate { repeat, concurrency }) => Some((Offline::Annotate, repeat, concurrency)),
+        Some(RuntimeCommand::Sanitize { repeat, concurrency }) => Some((Offline::Sanitize, repeat, concurrency)),
         None => None,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -462,8 +480,8 @@ where
             return ExitCode::FAILURE;
         }
     };
-    match annotating {
-        Some((repeat, concurrency)) => runtime.block_on(annotate(args, repeat, concurrency)),
+    match offline {
+        Some((command, repeat, concurrency)) => runtime.block_on(ask_offline(command, args, repeat, concurrency)),
         None => runtime.block_on(serve(args)),
     }
 }
@@ -478,15 +496,24 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
     Ok((config, battery_dirs))
 }
 
-/// `appa runtime annotate`: see [`crate::annotate`].
-async fn annotate(args: Args, repeat: u32, concurrency: std::num::NonZeroUsize) -> ExitCode {
+/// `appa runtime annotate` and `appa runtime sanitize`: see [`crate::annotate`] and
+/// [`crate::sanitize`].
+async fn ask_offline(command: Offline, args: Args, repeat: u32, concurrency: std::num::NonZeroUsize) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
-    match load_config(&config_path, &args.batteries_dir) {
-        Ok((config, _)) => crate::annotate::run(config, args.modules_dir, repeat, concurrency).await,
+    let config = match load_config(&config_path, &args.batteries_dir) {
+        Ok((config, _)) => config,
         Err(error) => {
-            eprintln!("appa runtime annotate: {error}");
-            ExitCode::FAILURE
+            let name = match command {
+                Offline::Annotate => "annotate",
+                Offline::Sanitize => "sanitize",
+            };
+            eprintln!("appa runtime {name}: {error}");
+            return ExitCode::FAILURE;
         }
+    };
+    match command {
+        Offline::Annotate => crate::annotate::run(config, args.modules_dir, repeat, concurrency).await,
+        Offline::Sanitize => crate::sanitize::run(config, args.modules_dir, repeat, concurrency).await,
     }
 }
 

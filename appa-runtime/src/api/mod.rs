@@ -774,6 +774,16 @@ pub(crate) struct AnnotationConsult {
     pub(crate) admitted: bool,
 }
 
+/// One sanitizer's answer to one value, as `appa runtime sanitize` reports it. `derived` is
+/// the body a session would take from the answer: `None` beside an answer that does not read
+/// as a sanitizer's, or a `tool_input` rewrite that is no call of its tool, which a session
+/// treats as no answer.
+#[cfg(feature = "daemon")]
+pub(crate) struct SanitizerConsult {
+    pub(crate) outcome: crate::external::ConsultOutcome,
+    pub(crate) derived: Option<String>,
+}
+
 /// Which deployment this is, and with it every rule the harness fixes rather than the
 /// policy: how the policy names tools, how a recorded name is spelled back when the runtime
 /// addresses the model, and which contracts may release a spawn.
@@ -2187,6 +2197,34 @@ impl Runtime {
             outcome,
             admitted,
         }))
+    }
+
+    /// `appa runtime sanitize`: the serving deployment's sanitizer asked afresh about one
+    /// value through the production consult path. No trajectory is opened and nothing is
+    /// appended.
+    #[cfg(feature = "daemon")]
+    pub(crate) async fn sanitize(
+        &self,
+        sanitizer: &str,
+        on: crate::consult::SanitizerPoint,
+        tool: Option<&str>,
+        value: &str,
+    ) -> Result<SanitizerConsult, crate::engine::UnownedSanitizer> {
+        let deployment = self.inner.deployment();
+        let consult = deployment.resident.sanitizer_owed(sanitizer, on, tool, value)?;
+        let outcome = deployment.externals.consult(&consult, None, None).await;
+        let derived = match &outcome {
+            crate::external::ConsultOutcome::Answer(answer) => crate::consult::SanitizerAnswer::from_wire(answer)
+                .map(|answer| answer.body)
+                .filter(|body| match (on, tool) {
+                    (crate::consult::SanitizerPoint::ToolInput, Some(tool)) => {
+                        deployment.resident.rewrite_resolves(tool, body)
+                    }
+                    _ => true,
+                }),
+            crate::external::ConsultOutcome::NoAnswer(_) => None,
+        };
+        Ok(SanitizerConsult { outcome, derived })
     }
 
     /// The batteries the serving deployment includes.
