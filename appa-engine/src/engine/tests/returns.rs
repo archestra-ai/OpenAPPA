@@ -1279,3 +1279,272 @@ fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
     );
     assert!(execute(floor).is_ok());
 }
+
+/// `spawn` requires `partner` among its readers, which `officer` may approve, while the session
+/// holds `insider`; `open_spawn` has no gap. The replay fixture was recorded under this engine.
+fn gapped_spawn_engine() -> Engine {
+    let mut spawn = plain_tool("spawn");
+    spawn.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: None,
+            audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                DeclaredAudience::restricted([ReaderId::new("partner")]),
+            ))],
+        },
+        ..Requires::default()
+    };
+    let mut cfg = returning_registry(vec![]);
+    cfg.tools = declared(vec![spawn, plain_tool("open_spawn")]);
+    cfg.authorities = vec![crate::authority::Authority {
+        name: AuthorityName::new("officer"),
+        mandate: crate::authority::Mandate {
+            reader_ceiling: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                "partner",
+            )]))),
+            ..crate::authority::Mandate::default()
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    }];
+    open_engine_at(
+        cfg,
+        Label::new(SUSPICIOUS, Audience::restricted([ReaderId::new("insider")])),
+    )
+}
+
+fn marked(id: &str, tool: &str) -> EngineEvent {
+    EngineEvent::Proposals(ProposalBatch {
+        id: crate::transition::ProposalBatchId::new(id),
+        trajectory: traj(),
+        provider_results: Vec::new(),
+        proposals: vec![raw(&call(tool, json!({})))],
+        spawn: Some(crate::transition::SpawnMark::at(0)),
+        offer_nonce: nonce(),
+        evidence: Vec::new(),
+        audience: crate::audience::AudienceEvidence::default(),
+    })
+}
+
+/// Execute the bare declaration a marked spawn's block offered, at the parent's label.
+fn declare_bare(
+    e: &Engine,
+    log: &[Fact],
+    offered: &[(crate::value::OfferId, plan::ExecutableRemedyPlan)],
+) -> Vec<Fact> {
+    let (offer, _) = offered
+        .iter()
+        .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
+        .expect("the bare declaration is offered");
+    appended_facts(
+        execute_offer_declaring(
+            e,
+            log,
+            *offer,
+            OfferOutcome::Approved(Vec::new()),
+            Some(floor_policy(e, log)),
+        )
+        .expect("the declaration is approved without a ruling"),
+    )
+}
+
+fn execute_offer_declaring(
+    e: &Engine,
+    log: &[Fact],
+    offer: crate::value::OfferId,
+    outcome: OfferOutcome,
+    return_policy: Option<ReturnPolicy>,
+) -> Result<EngineDecision, TransitionError> {
+    e.handle(
+        &viewing(e, log),
+        EngineEvent::ExecuteOffer(OfferExecution {
+            trajectory: traj(),
+            offer,
+            outcome,
+            return_policy,
+            offer_nonce: nonce(),
+            audience: crate::audience::AudienceEvidence::default(),
+        }),
+    )
+}
+
+#[test]
+fn a_log_the_bundled_planner_recorded_replays_and_continues() {
+    let e = gapped_spawn_engine();
+    let log: Vec<Fact> = serde_json::from_str(include_str!("fixtures/bundled-spawn-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    let approvals: Vec<(usize, bool)> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::CallApproved {
+                rulings, return_policy, ..
+            } => Some((rulings.len(), return_policy.is_some())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        approvals,
+        vec![(0, true), (1, true)],
+        "the fixture releases one spawn by its declaration alone and one by a bundled ruling"
+    );
+    assert_eq!(e.validate_replay(&log), Ok(()), "the recorded log replays");
+
+    let blocked = e
+        .handle(&viewing(&e, &log), marked("after-upgrade", "spawn"))
+        .expect("a later spawn decides on the replayed log");
+    let offered = opened_offers(&appended_facts(blocked));
+    assert!(
+        !offered.is_empty() && offered.iter().all(|(_, plan)| plan.declares_only()),
+        "a later block is planned without bundling: {offered:?}"
+    );
+}
+
+#[test]
+fn a_spawn_with_no_other_gap_declares_without_a_ruling_and_releases_on_retry() {
+    let e = gapped_spawn_engine();
+    let log = vec![opened(&e)];
+    let blocked = appended_facts(e.handle(&viewing(&e, &log), marked("open-1", "open_spawn")).unwrap());
+    let offered = opened_offers(&blocked);
+    assert!(
+        offered
+            .iter()
+            .all(|(_, plan)| plan.declares_only() && plan.required.is_empty()),
+        "every plan is one declaration and names no authority: {offered:?}"
+    );
+    let log = [log, blocked].concat();
+    let log = [log.clone(), declare_bare(&e, &log, &offered)].concat();
+    let released = e.handle(&viewing(&e, &log), marked("open-2", "open_spawn")).unwrap();
+    assert!(matches!(answered(&released), ([release], []) if release.fork.is_some()));
+    let log = [log, appended_facts(released)].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+}
+
+#[test]
+fn a_gapped_spawn_declares_first_and_its_retry_asks_the_authority_for_the_gap_alone() {
+    let e = gapped_spawn_engine();
+    let log = vec![opened(&e)];
+    let blocked = e.handle(&viewing(&e, &log), marked("gap-1", "spawn")).unwrap();
+    let ([], [block]) = answered(&blocked) else {
+        panic!("the spawn blocks alone, got {:?}", answered(&blocked))
+    };
+    assert!(matches!(
+        block.block.raw.requirement_gaps.as_slice(),
+        [Gap::Includes { .. }]
+    ));
+    let blocked = appended_facts(blocked);
+    let offered = opened_offers(&blocked);
+    assert!(
+        !offered.is_empty()
+            && offered
+                .iter()
+                .all(|(_, plan)| plan.declares_only() && plan.required.is_empty()),
+        "the declaration is offered alone, with no authority: {offered:?}"
+    );
+    let log = [log, blocked].concat();
+    let declared = declare_bare(&e, &log, &offered);
+    assert!(declared.iter().any(|fact| matches!(
+        fact,
+        Fact::CallApproved { rulings, return_policy: Some(_), .. } if rulings.is_empty()
+    )));
+    let log = [log, declared].concat();
+
+    let retried = e.handle(&viewing(&e, &log), marked("gap-2", "spawn")).unwrap();
+    assert!(
+        matches!(answered(&retried), ([], [_])),
+        "the declaration alone does not cover the gap"
+    );
+    let retried = appended_facts(retried);
+    let (offer, plan) = match opened_offers(&retried).as_slice() {
+        [(offer, plan)] => (*offer, plan.clone()),
+        other => panic!("the gap alone is planned, got {other:?}"),
+    };
+    assert_eq!(plan.required.len(), 1, "the gap's plan names its authority");
+    assert_eq!(plan.return_step(), None, "the declaration already stands");
+    let log = [log, retried].concat();
+    let label = viewing(&e, &log).views(&traj()).unwrap().current_label();
+    let approved = appended_facts(
+        execute_offer_declaring(
+            &e,
+            &log,
+            offer,
+            OfferOutcome::Approved(evidence_for(offer, &plan, "spawn", label)),
+            None,
+        )
+        .expect("the officer's ruling covers the gap"),
+    );
+    assert!(
+        approved.iter().any(|fact| matches!(
+            fact,
+            Fact::CallApproved { rulings, return_policy, .. }
+                if rulings.len() == 1 && *return_policy == Some(floor_policy(&e, &log))
+        )),
+        "the gap's approval carries the standing declaration"
+    );
+    let log = [log, approved].concat();
+    let released = e.handle(&viewing(&e, &log), marked("gap-3", "spawn")).unwrap();
+    assert!(matches!(answered(&released), ([release], []) if release.fork.is_some()));
+    let released = appended_facts(released);
+    assert!(released.iter().any(|fact| matches!(
+        fact,
+        Fact::ForkPrepared { return_policy, .. } if *return_policy == floor_policy(&e, &log)
+    )));
+    assert_eq!(e.validate_replay(&[log, released].concat()), Ok(()));
+}
+
+#[test]
+fn a_declaration_lapses_when_the_label_moves_before_the_spawn() {
+    let e = open_engine(returning_registry(vec![]));
+    let log = vec![opened(&e)];
+    let blocked = appended_facts(e.handle(&viewing(&e, &log), marked("first", "spawn")).unwrap());
+    let offered = opened_offers(&blocked);
+    let log = [log, blocked].concat();
+    let mut log = [log.clone(), declare_bare(&e, &log, &offered)].concat();
+    reads(&e, &mut log, &traj(), "read_internal");
+    let retried = e.handle(&viewing(&e, &log), marked("retry", "spawn")).unwrap();
+    assert!(
+        matches!(answered(&retried), ([], [_])),
+        "the narrowed parent declares again"
+    );
+    assert!(
+        opened_offers(&appended_facts(retried))
+            .iter()
+            .all(|(_, plan)| plan.declares_only()),
+        "the lapsed declaration is offered again"
+    );
+}
+
+#[test]
+fn a_declaration_ahead_of_the_spawn_is_held_to_the_label_and_the_own_floor() {
+    let e = open_engine_at(returning_registry(vec![]), Label::new(SUSPICIOUS, Audience::public()));
+    let log = vec![opened(&e)];
+    let label = floor_crossing(&e, &log).floor;
+    let at = |log: &[Fact], trajectory: &TrajectoryId, floor: Label| {
+        e.check_return_declaration(
+            &viewing(&e, log),
+            trajectory,
+            &ReturnPolicy::Crossing(crate::fact::CrossingReturn { floor, sanitizer: None }),
+        )
+    };
+    assert_eq!(
+        at(&log, &traj(), label.clone()),
+        Ok(()),
+        "the parent's own label stands"
+    );
+    assert_eq!(
+        at(&log, &traj(), Label::new(TRUSTED, label.audience.clone())),
+        Err(crate::plan::ReturnPolicyRefusal::FloorAboveLabel),
+        "a floor above the label is refused"
+    );
+
+    let child = TrajectoryId::new("child");
+    let log = [log.clone(), forked_child(&e, &log, &child)].concat();
+    assert_eq!(
+        at(
+            &log,
+            &child,
+            Label::new(label.trust, Audience::restricted([ReaderId::new("insider")]))
+        ),
+        Err(crate::plan::ReturnPolicyRefusal::FloorBelowOwn),
+        "a floor below the child's own floor is refused"
+    );
+    assert_eq!(at(&log, &child, label), Ok(()), "the child's own floor stands");
+}

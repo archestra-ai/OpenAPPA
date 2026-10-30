@@ -170,10 +170,11 @@ impl Engine {
             &|views, call| {
                 views
                     .approvals_for(call)
-                    .find(|(offer, approval)| {
+                    .filter(|(offer, approval)| {
                         approval.basis == views.basis_after(&admissions, &crate::basis::SubjectKey::Approval(*offer))
                     })
                     .map(|(offer, _)| offer)
+                    .collect()
             },
             &|views, call, taken| {
                 views

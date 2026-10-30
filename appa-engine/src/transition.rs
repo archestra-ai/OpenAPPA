@@ -1762,7 +1762,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::BlockReused);
         }
         let expansions = self.recorded_expansions(evidence)?;
-        let menu = self.stage_menu(&views, trajectory, act, call, subject, &expansions)?;
+        let menu = self.stage_menu(&views, trajectory, act, call, subject, plan, &expansions)?;
         self.audit_reads(&expansions);
         if !menu.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
@@ -1782,6 +1782,7 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_menu(
         &self,
         views: &Views,
@@ -1789,6 +1790,7 @@ impl<'a> Sequence<'a> {
         act: &crate::basis::DecidedAct,
         call: &crate::value::CanonicalDigest,
         subject: &crate::basis::SubjectKey,
+        plan: &crate::plan::ExecutableRemedyPlan,
         expansions: &Expansions,
     ) -> Result<Vec<crate::plan::ExecutableRemedyPlan>, TransitionRefusal> {
         // The pins of the record the surfacing act continues are inherited evidence.
@@ -1836,26 +1838,34 @@ impl<'a> Sequence<'a> {
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
                 self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
-                Ok(crate::plan::plan(
-                    self.engine.registry(),
-                    views,
-                    crate::plan::BlockedCall {
-                        call: candidate,
-                        contract: &contract,
-                        raw: &block,
-                        stage: &stage,
-                        role,
-                    },
-                    &context,
-                )
+                let blocked = || crate::plan::BlockedCall {
+                    call: candidate,
+                    contract: &contract,
+                    raw: &block,
+                    stage: &stage,
+                    role,
+                };
                 // A recorded act whose pinned evidence leaves an enumeration read undecided
                 // reconstructed a menu the evidence cannot back.
-                .map_err(TransitionRefusal::from)?
-                .plans
-                .iter()
-                .filter_map(crate::plan::RemedyPlan::executable)
-                .cloned()
-                .collect())
+                let menu: Vec<crate::plan::ExecutableRemedyPlan> =
+                    crate::plan::plan(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?
+                        .plans
+                        .iter()
+                        .filter_map(crate::plan::RemedyPlan::executable)
+                        .cloned()
+                        .collect();
+                // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
+                if !menu.contains(plan)
+                    && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
+                {
+                    let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?;
+                    if bundled.contains(plan) {
+                        return Ok(bundled);
+                    }
+                }
+                Ok(menu)
             }
             crate::basis::SubjectKey::ConfinedResult(dispatch) => {
                 if dispatch.trajectory() != trajectory || dispatch.digest() != call {
@@ -1972,10 +1982,11 @@ impl<'a> Sequence<'a> {
         // One approval per offer, and one current approval per call: a second would leave the
         // release choosing between two plans the agent selected separately, and only one of them
         // is the choice it made.
-        if views.approval(offer).is_some() || views.current_approval(call).is_some() {
+        // A marked spawn's declaration stands beside the approval of its other gaps.
+        let offered = &recorded.plan;
+        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only()) {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
-        let offered = &recorded.plan;
         if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
@@ -1990,8 +2001,18 @@ impl<'a> Sequence<'a> {
         }) {
             return Err(TransitionRefusal::UnbackedApproval);
         }
+        let marked = matches!(
+            views.call_role(&recorded.subject),
+            crate::check::CallRole::MarkedSpawn(_)
+        );
         match (offered.return_step(), return_policy) {
-            (None, None) => {}
+            (None, None) if !marked => {}
+            // The plan of a declared spawn's other gaps carries the declaration that stands.
+            (None, Some(policy))
+                if marked
+                    && views
+                        .declaration(call)
+                        .is_some_and(|(_, declaration)| declaration.return_policy.as_ref() == Some(policy)) => {}
             (Some(step), Some(policy)) => {
                 crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy)
                     .map_err(|_| TransitionRefusal::UnbackedReturnPolicy)?;
@@ -2515,11 +2536,12 @@ impl<'a> Sequence<'a> {
                 views
                     .approvals_for(call)
                     .map(|(offer, approval)| (offer, approval.basis))
-                    .find(|(offer, basis)| {
+                    .filter(|(offer, basis)| {
                         self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
                             .is_ok()
                     })
                     .map(|(offer, _)| offer)
+                    .collect()
             },
             &|views, call, taken| {
                 views

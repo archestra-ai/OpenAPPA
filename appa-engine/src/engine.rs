@@ -680,6 +680,22 @@ impl Engine {
         (0..decided.proposals.len()).any(|position| views.pending_block(&composing.subject(position)).is_some())
     }
 
+    /// Would `policy` stand as this trajectory's return declaration now? The checks a declaration
+    /// at the spawn passes, at the trajectory's current label. A runtime holds a declaration made
+    /// ahead of the spawn by them and applies it through the spawn's own declaration offer.
+    pub fn check_return_declaration(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        policy: &ReturnPolicy,
+    ) -> Result<(), crate::plan::ReturnPolicyRefusal> {
+        let views = view.crossed_to(self);
+        match views.views(trajectory) {
+            Some(views) => plan::declared_return_policy(&self.registry, &views, &policy.route(), policy),
+            None => Err(crate::plan::ReturnPolicyRefusal::RouteMismatch),
+        }
+    }
+
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
         view.views(child)?.fork_of(child).cloned()

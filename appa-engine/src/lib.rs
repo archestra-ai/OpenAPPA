@@ -46,6 +46,13 @@
 //! crosses back to its parent only through the checked return path. Family-wide effect
 //! history remains shared.
 //!
+//! A marked spawn releases by spending an approval that carries its child's **return
+//! declaration**. Declaring asks no authority: a blocked spawn with no declaration is offered
+//! the declarations alone, and the approval one of them prepares releases the spawn when nothing
+//! else blocks it. Otherwise the retry is planned on its remaining gaps, and the approval that
+//! covers them carries the declaration that stands. Like any approval, a declaration stops being
+//! current when the parent's label moves.
+//!
 //! A **fan-out spawn** ([`transition::SpawnKind::FanOut`]) starts any number of children under
 //! the one return declaration its release consumed. Its own fork binds no child. Each child it
 //! starts gets a member fork ([`value::ForkId::Member`]), prepared by the engine's binding
