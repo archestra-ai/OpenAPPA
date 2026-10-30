@@ -91,6 +91,16 @@ pub enum ConfigError {
         "audience source {provider:?} in {context} declares no selectors: include the config that declares [externals.audience.{provider}], or declare it here with `selectors` — not both"
     )]
     UndeclaredProvider { context: String, provider: String },
+    #[error("interceptor {name:?}: {reason}")]
+    BadInterceptor { name: String, reason: String },
+    #[error("{context}: selector {selector:?} names no declared tool")]
+    UnboundTools { context: String, selector: String },
+    #[error("{context}: tag {tag:?} uses a reserved prefix")]
+    ReservedTag { context: String, tag: String },
+    #[error("{context}: `unblocks` replaces `tags`; write one of them")]
+    UnblocksWithTags { context: String },
+    #[error("sanitizer {name} declares no `permits`: a sanitizer without one must name the tools it `unblocks`")]
+    SanitizerWithoutPermits { name: String },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }

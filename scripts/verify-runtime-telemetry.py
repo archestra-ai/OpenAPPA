@@ -634,7 +634,7 @@ delta = {{}}
 
 [[policy.tool]]
 name = "host/claude-code/Blocked"
-requires = {{ attention = ["blocked"] }}
+requires = {{ attention = ["hard-block"] }}
 delta = {{}}
 
 [[policy.annotator]]

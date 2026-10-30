@@ -139,6 +139,7 @@ pub mod engine;
 pub mod execute;
 pub mod fact;
 mod hex32;
+pub mod intercept;
 pub mod label;
 pub mod names;
 pub mod params;

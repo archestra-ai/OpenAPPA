@@ -292,7 +292,7 @@ fn a_substitution_that_selects_another_ordered_contract_is_a_new_call_under_it()
         e.registry.selected(&selected).unwrap(),
         crate::value::ToolDeclarationId::new(1).unwrap()
     );
-    let rewrite = |body: &str| substituted_call(&e.registry, &selected, &ValueBody::new(body), None);
+    let rewrite = |body: &str| substituted_call(&e.registry, &selected, &ValueBody::new(body), None, None);
 
     // Arguments that select another declaration render a new call under it: the selected
     // ordinal, nothing carried.
@@ -423,6 +423,7 @@ fn rewrite(
     annotation: Option<crate::contract::PinnedAnnotation>,
 ) -> OfferOutcome {
     OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+        interceptions: None,
         sanitizer: crate::names::SanitizerName::new(sanitizer),
         source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
         derived: ValueBody::new(replacement),
@@ -859,6 +860,7 @@ fn replay_refuses_a_corrupt_dispatched_call() {
         vec![
             opened(&e),
             Fact::DispatchOpened {
+                interceptions: None,
                 trajectory: traj(),
                 dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
                 tool: ToolName::new(tool),

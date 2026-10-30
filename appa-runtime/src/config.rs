@@ -304,6 +304,8 @@ pub struct Externals {
     /// One context provider per `[externals.context.<name>]`, under its name: asked about
     /// every call an Annotator judges, before the Annotator.
     pub context: BTreeMap<String, Transport>,
+    /// One implementation per policy-declared `[[interceptor]]` that names no `builtin`.
+    pub interceptors: BTreeMap<String, Transport>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -946,15 +948,18 @@ pub(crate) enum Section {
     Audience,
     /// One context provider per `[externals.context.<name>]`.
     Context,
+    /// One `[externals.interceptors.<name>]` per `[[interceptor]]` that names no builtin.
+    Interceptors,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 6] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
         Section::Audience,
         Section::Context,
+        Section::Interceptors,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -964,6 +969,7 @@ impl Section {
             Section::Annotators => "annotators",
             Section::Audience => "audience",
             Section::Context => "context",
+            Section::Interceptors => "interceptors",
         }
     }
 
@@ -982,7 +988,7 @@ impl Section {
     /// on its policy declaration instead, and an audience entry is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Audience | Section::Context => {
+            Section::Annotators | Section::Audience | Section::Context | Section::Interceptors => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -1085,6 +1091,8 @@ struct RawExternals {
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
     context: BTreeMap<String, RawBinding>,
+    #[serde(default)]
+    interceptors: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1098,6 +1106,7 @@ impl RawExternals {
             (Section::Sanitizers, &self.sanitizers),
             (Section::Annotators, &self.annotators),
             (Section::Context, &self.context),
+            (Section::Interceptors, &self.interceptors),
         ];
         bindings
             .into_iter()
@@ -1583,6 +1592,7 @@ impl Config {
             annotators,
             audience,
             context,
+            interceptors,
             claude_code,
             llm,
             jev,
@@ -1633,6 +1643,10 @@ impl Config {
                     .collect(),
                 audience: resolve_audience_bindings(audience, &origins, keys)?,
                 context: resolve(Section::Context, context)?
+                    .into_iter()
+                    .map(|(name, implementation)| (name, transport_only(implementation)))
+                    .collect(),
+                interceptors: resolve(Section::Interceptors, interceptors)?
                     .into_iter()
                     .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
@@ -2046,7 +2060,10 @@ impl Composition {
             if field == "version" {
                 continue;
             }
-            if !matches!(field.as_str(), "tool" | "annotator" | "authority" | "sanitizer") {
+            if !matches!(
+                field.as_str(),
+                "tool" | "annotator" | "authority" | "sanitizer" | "interceptor"
+            ) {
                 return Err(refused(field));
             }
             let toml::Value::Array(mut declarations) = value else {
@@ -2211,7 +2228,9 @@ fn compose_included_confinement(
 fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
         Implementation::Transport(transport) => transport,
-        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
+        Implementation::Builtin(_) => {
+            unreachable!("the annotators, context and interceptors sections refuse every builtin")
+        }
     }
 }
 
@@ -2790,9 +2809,10 @@ mod tests {
                         AudienceImplementation::Readers(_) => Bound::Readers,
                     });
             }
-            Section::Annotators | Section::Context => {
+            Section::Annotators | Section::Context | Section::Interceptors => {
                 let table = match section {
                     Section::Context => &config.externals.context,
+                    Section::Interceptors => &config.externals.interceptors,
                     _ => &config.externals.annotators,
                 };
                 return table.get(name).map(Bound::of);

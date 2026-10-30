@@ -195,6 +195,7 @@ fn an_ended_branch_releases_nothing_more() {
     let forged = [
         log,
         vec![Fact::DispatchOpened {
+            interceptions: None,
             trajectory: child.clone(),
             dispatch: DispatchId::new(child.clone(), call.digest(), 0),
             tool: call.tool().clone(),

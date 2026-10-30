@@ -97,6 +97,20 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
     match decision {
         HookDecision::Ack => serde_json::json!({}),
         HookDecision::AllowCall { .. } => allow("appa: the call is released"),
+        // The rewrite replaces the whole input object: Claude Code runs the tool with exactly
+        // the arguments APPA checked. Rendered the same in every permission mode, since an
+        // empty answer would run the model's original arguments.
+        HookDecision::AllowRewrittenCall { arguments } => match serde_json::from_str::<serde_json::Value>(arguments) {
+            Ok(input) => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "appa: a bound sanitizer rewrote the call; it runs as rewritten",
+                    "updatedInput": input,
+                }
+            }),
+            Err(_) => deny("appa: the rewritten arguments are not a JSON object"),
+        },
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
         HookDecision::DenyCall { feedback, .. } => deny(feedback),
         HookDecision::Block { reason } => match replacement(event, &withheld(reason)) {

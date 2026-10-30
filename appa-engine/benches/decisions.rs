@@ -90,6 +90,7 @@ fn engine() -> Engine {
         },
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain,
             tools: vec![ToolDeclaration::Declared(wire)],
             annotators: vec![],
@@ -122,6 +123,7 @@ fn proposal(history: History, round: usize, stage: &str) -> EngineEvent {
         trajectory: trajectory(),
         provider_results: vec![],
         proposals: vec![ProposedCall {
+            interceptions: None,
             tool: ToolName::new(TOOL),
             arguments: history.arguments(round),
             annotation: None,

@@ -265,19 +265,40 @@ impl RawRequires {
 }
 
 impl RawAuthority {
-    pub(crate) fn convert(self, chain: &TrustChain) -> Result<Authority, ConfigError> {
+    pub(crate) fn convert(self, chain: &TrustChain, tools: &mut [ToolDeclaration]) -> Result<Authority, ConfigError> {
         refuse_inline_binding("authority", &self.name, self.implementation.as_ref())?;
         let ctx = format!("authority {}", self.name);
         let mandate = self.permits.convert(chain, &ctx)?;
         let hint = parse_hint(self.hint, &ctx)?;
+        let own = Scope::authority_unblock_tag(&self.name);
+        let scope = component_scope(own, self.tags, &self.unblocks, tools, &ctx)?;
         Ok(Authority {
             name: AuthorityName::new(self.name),
             mandate,
-            scope: Scope {
-                tags: self.tags.into_iter().map(TagName::new).collect(),
-            },
+            scope,
             hint,
         })
+    }
+}
+
+/// A component's scope: its `tags`, or the reserved tag `unblocks` gives it and the tools it
+/// names. A component writes one of the two.
+fn component_scope(
+    own: TagName,
+    tags: Vec<String>,
+    unblocks: &[String],
+    tools: &mut [ToolDeclaration],
+    ctx: &str,
+) -> Result<Scope, ConfigError> {
+    crate::interceptor::refuse_reserved_tags(&tags, ctx)?;
+    match (tags.is_empty(), unblocks.is_empty()) {
+        (_, true) => Ok(Scope {
+            tags: tags.into_iter().map(TagName::new).collect(),
+        }),
+        (true, false) => crate::interceptor::unblock_scope(own, unblocks, tools, ctx),
+        (false, false) => Err(ConfigError::UnblocksWithTags {
+            context: ctx.to_string(),
+        }),
     }
 }
 
@@ -309,18 +330,23 @@ fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, Confi
 }
 
 impl RawSanitizer {
-    pub(crate) fn convert(self, chain: &TrustChain) -> Result<Sanitizer, ConfigError> {
+    pub(crate) fn convert(self, chain: &TrustChain, tools: &mut [ToolDeclaration]) -> Result<Sanitizer, ConfigError> {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
         let on = parse_points(&self.on, &self.name)?;
-        let transition = self.permits.convert(chain, &self.name)?;
-        let hint = parse_hint(self.hint, &format!("sanitizer {}", self.name))?;
+        let transition = match (self.permits, self.unblocks.is_empty()) {
+            (Some(permits), _) => permits.convert(chain, &self.name)?,
+            (None, false) => DeclaredTransition::Unchanged,
+            (None, true) => return Err(ConfigError::SanitizerWithoutPermits { name: self.name }),
+        };
+        let ctx = format!("sanitizer {}", self.name);
+        let hint = parse_hint(self.hint, &ctx)?;
+        let own = Scope::sanitizer_unblock_tag(&self.name);
+        let scope = component_scope(own, self.tags, &self.unblocks, tools, &ctx)?;
         Ok(Sanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
-            scope: Scope {
-                tags: self.tags.into_iter().map(TagName::new).collect(),
-            },
+            scope,
             hint,
         })
     }

@@ -427,6 +427,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             annotators: Vec::new(),
             authorities: registry.authorities().to_vec(),
             sanitizers: registry.sanitizers().cloned().collect(),
+            interceptors: registry.interceptors().to_vec(),
             audience: registry.audience_config().clone(),
         },
         registry.profile(),
@@ -499,10 +500,23 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
         })
         .collect();
 
+    let mut interceptors: Vec<_> = registry.interceptors.iter().collect();
+    interceptors.sort_by(|a, b| a.name.cmp(&b.name));
+    let interceptors: Vec<serde_json::Value> = interceptors
+        .into_iter()
+        .map(|interceptor| {
+            serde_json::json!({
+                "name": interceptor.name,
+                "scope": sorted_set(&interceptor.scope.tags),
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
+        "interceptors": interceptors,
         // Which sources feed each audience is part of what the policy means.
         "audience": registry.audience,
         "deployment": profile,
@@ -688,6 +702,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain(),
             tools: tools.into_iter().map(ToolDeclaration::Declared).collect(),
             annotators: vec![],

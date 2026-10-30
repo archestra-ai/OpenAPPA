@@ -95,6 +95,9 @@ pub struct ProposedCall {
     /// same tool and arguments under a different annotation is a different act. `None` proposes
     /// a statically declared call.
     pub annotation: Option<crate::contract::PinnedAnnotation>,
+    /// The answers of the Interceptors that judge this call, pinned to it. Payload, as the
+    /// annotation is. `None` proposes a call no Interceptor judges.
+    pub interceptions: Option<crate::intercept::Interceptions>,
 }
 
 /// One provider-run result the response exposed: the tool the provider ran inside the
@@ -345,6 +348,9 @@ pub enum Evidence {
         source: RawResultDigest,
         derived: ValueBody,
         annotation: Option<crate::contract::PinnedAnnotation>,
+        /// The answers of the Interceptors that judge the rewritten call: a rewrite is judged
+        /// afresh, as it is annotated afresh.
+        interceptions: Option<crate::intercept::Interceptions>,
     },
 }
 
@@ -456,6 +462,12 @@ pub enum TransitionError {
     AnnotationNeeded {
         annotators: Vec<crate::names::AnnotatorName>,
     },
+    #[error("the act proposes calls without the answers of their Interceptors: {}", interceptors.iter().map(|i| i.as_str()).collect::<Vec<_>>().join(", "))]
+    InterceptionNeeded {
+        interceptors: Vec<crate::names::InterceptorName>,
+    },
+    #[error("the interceptions are not this call's under its declaration: {reason}")]
+    ForeignInterceptions { reason: String },
     #[error("the pinned annotation is not this call's under its declaration: {reason}")]
     ForeignAnnotation { reason: String },
     #[error("the pinned annotation is outside its mandate: {reason}")]
@@ -1268,12 +1280,13 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 annotation,
+                interceptions,
                 file_basis,
                 evidence,
                 terms,
                 ..
             } => {
-                let call = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let call = crate::projection::opened_call(tool, arguments, annotation, interceptions, file_basis);
                 self.opened(trajectory, dispatch, &call, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects, terms)?;
             }
@@ -1470,7 +1483,9 @@ impl<'a> Sequence<'a> {
             }
             _ => return Err(TransitionRefusal::ForgedEvidence),
         };
-        if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err() {
+        if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err()
+            || crate::check::validate_interceptions(self.engine.registry(), entry, call).is_err()
+        {
             return Err(TransitionRefusal::ForgedEvidence);
         }
         let checked = match checked.bound_to(call.arguments()) {
@@ -2345,13 +2360,14 @@ impl<'a> Sequence<'a> {
                     tool,
                     arguments,
                     annotation,
+                    interceptions,
                     subject,
                     evidence,
                     file_basis,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let opened = crate::projection::opened_call(tool, arguments, annotation, interceptions, file_basis);
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2498,7 +2514,9 @@ impl<'a> Sequence<'a> {
                 .ok_or(TransitionRefusal::InvalidPayload(
                     crate::params::ArgumentError::NoMatchingContract,
                 ))?;
-            if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err() {
+            if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err()
+                || crate::check::validate_interceptions(self.engine.registry(), declaration, call).is_err()
+            {
                 return Err(TransitionRefusal::ForgedEvidence);
             }
         }
@@ -3278,10 +3296,15 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
         // Annotation evidence binds the exact canonical call: whatever declaration the rewrite
         // selects, the pin the record carries is judged afresh against it.
-        if crate::check::validate_annotation(registry, declaration, call).is_err() {
+        if crate::check::validate_annotation(registry, declaration, call).is_err()
+            || crate::check::validate_interceptions(registry, declaration, call).is_err()
+        {
             return Err(TransitionRefusal::ForgedEvidence);
         }
         let contract = annotation_or_unknown(registry, call)?;
+        if !crate::check::keeps_interceptors(registry, &before_contract.tags, &contract.tags) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
         contract
             .parameters
             .validate(call.arguments())
@@ -3315,7 +3338,7 @@ impl<'a> Sequence<'a> {
         let next = CallStage::substituting(derived, lineage.clone());
         let after =
             crate::check::evaluate(&contract, &views, call, &next, role, &context).map_err(TransitionRefusal::from)?;
-        if !crate::plan::substitution_helps(&before, &after) {
+        if !crate::plan::substitution_helps(&before, predecessor, &after, call) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         // The live hop's act gated the standing block's whole atom set before offering.
@@ -3605,6 +3628,7 @@ mod tests {
     /// The test policy over the trust chain `ranks`, lowest first.
     fn engine_over(ranks: &[&str]) -> Engine {
         let config = crate::registry::RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: crate::registry::TrustChain::new(ranks.iter().map(|rank| rank.to_string()).collect()),
             tools: vec![crate::contract::ToolDeclaration::Declared(note_tool())],
             annotators: vec![],
@@ -3651,6 +3675,7 @@ mod tests {
                     trajectory: view.family().clone(),
                     provider_results: Vec::new(),
                     proposals: vec![ProposedCall {
+                        interceptions: None,
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
                         annotation: None,
@@ -3685,6 +3710,7 @@ mod tests {
                     trajectory: traj(),
                     provider_results: Vec::new(),
                     proposals: vec![ProposedCall {
+                        interceptions: None,
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
                         annotation: None,
@@ -3743,6 +3769,7 @@ mod tests {
         let first = vec![opening(&engine, &traj())];
         let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
         let proposal = ProposedCall {
+            interceptions: None,
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
             annotation: None,
@@ -3953,6 +3980,7 @@ mod tests {
     /// The test policy over two ranks with `note` declared as `note`, at `revision`.
     fn engine_noting(note: Option<ToolAnnotation>, revision: u64) -> Engine {
         let config = crate::registry::RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: note
                 .into_iter()

@@ -31,6 +31,9 @@ postgres = ["appa-eventlog/postgres"]
 # The `archestra` annotator builtin: the rendered model prompt sent to an endpoint the
 # embedding host supplies through `HostDefaults`. The daemon never offers it.
 archestra = ["appa-policy/archestra"]
+# The `cedar` Interceptor builtin. Opt-in: `cedar-policy` turns on serde_json's
+# `preserve_order` for the whole binary, which changes how every JSON object orders its keys.
+cedar = ["dep:cedar-policy"]
 
 # These integration tests drive the server stack: the MCP endpoint, the
 # installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
@@ -91,6 +94,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-streamable-ht
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tar = "0.4"
@@ -117,6 +121,7 @@ rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
 regex = "1.13.1"
+cedar-policy = { version = "4.14.0", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }

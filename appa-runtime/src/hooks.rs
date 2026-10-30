@@ -534,7 +534,7 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
         | HookDecision::Context { .. }
         | HookDecision::ChildReturn { .. }
         | HookDecision::DeliverValue { .. } => (HookOutcome::Acked, Vec::new()),
-        HookDecision::AllowCall { .. } => (HookOutcome::Allowed, Vec::new()),
+        HookDecision::AllowCall { .. } | HookDecision::AllowRewrittenCall { .. } => (HookOutcome::Allowed, Vec::new()),
         HookDecision::PassControl => (HookOutcome::PassControl, Vec::new()),
         HookDecision::DenyCall { offers, .. } => (
             HookOutcome::Denied,
@@ -576,7 +576,7 @@ async fn dispatch_event(
             settles,
             peer,
             title,
-        } => dispatcher.prompt(actor, text, settles, peer, title),
+        } => dispatcher.prompt(actor, text, settles, peer, title).await,
         HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
         HookEvent::ToolCall {
             actor,
@@ -685,7 +685,7 @@ impl Dispatcher<'_> {
     /// A peer frame is not the user's turn: it may arrive in the middle of one, so it leaves
     /// no mark. It enters only when it does not narrow the session; otherwise it is held and
     /// the prompt blocked, and a message that can be neither refuses the prompt.
-    fn prompt(
+    async fn prompt(
         &mut self,
         actor: Actor,
         text: String,
@@ -712,6 +712,23 @@ impl Dispatcher<'_> {
                 }
             },
             None => {
+                // The prompt's Interceptors judge it before it leaves a mark: a blocked
+                // prompt never reaches the model, so it starts no turn.
+                let judged = match self.runtime.intercepts_prompts() {
+                    false => Ok(None),
+                    true => {
+                        on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+                            let text = text.clone();
+                            async move { session.intercept_prompt(&text).await }
+                        })
+                        .await
+                    }
+                };
+                match judged {
+                    Ok(Some(reason)) => return with_peer_notices(self.runtime, &actor, block(reason)),
+                    Ok(None) => {}
+                    Err(error) => return refuse(error),
+                }
                 if let Err(error) = self.runtime.record_prompt(&actor) {
                     tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
                 }
@@ -802,12 +819,64 @@ impl Dispatcher<'_> {
                 async move { session.on_tool_call_identified(call, call_id, spawn, prompt).await }
             })
         };
-        let decided = match (spawn, propose().await) {
+        let mut decided = match (spawn, propose().await) {
             (Some(SpawnKind::Single), Err(EventError::SpawnOutstanding)) => {
                 self.runtime.hold_spawn(&actor.root, hold_until, propose).await
             }
             (_, decided) => decided,
         };
+        // One bound unblocker that asks nobody is applied here: the model has no choice to
+        // make. Two or more stay the model's to choose. What follows is the decision on the
+        // call the unblocker approved, or on the original call proposed afresh when it did
+        // not lift the block, so the model never sees an offer the attempt spent.
+        let mut released = call.clone();
+        if let Ok(ToolCallDecision::Deny { offers, .. }) = &decided
+            && sent.is_none()
+            && spawn.is_none()
+            && let [only] = offers.as_slice()
+            && let Ok(offer) = OfferId::parse(&only.id)
+            && self.runtime.applies_itself(&actor.root, &offer)
+        {
+            match self.runtime.execute_remedy(&actor, offer).await {
+                crate::api::RemedyOutcome::Authorized { call: approved } => {
+                    let approved = ProposedCall {
+                        cwd: call.cwd.clone(),
+                        ..approved
+                    };
+                    decided = on_actor(self.runtime, &actor, missing_start, self.options, |session| {
+                        let approved = approved.clone();
+                        let call_id = call_id.clone();
+                        let prompt = prompt.clone();
+                        async move { session.on_tool_call_identified(approved, call_id, None, prompt).await }
+                    })
+                    .await;
+                    released = approved;
+                }
+                // The attempt moved the block — a denial, or a rewrite that cleared part of
+                // it: what the model reads is the block as it stands now.
+                crate::api::RemedyOutcome::Declined { presentation } => {
+                    *self.presentation = Some(presentation.clone());
+                    return HookDecision::DenyCall {
+                        feedback: presentation.feedback,
+                        offers: presentation.offers,
+                        review: presentation.review,
+                    };
+                }
+                // No answer leaves the offer standing: the original block is still the model's,
+                // with why the unblocker did not lift it.
+                crate::api::RemedyOutcome::NoAnswer { feedback: why } => {
+                    if let Ok(ToolCallDecision::Deny { feedback, .. }) = &mut decided {
+                        feedback.push_str(&format!("\n\n{why}"));
+                    }
+                }
+                crate::api::RemedyOutcome::Refused { reason } => {
+                    return fold(EventError::EngineInvariant(format!("{reason:?}")), Refusal::Deny);
+                }
+                other => {
+                    tracing::warn!(root = %actor.root.0, ?other, "the bound unblocker did not lift the block");
+                }
+            }
+        }
         match decided {
             Ok(ToolCallDecision::Allow {
                 spawn,
@@ -821,8 +890,14 @@ impl Dispatcher<'_> {
                     return refuse(error);
                 }
                 *self.dispatch = Some(opened);
-                vouch_call(self.runtime, &actor, &call);
-                HookDecision::AllowCall { spawn }
+                vouch_call(self.runtime, &actor, &released);
+                let parsed = |call: &ProposedCall| serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok();
+                match parsed(&released) == parsed(&call) {
+                    true => HookDecision::AllowCall { spawn },
+                    false => HookDecision::AllowRewrittenCall {
+                        arguments: released.arguments.get().to_string(),
+                    },
+                }
             }
             Ok(ToolCallDecision::Deny {
                 feedback,

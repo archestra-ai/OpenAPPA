@@ -40,6 +40,9 @@ pub enum ConsultKind {
     /// A registered `[externals.context.<name>]` provider: one consult answers what the
     /// deployment knows about one proposed call, before its Annotator is asked.
     Context,
+    /// A `[[interceptor]]` the deployment binds: one consult answers `yes`, `no` or `ask`
+    /// about one step.
+    Interceptor,
 }
 
 impl ConsultKind {
@@ -50,6 +53,7 @@ impl ConsultKind {
             ConsultKind::Annotation => "annotation",
             ConsultKind::AudienceSource => "audience",
             ConsultKind::Context => "context",
+            ConsultKind::Interceptor => "interceptor",
         }
     }
 }
@@ -88,6 +92,11 @@ pub enum ConsultBody {
         declaration: ContextDeclaration,
         artifact: ContextArtifact,
     },
+    /// An Interceptor declares its hint; the artifact is the step it judges.
+    Interceptor {
+        declaration: InterceptorDeclaration,
+        artifact: InterceptorArtifact,
+    },
 }
 
 impl Consult {
@@ -98,6 +107,17 @@ impl Consult {
             name: provider.to_string(),
             body: ConsultBody::Context {
                 declaration: ContextDeclaration {},
+                artifact,
+            },
+        }
+    }
+
+    /// The one question an Interceptor the deployment binds is asked about a step.
+    pub fn interceptor(name: &str, hint: Option<String>, artifact: InterceptorArtifact) -> Consult {
+        Consult {
+            name: name.to_string(),
+            body: ConsultBody::Interceptor {
+                declaration: InterceptorDeclaration { hint },
                 artifact,
             },
         }
@@ -138,6 +158,7 @@ impl Consult {
             ConsultBody::Annotation { .. } => ConsultKind::Annotation,
             ConsultBody::AudienceSource { .. } => ConsultKind::AudienceSource,
             ConsultBody::Context { .. } => ConsultKind::Context,
+            ConsultBody::Interceptor { .. } => ConsultKind::Interceptor,
         }
     }
 
@@ -150,6 +171,7 @@ impl Consult {
             ConsultBody::Annotation { declaration, .. } => serde_json::to_value(declaration),
             ConsultBody::AudienceSource { declaration, .. } => serde_json::to_value(declaration),
             ConsultBody::Context { declaration, .. } => serde_json::to_value(declaration),
+            ConsultBody::Interceptor { declaration, .. } => serde_json::to_value(declaration),
         }
         .expect("a declaration serializes: it holds strings, lists, and a compiled schema")
     }
@@ -161,6 +183,7 @@ impl Consult {
             ConsultBody::Annotation { artifact, .. } => serde_json::to_value(artifact),
             ConsultBody::AudienceSource { artifact, .. } => serde_json::to_value(artifact),
             ConsultBody::Context { artifact, .. } => serde_json::to_value(artifact),
+            ConsultBody::Interceptor { artifact, .. } => serde_json::to_value(artifact),
         }
         .expect("an artifact serializes: it holds strings and canonical JSON")
     }
@@ -282,6 +305,10 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+    /// The trajectory's label and the sources that narrowed it, for an authority bound to
+    /// the tool with `unblocks`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ifc: Option<IfcContext>,
 }
 
 impl AuthorityArtifact {
@@ -292,8 +319,9 @@ impl AuthorityArtifact {
             requirements: requirement
                 .covers
                 .iter()
-                .map(|gap| Requirement::of(gap, chain))
+                .flat_map(|gap| Requirement::with_interceptors(gap, chain, call.interceptions()))
                 .collect(),
+            ifc: None,
         }
     }
 }
@@ -305,10 +333,25 @@ impl AuthorityArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Requirement {
-    Trust { required: String },
-    Audience { required: AudienceRequirement },
-    Effect { excludes: String },
-    Attention { mark: String },
+    Trust {
+        required: String,
+    },
+    Audience {
+        required: AudienceRequirement,
+    },
+    Effect {
+        excludes: String,
+    },
+    Attention {
+        mark: String,
+    },
+    /// An Interceptor answered `no` or `ask` about the call, with the reason it gave.
+    Interceptor {
+        name: String,
+        verdict: appa_engine::intercept::Verdict,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// The required audience of an `includes` gap by shape only.
@@ -330,6 +373,39 @@ impl Serialize for AudienceRequirement {
 impl Requirement {
     /// Project one assigned gap. A `prior` gap is never assigned to an authority — no
     /// mandate covers it — so meeting one here is a broken planning invariant.
+    /// Project one assigned gap, followed by each Interceptor whose answer added its mark.
+    pub fn with_interceptors(
+        gap: &Gap,
+        chain: &TrustChain,
+        interceptions: Option<&appa_engine::intercept::Interceptions>,
+    ) -> Vec<Requirement> {
+        let behind = match gap {
+            Gap::Attention(mark) => interceptions
+                .into_iter()
+                .flat_map(|answers| {
+                    answers
+                        .behind(mark)
+                        .map(|(interceptor, verdict)| Requirement::interceptor(interceptor, verdict, answers))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        std::iter::once(Requirement::of(gap, chain)).chain(behind).collect()
+    }
+
+    /// One Interceptor's blocking answer, with the reason it gave.
+    pub fn interceptor(
+        interceptor: &appa_engine::names::InterceptorName,
+        verdict: appa_engine::intercept::Verdict,
+        answers: &appa_engine::intercept::Interceptions,
+    ) -> Requirement {
+        Requirement::Interceptor {
+            name: interceptor.as_str().to_string(),
+            verdict,
+            reason: answers.reason(interceptor).map(str::to_string),
+        }
+    }
+
     pub fn of(gap: &Gap, chain: &TrustChain) -> Requirement {
         match gap {
             Gap::TrustFloor { required, .. } => Requirement::Trust {
@@ -394,7 +470,9 @@ pub struct SanitizerDeclaration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     pub on: SanitizerPoint,
-    pub permits: DeclaredSanitizerTransition,
+    /// The label change the sanitizer may claim; absent for one that rewrites content only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permits: Option<DeclaredSanitizerTransition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
 }
@@ -417,14 +495,15 @@ impl SanitizerDeclaration {
             hint: sanitizer.hint.as_ref().map(|hint| hint.as_str().to_string()),
             on,
             permits: match &sanitizer.transition {
-                DeclaredTransition::Audience { from_includes, to } => DeclaredSanitizerTransition::Audience {
+                DeclaredTransition::Audience { from_includes, to } => Some(DeclaredSanitizerTransition::Audience {
                     from: WireAudience::declared(from_includes),
                     to: WireAudience::declared(to),
-                },
-                DeclaredTransition::Trust { from_floor, to } => DeclaredSanitizerTransition::Trust {
+                }),
+                DeclaredTransition::Trust { from_floor, to } => Some(DeclaredSanitizerTransition::Trust {
                     from: rank_name(chain, *from_floor),
                     to: rank_name(chain, *to),
-                },
+                }),
+                DeclaredTransition::Unchanged => None,
             },
             parameters,
         }
@@ -438,6 +517,24 @@ pub struct SanitizerArtifact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     pub body: String,
+    /// For a rewrite a sanitizer bound with `unblocks` makes: why the call is blocked — each
+    /// Interceptor's answer — and the trajectory's label with the sources that narrowed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unblock: Option<UnblockContext>,
+}
+
+/// What an unblocker reads about the block it lifts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnblockContext {
+    /// The Interceptors that answered `no` or `ask`, with their reasons.
+    pub interceptors: Vec<Requirement>,
+    pub ifc: IfcContext,
+}
+
+/// The trajectory's label when the call was blocked.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IfcContext {
+    pub label: WireLabel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -827,7 +924,9 @@ impl ModelPrompt {
                 format!("{}\n\n{ANNOTATION_ANSWER}", crate::label_guide::for_model(declaration)),
                 annotation_schema(declaration),
             ),
-            ConsultBody::AudienceSource { .. } | ConsultBody::Context { .. } => return None,
+            ConsultBody::AudienceSource { .. } | ConsultBody::Context { .. } | ConsultBody::Interceptor { .. } => {
+                return None;
+            }
         };
         let declaration = consult.declaration_json();
         let artifact = match &consult.body {
@@ -1353,6 +1452,7 @@ mod tests {
                     },
                 },
                 artifact: AuthorityArtifact {
+                    ifc: None,
                     tool: "send".to_string(),
                     arguments: serde_json::json!({"to": "x"}),
                     requirements: vec![Requirement::Trust {
@@ -1600,13 +1700,14 @@ mod tests {
                 declaration: SanitizerDeclaration {
                     hint: None,
                     on: SanitizerPoint::ToolOutput,
-                    permits: DeclaredSanitizerTransition::Trust {
+                    permits: Some(DeclaredSanitizerTransition::Trust {
                         from: "suspicious".to_string(),
                         to: "trusted".to_string(),
-                    },
+                    }),
                     parameters: None,
                 },
                 artifact: SanitizerArtifact {
+                    unblock: None,
                     tool: None,
                     body: "token=t0k3n".to_string(),
                 },
@@ -1832,5 +1933,78 @@ mod tests {
             .chain(declaration.attention_marks.iter().cloned())
             .chain(declaration.effects.iter().cloned())
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------- interceptor
+
+/// What the policy wrote about an Interceptor: its hint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InterceptorDeclaration {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// The step an Interceptor judges, with the trajectory's current label.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InterceptorArtifact {
+    #[serde(flatten)]
+    pub step: InterceptedStep,
+    pub label: WireLabel,
+}
+
+/// One step as an Interceptor reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum InterceptedStep {
+    Prompt { prompt: String },
+    ToolCall { tool: String, arguments: serde_json::Value },
+}
+
+/// A label in the policy's own spellings: the trust rank's name, and the audience as
+/// `public` or a list of clauses, each a list of entries of which a reader must be one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WireLabel {
+    pub trust: String,
+    pub audience: serde_json::Value,
+}
+
+impl WireLabel {
+    pub fn of(label: &appa_engine::label::Label, chain: &TrustChain) -> WireLabel {
+        // The fold's top rank sits above the chain; it reads as the chain's top.
+        let top = chain.len().saturating_sub(1) as u8;
+        let rank = Trust::new(label.trust.rank().min(top));
+        WireLabel {
+            trust: rank_name(chain, rank),
+            audience: match label.audience.is_public() {
+                true => serde_json::Value::String("public".into()),
+                false => label
+                    .audience
+                    .clauses()
+                    .map(clause_entries)
+                    .map(serde_json::Value::from)
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// An Interceptor's answer: `{"verdict": "yes"|"no"|"ask", "reason"?: string}`. Anything
+/// else is no answer, and a step without an answer does not proceed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterceptorWireAnswer {
+    pub verdict: appa_engine::intercept::Verdict,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl InterceptorWireAnswer {
+    pub fn from_wire(answer: &serde_json::Value) -> Option<appa_engine::intercept::InterceptorAnswer> {
+        let answer: InterceptorWireAnswer = serde_json::from_value(answer.clone()).ok()?;
+        Some(appa_engine::intercept::InterceptorAnswer {
+            verdict: answer.verdict,
+            reason: answer.reason,
+        })
     }
 }

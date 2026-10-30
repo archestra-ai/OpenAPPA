@@ -163,6 +163,16 @@ pub enum ExternalRequest {
         /// declaration.
         templates: Vec<String>,
     },
+    /// Ask an Interceptor the deployment binds about one proposed call, under the label it
+    /// reads. Keyed on the call's digest and that label: a rewrite, or a label that moved,
+    /// is a new question.
+    Interception {
+        interceptor: String,
+        call: appa_engine::value::CanonicalDigest,
+        label: Label,
+        hint: Option<String>,
+        artifact: crate::consult::InterceptorArtifact,
+    },
     /// One member lookup: the principal for one qualified reader, asked of `answering` —
     /// the entry the deciding policy's routing sends `provider`'s lookups to, which is the
     /// provider's own source when nothing redirects them.
@@ -206,6 +216,13 @@ pub enum ExternalEvidence {
         provider: String,
         selector: String,
         members: Result<Vec<ReaderId>, crate::events::NoAnswerClass>,
+    },
+    /// An Interceptor's answer about one exact call under one label.
+    Interception {
+        interceptor: String,
+        call: appa_engine::value::CanonicalDigest,
+        label: Label,
+        answer: appa_engine::intercept::InterceptorAnswer,
     },
     MemberLookup {
         provider: String,
@@ -787,6 +804,8 @@ pub struct RuntimeEngine {
     /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
     /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
+    /// The policy's Interceptors, compiled: the builtins answer in process.
+    interceptors: std::sync::Arc<crate::interceptor::Interceptors>,
     /// How the deployment this engine decides for names tools, so feedback that tells the
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: an engine of any revision carries the same one.
@@ -914,6 +933,10 @@ impl RuntimeEngine {
                 .annotators()
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
+            interceptors: std::sync::Arc::new(
+                crate::interceptor::Interceptors::compile(policy)
+                    .expect("a deployment opens only once its interceptors compile"),
+            ),
             naming,
             views: HeldViews::default(),
         }
@@ -928,6 +951,7 @@ impl RuntimeEngine {
                 .clone()
                 .at(deployment.clone(), appa_engine::profile::PolicyRevision::new(revision)),
             annotators: self.annotators.clone(),
+            interceptors: std::sync::Arc::clone(&self.interceptors),
             naming: self.naming,
             views: HeldViews::default(),
         }
@@ -1556,10 +1580,15 @@ impl RuntimeEngine {
                 Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
             },
         };
+        let interceptions = match self.interceptions_for(&views, &resolved, evidence)? {
+            Ok(interceptions) => interceptions,
+            Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+        };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
+            interceptions,
         };
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
@@ -1678,6 +1707,7 @@ impl RuntimeEngine {
                     arguments: serde_json::to_vec(call.arguments())
                         .expect("a recorded call's arguments serialize back"),
                     annotation: call.annotation().cloned(),
+                    interceptions: call.interceptions().cloned(),
                 })
                 .collect(),
             spawn: recorded.spawn,
@@ -1839,6 +1869,7 @@ impl RuntimeEngine {
             self.naming,
             block.call.tool().as_str(),
             presentation,
+            block.call.interceptions(),
         );
         let review = self.pending_reviews(block, &offers);
         Feedback {
@@ -2059,7 +2090,10 @@ impl RuntimeEngine {
                     &sanitizer,
                     source,
                     ValueBody::new(arguments.canonical_text()),
-                    SanitizerSubject::Input { call: &call },
+                    SanitizerSubject::Input {
+                        call: &call,
+                        unblock: self.unblock_context(&views, &sanitizer, &call),
+                    },
                 ) {
                     Ok(derived) => derived,
                     Err(next) => return Ok(*next),
@@ -2090,11 +2124,26 @@ impl RuntimeEngine {
                     },
                     Err(_) => None,
                 };
+                // Every Interceptor judges the rewrite afresh: lifting a `no` is the rewrite's
+                // whole job, and only the Interceptor can say it did.
+                let interceptions = match self
+                    .engine
+                    .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
+                {
+                    Ok(rewritten) => match self.interceptions_for(&views, &rewritten, evidence)? {
+                        Ok(interceptions) => interceptions,
+                        Err(Resolution(requests)) => {
+                            return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+                        }
+                    },
+                    Err(_) => None,
+                };
                 OfferOutcome::Derived(Evidence::Rewrite {
                     sanitizer,
                     source,
                     derived,
                     annotation,
+                    interceptions,
                 })
             }
             OfferConsult::Sanitizer {
@@ -2212,10 +2261,14 @@ impl RuntimeEngine {
                     let registered = registry
                         .authority(&requirement.authority)
                         .expect("plans reference only registered authorities");
+                    let mut artifact = AuthorityArtifact::of(call, requirement, chain);
+                    if registered.scope.unblocks() {
+                        artifact.ifc = Some(self.ifc_context(views));
+                    }
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact::of(call, requirement, chain),
+                        artifact,
                         review,
                     });
                 }
@@ -2609,6 +2662,157 @@ impl RuntimeEngine {
         Ok(CallAnswers { annotation })
     }
 
+    /// The unblocker the runtime applies itself when this is a block's only offer: a plan of
+    /// exactly one step — the ruling of one authority, or the rewrite of one input sanitizer —
+    /// whose component the policy binds to the tool with `unblocks`. `None` for any other
+    /// plan, which stays the model's to choose.
+    pub(crate) fn sole_unblocker(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Option<Unblocker> {
+        let plan = self.engine.offer_plan(view, trajectory, &parse_offer(offer)?)?;
+        let registry = self.engine.registry();
+        match plan.steps.as_slice() {
+            [appa_engine::plan::RemedyStep::Authorize(authority)]
+                if registry.authority(authority)?.scope.unblocks() =>
+            {
+                Some(Unblocker::Authority(authority.as_str().to_string()))
+            }
+            [appa_engine::plan::RemedyStep::Derive(sanitizer)] if registry.sanitizer(sanitizer)?.scope.unblocks() => {
+                Some(Unblocker::Sanitizer)
+            }
+            _ => None,
+        }
+    }
+
+    /// The trajectory's label when the call was blocked.
+    fn ifc_context(&self, views: &Views) -> crate::consult::IfcContext {
+        crate::consult::IfcContext {
+            label: crate::consult::WireLabel::of(&views.current_label(), self.engine.registry().trust_chain()),
+        }
+    }
+
+    /// The block a sanitizer bound with `unblocks` lifts by its rewrite, or `None` for any
+    /// other sanitizer.
+    fn unblock_context(
+        &self,
+        views: &Views,
+        sanitizer: &appa_engine::names::SanitizerName,
+        call: &ResolvedCall,
+    ) -> Option<crate::consult::UnblockContext> {
+        let registry = self.engine.registry();
+        if !registry.sanitizer(sanitizer)?.scope.unblocks() {
+            return None;
+        }
+        let interceptors = call
+            .interceptions()
+            .into_iter()
+            .flat_map(|interceptions| {
+                interceptions.blocking().map(|(interceptor, verdict)| {
+                    crate::consult::Requirement::interceptor(interceptor, verdict, interceptions)
+                })
+            })
+            .collect();
+        Some(crate::consult::UnblockContext {
+            interceptors,
+            ifc: self.ifc_context(views),
+        })
+    }
+
+    /// The Interceptors bound to the user's prompt, in authored order.
+    pub(crate) fn prompt_interceptors(&self) -> impl Iterator<Item = &crate::interceptor::Interceptor> {
+        self.interceptors.on_prompt()
+    }
+
+    /// A trajectory's current label in the policy's spellings, for an Interceptor to read.
+    pub(crate) fn wire_label(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<crate::consult::WireLabel> {
+        let views = view.views(trajectory)?;
+        Some(crate::consult::WireLabel::of(
+            &views.current_label(),
+            self.engine.registry().trust_chain(),
+        ))
+    }
+
+    /// The answers of every Interceptor that judges this call: those pinned on an open offer
+    /// or unspent approval for it, those a builtin gives in process, and those the evidence
+    /// holds for this exact call under the current label. `Ok(Err(_))` names the consults
+    /// still owed; an Interceptor that could not answer refuses the call outright.
+    fn interceptions_for(
+        &self,
+        views: &Views,
+        resolved: &ResolvedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Result<Option<appa_engine::intercept::Interceptions>, Resolution>, EngineRefusal> {
+        let registry = self.engine.registry();
+        let declaration = registry
+            .declaration(resolved)
+            .expect("a resolved call names its registered declaration");
+        let judging: Vec<_> = registry.interceptors_judging(declaration.tags()).collect();
+        if judging.is_empty() {
+            return Ok(Ok(None));
+        }
+        if let Some(pinned) = views.pinned_interceptions(resolved) {
+            return Ok(Ok(Some(pinned.clone())));
+        }
+        let digest = resolved.digest();
+        let label = views.current_label();
+        let step = crate::consult::InterceptedStep::ToolCall {
+            tool: resolved.tool().as_str().to_string(),
+            arguments: resolved.arguments().clone(),
+        };
+        let mut answers = BTreeMap::new();
+        let mut owed = Vec::new();
+        for declared in judging {
+            let interceptor = self
+                .interceptors
+                .get(&declared.name)
+                .expect("the engine registers only the policy's interceptors");
+            let answer = match interceptor.judge_locally(&step) {
+                Some(Ok(answer)) => answer,
+                Some(Err(failure)) => {
+                    return Err(EngineRefusal::Annotation {
+                        annotator: format!("interceptor:{}", failure.interceptor),
+                        reason: failure.reason,
+                    });
+                }
+                None => {
+                    let answered = evidence.iter().find_map(|entry| match entry {
+                        ExternalEvidence::Interception {
+                            interceptor: by,
+                            call,
+                            label: under,
+                            answer,
+                        } if by == declared.name.as_str() && *call == digest && *under == label => Some(answer),
+                        _ => None,
+                    });
+                    match answered {
+                        Some(answer) => answer.clone(),
+                        None => {
+                            owed.push(ExternalRequest::Interception {
+                                interceptor: declared.name.as_str().to_string(),
+                                call: digest,
+                                label: label.clone(),
+                                hint: interceptor.hint.clone(),
+                                artifact: crate::consult::InterceptorArtifact {
+                                    step: step.clone(),
+                                    label: crate::consult::WireLabel::of(&label, registry.trust_chain()),
+                                },
+                            });
+                            continue;
+                        }
+                    }
+                }
+            };
+            answers.insert(declared.name.clone(), answer);
+        }
+        if !owed.is_empty() {
+            return Ok(Err(Resolution(owed)));
+        }
+        Ok(Ok(Some(appa_engine::intercept::Interceptions::new(digest, answers))))
+    }
+
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
     /// or unspent approval for this exact digest, the evidence the Annotator gave for it, or
     /// the one consult still owed. The digest is the key: any rewrite is annotated afresh.
@@ -2790,16 +2994,21 @@ impl RuntimeEngine {
         let registered = registry
             .sanitizer(sanitizer)
             .expect("plans reference only registered sanitizers");
-        let (on, tool, parameters) = match subject {
-            SanitizerSubject::Input { call } => {
+        let (on, tool, parameters, unblock) = match subject {
+            SanitizerSubject::Input { call, unblock } => {
                 let declaration = registry
                     .declaration(call)
                     .expect("a resolved call names its registered declaration");
                 let parameters =
                     serde_json::to_value(declaration.parameters()).expect("a compiled parameter schema serializes");
-                (SanitizerPoint::ToolInput, Some(call.tool().clone()), Some(parameters))
+                (
+                    SanitizerPoint::ToolInput,
+                    Some(call.tool().clone()),
+                    Some(parameters),
+                    unblock,
+                )
             }
-            SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
+            SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None, None),
         };
         ExternalRequest::Sanitizer {
             sanitizer: sanitizer.as_str().to_string(),
@@ -2808,6 +3017,7 @@ impl RuntimeEngine {
             artifact: SanitizerArtifact {
                 tool: tool.map(|tool| tool.as_str().to_string()),
                 body: body.as_str().to_string(),
+                unblock,
             },
         }
     }
@@ -3615,9 +3825,21 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
 
 /// What a sanitizer consult judges: the arguments of the call about to run, or a value on
 /// its way in — a tool's result naming its producer, a child's return naming none.
+/// A component the policy binds to a tool with `unblocks`, as one plan applies it.
+pub(crate) enum Unblocker {
+    Authority(String),
+    Sanitizer,
+}
+
 enum SanitizerSubject<'a> {
-    Input { call: &'a ResolvedCall },
-    Output { tool: Option<ToolName> },
+    Input {
+        call: &'a ResolvedCall,
+        /// The block the rewrite lifts, for a sanitizer bound with `unblocks`.
+        unblock: Option<crate::consult::UnblockContext>,
+    },
+    Output {
+        tool: Option<ToolName>,
+    },
 }
 
 fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {
@@ -3849,7 +4071,11 @@ const fn is_format(c: char) -> bool {
     )
 }
 
-fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
+fn gap_text(
+    gap: &appa_engine::check::Gap,
+    chain: &TrustChain,
+    interceptions: Option<&appa_engine::intercept::Interceptions>,
+) -> String {
     use appa_engine::check::Gap;
     match gap {
         Gap::TrustFloor { required, actual } => {
@@ -3870,7 +4096,30 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
         },
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
-        Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
+        Gap::Attention(mark) => {
+            // A mark an Interceptor's answer added names that Interceptor and its reason.
+            let behind: Vec<String> = interceptions
+                .into_iter()
+                .flat_map(|answers| {
+                    answers.behind(mark).map(|(interceptor, verdict)| {
+                        let answered = match verdict {
+                            appa_engine::intercept::Verdict::Ask => "asks for approval",
+                            appa_engine::intercept::Verdict::No | appa_engine::intercept::Verdict::Yes => {
+                                "refuses the call"
+                            }
+                        };
+                        match answers.reason(interceptor) {
+                            Some(reason) => format!("interceptor {} {answered}: {reason}", interceptor.as_str()),
+                            None => format!("interceptor {} {answered}", interceptor.as_str()),
+                        }
+                    })
+                })
+                .collect();
+            match behind.is_empty() {
+                true => format!("requires attention: {}", mark.as_str()),
+                false => format!("requires attention: {} ({})", mark.as_str(), behind.join("; ")),
+            }
+        }
     }
 }
 
@@ -4282,7 +4531,7 @@ fn remedy_lines(
                     &redispatch
                         .clears()
                         .iter()
-                        .map(|gap| gap_text(gap, chain))
+                        .map(|gap| gap_text(gap, chain, None))
                         .collect::<Vec<_>>()
                         .join("; ")
                 ),
@@ -4323,6 +4572,7 @@ struct RenderedBlock {
     display: RemedyDisplay,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
@@ -4331,6 +4581,7 @@ fn block_feedback(
     naming: ToolNaming,
     target: &str,
     presentation: &EmbeddedPresentationOptions,
+    interceptions: Option<&appa_engine::intercept::Interceptions>,
 ) -> RenderedBlock {
     let chain = registry.trust_chain();
     // A redispatch needs no offer. Delegation can isolate a narrowing, but a child
@@ -4356,7 +4607,7 @@ fn block_feedback(
     let no_continuation = remedies.is_empty() && !delegation_available;
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
-        reasons.push(terminal_safe(&gap_text(gap, chain)));
+        reasons.push(terminal_safe(&gap_text(gap, chain, interceptions)));
     }
     let public_expansion_required = planned.raw.requirement_gaps.iter().any(|gap| {
         matches!(
@@ -4711,6 +4962,7 @@ mod tests {
                             supports_delegation,
                             ..EmbeddedPresentationOptions::default()
                         },
+                        None,
                     )
                     .text;
                     assert_eq!(
@@ -4760,7 +5012,10 @@ mod tests {
             .engine
             .resolve_call(ToolName::new("fetch"), br#"{"url":"https://example.test"}"#)
             .expect("the call resolves");
-        let (declaration, artifact) = request(SanitizerSubject::Input { call: &call });
+        let (declaration, artifact) = request(SanitizerSubject::Input {
+            call: &call,
+            unblock: None,
+        });
         assert_eq!(declaration.on, SanitizerPoint::ToolInput);
         assert_eq!(artifact.tool.as_deref(), Some("fetch"));
         assert_eq!(artifact.body, "raw");
@@ -4812,6 +5067,7 @@ mod tests {
                     trajectory: trajectory.clone(),
                     provider_results: vec![],
                     proposals: vec![super::CoreProposedCall {
+                        interceptions: None,
                         tool: ToolName::new("read"),
                         arguments: bytes.to_vec(),
                         annotation: None,
@@ -5494,6 +5750,7 @@ mod tests {
                     ToolNaming::AsAuthored,
                     "send_mail",
                     &options,
+                    None,
                 );
                 let label = if required {
                     format!("Submit for approval and accept {change} for the rest of this session")
@@ -5563,6 +5820,7 @@ mod tests {
                 ToolNaming::AsAuthored,
                 "send_mail",
                 &options,
+                None,
             )
             .display
             .reasons
@@ -5642,6 +5900,7 @@ mod tests {
             ToolNaming::AsAuthored,
             "tool",
             &options,
+            None,
         );
         assert!(feedback.text.contains("approve_remedy(offer_id"));
         assert!(feedback.text.contains("plan: \"Submit for approval\""));
@@ -5686,6 +5945,7 @@ mod tests {
                     yell_tool: yell_tool.map(str::to_string),
                     ..EmbeddedPresentationOptions::default()
                 },
+                None,
             )
             .text
         };
@@ -5744,6 +6004,7 @@ mod tests {
                 ToolNaming::AsAuthored,
                 "tool",
                 &EmbeddedPresentationOptions::default(),
+                None,
             )
         };
         let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";

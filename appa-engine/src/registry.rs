@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
-use crate::authority::{Authority, DeclaredTransition, Sanitizer};
+use crate::authority::{Authority, DeclaredTransition, Sanitizer, Scope};
 use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
@@ -649,6 +649,9 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
+    /// The tool-call Interceptors, by name. A call they judge carries their answers.
+    #[serde(default)]
+    pub interceptors: Vec<crate::intercept::InterceptorDeclaration>,
     /// The audience side of the policy: registered sources, the chain mappings, the configured
     /// named audiences, and the identity implementation. All of it is policy meaning; how a
     /// deployment reaches a source or the identity implementation never enters.
@@ -680,6 +683,14 @@ pub enum LoadError {
     WildcardPlaceholderMandate(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
+    #[error("duplicate interceptor: {0}")]
+    DuplicateInterceptor(String),
+    #[error("{0} carries a reserved binding tag that is not its own")]
+    ForeignUnblockTag(String),
+    #[error(
+        "sanitizer {0} declares no label change: such a sanitizer rewrites tool input only and must name the tools it unblocks"
+    )]
+    UnchangedSanitizer(String),
     #[error("malformed tool selector {0:?}")]
     MalformedToolSelector(String),
     #[error("provider-run tool {0} cannot use an argument selector")]
@@ -700,7 +711,7 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
-    #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
+    #[error("authority {0} permits `hard-block`, the reserved mark no authority may attend")]
     ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
@@ -1107,6 +1118,7 @@ pub struct Registry {
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
+    interceptors: Vec<crate::intercept::InterceptorDeclaration>,
     audience: AudienceRegistry,
     /// The declared audience configuration as loaded — what the policy identity carries;
     /// the validated registry beside it is derived and never serialized.
@@ -1157,6 +1169,12 @@ impl Registry {
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
+            if !sanitizer
+                .scope
+                .owns_unblock_tags(&Scope::sanitizer_unblock_tag(sanitizer.name.as_str()))
+            {
+                return Err(LoadError::ForeignUnblockTag(sanitizer.name.as_str().to_string()));
+            }
             let context = || format!("sanitizer {}", sanitizer.name.as_str());
             if sanitizer.name.is_attest_schema() {
                 if matches!(sanitizer.transition, DeclaredTransition::Audience { .. }) {
@@ -1182,6 +1200,13 @@ impl Registry {
                         format!("{} from", context())
                     })?);
                     direct.extend(check_declared(&audience, to, || format!("{} to", context()))?);
+                }
+                // A sanitizer claiming no label change does one job: the rewrite that lifts an
+                // Interceptor's `no` on the tools the policy binds it to.
+                DeclaredTransition::Unchanged => {
+                    if sanitizer.on.output || !sanitizer.scope.unblocks() {
+                        return Err(LoadError::UnchangedSanitizer(sanitizer.name.as_str().to_string()));
+                    }
                 }
             }
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
@@ -1338,10 +1363,18 @@ impl Registry {
 
         let mut seen_authorities = BTreeMap::new();
         for authority in &config.authorities {
-            if authority.mandate.is_empty() {
+            // An authority bound with `unblocks` covers its tools' Interceptor answers whatever
+            // its mandate says, so its mandate may be empty.
+            if !authority
+                .scope
+                .owns_unblock_tags(&Scope::authority_unblock_tag(authority.name.as_str()))
+            {
+                return Err(LoadError::ForeignUnblockTag(authority.name.as_str().to_string()));
+            }
+            if authority.mandate.is_empty() && !authority.scope.unblocks() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
-            if authority.mandate.attends.named().iter().any(MarkName::is_blocked) {
+            if authority.mandate.attends.named().iter().any(MarkName::is_hard_block) {
                 return Err(LoadError::ReservedMark(authority.name.as_str().to_string()));
             }
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
@@ -1358,7 +1391,7 @@ impl Registry {
         }
 
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
-        // deliberately use the reserved `blocked` as an unremediable denial while registering
+        // deliberately use the reserved `hard-block` as an unremediable denial while registering
         // no authority at all. An Annotator must be able to produce those marks, but still
         // remains confined to names the policy declares somewhere — and an annotator's own
         // explicit mark bound is itself such a declaration. A catch-all mandate names
@@ -1480,6 +1513,25 @@ impl Registry {
                 ordered.push((name.clone(), *ordinal));
             }
         }
+        for interceptor in &config.interceptors {
+            let own = TagName::new(format!(
+                "{}{}",
+                crate::intercept::InterceptorDeclaration::TAG_PREFIX,
+                interceptor.name.as_str()
+            ));
+            let reserved = |tag: &TagName| {
+                tag.as_str()
+                    .starts_with(crate::intercept::InterceptorDeclaration::TAG_PREFIX)
+            };
+            if interceptor.scope.tags.iter().any(|tag| reserved(tag) && tag != &own) {
+                return Err(LoadError::ForeignUnblockTag(interceptor.name.as_str().to_string()));
+            }
+        }
+        let mut interceptors = config.interceptors;
+        interceptors.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(pair) = interceptors.windows(2).find(|pair| pair[0].name == pair[1].name) {
+            return Err(LoadError::DuplicateInterceptor(pair[0].name.as_str().to_string()));
+        }
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_vocabulary,
@@ -1492,6 +1544,7 @@ impl Registry {
             authorities: config.authorities,
             attention_marks,
             sanitizers,
+            interceptors,
             audience,
             audience_config: config.audience,
             profile,
@@ -1812,6 +1865,21 @@ impl Registry {
     pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
         self.sanitizers.values()
     }
+
+    /// The tool-call Interceptors, in name order.
+    pub fn interceptors(&self) -> &[crate::intercept::InterceptorDeclaration] {
+        &self.interceptors
+    }
+
+    /// The Interceptors that judge a call to a declaration carrying `tags`, in name order.
+    pub fn interceptors_judging<'a>(
+        &'a self,
+        tags: &'a [TagName],
+    ) -> impl Iterator<Item = &'a crate::intercept::InterceptorDeclaration> + 'a {
+        self.interceptors
+            .iter()
+            .filter(move |interceptor| interceptor.judges(tags))
+    }
 }
 
 #[cfg(test)]
@@ -2100,6 +2168,7 @@ mod tests {
 
     fn base() -> RegistryConfig {
         RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain(),
             tools: vec![],
             annotators: vec![],
@@ -2190,7 +2259,7 @@ mod tests {
     #[test]
     fn static_requirements_declare_attention_vocabulary_without_an_authority() {
         let mut blocked = tool("blocked");
-        blocked.requires.attention = vec![MarkName::new("blocked")];
+        blocked.requires.attention = vec![MarkName::new(MarkName::HARD_BLOCK)];
         let mut cfg = base();
         cfg.tools = declared(vec![blocked]);
 
@@ -2198,7 +2267,7 @@ mod tests {
 
         assert_eq!(
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
-            ["blocked"]
+            ["hard-block"]
         );
     }
 
@@ -2207,7 +2276,7 @@ mod tests {
         let mut review = tool("review");
         review.requires.attention = vec![MarkName::new("sentry-review")];
         let mut denied = tool("denied");
-        denied.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        denied.requires.attention = vec![MarkName::new(MarkName::HARD_BLOCK)];
         let mut cfg = base();
         cfg.tools = declared(vec![review, denied]);
         cfg.authorities = vec![Authority {
@@ -2226,10 +2295,10 @@ mod tests {
             .expect("the catch-all registers");
 
         assert!(anyone.mandate.attends.covers(&MarkName::new("sentry-review")));
-        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::BLOCKED)));
+        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::HARD_BLOCK)));
         assert_eq!(
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
-            ["blocked", "sentry-review"],
+            ["hard-block", "sentry-review"],
             "a catch-all names nothing; the vocabulary is the tools' marks"
         );
     }
@@ -2240,7 +2309,7 @@ mod tests {
         cfg.authorities = vec![Authority {
             name: AuthorityName::new("overreach"),
             mandate: Mandate {
-                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
+                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::HARD_BLOCK)]),
                 ..Mandate::default()
             },
             scope: Scope::default(),

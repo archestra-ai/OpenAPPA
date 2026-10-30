@@ -1339,7 +1339,7 @@ async fn an_unmatched_shell_selector_uses_the_wildcard_and_replays_its_annotatio
         r#"[[policy.tool]]
 name = "builtin:shell(command:git push*)"
 delta = {}
-requires = { attention = ["blocked"] }
+requires = { attention = ["hard-block"] }
 
 [[policy.tool]]
 name = "read"

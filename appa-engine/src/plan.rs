@@ -61,10 +61,11 @@ use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, CallRole, Gap, Narrowing, RawBlock};
 use crate::contract::{StaticAnnotation, ToolAnnotation, ToolDeclaration};
 use crate::fact::{CrossingReturn, EffectKind, EffectSet, ReturnPolicy, ReturnRoute, ReturnSanitizer};
+use crate::intercept::Verdict;
 use crate::label::{
     Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
 };
-use crate::names::{AuthorityName, SanitizerName, TagName};
+use crate::names::{AuthorityName, InterceptorName, SanitizerName, TagName};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{ResolvedCall, ToolName};
@@ -1036,7 +1037,18 @@ fn input_hops(
     if matches!(role, CallRole::MarkedSpawn(_)) {
         return Vec::new();
     }
-    if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
+    let includes = gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. }));
+    // The `block` an Interceptor's `no` added is cleared by a rewrite every Interceptor then
+    // judges afresh; one the contract requires itself stays whatever the arguments say.
+    let refused = gaps
+        .iter()
+        .any(|gap| matches!(gap, Gap::Attention(mark) if mark.is_block()))
+        && !contract
+            .requires
+            .attention_marks()
+            .iter()
+            .any(crate::names::MarkName::is_block);
+    if !includes && !refused {
         return Vec::new();
     }
     let released = stage.released(current);
@@ -1049,23 +1061,41 @@ fn input_hops(
             // shrinking the menu.
             needs
                 .take(sanitizer.derive_input(&released, &contract.tags, context))
-                .is_some_and(|derived| clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs))
+                .is_some_and(|derived| {
+                    (refused && sanitizer.scope.unblocks())
+                        || clears_a_recipient(&derived.combine(&forwarded), gaps, context, needs)
+                })
         })
         .map(|sanitizer| sanitizer.name.clone())
         .collect()
 }
 
 /// Does a validated substitution strictly improve the call candidate it replaces?
-pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome) -> bool {
+/// One `block` stands for every Interceptor that said `no`, so a rewrite that leaves the gaps
+/// as they were still helps when fewer Interceptors block the call.
+pub(crate) fn substitution_helps(
+    before: &RawBlock,
+    before_call: &ResolvedCall,
+    after: &check::CheckOutcome,
+    after_call: &ResolvedCall,
+) -> bool {
     let after = match after {
         check::CheckOutcome::Allow => return !before.requirement_gaps.is_empty(),
         check::CheckOutcome::Block(raw) => raw,
     };
-    after.requirement_gaps.len() < before.requirement_gaps.len()
-        && after
-            .requirement_gaps
-            .iter()
-            .all(|gap| before.requirement_gaps.contains(gap))
+    let blocking = |call: &ResolvedCall| -> Vec<(InterceptorName, Verdict)> {
+        call.interceptions()
+            .into_iter()
+            .flat_map(|answers| answers.blocking().map(|(name, verdict)| (name.clone(), verdict)))
+            .collect()
+    };
+    let (was, now) = (blocking(before_call), blocking(after_call));
+    let fewer_interceptors = now.len() < was.len() && now.iter().all(|answer| was.contains(answer));
+    after
+        .requirement_gaps
+        .iter()
+        .all(|gap| before.requirement_gaps.contains(gap))
+        && (after.requirement_gaps.len() < before.requirement_gaps.len() || fewer_interceptors)
 }
 
 fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>, needs: &mut NeededAtoms) -> bool {
@@ -1374,7 +1404,7 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
 pub(crate) fn attest_fits(transition: &DeclaredTransition, label: &Label) -> bool {
     match transition {
         DeclaredTransition::Trust { to, .. } => label.meets_floor(*to),
-        DeclaredTransition::Audience { .. } => false,
+        DeclaredTransition::Audience { .. } | DeclaredTransition::Unchanged => false,
     }
 }
 
@@ -1432,8 +1462,13 @@ pub(crate) fn gap_cover(
             }
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
-        // Attention routes by its own currency — the attended mark — never by scope.
-        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
+        // Attention routes by its own currency — the attended mark. Scope binds it only for
+        // an authority the policy binds with `unblocks`: that binding is its whole jurisdiction,
+        // and it lifts `block` there without naming it.
+        Gap::Attention(mark) => Evaluation::of_exact(
+            (mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks()))
+                && (!authority.scope.unblocks() || authority.scope.covers(tags)),
+        ),
         Gap::Prior(_) => Evaluation::Fails,
     }
 }
@@ -1578,6 +1613,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            interceptors: Vec::new(),
             annotators: vec![],
             trust_chain: chain(),
             tools: declared(tools),
@@ -2744,6 +2780,7 @@ mod tests {
             requires: Requires::default(),
         };
         Fact::DispatchOpened {
+            interceptions: None,
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
@@ -3562,7 +3599,7 @@ mod tests {
         let denied = requiring(
             "denied",
             Requires {
-                attention: vec![MarkName::new(MarkName::BLOCKED)],
+                attention: vec![MarkName::new(MarkName::HARD_BLOCK)],
                 ..Requires::default()
             },
         );
@@ -3645,7 +3682,9 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
-                Gap::Attention(mark) => authority.mandate.attends.covers(mark),
+                Gap::Attention(mark) => {
+                    authority.mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks())
+                }
                 Gap::Prior(_) => false,
             })
         }
@@ -4098,7 +4137,10 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
-                    Gap::Attention(mark) => authority.mandate.attends.covers(mark),
+                    Gap::Attention(mark) => {
+                        (authority.mandate.attends.covers(mark) || (mark.is_block() && authority.scope.unblocks()))
+                            && (!authority.scope.unblocks() || scoped)
+                    }
                     Gap::Prior(_) => false,
                 }
             };

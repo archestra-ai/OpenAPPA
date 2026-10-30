@@ -1,0 +1,27 @@
+# The same policy with devops rules written in Cedar. Needs `appa` built with
+# `--features cedar`.
+
+include = ["rules.appa.toml"]
+
+[policy]
+version = 2
+
+[[policy.interceptor]]
+name = "devops-rules"
+builtin = "cedar"
+on = ["tool_call"]
+tools = ["host/claude-code/Bash"]
+settings = { policies = '''
+@reason("force-pushing is not allowed")
+forbid (principal, action == Action::"tool_call", resource)
+when { context.arguments has command && context.arguments.command like "git push*--force*" };
+
+@verdict("ask")
+@reason("deleting a namespace needs a person")
+forbid (principal, action == Action::"tool_call", resource)
+when { context.arguments has command && context.arguments.command like "kubectl delete namespace*" };
+''' }
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 65536

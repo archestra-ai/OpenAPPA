@@ -410,6 +410,9 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
+        /// The answers of the Interceptors that judged this exact call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interceptions: Option<crate::intercept::Interceptions>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_basis: Option<crate::value::FileBasis>,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]

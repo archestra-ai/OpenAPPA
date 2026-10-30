@@ -11,10 +11,11 @@ use crate::contract::{
     ToolDeclaration,
 };
 use crate::fact::EffectKind;
+use crate::intercept::InterceptionRefusal;
 use crate::label::{
     Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
-use crate::names::{AnnotatorName, AudienceArgument, MarkName};
+use crate::names::{AnnotatorName, AudienceArgument, InterceptorName, MarkName, TagName};
 use crate::projection::Views;
 use crate::value::ResolvedCall;
 
@@ -23,10 +24,17 @@ use crate::value::ResolvedCall;
 /// membership snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gap {
-    TrustFloor { required: Trust, actual: Trust },
-    Includes { recipients: DeclaredAudience },
+    TrustFloor {
+        required: Trust,
+        actual: Trust,
+    },
+    Includes {
+        recipients: DeclaredAudience,
+    },
     Prior(EffectKind),
     NoPrior(EffectKind),
+    /// A mark the contract requires, or one an Interceptor's answer added: `block` for `no`,
+    /// `human-approval` for `ask`.
     Attention(MarkName),
 }
 
@@ -195,6 +203,16 @@ pub(crate) fn evaluate_state(
     for mark in annotation.requires.attention_marks() {
         gaps.push(Gap::Attention(mark.clone()));
     }
+    if let CallReads::Resolved(call) = reads
+        && let Some(interceptions) = call.interceptions()
+    {
+        gaps.extend(
+            interceptions
+                .blocking()
+                .filter_map(|(_, verdict)| verdict.mark())
+                .map(Gap::Attention),
+        );
+    }
     let mut seen = Vec::with_capacity(gaps.len());
     for gap in gaps {
         if !seen.contains(&gap) {
@@ -337,6 +355,52 @@ pub(crate) enum AnnotationRefusal {
     Foreign(String),
     #[error("the pinned annotation is outside its mandate: {0}")]
     OutsidePolicy(String),
+}
+
+/// Hold a call's interceptions to its declaration: the call carries exactly the answers of the
+/// Interceptors that judge a call to this declaration, pinned to its own canonical digest. The
+/// one validator the live check and replay both consume.
+pub(crate) fn validate_interceptions(
+    registry: &crate::registry::Registry,
+    declaration: &ToolDeclaration,
+    call: &ResolvedCall,
+) -> Result<(), InterceptionRefusal> {
+    let expected: Vec<&InterceptorName> = registry
+        .interceptors_judging(declaration.tags())
+        .map(|interceptor| &interceptor.name)
+        .collect();
+    let Some(interceptions) = call.interceptions() else {
+        return match expected.is_empty() {
+            true => Ok(()),
+            false => Err(InterceptionRefusal::Needed(expected.into_iter().cloned().collect())),
+        };
+    };
+    if interceptions.call() != &call.digest() {
+        return Err(InterceptionRefusal::Foreign("the answers judge another call".into()));
+    }
+    let missing: Vec<InterceptorName> = expected
+        .iter()
+        .filter(|name| !interceptions.answers().contains_key(**name))
+        .map(|name| (*name).clone())
+        .collect();
+    if !missing.is_empty() {
+        return Err(InterceptionRefusal::Needed(missing));
+    }
+    if let Some(stranger) = interceptions.answers().keys().find(|name| !expected.contains(name)) {
+        return Err(InterceptionRefusal::Foreign(format!(
+            "interceptor {} does not judge this tool",
+            stranger.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Does a rewrite keep every Interceptor that judged the call it replaces? A rewrite that
+/// selects a declaration fewer Interceptors judge would step past the ones it left behind.
+pub(crate) fn keeps_interceptors(registry: &crate::registry::Registry, before: &[TagName], after: &[TagName]) -> bool {
+    registry
+        .interceptors_judging(before)
+        .all(|interceptor| interceptor.judges(after))
 }
 
 /// Hold a call's annotation evidence to its declaration: a static declaration is its own
@@ -491,6 +555,7 @@ mod tests {
     /// call by `classifier`.
     fn registry(annotators: Vec<AnnotatorDeclaration>) -> Registry {
         Registry::build_covered(RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolDeclaration::Declared(ToolAnnotation {

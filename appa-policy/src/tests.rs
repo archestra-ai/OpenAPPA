@@ -520,7 +520,7 @@ fn a_catch_all_attention_permit_loads_and_the_wildcard_never_mixes_with_names() 
         Err(ConfigError::MixedAttentionWildcard { context }) if context == "authority anyone"
     ));
 
-    let reserved = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"blocked\"]\n";
+    let reserved = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"hard-block\"]\n";
     assert!(matches!(
         load(reserved),
         Err(ConfigError::Registry(LoadError::ReservedMark(name))) if name == "anyone"
@@ -1569,6 +1569,7 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
             trajectory: trajectory.clone(),
             provider_results: Vec::new(),
             proposals: vec![appa_engine::transition::ProposedCall {
+                interceptions: None,
                 tool: ToolName::new("mail_report"),
                 arguments: br#"{"to":"alice"}"#.to_vec(),
                 annotation: None,
@@ -1644,4 +1645,145 @@ delta = {}
         refused(serde_json::json!({ "trust": "vetted" })),
         Err(ConfigError::UnknownTrustRank { name, .. }) if name == "vetted"
     ));
+}
+
+const INTERCEPTED: &str = r#"
+version = 2
+
+[[tool]]
+name = "send_email"
+
+[[tool]]
+name = "send_email(to:*@consulting.com)"
+
+[[tool]]
+name = "commit"
+
+[[interceptor]]
+name = "orlando"
+builtin = "regex"
+settings = { pattern = "(?i)orlando", on_match = "no" }
+on = ["tool_call"]
+tools = ["commit"]
+
+[[interceptor]]
+name = "no-cards"
+builtin = "regex"
+settings = { pattern = "\\d{4}( ?\\d{4}){3}" }
+on = ["prompt"]
+
+[[authority]]
+name = "hitl"
+unblocks = ["*"]
+
+[[sanitizer]]
+name = "strip"
+on = ["tool_input"]
+unblocks = ["commit"]
+
+[[sanitizer]]
+name = "my-address"
+on = ["tool_input"]
+unblocks = ["send_email(to:*@consulting.com)"]
+permits = { audience = { from = ["self"], to = ["public"] } }
+"#;
+
+fn tool_tags(config: &Config, name: &str) -> Vec<String> {
+    let declaration = config
+        .registry_config()
+        .tools
+        .iter()
+        .find(|tool| tool.name().as_str() == name)
+        .expect("the tool is declared");
+    declaration.tags().iter().map(|tag| tag.as_str().to_string()).collect()
+}
+
+#[test]
+fn unblocks_binds_each_component_to_the_tools_it_names() {
+    let config = load(INTERCEPTED).expect("the policy compiles");
+    assert_eq!(
+        tool_tags(&config, "commit"),
+        ["intercept:orlando", "unblock:authority:hitl", "unblock:sanitizer:strip"]
+    );
+    assert_eq!(tool_tags(&config, "send_email"), ["unblock:authority:hitl"]);
+    assert_eq!(
+        tool_tags(&config, "send_email(to:*@consulting.com)"),
+        ["unblock:authority:hitl", "unblock:sanitizer:my-address"]
+    );
+    let strip = config
+        .registry_config()
+        .sanitizers
+        .iter()
+        .find(|sanitizer| sanitizer.name == SanitizerName::new("strip"))
+        .expect("strip is registered");
+    assert_eq!(strip.transition, DeclaredTransition::Unchanged);
+    assert!(strip.scope.unblocks());
+}
+
+#[test]
+fn only_tool_call_interceptors_reach_the_engine() {
+    let config = load(INTERCEPTED).expect("the policy compiles");
+    let engine: Vec<_> = config
+        .registry_config()
+        .interceptors
+        .iter()
+        .map(|interceptor| interceptor.name.as_str())
+        .collect();
+    assert_eq!(engine, ["orlando"]);
+    let bound: Vec<_> = config.interceptors().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(bound, ["orlando", "no-cards"]);
+}
+
+#[test]
+fn unblocks_refuses_a_selector_naming_no_tool_and_a_mix_with_tags() {
+    let unknown = INTERCEPTED.replace(r#"unblocks = ["commit"]"#, r#"unblocks = ["comit"]"#);
+    assert!(matches!(load(&unknown), Err(ConfigError::UnboundTools { selector, .. }) if selector == "comit"));
+    let mixed = INTERCEPTED.replace(r#"unblocks = ["commit"]"#, "unblocks = [\"commit\"]\ntags = [\"x\"]");
+    assert!(matches!(load(&mixed), Err(ConfigError::UnblocksWithTags { .. })));
+}
+
+#[test]
+fn a_sanitizer_without_permits_must_unblock_and_tags_never_use_reserved_prefixes() {
+    let unbound = INTERCEPTED.replace(
+        "name = \"strip\"\non = [\"tool_input\"]\nunblocks = [\"commit\"]",
+        "name = \"strip\"\non = [\"tool_input\"]",
+    );
+    assert!(matches!(load(&unbound), Err(ConfigError::SanitizerWithoutPermits { name }) if name == "strip"));
+    let reserved = INTERCEPTED.replace(
+        "name = \"commit\"\n",
+        "name = \"commit\"\ntags = [\"unblock:authority:hitl\"]\n",
+    );
+    assert!(matches!(load(&reserved), Err(ConfigError::ReservedTag { .. })));
+}
+
+#[test]
+fn an_interceptor_names_a_known_step_and_builtin() {
+    let step = INTERCEPTED.replace(r#"on = ["prompt"]"#, r#"on = ["response"]"#);
+    assert!(matches!(load(&step), Err(ConfigError::BadInterceptor { .. })));
+    let builtin = INTERCEPTED.replace(
+        r#"builtin = "regex"
+settings = { pattern = "\\d"#,
+        r#"builtin = "cel"
+settings = { pattern = "\\d"#,
+    );
+    assert!(matches!(load(&builtin), Err(ConfigError::BadInterceptor { .. })));
+    let prompt_tools = INTERCEPTED.replace(r#"on = ["prompt"]"#, "on = [\"prompt\"]\ntools = [\"commit\"]");
+    assert!(matches!(load(&prompt_tools), Err(ConfigError::BadInterceptor { .. })));
+}
+
+#[test]
+fn an_interceptor_name_is_unique_across_steps() {
+    let twice = INTERCEPTED.replace(r#"name = "no-cards""#, r#"name = "orlando""#);
+    assert!(matches!(load(&twice), Err(ConfigError::BadInterceptor { name, .. }) if name == "orlando"));
+}
+
+#[test]
+fn an_authority_and_a_sanitizer_of_one_name_keep_their_own_tools() {
+    let shared = INTERCEPTED.replace(r#"name = "strip""#, r#"name = "hitl""#);
+    let config = load(&shared).expect("the policy compiles");
+    assert_eq!(
+        tool_tags(&config, "commit"),
+        ["intercept:orlando", "unblock:authority:hitl", "unblock:sanitizer:hitl"]
+    );
+    assert_eq!(tool_tags(&config, "send_email"), ["unblock:authority:hitl"]);
 }

@@ -632,7 +632,7 @@ Attention requires fresh approval for each call. A previous approval or recorded
 | Field | Meaning | Example |
 |---|---|---|
 | `requires.attention` | Lists the approvals required before the tool can run. | `requires = { attention = ["sre-signoff"] }` |
-| `permits.attention` | Lists the approvals an authority is allowed to give. `["*"]` alone allows every mark the policy declares except `blocked`. | `permits = { attention = ["sre-signoff"] }` |
+| `permits.attention` | Lists the approvals an authority is allowed to give. `["*"]` alone allows every mark the policy declares except `hard-block`. | `permits = { attention = ["sre-signoff"] }` |
 
 In the example below, each `apply_db_migration` call requires `sre-signoff`. The `sre-reviewer` authority has permission to give that approval and uses the built-in human approval handler, `hitl`.
 
@@ -655,7 +655,7 @@ An attention mark is the name of an approval requirement, such as `sre-signoff`.
 
 A deployment with one reviewer can permit every mark at once. `permits = { attention = ["*"] }` allows the authority to give every approval the policy declares, under any name a battery or annotator uses. The wildcard MUST be the only entry; `["*", "sre-signoff"]` is a load error.
 
-`blocked` is the reserved mark that denies a call. No authority can list it in `permits.attention`, and `["*"]` does not cover it. A tool that requires `blocked` has no remedy, whatever authorities the policy declares.
+`hard-block` is the reserved mark that denies a call. No authority can list it in `permits.attention`, and `["*"]` does not cover it. A tool that requires `hard-block` has no remedy, whatever authorities the policy declares.
 
 ## Annotators
 
@@ -772,7 +772,7 @@ An annotator's permits limit the values it can use in its answers. The following
 
 An annotator can use a selector placeholder only when its own `audiences` lists it. A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string (or array of strings) argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spellings for that call, such as `@github:repo/acme/api/collaborators`, one per element of an array argument, and the answer MAY use only those spellings. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
 
-An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
+An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `hard-block` included; a catch-all `["*"]` permit declares no mark of its own.
 
 The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what a context provider's answer means. It can give examples. Every annotator builtin (`claude-code`, `llm`, `jev`) already applies OpenAPPA's label guide: the rule and the criteria for each trust and audience leaf, with worked examples. A hint does not restate the guide. For `claude-code` and `llm`, the hint overrides the guide where the two disagree. `jev` adds the hint to each of its four questions, after the guide's rule for that question. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
@@ -998,7 +998,7 @@ Each field in `permits` allows the authority to approve a different type of requ
 | `trust_below` | Allows a call whose required trust rank is not met, up to the rank specified here. |
 | `audience_missing` | Allows sharing with readers outside the current audience, limited to the audience specified here. |
 | `effects_containing` | Allows a call blocked by `excludes` because a listed effect has already occurred. |
-| `attention` | The listed attention marks for this call, or every declared mark except `blocked` when the list is `["*"]`. |
+| `attention` | The listed attention marks for this call, or every declared mark except `hard-block` when the list is `["*"]`. |
 
 For example, these permissions let an authority approve a call that needs `trusted` data, a public audience, an exception for an earlier `email.sent` effect, or `finance-signoff`:
 

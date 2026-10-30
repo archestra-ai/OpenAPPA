@@ -148,6 +148,7 @@ mod tests {
             hint: None,
         };
         Registry::build_covered(crate::registry::RegistryConfig {
+            interceptors: Vec::new(),
             trust_chain: chain(),
             tools: vec![crate::contract::ToolDeclaration::Declared(wire())],
             annotators: vec![],

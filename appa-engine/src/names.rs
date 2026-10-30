@@ -36,6 +36,10 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
+name_newtype!(
+    /// A tool-call or prompt check the policy declares under `[[policy.interceptor]]`.
+    InterceptorName
+);
 name_newtype!(GroupName);
 name_newtype!(
     /// An audience provider: the namespace of one registered audience source, and the prefix
@@ -96,10 +100,23 @@ name_newtype!(MarkName);
 impl MarkName {
     /// The reserved denial. A contract requiring it has no remedy by definition: no
     /// authority may attend it, and a catch-all mandate never covers it.
-    pub const BLOCKED: &'static str = "blocked";
+    pub const HARD_BLOCK: &'static str = "hard-block";
 
-    pub fn is_blocked(&self) -> bool {
-        self.0 == Self::BLOCKED
+    /// The reserved liftable denial: an Interceptor's `no` adds it to the call. An authority
+    /// attending it lifts it, as one the policy binds to the tool with `unblocks` does
+    /// without naming it; a bound input sanitizer clears it by a rewrite the Interceptors
+    /// then answer `yes` for.
+    pub const BLOCK: &'static str = "block";
+
+    /// The mark an Interceptor's `ask` adds to the call: only an authority attending it lifts it.
+    pub const HUMAN_APPROVAL: &'static str = "human-approval";
+
+    pub fn is_hard_block(&self) -> bool {
+        self.0 == Self::HARD_BLOCK
+    }
+
+    pub fn is_block(&self) -> bool {
+        self.0 == Self::BLOCK
     }
 }
 

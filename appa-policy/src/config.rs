@@ -4,7 +4,7 @@ use appa_engine::audience::SourceRegistration;
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
-use appa_engine::names::AnnotatorName;
+use appa_engine::names::{AnnotatorName, InterceptorName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
 use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
@@ -12,6 +12,7 @@ use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_
 use crate::audience::convert_audience;
 use crate::convert::{default_boundary_label, split_selector};
 use crate::error::ConfigError;
+use crate::interceptor::InterceptorBinding;
 use crate::raw::{RawConfig, RawDeployment, RawTool};
 
 pub(crate) const SUPPORTED_VERSION: u32 = 2;
@@ -30,6 +31,8 @@ pub struct Config {
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
     /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
     deployment_tools: Vec<(&'static str, String)>,
+    /// Every `[[interceptor]]`, in authored order, with its runtime-owned binding.
+    interceptors: Vec<(InterceptorName, InterceptorBinding)>,
 }
 
 impl Config {
@@ -89,14 +92,20 @@ impl Config {
             .retain(|source| referenced.contains(source.provider.as_str()));
         validate_annotator_inputs(&tools, &annotators)?;
 
+        let mut tools = tools;
+        let crate::interceptor::CompiledInterceptors {
+            bindings: interceptors,
+            declarations: interceptor_declarations,
+        } = crate::interceptor::compile_interceptors(raw.interceptor, &mut tools)?;
+
         let mut authorities = Vec::new();
         for a in raw.authority {
-            authorities.push(a.convert(&trust_chain)?);
+            authorities.push(a.convert(&trust_chain, &mut tools)?);
         }
 
         let mut sanitizers = Vec::new();
         for s in raw.sanitizer {
-            sanitizers.push(s.convert(&trust_chain)?);
+            sanitizers.push(s.convert(&trust_chain, &mut tools)?);
         }
 
         let planner_cap = match raw.limits.as_ref().and_then(|l| l.planner_cap) {
@@ -119,6 +128,7 @@ impl Config {
             annotators: annotator_declarations,
             authorities,
             sanitizers,
+            interceptors: interceptor_declarations,
             audience,
         };
         let policy = DeploymentPolicy {
@@ -144,6 +154,7 @@ impl Config {
             boundary_label,
             annotators,
             deployment_tools,
+            interceptors,
         })
     }
 
@@ -196,6 +207,13 @@ impl Config {
     pub fn annotators(&self) -> impl Iterator<Item = (&AnnotatorName, &AnnotatorBinding)> {
         self.annotators.iter()
     }
+
+    /// Every `[[interceptor]]` in authored order, with its runtime-owned binding. An Interceptor
+    /// naming a builtin takes no deployment binding; every other one is bound by name under
+    /// `[externals.interceptors]`.
+    pub fn interceptors(&self) -> impl Iterator<Item = (&InterceptorName, &InterceptorBinding)> {
+        self.interceptors.iter().map(|(name, binding)| (name, binding))
+    }
 }
 
 /// Every bare tool identity each authored bare name qualifies to, so a `[deployment]` field
@@ -209,6 +227,7 @@ fn compile_tools(
     let mut tools = Vec::new();
     let mut qualified = QualifiedNames::new();
     for t in raw {
+        crate::interceptor::refuse_reserved_tags(&t.tags, &format!("tool {}", t.name))?;
         let authored = split_selector(&t.name).0.to_string();
         let tool = t.convert(trust_chain)?;
         qualified

@@ -132,6 +132,10 @@ impl CanonicalDigest {
                 hasher.update([3u8]);
                 hasher.update(canonical_json(pinned));
             }
+            if let Some(interceptions) = &call.interceptions {
+                hasher.update([5u8]);
+                hasher.update(canonical_json(interceptions));
+            }
             if let Some(basis) = &call.file_basis {
                 hasher.update([4u8]);
                 hasher.update(canonical_json(basis));
@@ -469,6 +473,8 @@ pub struct ResolvedCall {
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    interceptions: Option<crate::intercept::Interceptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     file_basis: Option<FileBasis>,
 }
 
@@ -480,12 +486,15 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
             #[serde(default)]
+            interceptions: Option<crate::intercept::Interceptions>,
+            #[serde(default)]
             file_basis: Option<FileBasis>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
         Ok(ResolvedCall::new(wire.tool, wire.arguments)
             .with_annotation(wire.annotation)
+            .with_interceptions(wire.interceptions)
             .with_file_basis(wire.file_basis))
     }
 }
@@ -496,6 +505,7 @@ impl ResolvedCall {
             tool,
             arguments,
             annotation: None,
+            interceptions: None,
             file_basis: None,
         }
     }
@@ -522,6 +532,18 @@ impl ResolvedCall {
 
     pub fn annotation(&self) -> Option<&PinnedAnnotation> {
         self.annotation.as_ref()
+    }
+
+    /// Attach the answers of the Interceptors that judge this call. `None` is the case where
+    /// no Interceptor judges it; whether the answers fit the call is
+    /// [`crate::check::validate_interceptions`]'s to decide.
+    pub fn with_interceptions(mut self, interceptions: Option<crate::intercept::Interceptions>) -> Self {
+        self.interceptions = interceptions;
+        self
+    }
+
+    pub fn interceptions(&self) -> Option<&crate::intercept::Interceptions> {
+        self.interceptions.as_ref()
     }
 
     pub fn file_basis(&self) -> Option<&FileBasis> {
@@ -608,7 +630,10 @@ impl ResolvedCall {
     /// basis is evidence the host pins for one proposal, and a record of a call carries none.
     /// A staged derivation is matched this way so a file-mediated call can take one at all.
     pub(crate) fn renders(&self, other: &ResolvedCall) -> bool {
-        self.tool == other.tool && self.arguments == other.arguments && self.annotation == other.annotation
+        self.tool == other.tool
+            && self.arguments == other.arguments
+            && self.annotation == other.annotation
+            && self.interceptions == other.interceptions
     }
 }
 

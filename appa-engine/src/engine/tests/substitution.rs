@@ -348,6 +348,7 @@ fn a_derivation_that_no_longer_covers_does_not_starve_the_one_that_does() {
     };
     let rewrite_by = |sanitizer: &str| {
         OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+            interceptions: None,
             sanitizer: crate::names::SanitizerName::new(sanitizer),
             source: crate::value::RawResultDigest::of(proposal.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(REDACTED),
@@ -903,6 +904,7 @@ fn staged_call_after_membership_moves() -> (Engine, Vec<Fact>, Result<EngineDeci
         &log,
         hop,
         OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+            interceptions: None,
             sanitizer: crate::names::SanitizerName::new("redact"),
             source: crate::value::RawResultDigest::of(proposal.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(r#"{"to":"bob@corp.com"}"#),

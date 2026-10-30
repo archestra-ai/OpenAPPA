@@ -237,6 +237,7 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             evidence: crate::audience::AudienceEvidence::default(),
         },
         Fact::DispatchOpened {
+            interceptions: None,
             trajectory: traj(),
             dispatch,
             tool: call.tool().clone(),

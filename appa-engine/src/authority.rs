@@ -48,9 +48,9 @@ impl TryFrom<String> for Hint {
 }
 
 /// The attention marks an authority's ruling may attend. A catch-all covers every mark the
-/// policy declares except the reserved denial, [`MarkName::BLOCKED`]: one human authority
+/// policy declares except the reserved denial, [`MarkName::HARD_BLOCK`]: one human authority
 /// serves a single-reviewer deployment without naming each battery's mark, and a contract
-/// requiring `blocked` stays unremediable under it.
+/// requiring `hard-block` stays unremediable under it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Attends {
     Named(Vec<MarkName>),
@@ -70,7 +70,7 @@ impl Attends {
     pub fn covers(&self, mark: &MarkName) -> bool {
         match self {
             Attends::Named(marks) => marks.contains(mark),
-            Attends::Any => !mark.is_blocked(),
+            Attends::Any => !mark.is_hard_block(),
         }
     }
 
@@ -143,7 +143,8 @@ impl Mandate {
 
 /// A component's jurisdiction: the tags it covers. Empty = everything (small configs stay
 /// small). Authorities and sanitizers route by this one shape.
-/// Attention gaps ignore scope — they route by their own currency (the attended mark).
+/// Attention gaps ignore scope — they route by their own currency (the attended mark) —
+/// except for an authority the policy binds with `unblocks`, whose binding is its jurisdiction.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
     pub tags: Vec<TagName>,
@@ -163,6 +164,38 @@ impl Scope {
 
     pub fn is_unscoped(&self) -> bool {
         self.tags.is_empty()
+    }
+
+    /// The tag the policy compiler gives every tool a component `unblocks`, and that
+    /// component's scope: `unblock:<component>`. The prefix is reserved; policy tags never
+    /// carry it.
+    pub const UNBLOCK_PREFIX: &'static str = "unblock:";
+
+    /// Does the policy bind this component to its tools with `unblocks`? Such a component
+    /// is the one kind that lifts an Interceptor's answer.
+    pub fn unblocks(&self) -> bool {
+        self.tags
+            .iter()
+            .any(|tag| tag.as_str().starts_with(Self::UNBLOCK_PREFIX))
+    }
+
+    /// The tag `unblocks` gives the tools an authority is bound to, and the authority's scope.
+    pub fn authority_unblock_tag(authority: &str) -> TagName {
+        TagName::new(format!("{}authority:{authority}", Self::UNBLOCK_PREFIX))
+    }
+
+    /// The tag `unblocks` gives the tools a sanitizer is bound to, and the sanitizer's scope.
+    pub fn sanitizer_unblock_tag(sanitizer: &str) -> TagName {
+        TagName::new(format!("{}sanitizer:{sanitizer}", Self::UNBLOCK_PREFIX))
+    }
+
+    /// Is this a component's scope that carries only its own unblock tag, or none at all?
+    /// A reserved tag naming another component would borrow that component's binding.
+    pub(crate) fn owns_unblock_tags(&self, own: &TagName) -> bool {
+        match self.unblocks() {
+            false => true,
+            true => self.tags.len() == 1 && &self.tags[0] == own,
+        }
     }
 }
 
@@ -197,6 +230,10 @@ pub enum DeclaredTransition {
         from_floor: Trust,
         to: Trust,
     },
+    /// The sanitizer rewrites content and claims no label change: a sanitizer the policy binds
+    /// with `unblocks` and gives no `permits`. It lifts only an Interceptor's `no`, by a
+    /// rewrite every Interceptor judges afresh.
+    Unchanged,
 }
 
 impl DeclaredTransition {
@@ -214,6 +251,7 @@ impl DeclaredTransition {
                 from_floor: *from_floor,
                 to: *to,
             },
+            DeclaredTransition::Unchanged => Transition::Unchanged,
         }
     }
 
@@ -231,6 +269,7 @@ impl DeclaredTransition {
                 !matches!(raw.covers(&widest, context), Evaluation::Fails)
             }
             DeclaredTransition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
+            DeclaredTransition::Unchanged => true,
         }
     }
 }
@@ -249,6 +288,7 @@ pub enum Transition {
         from_floor: Trust,
         to: Trust,
     },
+    Unchanged,
 }
 
 impl Transition {
@@ -257,6 +297,7 @@ impl Transition {
         match self {
             Transition::Audience { from_includes, .. } => raw.covers(from_includes, context),
             Transition::Trust { from_floor, .. } => Evaluation::of_exact(raw.meets_floor(*from_floor)),
+            Transition::Unchanged => Evaluation::Holds,
         }
     }
 
@@ -266,6 +307,7 @@ impl Transition {
         match self {
             Transition::Audience { to, .. } => Label::new(raw.trust, to.clone()),
             Transition::Trust { to, .. } => Label::new(*to, raw.audience.clone()),
+            Transition::Unchanged => raw.clone(),
         }
     }
 }

@@ -1,0 +1,15 @@
+# Interceptors and unblockers: a prototype policy for Claude Code.
+#
+# An Interceptor checks one step and answers yes, no or ask. A `no` or `ask`
+# blocks the step. `unblocks` binds an authority or a sanitizer to the tools it
+# may unblock. One bound unblocker that asks nobody is applied by APPA itself;
+# two or more are offered to the model, which chooses one.
+
+include = ["rules.appa.toml"]
+
+[policy]
+version = 2
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 65536

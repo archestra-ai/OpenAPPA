@@ -61,6 +61,7 @@ mod elicit;
 mod engine;
 mod events;
 mod external;
+mod interceptor;
 mod label_guide;
 mod model;
 mod process_tree;

@@ -137,6 +137,7 @@ impl Bindings<'_> {
                 Section::Annotators => externals.annotators.contains_key(name),
                 Section::Audience => externals.audience.contains_key(name),
                 Section::Context => externals.context.contains_key(name),
+                Section::Interceptors => externals.interceptors.contains_key(name),
             },
             Bindings::Raw(root) => root
                 .get("externals")

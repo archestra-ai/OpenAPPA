@@ -418,6 +418,7 @@ impl ExternalServices {
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
+        backends.insert(ConsultKind::Interceptor, bound(config.interceptors));
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
@@ -800,7 +801,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Context => None,
+        Section::Annotators | Section::Audience | Section::Context | Section::Interceptors => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -933,6 +934,7 @@ mod tests {
             })
             .collect();
         Externals {
+            interceptors: Default::default(),
             timeout: Duration::from_millis(timeout_ms),
             review_timeout: Duration::from_millis(timeout_ms),
             max_body_bytes: cap,
@@ -1008,6 +1010,7 @@ mod tests {
                     },
                 },
                 artifact: AuthorityArtifact {
+                    ifc: None,
                     tool: "send_message".to_string(),
                     arguments,
                     requirements: vec![],
@@ -1023,13 +1026,14 @@ mod tests {
                 declaration: SanitizerDeclaration {
                     hint: None,
                     on: SanitizerPoint::ToolOutput,
-                    permits: DeclaredSanitizerTransition::Audience {
+                    permits: Some(DeclaredSanitizerTransition::Audience {
                         from: WireAudience::Entries(vec!["hr".to_string()]),
                         to: WireAudience::Public,
-                    },
+                    }),
                     parameters: None,
                 },
                 artifact: SanitizerArtifact {
+                    unblock: None,
                     tool: Some("read_file".to_string()),
                     body: body.to_string(),
                 },

@@ -129,7 +129,7 @@ context_control = true
 # wider audience before a tool runs. This authority shows the person running
 # the Claude Code session the exact call and can approve those gaps for that
 # call: any attention mark a battery declares (`*` — every mark but the
-# reserved `blocked`), data below `trusted`, and an audience up to `public`.
+# reserved `hard-block`), data below `trusted`, and an audience up to `public`.
 # Approval does not change the trajectory's label or authorize later calls.
 [[policy.authority]]
 name = "hitl"
