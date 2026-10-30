@@ -324,7 +324,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: runtime-binary
-          env-vars: CARGO_PROFILE_DEV_DEBUG
+          env-vars: CARGO_PROFILE_DEV_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
@@ -441,6 +441,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: marketplace
+          env-vars: ImageOS
 
       - name: Manifest tests
         run: cargo test -p appa-package --all-targets --locked
@@ -497,7 +498,10 @@ jobs:
   # is omitted: clippy --all-targets is a superset. Each rust-cache key is
   # per job: clippy and test write different target/ trees, so they must
   # not share one entry. A job that runs on main seeds the key later PRs
-  # restore.
+  # restore. Every rust-cache key on a floating runner label also hashes
+  # `ImageOS`: build scripts record what they found on the image (pyo3 links
+  # the image's libpython3.x) and cargo does not rerun them when the image
+  # changes, so an entry built on one image must not restore on another.
   rust-lint:
     name: Rust Lint
     needs: [changes, cargo-release-age]
@@ -518,6 +522,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-lint
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust formatting
@@ -568,7 +573,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-tests
-          env-vars: CARGO_PROFILE_TEST_DEBUG
+          env-vars: CARGO_PROFILE_TEST_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
@@ -696,6 +701,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build runtime
@@ -735,6 +741,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup uv
@@ -965,6 +972,7 @@ jobs:
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
