@@ -35,6 +35,13 @@ already reads it: `public` when anyone may, `internal` when the
 Workspace's domain may, else `self`. Copying a file only the viewer
 reads into a folder the organization reads is refused.
 
+`update_file` with `inheritedPermissionsDisabled: false` gives a folder
+its parent's readers again, so it is checked as a move into that
+parent; a parent the token cannot see needs `public`. With
+`writersCanShare: true` any writer may share the file with anyone, so
+it needs `public`, as `share_file` does. An `update_file` argument the
+annotator does not know refuses the call.
+
 `trash_file` needs trusted data that `internal` may see. A trashed file
 can be restored, so trashing needs no review. Every write records
 `google-workspace.changed`.

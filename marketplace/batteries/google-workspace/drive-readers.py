@@ -18,6 +18,12 @@ readers may see.
 moves one, both on Google's side and never through the trajectory, so
 the answer also forwards the audience that already reads the source:
 its content reaches the target only when the target's readers do.
+`update_file` with `inheritedPermissionsDisabled: false` gives a folder
+its parent's readers, so it is checked as a move into that parent, and
+a parent the token cannot see could be read by anyone. With
+`writersCanShare: true` any writer may share the file with anyone, so
+it needs public data, as `share_file` does. An `update_file` argument
+this script does not know refuses the call.
 
 Credentials come from APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN: the audience
 source's token, with the drive.metadata.readonly scope added. A 403 is
@@ -50,6 +56,8 @@ PUBLIC = "public"
 CHAIN = [SELF, INTERNAL, PUBLIC]
 # The id Drive accepts for the viewer's My Drive root folder.
 ROOT = "root"
+# The update_file arguments whose effect on readers this script knows.
+UPDATE_ARGUMENTS = {"fileId", "title", "parentId", "inheritedPermissionsDisabled", "writersCanShare"}
 
 
 def widest(*readers):
@@ -180,13 +188,23 @@ class Drive:
             return INTERNAL
         return SELF
 
-    def parent(self, file_id):
+    def parents(self, file_id):
+        """The folders the token sees the file in; empty when it sees none."""
+        payload = self.call(f"{DRIVE_ROOT}/files/{quote(file_id)}", supportsAllDrives="true", fields="parents")
+        return payload.get("parents") or []
+
+    def copy_parent(self, file_id):
         """The folder a copy lands in when the call names none: the
         original's parent. A parent the token cannot see is one the viewer
         cannot write to, so Drive puts the copy in the viewer's root."""
-        payload = self.call(f"{DRIVE_ROOT}/files/{quote(file_id)}", supportsAllDrives="true", fields="parents")
-        parents = payload.get("parents") or []
-        return parents[0] if parents else ROOT
+        return next(iter(self.parents(file_id)), ROOT)
+
+    def inherited(self, file_id):
+        """The readers a folder gains when it inherits its parent's
+        sharing again. A parent the token cannot see could be read by
+        anyone."""
+        parents = self.parents(file_id)
+        return widest(SELF, *(self.readers(parent) for parent in parents)) if parents else PUBLIC
 
 
 def file_id(arguments, key, required):
@@ -197,6 +215,13 @@ def file_id(arguments, key, required):
         return None
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
+    return value
+
+
+def flag(arguments, key):
+    value = arguments.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
     return value
 
 
@@ -214,15 +239,26 @@ def answer(drive, tool, arguments):
         case "copy_file":
             source = file_id(arguments, "fileId", True)
             forwards = drive.content(source)
-            target = drive.readers(file_id(arguments, "parentId", False) or drive.parent(source))
+            target = drive.readers(file_id(arguments, "parentId", False) or drive.copy_parent(source))
         case "update_file":
+            unknown = set(arguments) - UPDATE_ARGUMENTS
+            if unknown:
+                # A flag this script does not know may change who reads the file.
+                raise ValueError(f"update_file arguments {sorted(unknown)} are not ones this annotator labels")
             moved = file_id(arguments, "fileId", True)
             parent = file_id(arguments, "parentId", False)
             target = drive.readers(moved)
             if parent:
                 # A move adds the folder's readers to the file's own.
                 target = widest(target, drive.readers(parent))
+            elif flag(arguments, "inheritedPermissionsDisabled") is False:
+                # Re-enabling inheritance adds the parent's readers, as a move does.
+                target = widest(target, drive.inherited(moved))
+            if parent or flag(arguments, "inheritedPermissionsDisabled") is False:
                 forwards = drive.content(moved)
+            if flag(arguments, "writersCanShare"):
+                # Any writer may then share the file with anyone, as share_file does.
+                target = PUBLIC
         case _:
             raise ValueError(f"{tool!r} is not a write this annotator labels")
     result = {

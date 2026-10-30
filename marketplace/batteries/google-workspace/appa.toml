@@ -15,7 +15,9 @@
 # the file `update_file` renames or moves, and requires trusted data that
 # those readers may see: `self`, `internal`, or `public` for a target
 # shared outside the Workspace. A copy or a move also forwards the
-# audience that already reads the source file. Writes record
+# audience that already reads the source file. Re-enabling a folder's
+# inherited sharing is checked as a move into its parent, and letting
+# writers share a file needs public data. Writes record
 # `google-workspace.changed`; trashing is a write that needs trusted
 # `internal` data, since a trashed file can be restored. Sharing a file
 # exposes its whole content, which is not a value the policy tracks, so

@@ -18,6 +18,7 @@ Sharing a file needs `google-workspace-review`. The Claude Code plugin default p
 - Reads, searches, metadata, and permission lookups return untrusted `self` data. The connector does not report who can see a file, and anyone can share a file with you or comment on one.
 - Creating, copying, and updating files require trusted data that the target's readers may see. A file inherits its folder's sharing, so the `google-workspace.drive-readers` annotator reads the Drive permissions of the target folder or file. A target that only you read requires `self`. A target that only Workspace users, your domain, or all-internal groups read requires `internal`. Any other target requires `public`, for example a folder shared as "Anyone with the link".
 - A copy or a move also forwards the audience that already reads the source file. Copying a file that only you read into a folder the organization reads is refused.
+- Re-enabling a folder's inherited sharing is checked as a move into its parent. Letting writers share a file requires `public`. An `update_file` argument the annotator does not know refuses the call.
 - Trashing a file requires trusted `internal` data. Every write records `google-workspace.changed`.
 - Sharing a file requires public input and review, and records `google-workspace.sensitive`.
 

@@ -226,6 +226,62 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(answer["forwards"], {"audience": ["self"]})
 
 
+PARENTS = {"supportsAllDrives": "true", "fields": "parents"}
+
+
+class UpdateTests(unittest.TestCase):
+    def test_re_enabling_inheritance_adds_the_parent_readers_and_forwards_the_folder(self):
+        for grant, expected in [({"type": "anyone"}, "public"), ({"type": "domain", "domain": "corp.com"}, ["internal"])]:
+            with self.subTest(grant=grant):
+                answer = ANNOTATOR.answer(
+                    drive(
+                        permissions("D", user("alice@corp.com")),
+                        (f"{DRIVE}/files/D", PARENTS, {"parents": ["P"]}),
+                        permissions("P", grant),
+                    ),
+                    "update_file",
+                    {"fileId": "D", "inheritedPermissionsDisabled": False},
+                )
+                self.assertEqual(required(answer), expected)
+                self.assertEqual(answer["forwards"], {"audience": ["self"]})
+
+    def test_re_enabling_inheritance_under_a_parent_the_token_cannot_see_needs_public_data(self):
+        # Unlike a copy, whose hidden parent sends it to the viewer's root.
+        answer = ANNOTATOR.answer(
+            drive(permissions("D", user("alice@corp.com")), (f"{DRIVE}/files/D", PARENTS, {})),
+            "update_file",
+            {"fileId": "D", "inheritedPermissionsDisabled": False},
+        )
+        self.assertEqual(required(answer), "public")
+
+    def test_disabling_inheritance_only_narrows_and_asks_for_no_parent(self):
+        answer = ANNOTATOR.answer(
+            drive(permissions("D", user("alice@corp.com"))),
+            "update_file",
+            {"fileId": "D", "inheritedPermissionsDisabled": True},
+        )
+        self.assertEqual(required(answer), ["self"])
+        self.assertNotIn("forwards", answer)
+
+    def test_letting_writers_share_needs_public_data(self):
+        for value, expected in [(True, "public"), (False, ["self"])]:
+            with self.subTest(writersCanShare=value):
+                answer = ANNOTATOR.answer(
+                    drive(permissions("D", user("alice@corp.com"))),
+                    "update_file",
+                    {"fileId": "D", "writersCanShare": value},
+                )
+                self.assertEqual(required(answer), expected)
+
+    def test_an_unknown_argument_or_a_non_boolean_flag_refuses_the_call(self):
+        for arguments in [
+            {"fileId": "D", "copyRequiresWriterPermission": False},
+            {"fileId": "D", "inheritedPermissionsDisabled": "false"},
+        ]:
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                ANNOTATOR.answer(drive(permissions("D", user("alice@corp.com"))), "update_file", arguments)
+
+
 class ConsultTests(unittest.TestCase):
     def run_script(self, audiences, env):
         consult = {
