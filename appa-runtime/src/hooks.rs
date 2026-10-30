@@ -1105,6 +1105,17 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
     let quoted = match quoted_offer(call) {
         Ok(Some(quoted)) => quoted,
         Ok(None) => {
+            // A declaration ahead of the spawn quotes no offer: its arguments name it. It can be
+            // a root's first call, which opens the root as any root call does.
+            if let Ok(args) = serde_json::from_str::<crate::api::ExecuteRemedyPlanArgs>(call.arguments.get()) {
+                if actor.child.is_none()
+                    && let Err(error) =
+                        open_or_reopen(runtime, &actor.root, None, EmbeddedPresentationOptions::default())
+                {
+                    return fold(error, Refusal::Deny);
+                }
+                runtime.vouch(&crate::api::declaration_key(&args), actor, ruling);
+            }
             tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
             return HookDecision::PassControl;
         }

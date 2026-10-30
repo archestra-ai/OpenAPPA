@@ -2302,10 +2302,52 @@ impl RuntimeEngine {
         else {
             return Ok(None);
         };
+        self.return_policy_of_route(views, route, arguments).map(Some)
+    }
+
+    /// A return declaration made ahead of the spawn: the bare floor, or the attestation when
+    /// `return_schema` is passed, checked as the spawn's own declaration would be at this
+    /// trajectory's label. Answers the label it was checked at, which the declaration stands at.
+    pub(crate) fn declare_ahead(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        arguments: &RemedyArguments,
+    ) -> Result<Label, String> {
+        if !self.engine.registry().profile().context_control() {
+            return Err("this deployment does not control subagent context, so no return is declared".to_string());
+        }
+        let views = view
+            .views(trajectory)
+            .ok_or_else(|| "this session has not opened".to_string())?;
+        let route = match &arguments.return_schema {
+            Some(_) => ReturnRoute::Sanitized(appa_engine::names::SanitizerName::new(
+                appa_engine::names::SanitizerName::ATTEST_SCHEMA,
+            )),
+            None => ReturnRoute::Raw,
+        };
+        let policy = self.return_policy_of_route(&views, route, arguments)?;
+        self.engine
+            .check_return_declaration(view, trajectory, &policy)
+            .map_err(|refusal| format!("this return declaration does not stand: {refusal}"))?;
+        Ok(views.current_label())
+    }
+
+    /// The trajectory's label now, or `None` before it opens.
+    pub(crate) fn label_of(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<Label> {
+        view.views(trajectory).map(|views| views.current_label())
+    }
+
+    fn return_policy_of_route(
+        &self,
+        views: &Views,
+        route: ReturnRoute,
+        arguments: &RemedyArguments,
+    ) -> Result<ReturnPolicy, String> {
         let step = match route {
             ReturnRoute::Void => {
                 return match (&arguments.label, &arguments.return_schema) {
-                    (None, None) => Ok(Some(ReturnPolicy::Void)),
+                    (None, None) => Ok(ReturnPolicy::Void),
                     _ => Err(
                         "this plan takes no return from the subagent, so it takes no `label` or \
                               `return_schema`: omit them"
@@ -2368,7 +2410,7 @@ impl RuntimeEngine {
             None => None,
             Some(name) => Some(ReturnSanitizer::Named(name)),
         };
-        Ok(Some(ReturnPolicy::Crossing(CrossingReturn { floor, sanitizer })))
+        Ok(ReturnPolicy::Crossing(CrossingReturn { floor, sanitizer }))
     }
 
     /// Return contract context provided to a starting subagent.
@@ -4041,59 +4083,49 @@ fn return_instruction(
             let call = remedy_call(
                 control,
                 id,
-                ", label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}",
+                &format!(", label: {floor}"),
                 description,
                 include_display_plan,
             );
             format!(
-                "  - Declare the lowest label this session accepts from the subagent's return, then call the subagent \
-             tool again with the same arguments. The subagent starts at this session's label, now {floor}. Its floor \
-             must cover every narrowing its task needs. Set `trust` to the lowest rank it may read and `audience` to \
-             the narrowest audience its data may be confined to. Remove either field from the call when that dimension \
-             should keep its current value. A returned value combines its label with this session's and can narrow \
-             this session: under this floor it carries the subagent's label. Returning no final value adds nothing to \
-             this session's label, and it does not relax this floor.\n    {call}, with \
-             <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, \
-             or reader ID from the policy; add audience entries as needed"
+                "  - Declare this session's label as the floor of the subagent's return, then call the subagent tool \
+             again with the same arguments. Set `trust` (one of {ranks}, lowest first) or `audience` lower only when \
+             the subagent must read data below that label. A returned value can narrow this session to its \
+             floor.\n    {call}"
             )
         }
         ReturnRoute::Sanitized(name) if name.is_attest_schema() => {
             let call = remedy_call(
                 control,
                 id,
-                ", label: {audience: [\"<audience-entry>\"]}, return_schema: {type: \"object\", ...}",
+                ", label: {}, return_schema: {type: \"object\", ...}",
                 description,
                 include_display_plan,
             );
             format!(
                 "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
              floor must cover every audience narrowing its task needs, even when the subagent returns no final value. \
-             `attest-schema` unbinds trust by raising the return's trust; it does not widen or unbind audience. Set \
-             `audience` to the narrowest audience its data may be confined to, and omit `trust` because this sanitizer \
-             already unbinds it. The \
+             `attest-schema` unbinds trust by raising the return's trust; it does not widen or unbind audience. \
+             `label: {{}}` keeps this session's audience; set `audience` lower only when the subagent must read data \
+             below it, and omit `trust` because this sanitizer already unbinds it. The \
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
              `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
-             label.\n    {call}, with each <audience-entry> a built-in audience, configured group, or reader ID \
-             from the policy; add audience entries as needed"
+             label.\n    {call}"
             )
         }
         ReturnRoute::Sanitized(name) => {
             let call = remedy_call(
                 control,
                 id,
-                ", label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}",
+                &format!(", label: {floor}"),
                 description,
                 include_display_plan,
             );
             format!(
                 "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor. The floor must cover every narrowing its task needs on dimensions the sanitizer does not raise, even \
-             when the subagent returns no final value. Set every bound dimension low enough for the data the subagent \
-             must read. A returned value combines its sanitized label with this session's and can narrow this session \
-             on the dimensions the sanitizer does not raise; returning no final value adds nothing.\n    {call}, with \
-             <rank> one of {ranks} (lowest first), and each <audience-entry> a built-in audience, configured group, or reader ID from the policy; add audience entries \
-             as needed",
+             floor. Set `trust` (one of {ranks}, lowest first) or `audience` lower only when the subagent must read \
+             data below this session's label on a dimension the sanitizer does not raise.\n    {call}",
                 terminal_safe(name.as_str()),
             )
         }
@@ -4430,10 +4462,13 @@ fn block_feedback(
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
         RemedyPlan::Redispatch(_) => false,
     }) {
+        // Steer toward declaring ahead, so the next spawn meets no block for it.
         reasons.push(format!(
-            "This call starts a subagent, and this session has not declared what its return may carry. The policy's \
-             trust ranks, lowest first: {}.",
-            chain.names().map(terminal_safe).collect::<Vec<_>>().join(" < ")
+            "This call starts a subagent, and this session has not declared what its return may carry. Declare it \
+             first; any other reason here gets its own plan when you call again. Next time, declare right before \
+             the subagent call: {}(label: {}).",
+            control_spelling(naming, presentation),
+            spelling.floor,
         ));
     }
 
@@ -5416,36 +5451,59 @@ mod tests {
     }
 
     #[test]
-    fn display_plans_describe_return_remedies_in_the_rendered_call() {
-        let plan = ExecutableRemedyPlan {
+    fn a_declaration_renders_a_ready_call_and_a_gap_plan_says_it_asks_for_approval() {
+        let spelling = super::ReturnSpelling {
+            floor: "{trust: \"suspicious\", audience: [\"self\"]}".to_string(),
+            ranks: "\"suspicious\"".to_string(),
+        };
+        let render = |plan: &ExecutableRemedyPlan, display: bool| {
+            remedy_instruction(
+                plan,
+                &OfferId("0123456789abcdef".to_string()),
+                &spelling,
+                "approve_remedy",
+                None,
+                "subagent",
+                display,
+            )
+        };
+        let declare = ExecutableRemedyPlan {
             id: PlanId::new(1),
             steps: vec![RemedyStep::Return(appa_engine::fact::ReturnRoute::Raw)],
             required: Vec::new(),
         };
-        let instruction = remedy_instruction(
-            &plan,
-            &OfferId("0123456789abcdef".to_string()),
-            &super::ReturnSpelling {
-                floor: "{trust: \"internal\", audience: [\"public\"]}".to_string(),
-                ranks: "\"internal\"".to_string(),
-            },
-            "approve_remedy",
-            None,
-            "subagent",
-            true,
-        );
+        for display in [true, false] {
+            let instruction = render(&declare, display);
+            assert!(
+                instruction.contains(
+                    "approve_remedy(offer_id: \"0123456789abcdef\", label: {trust: \"suspicious\", audience: [\"self\"]}"
+                ),
+                "the call declares this session's label, ready to run: {instruction}"
+            );
+            assert!(
+                !instruction.contains('<'),
+                "the call carries no placeholder: {instruction}"
+            );
+            assert!(instruction.contains("lower only when the subagent must read data below that label"));
+            assert!(
+                !instruction.contains("asks the configured authority") && !instruction.contains("confirmation card")
+            );
+        }
 
-        assert!(
-            instruction.contains("plan: \"Declare the lowest label this session accepts from the subagent's return\"")
-        );
-        assert!(
-            instruction.contains("label: {trust: \"<rank>\", audience: [\"<audience-entry>\"]}"),
-            "the bare return remedy exposes both label dimensions: {instruction}",
-        );
-        assert!(instruction.contains("Set `trust` to the lowest rank it may read"));
-        assert!(instruction.contains("`audience` to the narrowest audience its data may be confined to"));
-        assert!(instruction.contains("Remove either field from the call when that dimension"));
-        assert!(instruction.contains("Each call in a fan-out declares its own"));
+        let gap = ExecutableRemedyPlan {
+            id: PlanId::new(2),
+            steps: vec![RemedyStep::Authorize(appa_engine::names::AuthorityName::new("officer"))],
+            required: vec![appa_engine::plan::RequiredRuling {
+                authority: appa_engine::names::AuthorityName::new("officer"),
+                covers: Vec::new(),
+            }],
+        };
+        let displayed = render(&gap, true);
+        assert!(displayed.contains("plan: \"Submit for approval\""), "{displayed}");
+        assert!(displayed.contains("The runtime asks the configured authority and returns its ruling."));
+        let listed = render(&gap, false);
+        assert!(listed.contains("Submit for approval:"), "{listed}");
+        assert!(listed.contains("The confirmation card is not open yet."));
     }
 
     #[test]

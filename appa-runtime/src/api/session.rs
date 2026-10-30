@@ -298,6 +298,10 @@ pub struct Session {
     presentation: EmbeddedPresentationOptions,
 }
 
+/// What a spawn's block says when the return its trajectory declared ahead has lapsed.
+const LAPSED_AHEAD: &str = "[appa] The return you declared ahead lapsed: this session's label changed before the \
+    subagent call. Declare it again right before the call, with no tool call between.";
+
 impl Session {
     pub(super) fn attach(
         inner: Arc<Inner>,
@@ -646,7 +650,94 @@ impl Session {
         self.propose_tool_call(call, call_id, None, None, Some(basis)).await
     }
 
+    /// Check a return declaration made ahead of the spawn at this trajectory's label, and answer
+    /// that label: the declaration stands only there.
+    pub(crate) fn declare_return_ahead(
+        &self,
+        arguments: &RemedyArguments,
+    ) -> Result<appa_engine::label::Label, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        policy
+            .engine()
+            .declare_ahead(&view, &self.trajectory, arguments)
+            .map_err(|detail| EventError::RemedyArguments { detail })
+    }
+
+    /// A marked single spawn applies the return this trajectory declared ahead of it: blocked
+    /// for its declaration, it takes the block's own declaration offer with the held arguments
+    /// and is proposed again, so it meets only what else blocks it. A declaration held at
+    /// another label has lapsed, and the block says so.
     async fn propose_tool_call(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: Option<SpawnKind>,
+        prompt: Option<PromptKey>,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
+        let decision = self
+            .propose_once(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone())
+            .await?;
+        let ToolCallDecision::Deny { feedback, offers, .. } = &decision else {
+            return Ok(decision);
+        };
+        if spawn != Some(SpawnKind::Single) {
+            return Ok(decision);
+        }
+        let Some(held) = self.inner.take_held_return(&self.root, &self.trajectory) else {
+            return Ok(decision);
+        };
+        let route = match held.arguments.return_schema {
+            Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
+                sanitizer: appa_engine::names::SanitizerName::ATTEST_SCHEMA.to_string(),
+            },
+            None => appa_runtime_api::OfferedReturn::AsSpoken,
+        };
+        let log = self.inner.log(&self.root)?;
+        let offer = offers
+            .iter()
+            .find(|offer| offer.returns.as_ref() == Some(&route))
+            .and_then(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())));
+        let lapsed = |feedback: &str| match &decision {
+            ToolCallDecision::Deny {
+                offers,
+                display,
+                review,
+                ..
+            } => ToolCallDecision::Deny {
+                feedback: format!("{LAPSED_AHEAD}\n\n{feedback}"),
+                offers: offers.clone(),
+                display: display.clone(),
+                review: review.clone(),
+            },
+            ToolCallDecision::Allow { .. } => unreachable!("only a denial is rewritten"),
+        };
+        let Some(offer) = offer else {
+            // No declaration offer: the spawn is blocked for something no declaration lifts.
+            return Ok(decision);
+        };
+        if self.current_label()? != Some(held.label) {
+            return Ok(lapsed(feedback));
+        }
+        match self.on_remedy(offer, held.arguments, None, None).await? {
+            RemedyDecision::Authorized { .. } => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
+            _ => Ok(lapsed(feedback)),
+        }
+    }
+
+    /// This trajectory's label now, or `None` before it opens.
+    fn current_label(&self) -> Result<Option<appa_engine::label::Label>, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        Ok(policy.engine().label_of(&view, &self.trajectory))
+    }
+
+    async fn propose_once(
         &self,
         call: ProposedCall,
         call_id: Option<String>,
@@ -8819,7 +8910,7 @@ delta = {}
             let quoted = OfferId(offers[0].id.clone());
             let key = crate::api::PermitKey::offer(&quoted);
             let args = || crate::api::ExecuteRemedyPlanArgs {
-                offer_id: quoted.0.clone(),
+                offer_id: Some(quoted.0.clone()),
                 label: None,
                 return_schema: None,
             };
@@ -8875,7 +8966,7 @@ delta = {}
             runtime.vouch(&key, &actor, None);
             runtime.vouch(&key, &actor, None);
             let args = || crate::api::ExecuteRemedyPlanArgs {
-                offer_id: quoted.0.clone(),
+                offer_id: Some(quoted.0.clone()),
                 label: None,
                 return_schema: None,
             };

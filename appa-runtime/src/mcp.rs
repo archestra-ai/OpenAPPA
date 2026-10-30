@@ -147,7 +147,11 @@ async fn execute_remedy(
     request: RequestContext<RoleServer>,
     expected_actor: Option<&appa_runtime_api::Actor>,
 ) -> CallToolResponse {
-    let pending = || runtime.pending_hitl_review(&args.offer_id);
+    let pending = || {
+        args.offer_id
+            .as_deref()
+            .and_then(|offer| runtime.pending_hitl_review(offer))
+    };
     match Elicitation::open(request, responses, runtime.review_timeout(), pending) {
         Review::Ask(review) => review.into(),
         Review::Proceed(elicitation) => remedy_result(
@@ -194,7 +198,10 @@ impl RuntimeTools {
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
                        session accepts from the return, unless it takes no return; a plan \
-                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
+                       that attests it also takes `return_schema`. Omit `offer_id` to declare \
+                       the return right before a subagent call, with no tool call between: \
+                       execute_remedy_plan(label: {}) keeps this session's label as the floor. \
+                       After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
@@ -369,7 +376,10 @@ impl RuntimeToolService {
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
                        session accepts from the return, unless it takes no return; a plan \
-                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
+                       that attests it also takes `return_schema`. Omit `offer_id` to declare \
+                       the return right before a subagent call, with no tool call between: \
+                       execute_remedy_plan(label: {}) keeps this session's label as the floor. \
+                       After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
@@ -1201,7 +1211,7 @@ mod tests {
         runtime.claim_until(&actor, &quoted, ahead);
         runtime.vouch(&PermitKey::offer(&quoted), &actor, None);
         let args = ExecuteRemedyPlanArgs {
-            offer_id: quoted.0.clone(),
+            offer_id: Some(quoted.0.clone()),
             label: None,
             return_schema: None,
         };
@@ -1216,6 +1226,56 @@ mod tests {
                 reason: RemedyRefusal::AlreadyExecuting
             },
             "the refused attempt left the running claim in place"
+        );
+    }
+
+    /// A declaration ahead of the spawn quotes no offer: the control hook vouches for it by
+    /// its arguments, and the tool spends that vouch for the trajectory that made it.
+    #[tokio::test]
+    async fn a_declaration_ahead_acts_for_the_trajectory_its_hook_vouched() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let policy = r#"
+            [policy]
+            version = 2
+
+            [policy.deployment]
+            context_control = true
+
+            [[policy.tool]]
+            name = "host/claude-code/Agent"
+            delta = {}
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, policy).expect("the fixture writes");
+        let runtime = Runtime::open_served(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .expect("the served deployment opens");
+        let root = crate::api::TrajectoryId("cc:ahead".to_string());
+        runtime.create_session(root.clone(), None).expect("a fresh id opens");
+        let args = || ExecuteRemedyPlanArgs {
+            offer_id: None,
+            label: Some(crate::api::LabelArgs {
+                trust: None,
+                audience: None,
+            }),
+            return_schema: None,
+        };
+        let unvouched = runtime.execute_remedy_plan(args(), None, None).await;
+        assert!(unvouched.is_error, "no hook vouched for it: {unvouched:?}");
+
+        runtime.vouch(&crate::api::declaration_key(&args()), &acting(root.0.as_str()), None);
+        let reply = runtime.execute_remedy_plan(args(), None, None).await;
+        assert!(
+            !reply.is_error && reply.text.starts_with("[appa] Declared."),
+            "{reply:?}"
         );
     }
 
@@ -1555,7 +1615,7 @@ mod tests {
         let owner = acting(root.0.as_str());
         let stranger = acting("cc:mcp-embedded-stranger");
         let args = ExecuteRemedyPlanArgs {
-            offer_id: quoted.0.clone(),
+            offer_id: Some(quoted.0.clone()),
             label: None,
             return_schema: None,
         };
@@ -1575,7 +1635,7 @@ mod tests {
             .execute_embedded_remedy(
                 &owner,
                 ExecuteRemedyPlanArgs {
-                    offer_id: quoted.0,
+                    offer_id: Some(quoted.0),
                     label: None,
                     return_schema: None,
                 },
@@ -1601,7 +1661,7 @@ mod tests {
                 .execute_embedded_remedy(
                     &actor,
                     ExecuteRemedyPlanArgs {
-                        offer_id: "not-an-offer".to_owned(),
+                        offer_id: Some("not-an-offer".to_owned()),
                         label: None,
                         return_schema: None,
                     },
@@ -1616,7 +1676,7 @@ mod tests {
             .execute_embedded_remedy(
                 &actor,
                 ExecuteRemedyPlanArgs {
-                    offer_id: quoted.0,
+                    offer_id: Some(quoted.0),
                     label: None,
                     return_schema: None,
                 },
@@ -1678,7 +1738,7 @@ max_body_bytes = 4096
             .next()
             .expect("an offered narrowing");
         let args = || ExecuteRemedyPlanArgs {
-            offer_id: offer.0.clone(),
+            offer_id: Some(offer.0.clone()),
             label: None,
             return_schema: None,
         };
