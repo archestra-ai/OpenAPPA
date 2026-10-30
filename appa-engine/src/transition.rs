@@ -190,6 +190,8 @@ pub enum OfferConsult {
     Authorities {
         call: ResolvedCall,
         required: Vec<crate::plan::RequiredRuling>,
+        /// The narrowing approving this offer also accepts, so a reviewer can be told.
+        narrowing: Option<crate::check::Narrowing>,
     },
     /// An input-substitution hop: the sanitizer rewrites the arguments of the call this offer
     /// stands on. The runtime derives the sanitizer's input from the call, and annotates the

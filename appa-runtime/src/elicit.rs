@@ -343,6 +343,10 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
         Some(hint) => format!("{hint}\n"),
         None => String::new(),
     };
+    let narrows = match &artifact.narrows {
+        Some(change) => format!("Approving also means {change} for good.\n"),
+        None => String::new(),
+    };
     format!(
         "{headline}\n\
          APPA asks you to rule as the authority \"{authority}\".\n\
@@ -352,6 +356,7 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
          Arguments:\n{arguments}\n\
          \n\
          What this ruling would cover:\n{requirements}\n\
+         {narrows}\
          \n\
          Set approval to true only if this exact call, with these exact arguments, \
          may run. Submit false or decline to refuse it. Cancel answers nothing and \
@@ -421,6 +426,7 @@ mod tests {
             tool: "host/claude-code/Bash".to_string(),
             arguments,
             requirements: Vec::new(),
+            narrows: None,
         }
     }
 

@@ -16,7 +16,7 @@ use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
 
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
-use appa_engine::check::Gap;
+use appa_engine::check::{Gap, Narrowing};
 use appa_engine::contract::AnnotationContext;
 use appa_engine::label::{Clause, DeclaredAudience, Trust};
 use appa_engine::plan::RequiredRuling;
@@ -24,6 +24,8 @@ use appa_engine::registry::AudienceVocabulary;
 use appa_engine::registry::TrustChain;
 use appa_engine::value::ResolvedCall;
 use appa_runtime_api::Ruling;
+
+use crate::engine::SessionNarrowing;
 
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
@@ -282,11 +284,21 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+    /// What approving also does to this session, for the human review only: the wire
+    /// artifact names what the ruling covers, not what the offer accepts beside it.
+    #[serde(skip)]
+    pub(crate) narrows: Option<SessionNarrowing>,
 }
 
 impl AuthorityArtifact {
-    pub fn of(call: &ResolvedCall, requirement: &RequiredRuling, chain: &TrustChain) -> AuthorityArtifact {
+    pub fn of(
+        call: &ResolvedCall,
+        requirement: &RequiredRuling,
+        narrowing: Option<&Narrowing>,
+        chain: &TrustChain,
+    ) -> AuthorityArtifact {
         AuthorityArtifact {
+            narrows: narrowing.and_then(|narrowing| SessionNarrowing::of(narrowing, Some(chain))),
             tool: call.tool().as_str().to_string(),
             arguments: call.arguments().clone(),
             requirements: requirement
@@ -1358,6 +1370,7 @@ mod tests {
                     requirements: vec![Requirement::Trust {
                         required: "trusted".to_string(),
                     }],
+                    narrows: None,
                 },
             },
         };

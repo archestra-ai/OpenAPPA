@@ -1905,7 +1905,7 @@ impl RuntimeEngine {
             let Some((offer, _)) = offers.iter().find(|(_, planned)| *planned == plan.id) else {
                 continue;
             };
-            reviews.extend(self.reviews_of(offer, &block.call, &plan.required));
+            reviews.extend(self.reviews_of(offer, &block.call, &plan.required, plan.narrowing()));
         }
         reviews
     }
@@ -1923,19 +1923,29 @@ impl RuntimeEngine {
             return Vec::new();
         };
         match self.engine.offer_consults(view, trajectory, &engine_offer) {
-            Ok(OfferConsult::Authorities { call, required }) => self.reviews_of(offer, &call, &required),
+            Ok(OfferConsult::Authorities {
+                call,
+                required,
+                narrowing,
+            }) => self.reviews_of(offer, &call, &required, narrowing.as_ref()),
             _ => Vec::new(),
         }
     }
 
-    fn reviews_of(&self, offer: &OfferId, call: &ResolvedCall, required: &[RequiredRuling]) -> Vec<PendingReview> {
+    fn reviews_of(
+        &self,
+        offer: &OfferId,
+        call: &ResolvedCall,
+        required: &[RequiredRuling],
+        narrowing: Option<&appa_engine::check::Narrowing>,
+    ) -> Vec<PendingReview> {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
         required
             .iter()
             .filter_map(|requirement| {
                 let declaration = AuthorityDeclaration::of(registry.authority(&requirement.authority)?, chain);
-                let artifact = AuthorityArtifact::of(call, requirement, chain);
+                let artifact = AuthorityArtifact::of(call, requirement, narrowing, chain);
                 Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
@@ -2110,15 +2120,17 @@ impl RuntimeEngine {
                 }),
                 Err(next) => return Ok(*next),
             },
-            OfferConsult::Authorities { call, required } => {
-                match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
-                    AuthorityOutcome::Outcome(outcome) => outcome,
-                    AuthorityOutcome::Consult(requests) => {
-                        return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-                    }
-                    AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
+            OfferConsult::Authorities {
+                call,
+                required,
+                narrowing,
+            } => match self.offer_authorities(&views, &engine_offer, &call, &required, narrowing.as_ref(), evidence) {
+                AuthorityOutcome::Outcome(outcome) => outcome,
+                AuthorityOutcome::Consult(requests) => {
+                    return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                 }
-            }
+                AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
+            },
         };
         let judged = self.judge_under_audience(
             view.principal(),
@@ -2195,6 +2207,7 @@ impl RuntimeEngine {
         offer: &EngineOfferId,
         call: &ResolvedCall,
         required: &[RequiredRuling],
+        narrowing: Option<&appa_engine::check::Narrowing>,
         evidence: &[ExternalEvidence],
     ) -> AuthorityOutcome {
         let registry = self.engine.registry();
@@ -2215,7 +2228,7 @@ impl RuntimeEngine {
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact::of(call, requirement, chain),
+                        artifact: AuthorityArtifact::of(call, requirement, narrowing, chain),
                         review,
                     });
                 }
@@ -4154,12 +4167,14 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
                 };
                 format!("{lead} sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
             }
-            (true, Some(narrowing), None) => format!(
-                "Submit for approval and accept {} for the rest of this session",
-                narrowing_change(narrowing)
-            ),
-            (false, Some(narrowing), None) => {
-                format!("Accept {} for the rest of this session", narrowing_change(narrowing))
+            (needs_approval, Some(narrowing), None) => {
+                let chain = registry.map(Registry::trust_chain);
+                match (needs_approval, SessionNarrowing::of(narrowing, chain)) {
+                    (true, Some(change)) => format!("Submit this call for approval; once approved, {change} for good"),
+                    (false, Some(change)) => format!("Run this call; {change} for good"),
+                    (true, None) => "Submit this call for approval".to_string(),
+                    (false, None) => "Run this call".to_string(),
+                }
             }
             (true, None, None) => "Submit for approval".to_string(),
             (false, None, None) => "Apply the offered remedy".to_string(),
@@ -4167,20 +4182,44 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
     }
 }
 
-/// The change a narrowing plan asks the model to accept, in the words of the reasons
-/// `narrowing_feedback` gives: "lower this session's trust", "narrow this session's audience".
-fn narrowing_change(narrowing: &appa_engine::check::Narrowing) -> &'static str {
-    // The engine builds a narrowing only where the label moves, so one dimension changes.
-    debug_assert_ne!(narrowing.from, narrowing.to, "a narrowing changes trust or audience");
-    match (
-        narrowing.from.trust != narrowing.to.trust,
-        narrowing.from.audience != narrowing.to.audience,
-    ) {
-        (true, true) => "lower trust and the narrower audience",
-        (true, false) => "lower trust",
-        (false, true) => "the narrower audience",
-        // The assert above rules this out; a release build keeps a neutral label.
-        (false, false) => "this change",
+/// Where accepting a narrowing moves this session's label, by the names the reasons use. The
+/// move is permanent: labels only narrow, so a plan offering it binds more than its one call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionNarrowing {
+    Trust(String),
+    Audience(String),
+    Both { trust: String, audience: String },
+}
+
+impl SessionNarrowing {
+    pub(crate) fn of(narrowing: &appa_engine::check::Narrowing, chain: Option<&TrustChain>) -> Option<Self> {
+        let trust = (narrowing.from.trust != narrowing.to.trust).then(|| match chain {
+            Some(chain) => trust_feedback(narrowing.to.trust, chain),
+            None => format!("rank {}", narrowing.to.trust.rank()),
+        });
+        let audience =
+            (narrowing.from.audience != narrowing.to.audience).then(|| audience_count(&narrowing.to.audience));
+        match (trust, audience) {
+            (Some(trust), Some(audience)) => Some(Self::Both { trust, audience }),
+            (Some(trust), None) => Some(Self::Trust(trust)),
+            (None, Some(audience)) => Some(Self::Audience(audience)),
+            (None, None) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SessionNarrowing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Trust(trust) => write!(f, "this session's trust drops to {trust}"),
+            Self::Audience(audience) => write!(f, "this session's audience narrows to {audience}"),
+            Self::Both { trust, audience } => {
+                write!(
+                    f,
+                    "this session's trust drops to {trust} and its audience narrows to {audience}"
+                )
+            }
+        }
     }
 }
 
@@ -5457,11 +5496,17 @@ mod tests {
         let from = Label::new(Trust::new(2), Audience::public());
         let narrower = Audience::restricted([ReaderId::new("alice")]);
         let cases = [
-            (Label::new(Trust::new(0), Audience::public()), "lower trust"),
-            (Label::new(Trust::new(2), narrower.clone()), "the narrower audience"),
+            (
+                Label::new(Trust::new(0), Audience::public()),
+                "this session's trust drops to suspicious",
+            ),
+            (
+                Label::new(Trust::new(2), narrower.clone()),
+                "this session's audience narrows to 1 reader",
+            ),
             (
                 Label::new(Trust::new(0), narrower.clone()),
-                "lower trust and the narrower audience",
+                "this session's trust drops to suspicious and its audience narrows to 1 reader",
             ),
         ];
         let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
@@ -5512,14 +5557,13 @@ mod tests {
                     &options,
                 );
                 let label = if required {
-                    format!("Submit for approval and accept {change} for the rest of this session")
+                    format!("Submit this call for approval; once approved, {change} for good")
                 } else {
-                    format!("Accept {change} for the rest of this session")
+                    format!("Run this call; {change} for good")
                 };
                 let text = feedback.text;
                 assert!(text.starts_with("[appa] Blocked: send_mail cannot run yet."), "{text}");
                 assert_eq!(text.matches(&label).count(), 1, "the label appears once: {text}");
-                assert!(!text.contains("Accept this change"), "{text}");
                 if include_display_plan {
                     assert!(
                         text.contains(&format!(
