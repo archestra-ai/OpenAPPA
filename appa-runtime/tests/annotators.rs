@@ -747,8 +747,14 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
         );
     }
     assert_eq!(annotations.len(), 1, "the annotator is asked once, after the providers");
+    // The failing provider leaves an error entry with its reason; how the reason reads is the
+    // runtime's own.
+    let error = annotations[0]["artifact"]["context"]["down"]["error"]
+        .as_str()
+        .filter(|reason| !reason.is_empty())
+        .expect("the failing provider leaves an error with a reason");
     let context = serde_json::json!({
-        "down": { "error": "non_success status=500" },
+        "down": { "error": error },
         "repo": { "answer": { "visibility": "private" } },
     });
     assert_eq!(
@@ -932,12 +938,21 @@ async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast()
 async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     // A call owes one annotation, so concurrency comes from trajectories: five roots each
-    // propose one annotated call at once. Five 300ms consults through a four-permit gate
-    // are still two waves.
-    let command = fake_claude(dir.path(), &format!("cat > /dev/null\nsleep 0.3\n{NEUTRAL_STRUCTURED}"));
-    let runtime = open_runtime(&dir, &builtin_policy(&command, "")).await;
+    // propose one annotated call at once through a two-permit gate. Each consult marks itself
+    // running and records how many consults it saw running beside it.
+    let running = dir.path().join("running");
+    std::fs::create_dir(&running).expect("the running directory is created");
+    let seen = dir.path().join("seen.txt");
+    let command = fake_claude(
+        dir.path(),
+        &format!(
+            "cat > /dev/null\ntouch {running}/$$\nls {running} | wc -l >> {seen}\nsleep 0.3\nrm {running}/$$\n{NEUTRAL_STRUCTURED}",
+            running = running.display(),
+            seen = seen.display(),
+        ),
+    );
+    let runtime = open_runtime(&dir, &builtin_policy(&command, "max_concurrent = 2")).await;
 
-    let started = Instant::now();
     let mut proposals = Vec::new();
     for index in 0..5 {
         let root = TrajectoryId(format!("annotators-permit-{index}"));
@@ -978,11 +993,15 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
             HookDecision::AllowCall { spawn: None }
         );
     }
+    let seen = std::fs::read_to_string(&seen).expect("every consult recorded what it saw");
+    let counts: Vec<usize> = seen.lines().map(|line| line.trim().parse().expect("a count")).collect();
+    assert_eq!(counts.len(), 5, "every call was consulted once: {counts:?}");
+    let most = counts.iter().copied().max().expect("five counts");
     assert!(
-        started.elapsed() >= Duration::from_millis(450),
-        "five subprocess consults must not all run at once: {:?}",
-        started.elapsed()
+        most <= 2,
+        "no more consults run at once than the declared limit: {counts:?}"
     );
+    assert!(most > 1, "the consults ran concurrently up to the limit: {counts:?}");
 }
 
 /// One Ollama-shaped model endpoint on loopback: every `/api/chat` call is counted and

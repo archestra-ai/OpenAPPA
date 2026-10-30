@@ -1099,27 +1099,23 @@ mod tests {
         let runtime =
             Arc::new(Runtime::open(config(), dir.path().join("second.db"), None).expect("the second runtime opens"));
         let service = RuntimeToolService::new(runtime);
-        assert_eq!(
-            service
-                .appa_get_runtime_state(Parameters(RuntimeStateArgs {
-                    actor: "direct".to_string(),
-                }))
-                .await
-                .is_error,
-            Some(true)
-        );
-        assert_eq!(
-            service
-                .appa_match_batteries(Parameters(MatchBatteriesArgs {
-                    actor: "direct".to_string(),
-                    source: "server".to_string(),
-                    endpoint: None,
-                    tools: vec!["tool".to_string()],
-                }))
-                .await
-                .is_error,
-            Some(true)
-        );
+        let state = service
+            .appa_get_runtime_state(Parameters(RuntimeStateArgs {
+                actor: "direct".to_string(),
+            }))
+            .await;
+        assert_eq!(state.is_error, Some(true));
+        assert!(format!("{:?}", state.content).contains("one-shot APPA vouch"));
+        let matched = service
+            .appa_match_batteries(Parameters(MatchBatteriesArgs {
+                actor: "direct".to_string(),
+                source: "server".to_string(),
+                endpoint: None,
+                tools: vec!["tool".to_string()],
+            }))
+            .await;
+        assert_eq!(matched.is_error, Some(true));
+        assert!(format!("{:?}", matched.content).contains("one-shot APPA vouch"));
     }
 
     #[test]

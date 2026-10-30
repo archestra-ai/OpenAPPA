@@ -1834,8 +1834,18 @@ else:
         let id = TrajectoryId("host-owned-session".into());
         bind(&runtime, &id, dir.path());
         let session = runtime.create_session(id.clone(), None).unwrap();
+        let shell = ProposedCall {
+            tool: "host/claude-code/Bash".into(),
+            arguments: super::super::session::raw(serde_json::json!({"command": "cat source.txt"})),
+            cwd: None,
+        };
+        let refused = session.on_tool_call(shell, false).await;
+        assert!(
+            matches!(&refused, Err(EventError::RemedyArguments { detail })
+                if detail.contains("native filesystem and shell tools")),
+            "{refused:?}"
+        );
         for proposal in [
-            call("Bash", "source.txt"),
             call("Read", "../policy.toml"),
             call("Write", ".claude/settings.json"),
             call("Write", "CLAUDE.md"),

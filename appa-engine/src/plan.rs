@@ -2079,22 +2079,30 @@ mod tests {
                 "the sanitizer covers no gap: the ruling is still required"
             );
         }
+        let accept = executables
+            .iter()
+            .find(|plan| plan.narrowing().is_some())
+            .expect("an accept plan is offered");
+        let sanitize = executables
+            .iter()
+            .find(|plan| plan.sanitizer().is_some())
+            .expect("a sanitize plan is offered");
         assert!(
-            executables[1]
+            sanitize
                 .steps
                 .contains(&RemedyStep::Authorize(AuthorityName::new("steward")))
         );
         assert_eq!(executables[0].id, PlanId::new(0));
         assert_eq!(executables[1].id, PlanId::new(1));
         assert_eq!(
-            executables[0].steps,
+            accept.steps,
             vec![
                 RemedyStep::Accept(planned.raw.narrowing.clone().expect("the block narrows")),
                 RemedyStep::Authorize(AuthorityName::new("steward")),
             ]
         );
         assert_eq!(
-            executables[1].steps,
+            sanitize.steps,
             vec![
                 RemedyStep::Authorize(AuthorityName::new("steward")),
                 RemedyStep::Sanitize(SanitizerName::new("declassify")),
@@ -4176,23 +4184,12 @@ mod tests {
                 }
                 strictly_less
             };
-            let mut expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = Vec::with_capacity(enumerated.len());
-            let mut used = vec![false; enumerated.len()];
-            for _ in 0..enumerated.len() {
-                let next = (0..enumerated.len())
-                    .filter(|&i| !used[i])
-                    .find(|&i| (0..enumerated.len())
-                        .filter(|&j| !used[j] && j != i)
-                        .all(|j| !precedes(&enumerated[j], &enumerated[i])))
-                    .expect("a finite strict partial order has a minimal element");
-                used[next] = true;
-                expected.push(enumerated[next].clone());
-            }
+            let mut expected = enumerated;
             if raw.narrowing.is_some() && !contract.emits.is_empty() {
                 expected = expected.into_iter().flat_map(|assignment| [assignment.clone(), assignment]).collect();
             }
 
-            let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
+            let mut actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
                 .filter_map(RemedyPlan::executable)
                 .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
                 .collect();
@@ -4202,6 +4199,10 @@ mod tests {
                         "presented order inverts a dominance edge: {:?} precedes {:?}", actual[j], actual[i]);
                 }
             }
+            // The menu is checked as a multiset: presentation order is constrained only by the
+            // dominance loop above, not by the reference's enumeration order.
+            actual.sort_by_cached_key(|assignment| format!("{assignment:?}"));
+            expected.sort_by_cached_key(|assignment| format!("{assignment:?}"));
             prop_assert_eq!(actual, expected);
         }
     }

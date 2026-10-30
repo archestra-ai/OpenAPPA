@@ -667,7 +667,13 @@ mod tests {
         );
         assert!(detected(Host::Kagent, &available, &search).is_empty());
         assert!(detected(Host::ClaudeCode, &available, &std::env::join_paths([&other]).unwrap()).is_empty());
-        let relative = bin.strip_prefix(root.path()).unwrap().to_path_buf();
+        // A relative entry that really reaches `bin` from the working directory:
+        // only the refusal of relative entries keeps `gh` from being detected.
+        let cwd = std::env::current_dir().unwrap();
+        let relative: PathBuf = std::iter::repeat_n(Path::new(".."), cwd.components().count() - 1)
+            .collect::<PathBuf>()
+            .join(bin.strip_prefix("/").unwrap());
+        assert!(relative.is_relative() && relative.join("gh").is_file(), "{relative:?}");
         assert!(
             detected(Host::ClaudeCode, &available, relative.as_os_str()).is_empty(),
             "a relative entry names the working directory, not the machine"

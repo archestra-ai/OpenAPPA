@@ -263,10 +263,10 @@ async fn an_hr_child_return_crosses_only_as_the_redacted_derivation() {
         // The root will not pay the hr narrowing: it still has to email.
         .calls("read_hr", serde_json::json!({"file": "alice-chen.md"}))
         .calls("fork", serde_json::json!({"task": "look up the onboarding buddy"}))
-        // The parent declares the return through `pii-redactor`, the one plan
-        // listed behind the bare floor, keeping its own label as the floor: the
-        // child may narrow only as far as the redactor lifts back.
-        .declares_the_return(1, serde_json::json!({}))
+        // The parent declares the return through `pii-redactor`, keeping its
+        // own label as the floor: the child may narrow only as far as the
+        // redactor lifts back.
+        .declares_the_return_through("pii-redactor", serde_json::json!({}))
         .calls("fork", serde_json::json!({"task": "look up the onboarding buddy"}))
         // The child pays it, reads, and reports what it found; the return crosses
         // as the redacted derivation.

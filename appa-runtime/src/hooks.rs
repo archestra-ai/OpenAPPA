@@ -1809,7 +1809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replaced_output_renders_as_a_block_with_the_placeholder() {
+    async fn a_plain_success_answers_with_no_opinion() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let pre = serde_json::json!({
