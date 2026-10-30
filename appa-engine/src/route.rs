@@ -767,8 +767,7 @@ impl<'a> Search<'a> {
                     };
                     // The hop replaces the arguments only: what the call forwards still
                     // reaches the sink beside the derived bytes.
-                    let forwarded =
-                        check::forwarded_label(&self.context.contract, CallReads::Resolved(&self.context.call));
+                    let forwarded = check::forwarded_label(&self.context.contract);
                     let to = Audience::of_declared(to).combine(&forwarded.audience);
                     for gap in gaps {
                         if let Gap::Includes { recipients } = gap
@@ -1054,6 +1053,7 @@ mod tests {
 
         fn registry(self) -> Registry {
             Registry::build_covered(RegistryConfig {
+                recorders: Default::default(),
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "vetted".into()]),
                 tools: self
                     .tools
@@ -1101,7 +1101,7 @@ mod tests {
             receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             annotation: None,
-            file_basis: None,
+            held: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
             terms: crate::fact::ReleaseTerms::none(),

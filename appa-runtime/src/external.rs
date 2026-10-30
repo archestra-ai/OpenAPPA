@@ -247,6 +247,8 @@ pub struct ExternalServices {
     timeout: Duration,
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
+    /// The bound recorders: delivered to, never consulted.
+    recorders: BTreeMap<String, Transport>,
     gates: ConsultGates,
 }
 
@@ -430,6 +432,7 @@ impl ExternalServices {
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
+        let recorders = config.recorders;
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
@@ -469,6 +472,7 @@ impl ExternalServices {
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
+            recorders,
             gates,
         })
     }
@@ -647,6 +651,21 @@ impl ExternalServices {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
+        let credentials = self.command_credentials(command)?;
+        let CommandRun { output, transcript } =
+            run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
+        drop(permit);
+        if let (Some(seen), Some(transcript)) = (seen, transcript) {
+            *seen = transcript;
+        }
+        read_answer(&output?)
+    }
+
+    /// The credentials a `command` binding's `token_env` names, resolved for its process.
+    fn command_credentials(
+        &self,
+        command: &ResolverCommand,
+    ) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, NoAnswerReason> {
         let mut credentials = Vec::new();
         for var in &command.token_env {
             if let Some(value) = crate::credentials::resolve(self.credential_store.as_ref(), var)
@@ -655,13 +674,7 @@ impl ExternalServices {
                 credentials.push((std::ffi::OsString::from(var), value));
             }
         }
-        let CommandRun { output, transcript } =
-            run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
-        drop(permit);
-        if let (Some(seen), Some(transcript)) = (seen, transcript) {
-            *seen = transcript;
-        }
-        read_answer(&output?)
+        Ok(credentials)
     }
 
     async fn consult_model(
@@ -728,10 +741,35 @@ impl ExternalServices {
         }
     }
 
+    /// Deliver one batch of dispatch records to a bound recorder over its transport, in the
+    /// consult envelope's carriage: a `url` recorder is posted the delivery, a `command`
+    /// recorder reads it on stdin, and either answers `{"version": 1, "answer": {}}` once it
+    /// has kept the records. Any other reply is a failed delivery, retried with the next.
+    pub(crate) async fn deliver(&self, recorder: &str, delivery: &serde_json::Value) -> Result<(), NoAnswerReason> {
+        let answer = match self.recorders.get(recorder) {
+            None => return Err(NoAnswerReason::Unregistered),
+            Some(Transport::Url(endpoint)) => read_answer(&self.post(endpoint, delivery, None).await?),
+            Some(Transport::Command(command)) => {
+                let input = serde_json::to_vec(delivery).map_err(|_| NoAnswerReason::Malformed)?;
+                let deadline = tokio::time::Instant::now() + self.timeout;
+                let credentials = self.command_credentials(command)?;
+                let permit = acquire_within(&self.gates.command, deadline, "command", recorder).await?;
+                let CommandRun { output, .. } =
+                    run_command(command, input, deadline, self.max_body_bytes, None, credentials).await;
+                drop(permit);
+                read_answer(&output?)
+            }
+        }?;
+        match answer.as_object() {
+            Some(_) => Ok(()),
+            None => Err(NoAnswerReason::MalformedAnswer("recorder answer".into())),
+        }
+    }
+
     async fn post(
         &self,
         endpoint: &Endpoint,
-        consult: &Consult,
+        consult: &(impl serde::Serialize + ?Sized),
         mut seen: Option<&mut Transcript>,
     ) -> Result<Vec<u8>, NoAnswerReason> {
         let http = match endpoint.host() {
@@ -839,7 +877,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Context => None,
+        Section::Annotators | Section::Audience | Section::Context | Section::Recorders => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -988,6 +1026,7 @@ mod tests {
             audience,
             context: BTreeMap::new(),
             context_hints: BTreeMap::new(),
+            recorders: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
             jev: None,

@@ -6,8 +6,6 @@ mod agent_scan;
 mod annotate;
 pub mod api;
 pub mod batteries;
-#[cfg(feature = "daemon")]
-pub mod claude_files;
 pub mod config;
 mod credentials;
 pub mod describe;

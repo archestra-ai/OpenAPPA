@@ -20,7 +20,7 @@ use crate::profile::PolicyRevision;
 use crate::projection::{Projection, Views};
 use crate::registry::TrustChain;
 use crate::value::{
-    ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
+    ChildReturnId, DispatchId, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
 };
 
 /// The identity of one complete policy-content payload for one trajectory. Runtime
@@ -330,8 +330,12 @@ pub enum OutcomeBody {
 /// engine event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
-    /// Trusted host pin for the file operation at `position` in a proposal batch.
-    File { position: usize, basis: FileBasis },
+    /// The held peer message the proposal at `position` in a proposal batch reads, pinned by the
+    /// trusted runtime from its own store.
+    Held {
+        position: usize,
+        message: crate::value::HeldMessage,
+    },
     /// An output sanitizer's derivation of a withheld value.
     Sanitizer {
         sanitizer: SanitizerName,
@@ -499,7 +503,7 @@ pub enum TransitionError {
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
     #[error("a failure carries a body only for a call that touches a tracked file")]
-    FailureBodyOutsideFile,
+    FailureBodyOutsideHeld,
     #[error(
         "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
     )]
@@ -1272,12 +1276,12 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 annotation,
-                file_basis,
+                held,
                 evidence,
                 terms,
                 ..
             } => {
-                let call = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let call = crate::projection::opened_call(tool, arguments, annotation, held);
                 self.opened(trajectory, dispatch, &call, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects, terms)?;
             }
@@ -1487,7 +1491,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::EffectsMismatch);
         }
         let current = views.current_label();
-        if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
+        if proposed_label != &current.combine(&call.output_label(&checked)) || receiving != &current {
             return Err(TransitionRefusal::ForgedLabel);
         }
         // The terms a release pins are the contract it was checked under, exactly.
@@ -1529,9 +1533,7 @@ impl<'a> Sequence<'a> {
                 Err(TransitionRefusal::ContradictedSuccess)
             }
             (CloseOutcome::FailureWithBody { .. }, false)
-                if views
-                    .dispatch_call(dispatch)
-                    .is_none_or(|call| call.file_basis().is_none()) =>
+                if views.dispatch_call(dispatch).is_none_or(|call| call.held().is_none()) =>
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
@@ -2423,11 +2425,11 @@ impl<'a> Sequence<'a> {
                     annotation,
                     subject,
                     evidence,
-                    file_basis,
+                    held,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let opened = crate::projection::opened_call(tool, arguments, annotation, held);
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2747,7 +2749,7 @@ impl<'a> Sequence<'a> {
                                 Some(crate::plan::OutputRemedy::Sanitize(name)) => crate::plan::bound_contribution(
                                     self.engine.registry(),
                                     &contract,
-                                    &call.output_label(&contract, &views.current_label()),
+                                    &call.output_label(&contract),
                                     name,
                                     &self.context(expansions),
                                 )
@@ -2881,10 +2883,10 @@ impl<'a> Sequence<'a> {
                             } else {
                                 self.observed_as(trajectory, dispatch, &digest)?;
                             }
-                            let receiving = views
+                            views
                                 .receiving_bound(dispatch)
                                 .ok_or(TransitionRefusal::UnknownDispatch)?;
-                            call.output_label_from(&contract.output_label(), receiving)
+                            call.output_label_from(&contract.output_label())
                         }
                     },
                 };
@@ -3239,7 +3241,7 @@ impl<'a> Sequence<'a> {
                 .projection
                 .dispatch_call_of(dispatch)
                 .expect("dispatch_contract resolved this dispatch's recorded call")
-                .output_label_from(&contract.output_label(), &receiving),
+                .output_label_from(&contract.output_label()),
             Some((body, _)) => body.label.clone(),
         };
         let label = sanitized_label(registered.derive_output(
@@ -3370,7 +3372,7 @@ impl<'a> Sequence<'a> {
         }
         // A rewrite carries only the arguments and a fresh annotation pin, never a host-pinned
         // file basis.
-        if registry.selects_alike(call, predecessor) && call.file_basis().is_some() {
+        if registry.selects_alike(call, predecessor) && call.held().is_some() {
             return Err(TransitionRefusal::ForgedLabel);
         }
         let stage = views.call_stage(subject);
@@ -3682,6 +3684,7 @@ mod tests {
     /// The test policy over the trust chain `ranks`, lowest first.
     fn engine_over(ranks: &[&str]) -> Engine {
         let config = crate::registry::RegistryConfig {
+            recorders: Default::default(),
             trust_chain: crate::registry::TrustChain::new(ranks.iter().map(|rank| rank.to_string()).collect()),
             tools: vec![crate::contract::ToolDeclaration::Declared(note_tool())],
             annotators: vec![],
@@ -3815,7 +3818,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_file_basis_changes_batch_authorization() {
+    fn pinned_held_changes_batch_authorization() {
         let engine = engine();
         let first = vec![opening(&engine, &traj())];
         let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
@@ -3824,11 +3827,11 @@ mod tests {
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
             annotation: None,
         };
-        let basis = FileBasis::Read(crate::value::FileSource {
-            version: "v1".into(),
+        let basis = crate::value::HeldMessage {
+            id: "v1".into(),
             digest: "content".into(),
             label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")])),
-        });
+        };
         let event = EngineEvent::Proposals(ProposalBatch {
             id: ProposalBatchId::new("file-read"),
             trajectory: traj(),
@@ -3836,9 +3839,9 @@ mod tests {
             proposals: vec![proposal],
             spawn: None,
             offer_nonce: nonce(),
-            evidence: vec![Evidence::File {
+            evidence: vec![Evidence::Held {
                 position: 0,
-                basis: basis.clone(),
+                message: basis.clone(),
             }],
             audience: crate::audience::AudienceEvidence::default(),
         });
@@ -4030,6 +4033,7 @@ mod tests {
     /// The test policy over two ranks with `note` declared as `note`, at `revision`.
     fn engine_noting(note: Option<ToolAnnotation>, revision: u64) -> Engine {
         let config = crate::registry::RegistryConfig {
+            recorders: Default::default(),
             trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: note
                 .into_iter()

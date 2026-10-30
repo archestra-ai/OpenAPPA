@@ -2150,3 +2150,84 @@ async fn a_failing_jev_provider_refuses_the_hook_and_appends_nothing() {
         "a no-answer appends nothing to the trajectory"
     );
 }
+
+#[tokio::test]
+async fn a_released_call_reaches_its_recorder_with_the_label_it_published_and_the_evidence_judged() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    let mut answer = produced("trusted");
+    answer["answer"]["delta"]["audience"] = serde_json::json!(["insider"]);
+    answer["answer"]["evidence"] = serde_json::json!("etag:7");
+    annotator.set("classifier", Answer::Wire(answer));
+    let deliveries: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let recorder = serve(
+        Router::new()
+            .route(
+                "/record",
+                post(
+                    |State(deliveries): State<Arc<Mutex<Vec<serde_json::Value>>>>, body: String| async move {
+                        deliveries
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_str(&body).expect("a delivery is JSON"));
+                        r#"{"version":1,"answer":{}}"#
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&deliveries)),
+    )
+    .await;
+    let policy = http_policy(&url).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + &format!("\n[externals.recorders.tracker]\nurl = \"{recorder}/record\"\n");
+    let runtime = open_runtime(&dir, &policy).await;
+
+    let offered = propose(&runtime, fetch("https://a.example")).await;
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&offered)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let records = loop {
+        let records: Vec<serde_json::Value> = deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .inspect(|delivery| {
+                assert_eq!(delivery["kind"], "recorder");
+                assert_eq!(delivery["name"], "tracker");
+                assert_eq!(delivery["root"], root().0);
+            })
+            .flat_map(|delivery| delivery["records"].as_array().cloned().unwrap_or_default())
+            .collect();
+        if records.iter().any(|record| record["record"] == "outcome") || Instant::now() > deadline {
+            break records;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let released = records
+        .iter()
+        .find(|record| record["record"] == "released")
+        .expect("the release is delivered");
+    assert_eq!(released["tool"], "fetch");
+    assert_eq!(released["arguments"], serde_json::json!({ "url": "https://a.example" }));
+    assert_eq!(
+        released["label"],
+        serde_json::json!({ "trust": "trusted", "audience": [["insider"]] }),
+        "the call published its delta"
+    );
+    assert_eq!(released["evidence"], "etag:7");
+    let outcome = records
+        .iter()
+        .find(|record| record["record"] == "outcome")
+        .expect("the outcome is delivered");
+    assert_eq!(outcome["dispatch"], released["dispatch"]);
+    assert_eq!(outcome["outcome"], "success");
+}

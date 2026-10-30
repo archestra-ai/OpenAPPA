@@ -203,7 +203,7 @@ fn an_ended_branch_releases_nothing_more() {
             receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             proposed_effects: EffectSet::default(),
             annotation: None,
-            file_basis: None,
+            held: None,
             subject: crate::basis::fixture_subject(&child),
             evidence: crate::audience::AudienceEvidence::default(),
             terms: crate::fact::ReleaseTerms::none(),
@@ -278,6 +278,7 @@ fn a_sanitizer_settlement_replays_only_where_the_deployment_confines_the_result(
         hint: None,
     };
     let config = RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![declassify],
         ..test_config(vec![crm_tool()])
     };

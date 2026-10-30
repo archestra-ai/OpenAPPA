@@ -5,7 +5,7 @@ use appa_engine::authority::ContextHint;
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
-use appa_engine::names::AnnotatorName;
+use appa_engine::names::{AnnotatorName, RecorderName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
 use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
@@ -80,7 +80,7 @@ impl Config {
                 .filter_map(|annotator| annotator.audiences.as_ref())
                 .flat_map(AudienceVocabulary::referenced_providers),
         );
-        let (tools, qualified) = compile_tools(raw.tool, &trust_chain)?;
+        let (tools, recorders, qualified) = compile_tools(raw.tool, &trust_chain)?;
         referenced.extend(
             tools
                 .iter()
@@ -118,6 +118,7 @@ impl Config {
         };
 
         let registry_config = RegistryConfig {
+            recorders,
             trust_chain,
             tools,
             annotators: annotator_declarations,
@@ -213,22 +214,33 @@ impl Config {
 /// can name a tool as the policy wrote it.
 type QualifiedNames = BTreeMap<String, BTreeSet<String>>;
 
-fn compile_tools(
-    raw: Vec<RawTool>,
-    trust_chain: &TrustChain,
-) -> Result<(Vec<ToolDeclaration>, QualifiedNames), ConfigError> {
+/// The compiled declarations, the recorder each names by its written name, and the
+/// server-qualified spellings of each authored name.
+type CompiledTools = (Vec<ToolDeclaration>, BTreeMap<String, RecorderName>, QualifiedNames);
+
+fn compile_tools(raw: Vec<RawTool>, trust_chain: &TrustChain) -> Result<CompiledTools, ConfigError> {
     let mut tools = Vec::new();
+    let mut recorders = BTreeMap::new();
     let mut qualified = QualifiedNames::new();
-    for t in raw {
+    for mut t in raw {
         let authored = split_selector(&t.name).0.to_string();
+        let recorder = t.recorder.take();
         let tool = t.convert(trust_chain)?;
+        if let Some(recorder) = recorder {
+            if recorder.is_empty() {
+                return Err(ConfigError::EmptyRecorder {
+                    tool: tool.name().as_str().to_string(),
+                });
+            }
+            recorders.insert(tool.name().as_str().to_string(), RecorderName::new(recorder));
+        }
         qualified
             .entry(authored)
             .or_default()
             .insert(split_selector(tool.name().as_str()).0.to_string());
         tools.push(tool);
     }
-    Ok((tools, qualified))
+    Ok((tools, recorders, qualified))
 }
 
 fn qualify_deployment_names(deployment: &mut RawDeployment, qualified: &QualifiedNames) {

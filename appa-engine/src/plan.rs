@@ -403,7 +403,7 @@ pub(crate) fn plan(
             preserving_output: preserving_output_offered(
                 registry,
                 contract,
-                &call.output_label(contract, &current),
+                &call.output_label(contract),
                 &current,
                 &plans,
                 context,
@@ -483,7 +483,6 @@ fn narrowing_impact(
             !input_hops(
                 registry,
                 annotation,
-                check::CallReads::Static,
                 &CallStage::default(),
                 CallRole::Ordinary,
                 gaps,
@@ -651,7 +650,6 @@ pub(crate) fn enumerate_plans(
     let mut candidates: Vec<PlanCandidate> = input_hops(
         registry,
         contract,
-        check::CallReads::Resolved(call),
         stage,
         role,
         &block.requirement_gaps,
@@ -672,7 +670,7 @@ pub(crate) fn enumerate_plans(
             registry,
             current,
             contract,
-            &call.output_label(contract, current),
+            &call.output_label(contract),
             block.narrowing.as_ref(),
             floor,
             context,
@@ -735,7 +733,7 @@ pub(crate) fn enumerate_plans(
         registry,
         &block.requirement_gaps,
         candidates,
-        &check::forwarded_label(contract, check::CallReads::Resolved(call)).audience,
+        &check::forwarded_label(contract).audience,
         context,
     )
     .into_iter()
@@ -1128,7 +1126,6 @@ fn narrowing_remedies(
 fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
-    reads: check::CallReads<'_>,
     stage: &CallStage,
     role: CallRole,
     gaps: &[Gap],
@@ -1143,7 +1140,7 @@ fn input_hops(
         return Vec::new();
     }
     let released = stage.released(current);
-    let forwarded = check::forwarded_label(contract, reads);
+    let forwarded = check::forwarded_label(contract);
     registry
         .sanitizers()
         .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
@@ -1681,6 +1678,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             annotators: vec![],
             trust_chain: chain(),
             tools: declared(tools),
@@ -1735,6 +1733,7 @@ mod tests {
 
     fn registry(tools: Vec<ToolAnnotation>, authorities: Vec<Authority>, sanitizers: Vec<Sanitizer>) -> Registry {
         build(RegistryConfig {
+            recorders: Default::default(),
             authorities,
             sanitizers,
             ..config(tools)
@@ -1931,6 +1930,7 @@ mod tests {
         );
         let log = vec![opened(Label::new(TRUSTED, internal))];
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("wire"),
                 tags: vec![],
@@ -1953,6 +1953,7 @@ mod tests {
             crate::names::AnnotatorName::new("classifier"),
             unpinned.digest(),
             ProducedAnnotation {
+                evidence: None,
                 delta: annotation.delta,
                 forwards: annotation.forwards,
                 emits: annotation.emits,
@@ -2089,6 +2090,7 @@ mod tests {
         pinned.parameters = crate::params::test_string_argument_schema("room");
         let finance = Audience::restricted([ReaderId::new("finance")]);
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("lookup"),
                 tags: vec![],
@@ -2127,6 +2129,7 @@ mod tests {
             crate::names::AnnotatorName::new("directory"),
             unpinned.digest(),
             ProducedAnnotation {
+                evidence: None,
                 delta: pinned.delta,
                 forwards: pinned.forwards,
                 emits: pinned.emits,
@@ -2382,6 +2385,7 @@ mod tests {
         let tool = gated("wire", floor(TRUSTED));
         let officer = |name: &str, ceiling: Trust| trusted_up_to(name, ceiling);
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
             authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
             ..config(vec![tool])
@@ -2454,6 +2458,7 @@ mod tests {
             )
         };
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             authorities: vec![desk("desk", TRUSTED)],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
@@ -2566,6 +2571,7 @@ mod tests {
                 }],
             };
             let config = RegistryConfig {
+                recorders: Default::default(),
                 authorities: vec![
                     authority("desk", "team", &["mail"]),
                     authority("far", "press", &["unrelated"]),
@@ -2737,6 +2743,7 @@ mod tests {
             },
         );
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             authorities: vec![team_desk, global],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
@@ -2863,7 +2870,7 @@ mod tests {
             receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: annotation.emits.clone(),
             annotation: None,
-            file_basis: None,
+            held: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
             terms: crate::fact::ReleaseTerms::none(),
@@ -2995,6 +3002,7 @@ mod tests {
             )
         };
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
             authorities: vec![
                 officer("strong", Trust::new(2), Audience::public()),
@@ -4055,6 +4063,7 @@ mod tests {
         sanitizers: Vec<Sanitizer>,
     ) -> Result<Option<Registry>, TestCaseError> {
         let built = Registry::build_covered(RegistryConfig {
+            recorders: Default::default(),
             authorities,
             sanitizers,
             ..config(tools)

@@ -71,36 +71,36 @@
 //! No spawn dispatch or child-return contract is created. The new family belongs to the
 //! source family's deployment.
 //!
-//! ## File content: a pinned basis, and two labels
+//! ## Recorders: what a call publishes
 //!
-//! A call that touches a file the runtime tracks carries a host-pinned [`value::FileBasis`]
-//! on its [`value::ResolvedCall`]: the version, digest and Label of the content it reads,
-//! replaces, edits, copies, moves or processes, all supplied by the trusted harness and
-//! never by model arguments. The basis is part of the call's proposal-batch identity, so the
-//! same rendered call over different content is a different act, while the call's own
-//! canonical digest stays the digest of its tool and arguments.
+//! The engine knows no file, object, or store. Labels on objects that live outside the
+//! trajectory — a file on disk, a row in a database — belong to two external components
+//! the policy names on a tool declaration. Its **Annotator** reads the object's stored label
+//! and answers the call's annotation: a read's `delta` carries the label into the
+//! trajectory, an edit's `forwards` carries its predecessor into what the call sends. Its
+//! **recorder** ([`names::RecorderName`]) receives the call's records after they are
+//! appended, and stores what the call published. The recorder is named by the declaration,
+//! never chosen by the Annotator, and a recorder is never consulted: it cannot deny, delay,
+//! or grant anything.
 //!
-//! Two labels follow from it, and they are not the same label:
+//! [`engine::Engine::published_label`] is what a released call publishes:
+//! `trajectory ⊓ forwards ⊓ delta`. `trajectory` is the label the call's
+//! [`fact::Fact::DispatchOpened`] pinned as it was released — the substituted label, for a
+//! call an input sanitizer rewrote — so a write publishes everything the agent could have put
+//! in its arguments, and a copy publishes its source's label through `delta` even though the
+//! trajectory never sees the bytes. The label derives from the dispatch's own record, so it
+//! is the same on every replay; a recorder that loses state rebuilds it from the log.
 //!
-//! - [`value::ResolvedCall::output_label`] is what the call returns to the trajectory. A
-//!   read returns content and carries the file's Label into the trajectory; a write or a
-//!   transfer returns a constant acknowledgement, so its content does not enter the
-//!   trajectory's Label and only a later read does.
-//! - [`value::ResolvedCall::file_output_label`] is what the call publishes as file content.
-//!   A copy or move puts the source's Label there even though the trajectory never sees the
-//!   bytes, and a replacement drops the Label of the content it destroyed.
+//! An Annotator answer may carry opaque `evidence` ([`contract::AnnotationEvidence`]): the
+//! version of the object it read a label from, for instance. The evidence is pinned and
+//! hashed with the answer, so the same rendered call judged over two versions of an object
+//! is two proposal batches, and it reaches the recorder with the call's records.
 //!
-//! Checking a call's requirements reads neither. It reads what the call sends, before the
-//! call runs: the trajectory's current label, met with the annotation's `forwards` and the
-//! file content the host sends with the call
-//! ([`value::ResolvedCall::forwarded_file_label`]) — an edit's predecessor, a copy's or a
-//! move's source, a process's inputs, never a replacement's predecessor. So a copy into a
-//! destination is checked against the source's Label, and an input substitution, which
-//! replaces only the arguments, replaces only the current label in the `contains` check. A
-//! file call that fails admits its error text at the same value Label a success would have
-//! used ([`transition::ToolOutcome::FailureWithBody`]), so an error can never say more than
-//! the call it came from. Where the call's output is withheld or bound to an output
-//! sanitizer, the error text is withheld: a sanitizer derives only from a success's bytes.
+//! The one host-pinned content the engine still knows is a peer message the runtime holds
+//! ([`value::HeldMessage`]): a call that reads it returns it at the held label, and a call
+//! that fails admits its error text at that label
+//! ([`transition::ToolOutcome::FailureWithBody`]), so an error never says more than the
+//! message it came from.
 //!
 //! ## Policy revisions
 //!

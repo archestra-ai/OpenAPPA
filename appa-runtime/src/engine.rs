@@ -181,8 +181,9 @@ pub enum ExternalRequest {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalEvidence {
-    /// Trusted runtime ledger input, never an external Annotator answer.
-    File { basis: appa_engine::value::FileBasis },
+    /// The held peer message a read pins from the runtime's own store, never an external
+    /// Annotator answer.
+    Held { message: appa_engine::value::HeldMessage },
     Authority {
         authority: String,
         verdict: AuthorityVerdict,
@@ -1265,33 +1266,109 @@ impl RuntimeEngine {
             .map(|arguments| arguments.canonical_bytes().to_vec())
     }
 
-    pub(crate) fn file_dispatch(
+    /// The records `facts` — a stretch of `view`'s log — hold for each recorder: every release,
+    /// outcome and unreleased proposal of a call whose declaration names that recorder, in log
+    /// order. A release carries the label the call published
+    /// ([`appa_engine::engine::Engine::published_label`]) and the evidence its Annotator pinned.
+    pub(crate) fn recorder_records(
         &self,
         view: &EngineView,
-        trajectory: &TrajectoryId,
-        call: &ProposedCall,
-    ) -> Result<EngineDispatchId, EngineRefusal> {
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
-            .map_err(|error| EngineRefusal::Arguments {
-                detail: error.to_string(),
-            })?;
-        let views = view.views(trajectory).ok_or(EngineRefusal::Ended)?;
-        let digest = resolved.digest();
-        let occurrence = views.dispatch_count(&digest);
-        Ok(EngineDispatchId::new(trajectory.clone(), digest, occurrence))
+        facts: &[Fact],
+    ) -> std::collections::BTreeMap<String, Vec<serde_json::Value>> {
+        let mut records: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+        let call_of = |dispatch: &EngineDispatchId| {
+            view.views(dispatch.trajectory())
+                .and_then(|views| views.dispatch_call(dispatch).cloned())
+        };
+        for fact in facts {
+            let (call, record) = match fact {
+                Fact::DispatchOpened { dispatch, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let label = match self.engine.published_label(view, dispatch) {
+                        Ok(label) => label,
+                        Err(error) => {
+                            tracing::warn!(?error, "a release's published label could not be derived");
+                            continue;
+                        }
+                    };
+                    let record = serde_json::json!({
+                        "record": "released",
+                        "dispatch": dispatch_key(dispatch),
+                        "tool": call.tool().as_str(),
+                        "arguments": call.arguments(),
+                        "label": self.wire_label(&label),
+                        "evidence": annotation_evidence(&call),
+                    });
+                    (call, record)
+                }
+                Fact::DispatchSucceeded { dispatch, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let record = outcome_record(dispatch, "success");
+                    (call, record)
+                }
+                Fact::DispatchClosed { dispatch, outcome, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let outcome = match outcome {
+                        CloseOutcome::Success { .. } => "success",
+                        CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => "failure",
+                        CloseOutcome::Indeterminate => "indeterminate",
+                    };
+                    (call, outcome_record(dispatch, outcome))
+                }
+                Fact::ProposalBatchDecided {
+                    trajectory,
+                    batch,
+                    proposals,
+                    released,
+                    ..
+                } => {
+                    for call in proposals
+                        .iter()
+                        .filter(|call| !released.iter().any(|dispatch| dispatch.digest() == &call.digest()))
+                    {
+                        if let Some(recorder) = self.engine.recorder(call) {
+                            records
+                                .entry(recorder.as_str().to_string())
+                                .or_default()
+                                .push(serde_json::json!({
+                                    "record": "unreleased",
+                                    "trajectory": trajectory.as_str(),
+                                    "batch": batch.as_str(),
+                                    "tool": call.tool().as_str(),
+                                    "arguments": call.arguments(),
+                                    "evidence": annotation_evidence(call),
+                                }));
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Some(recorder) = self.engine.recorder(&call) {
+                records.entry(recorder.as_str().to_string()).or_default().push(record);
+            }
+        }
+        records
     }
 
-    pub(crate) fn file_output_label(
-        &self,
-        view: &EngineView,
-        dispatch: &EngineDispatchId,
-    ) -> Result<Label, EngineRefusal> {
-        self.engine
-            .file_output_label(view, dispatch)
-            .map(|label| label.unwrap_or_else(Label::top))
-            .map_err(outcome_refusal)
+    /// A label as a recorder reads it: the rank's name, and the audience as `"public"` or as its
+    /// intersection of union clauses, each clause the list of its entries in the policy's own
+    /// spellings — so a single clause is exactly the audience an annotation answer can return.
+    fn wire_label(&self, label: &Label) -> serde_json::Value {
+        let chain = self.engine.registry().trust_chain();
+        let top = Trust::new((chain.len() - 1) as u8);
+        let trust = chain.name_of(label.trust.min(top)).unwrap_or_default();
+        let audience = match label.audience.is_public() {
+            true => serde_json::json!("public"),
+            false => serde_json::json!(
+                label
+                    .audience
+                    .clauses()
+                    .map(crate::consult::clause_entries)
+                    .collect::<Vec<_>>()
+            ),
+        };
+        serde_json::json!({ "trust": trust, "audience": audience })
     }
 
     /// Render one trajectory's current label from the rebuilt view, for the
@@ -1594,9 +1671,9 @@ impl RuntimeEngine {
                         evidence: evidence
                             .iter()
                             .filter_map(|entry| match entry {
-                                ExternalEvidence::File { basis } => Some(Evidence::File {
+                                ExternalEvidence::Held { message } => Some(Evidence::Held {
                                     position: 0,
-                                    basis: basis.clone(),
+                                    message: message.clone(),
                                 }),
                                 _ => None,
                             })
@@ -1698,9 +1775,9 @@ impl RuntimeEngine {
                 .iter()
                 .enumerate()
                 .filter_map(|(position, call)| {
-                    call.file_basis().map(|basis| Evidence::File {
+                    call.held().map(|message| Evidence::Held {
                         position,
-                        basis: basis.clone(),
+                        message: message.clone(),
                     })
                 })
                 .collect(),
@@ -1988,7 +2065,7 @@ impl RuntimeEngine {
                             if view
                                 .views(dispatch.trajectory())
                                 .and_then(|views| views.dispatch_call(dispatch).cloned())
-                                .is_some_and(|call| call.file_basis().is_some()) =>
+                                .is_some_and(|call| call.held().is_some()) =>
                         {
                             CoreToolOutcome::FailureWithBody {
                                 body: ValueBody::new(message.clone()),
@@ -2844,6 +2921,7 @@ impl RuntimeEngine {
             audience: answered.audience.clone().map(DeltaAudience::Static),
         };
         ProducedAnnotation {
+            evidence: answer.evidence.clone(),
             delta: delta(&answer.delta),
             forwards: delta(&answer.forwards),
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
@@ -3886,6 +3964,27 @@ fn clause_wire(clause: &Clause) -> String {
     } else {
         entries.join(",")
     }
+}
+
+/// A dispatch as a recorder keys it: trajectory, call digest and occurrence.
+fn dispatch_key(dispatch: &EngineDispatchId) -> String {
+    format!(
+        "{}/{}/{}",
+        dispatch.trajectory().as_str(),
+        hex(dispatch.digest().bytes()),
+        dispatch.occurrence()
+    )
+}
+
+fn outcome_record(dispatch: &EngineDispatchId, outcome: &str) -> serde_json::Value {
+    serde_json::json!({ "record": "outcome", "dispatch": dispatch_key(dispatch), "outcome": outcome })
+}
+
+/// What the call's Annotator said it judged, where it said anything.
+fn annotation_evidence(call: &appa_engine::value::ResolvedCall) -> Option<&str> {
+    call.annotation()
+        .and_then(|pinned| pinned.produced().evidence.as_ref())
+        .map(appa_engine::contract::AnnotationEvidence::as_str)
 }
 
 /// The dispatch a fact concerns, when it concerns exactly one.
@@ -5002,7 +5101,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_file_basis_survives_call_delivery_replay() {
+    fn a_recorded_held_read_survives_call_delivery_replay() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
             version = 2
@@ -5035,13 +5134,13 @@ mod tests {
                     }],
                     spawn: None,
                     offer_nonce: super::engine_nonce(&OfferNonce([1; 32])),
-                    evidence: vec![super::Evidence::File {
+                    evidence: vec![super::Evidence::Held {
                         position: 0,
-                        basis: appa_engine::value::FileBasis::Read(appa_engine::value::FileSource {
-                            version: "v1".into(),
+                        message: appa_engine::value::HeldMessage {
+                            id: "v1".into(),
                             digest: "content".into(),
                             label: appa_engine::label::Label::top(),
-                        }),
+                        },
                     }],
                     audience: Default::default(),
                 }),
@@ -5171,6 +5270,7 @@ mod tests {
         );
 
         let answer = AnnotationAnswer {
+            evidence: None,
             delta: AnswerDelta {
                 trust: Some("trusted".to_string()),
                 audience: Some(DeclaredAudience::Public),
@@ -5224,6 +5324,7 @@ mod tests {
             annotator: "classifier".to_string(),
             call: asked,
             answer: AnnotationAnswer {
+                evidence: None,
                 delta: AnswerDelta {
                     trust: Some("suspicious".to_string()),
                     audience: None,
@@ -5304,6 +5405,7 @@ mod tests {
         );
 
         let answer = || AnnotationAnswer {
+            evidence: None,
             delta: AnswerDelta {
                 trust: Some("suspicious".to_string()),
                 audience: Some(DeclaredAudience::Public),

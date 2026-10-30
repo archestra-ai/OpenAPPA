@@ -410,8 +410,9 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
+        /// The held peer message the call reads, where the runtime pinned one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        file_basis: Option<crate::value::FileBasis>,
+        held: Option<crate::value::HeldMessage>,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,

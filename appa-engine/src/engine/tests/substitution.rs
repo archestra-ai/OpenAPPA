@@ -159,7 +159,26 @@ fn a_substitution_that_clears_the_last_gap_approves_the_call_the_model_then_prop
     }
 
     let facts = taken(&e, &log, "b3", &approved);
-    assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    let log = [log, facts].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+
+    // What the released call publishes is what it sent: the substituted label, not the
+    // trajectory's.
+    let dispatch = log
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+            _ => None,
+        })
+        .expect("the approved call opens a dispatch");
+    let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
+    assert_eq!(
+        e.published_label(&view, &dispatch),
+        Ok(Label::new(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("insider"), ReaderId::new("partner")])
+        ))
+    );
 }
 
 #[test]
@@ -305,6 +324,7 @@ fn a_repeat_of_a_hop_answers_with_the_same_call_until_a_proposal_takes_it() {
 fn a_derivation_that_no_longer_covers_does_not_starve_the_one_that_does() {
     let e = open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             sanitizers: vec![
                 // Sorted so the group-labelled hop is the earlier subject's: `by_group` runs
                 // on b1, `by_name` on b2, and subject order puts b1 first.
@@ -766,6 +786,7 @@ fn input_sanitizer_to(name: &str, from: &[&str], to: DeclaredAudience) -> crate:
 fn selecting_substitution_engine() -> Engine {
     open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             annotators: Vec::new(),
             authorities: Vec::new(),
             sanitizers: vec![input_sanitizer_to(
@@ -793,12 +814,12 @@ fn redacted_hop(e: &Engine, proposal: &ResolvedCall) -> (Vec<Fact>, Vec<Fact>) {
 }
 
 /// The hop's derived call, re-recorded with a host-pinned file basis.
-fn with_pinned_file_basis(mut hopped: Vec<Fact>) -> Vec<Fact> {
-    let basis = crate::value::FileBasis::Read(crate::value::FileSource {
-        version: "v1".into(),
+fn with_pinned_held(mut hopped: Vec<Fact>) -> Vec<Fact> {
+    let basis = crate::value::HeldMessage {
+        id: "v1".into(),
         digest: "content".into(),
         label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
-    });
+    };
     let mut pinned = false;
     for fact in &mut hopped {
         if let Fact::CandidateDerived {
@@ -806,7 +827,7 @@ fn with_pinned_file_basis(mut hopped: Vec<Fact>) -> Vec<Fact> {
             ..
         } = fact
         {
-            *call = call.clone().with_file_basis(Some(basis.clone()));
+            *call = call.clone().with_held(Some(basis.clone()));
             pinned = true;
         }
     }
@@ -815,18 +836,18 @@ fn with_pinned_file_basis(mut hopped: Vec<Fact>) -> Vec<Fact> {
 }
 
 #[test]
-fn a_same_declaration_rewrite_carrying_a_file_basis_is_refused() {
+fn a_same_declaration_rewrite_carrying_a_held_is_refused() {
     let e = substituting_engine(TRUSTED);
     let (log, hopped) = redacted_hop(&e, &call("post", json!({ "body": "ssn 123" })));
     assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
     assert_eq!(
-        e.validate_replay(&[log, with_pinned_file_basis(hopped)].concat()),
+        e.validate_replay(&[log, with_pinned_held(hopped)].concat()),
         Err(TransitionRefusal::ForgedLabel)
     );
 }
 
 #[test]
-fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
+fn a_rewrite_that_selects_another_declaration_may_carry_a_held() {
     let e = selecting_substitution_engine();
     let proposal = e
         .resolve_call(ToolName::new("post"), br#"{"body":"ssn 123"}"#)
@@ -847,10 +868,7 @@ fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
         "the rewrite selects the other declaration"
     );
     assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
-    assert_eq!(
-        e.validate_replay(&[log, with_pinned_file_basis(hopped)].concat()),
-        Ok(())
-    );
+    assert_eq!(e.validate_replay(&[log, with_pinned_held(hopped)].concat()), Ok(()));
 }
 
 /// A send to bob whose `redact` hop staged it at `@b` while bob sat in `@b`, then proposed
@@ -881,6 +899,7 @@ fn staged_call_after_membership_moves() -> (Engine, Vec<Fact>, Result<EngineDeci
     };
     let e = open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             sanitizers: vec![redact],
             audience: slack_groups(&["a", "b"]),
             ..test_config(vec![send])

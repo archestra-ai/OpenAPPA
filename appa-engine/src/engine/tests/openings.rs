@@ -376,6 +376,7 @@ fn a_root_fork_opening_that_forks_the_root_from_itself_is_refused() {
 #[test]
 fn a_fork_records_the_return_policy_its_spawn_approved() {
     let cfg = RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("redactor"),
             on: crate::authority::SanitizerPoints {

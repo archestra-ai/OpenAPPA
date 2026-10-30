@@ -171,7 +171,7 @@ pub(crate) fn evaluate_state(
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
     let committed = match reads {
-        CallReads::Resolved(call) => current.combine(&call.output_label(annotation, current)),
+        CallReads::Resolved(call) => current.combine(&call.output_label(annotation)),
         CallReads::Static => committed_label(annotation, current),
     };
 
@@ -183,7 +183,7 @@ pub(crate) fn evaluate_state(
     // Requirements check what the call sends: the current label, which the agent's arguments
     // carry, met with what the call forwards. A substitution replaces the arguments, so it
     // replaces the current label in the `contains` check; the trust floor never reads it.
-    let forwarded = forwarded_label(annotation, reads);
+    let forwarded = forwarded_label(annotation);
     let checked = current.combine(&forwarded);
     let released = stage
         .substituted()
@@ -216,16 +216,11 @@ pub(crate) fn evaluate_state(
     })
 }
 
-/// What the call sends beyond the agent's arguments: the rule's `forwards` and the file
-/// content the host sends with it. The sink receives it whatever the arguments say, so every
-/// requirement reads it, and no substitution of the arguments removes it. The call's `delta`
-/// labels its result and never enters here.
-pub(crate) fn forwarded_label(annotation: &ToolAnnotation, reads: CallReads<'_>) -> Label {
-    let declared = annotation.forwards.output_label();
-    match reads {
-        CallReads::Resolved(call) => declared.combine(&call.forwarded_file_label()),
-        CallReads::Static => declared,
-    }
+/// What the call sends beyond the agent's arguments: the annotation's `forwards`. The sink
+/// receives it whatever the arguments say, so every requirement reads it, and no substitution of
+/// the arguments removes it. The call's `delta` labels its result and never enters here.
+pub(crate) fn forwarded_label(annotation: &ToolAnnotation) -> Label {
+    annotation.forwards.output_label()
 }
 
 fn label_gaps(
@@ -452,11 +447,11 @@ mod tests {
     use super::*;
     use crate::contract::{Delta, LabelRequirements, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::fact::{EffectKind, EffectSet};
-    use crate::label::{Audience, GroupRef, TestContext};
+    use crate::label::GroupRef;
     use crate::names::GroupName;
     use crate::params::ToolParameters;
     use crate::registry::{AnnotatorDeclaration, AudienceVocabulary, Registry, RegistryConfig, TrustChain};
-    use crate::value::{FileBasis, FileSource, ToolName};
+    use crate::value::ToolName;
 
     fn annotation(name: &str) -> ToolAnnotation {
         ToolAnnotation {
@@ -499,6 +494,7 @@ mod tests {
     /// call by `classifier`.
     fn registry(annotators: Vec<AnnotatorDeclaration>) -> Registry {
         Registry::build_covered(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolDeclaration::Declared(ToolAnnotation {
@@ -558,121 +554,12 @@ mod tests {
 
     fn produced_of(annotation: ToolAnnotation) -> ProducedAnnotation {
         ProducedAnnotation {
+            evidence: None,
             delta: annotation.delta,
             forwards: annotation.forwards,
             emits: annotation.emits,
             requires: annotation.requires,
         }
-    }
-
-    #[test]
-    fn copy_source_is_checked_without_narrowing_the_trajectory() {
-        let annotation = ToolAnnotation {
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Trust::new(1)),
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::Public,
-                    ))],
-                },
-                ..Requires::default()
-            },
-            ..annotation("copy")
-        };
-        let current = Label::new(Trust::new(1), Audience::public());
-        let source = FileSource {
-            version: "source-v1".into(),
-            digest: "source-digest".into(),
-            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("source-reader")])),
-        };
-        let call = call("copy").with_file_basis(Some(FileBasis::Copy { source, replaced: None }));
-        let context = TestContext::default();
-
-        let block = evaluate_state(
-            &annotation,
-            &current,
-            &|_| false,
-            &|_| false,
-            CallReads::Resolved(&call),
-            &CallStage::default(),
-            &context.context(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            block.narrowing, None,
-            "the acknowledgement does not carry source content"
-        );
-        assert_eq!(
-            block.requirement_gaps,
-            vec![
-                Gap::TrustFloor {
-                    required: Trust::new(1),
-                    actual: Trust::new(0),
-                },
-                Gap::Includes {
-                    recipients: DeclaredAudience::Public
-                }
-            ],
-            "destination requirements still inspect copied content"
-        );
-    }
-
-    /// An edit sends the predecessor's bytes on in the file it writes, so a requirement reads
-    /// them. A replacement overwrites the predecessor without sending it: the requirement does
-    /// not read it, and only the result the call returns carries it.
-    #[test]
-    fn an_edit_sends_its_predecessor_and_a_replacement_does_not() {
-        let annotation = ToolAnnotation {
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::Public,
-                    ))],
-                },
-                ..Requires::default()
-            },
-            ..annotation("write")
-        };
-        let current = Label::new(Trust::new(1), Audience::public());
-        let private = FileSource {
-            version: "v1".into(),
-            digest: "private".into(),
-            label: Label::new(
-                Trust::new(1),
-                Audience::of_declared(&chain(crate::label::ChainAudience::Self_)),
-            ),
-        };
-        let context = TestContext::default();
-        let evaluate = |basis: FileBasis| {
-            evaluate_state(
-                &annotation,
-                &current,
-                &|_| false,
-                &|_| false,
-                CallReads::Resolved(&call("write").with_file_basis(Some(basis))),
-                &CallStage::default(),
-                &context.context(),
-            )
-            .unwrap()
-        };
-
-        let edit = evaluate(FileBasis::Edit(private.clone()));
-        assert_eq!(
-            edit.requirement_gaps,
-            vec![Gap::Includes {
-                recipients: DeclaredAudience::Public
-            }]
-        );
-
-        let replace = evaluate(FileBasis::Replace(Some(private.clone())));
-        assert_eq!(replace.requirement_gaps, vec![]);
-        assert_eq!(
-            replace.narrowing.map(|narrowing| narrowing.to),
-            Some(private.label),
-            "the replaced content still labels what the call returns"
-        );
     }
 
     fn pinned_by_classifier(produced: ToolAnnotation) -> ResolvedCall {

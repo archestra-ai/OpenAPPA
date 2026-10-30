@@ -649,6 +649,10 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
+    /// The recorder each tool declaration names, keyed by the declaration's written name — the
+    /// tool name with its argument selector, or the wildcard's `"*"`. A key that names no
+    /// declaration is a load error. Routing only: a recorder never enters a decision.
+    pub recorders: BTreeMap<String, crate::names::RecorderName>,
     /// The audience side of the policy: registered sources, the chain mappings, the configured
     /// named audiences, and the identity implementation. All of it is policy meaning; how a
     /// deployment reaches a source or the identity implementation never enters.
@@ -690,6 +694,8 @@ pub enum LoadError {
     DuplicateAnnotator(String),
     #[error("tool {tool} names annotator {annotator}, which the policy does not register")]
     UnknownAnnotator { tool: String, annotator: String },
+    #[error("recorder {recorder} is bound to {tool}, which the policy does not declare")]
+    UnknownRecorderTool { tool: String, recorder: String },
     #[error(
         "provider-run tool {0} routes through an Annotator: its result reaches the model inside the inference call, so nothing would consume a per-call annotation"
     )]
@@ -1107,6 +1113,10 @@ pub struct Registry {
     /// tool call without a matching explicit contract resolves to. In no tool-name listing; the
     /// policy identity carries it through the declared configuration.
     wildcard: Option<ToolDeclaration>,
+    /// The recorder each declaration names: by base name and ordinal within `tools`, and the
+    /// wildcard's apart.
+    recorders: BTreeMap<(ToolName, usize), crate::names::RecorderName>,
+    wildcard_recorder: Option<crate::names::RecorderName>,
     annotators: BTreeMap<AnnotatorName, AnnotatorMandate>,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
@@ -1216,7 +1226,11 @@ impl Registry {
         let mut tool_order = Vec::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
         let mut wildcard: Option<ToolDeclaration> = None;
+        let mut unbound_recorders = config.recorders;
+        let mut recorders = BTreeMap::new();
+        let mut wildcard_recorder = None;
         for mut declaration in config.tools {
+            let recorder = unbound_recorders.remove(declaration.name().as_str());
             let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
             // An audience argument binding implies its schema: the argument is a required
             // top-level string, so a minted call always carries a value the binding can read.
@@ -1244,6 +1258,7 @@ impl Registry {
                     if wildcard.replace(declaration).is_some() {
                         return Err(LoadError::DuplicateWildcard);
                     }
+                    wildcard_recorder = recorder;
                     continue;
                 }
             };
@@ -1336,8 +1351,17 @@ impl Registry {
                     return Err(LoadError::TooManyToolVariants(declaration.name().as_str().to_string()));
                 }
                 tool_order.push((declaration.name().clone(), variants.len()));
+                if let Some(recorder) = recorder {
+                    recorders.insert((declaration.name().clone(), variants.len()), recorder);
+                }
                 variants.push((matcher, declaration));
             }
+        }
+        if let Some((tool, recorder)) = unbound_recorders.into_iter().next() {
+            return Err(LoadError::UnknownRecorderTool {
+                tool,
+                recorder: recorder.as_str().to_string(),
+            });
         }
 
         let mut seen_authorities = BTreeMap::new();
@@ -1492,6 +1516,8 @@ impl Registry {
             mcp_order,
             provider_run,
             wildcard,
+            recorders,
+            wildcard_recorder,
             annotators,
             authorities: config.authorities,
             attention_marks,
@@ -1678,6 +1704,56 @@ impl Registry {
                 .as_ref()
                 .map(|declaration| (ToolDeclarationId::default(), declaration)),
         }
+    }
+
+    /// The recorder the declaration this registry selects for `call` names, where it names one.
+    pub fn recorder(&self, call: &crate::value::ResolvedCall) -> Option<&crate::names::RecorderName> {
+        let (name, arguments) = (call.tool(), call.arguments());
+        match self.classify(name)? {
+            ToolKind::Declared => {
+                let selected = self
+                    .matching_keys(name.clone())
+                    .find(|(matcher, _)| matcher.matches(arguments));
+                match selected {
+                    Some((_, key)) => self.recorders.get(&key),
+                    None => self.wildcard.as_ref().and(self.wildcard_recorder.as_ref()),
+                }
+            }
+            ToolKind::ProviderRun => None,
+            ToolKind::Wildcard => self.wildcard_recorder.as_ref(),
+        }
+    }
+
+    /// Every recorder a declaration names, once each.
+    pub fn recorders(&self) -> BTreeSet<&crate::names::RecorderName> {
+        self.recorders.values().chain(&self.wildcard_recorder).collect()
+    }
+
+    /// [`Registry::matching_variants`] in the same order, each with its key in `tools`.
+    fn matching_keys(&self, name: ToolName) -> impl Iterator<Item = (&ToolMatcher, (ToolName, usize))> {
+        let overlap = name
+            .as_str()
+            .strip_prefix("mcp/")
+            .and_then(|name| name.split_once('/'))
+            .and_then(|(_, leaf)| self.mcp_order.get(leaf));
+        let exact = if overlap.is_none() {
+            self.tools.get_key_value(&name)
+        } else {
+            None
+        };
+        let exact = exact.into_iter().flat_map(|(key, variants)| {
+            variants
+                .iter()
+                .enumerate()
+                .map(move |(ordinal, (matcher, _))| (matcher, (key.clone(), ordinal)))
+        });
+        exact.chain(
+            overlap
+                .into_iter()
+                .flatten()
+                .filter(move |(rule, _)| rule.matches_name(&name))
+                .map(|(rule, ordinal)| (&self.tools[rule][*ordinal].0, (rule.clone(), *ordinal))),
+        )
     }
 
     /// The ordinal of the declaration this registry selects for `call`.
@@ -2104,6 +2180,7 @@ mod tests {
 
     fn base() -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             trust_chain: chain(),
             tools: vec![],
             annotators: vec![],
