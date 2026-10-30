@@ -208,6 +208,9 @@ def _recorded_commit(run_dir: Path, benchmark: str) -> str:
         case "corp":
             path = run_dir / "config.json"
             provenance_path: tuple[str, ...] = ()
+        case "sanitizer":
+            path = run_dir / "run-config.json"
+            provenance_path = ()
         case "agentthreatbench":
             path = run_dir / "run-config.json"
             provenance_path = ("config",)

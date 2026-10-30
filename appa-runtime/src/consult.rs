@@ -380,7 +380,7 @@ impl AuthorityAnswer {
 
 /// Where a sanitizer is applied for this consult: to a tool's result, or to the
 /// arguments of a call about to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SanitizerPoint {
     ToolOutput,

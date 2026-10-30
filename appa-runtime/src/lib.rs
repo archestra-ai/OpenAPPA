@@ -39,6 +39,8 @@ pub mod runtime_start;
 #[cfg(feature = "daemon")]
 pub mod runtime_url;
 #[cfg(feature = "daemon")]
+mod sanitize;
+#[cfg(feature = "daemon")]
 pub mod session_context;
 #[cfg(feature = "daemon")]
 pub mod statusline;
