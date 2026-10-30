@@ -1036,7 +1036,10 @@ max_body_bytes = 65536
                 },
             )
             .await;
-        assert!(forged.is_err(), "a forged result is not admitted, got {forged:?}");
+        assert!(
+            matches!(forged, Err(EventError::OutcomeMismatch)),
+            "a forged result is not admitted, got {forged:?}"
+        );
         let read = runtime
             .read_embedded_peer(&actor, "read-1", &notice.id, call(arguments))
             .await
@@ -1047,11 +1050,16 @@ max_body_bytes = 65536
                 value: "plain".to_string()
             }
         );
-        let audit = runtime.audit(&family()).expect("the family audits");
-        assert!(
-            !format!("{audit:?}").contains("forged"),
-            "the forged bytes never enter the log, audit={audit:?}"
-        );
+        let log = runtime.inner.log(&family()).expect("the family log");
+        let admitted: Vec<&str> = log
+            .facts()
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admitted, ["plain"], "the stored body is the only admitted value");
     }
 
     #[tokio::test]

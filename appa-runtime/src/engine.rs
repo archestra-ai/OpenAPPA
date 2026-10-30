@@ -4637,14 +4637,30 @@ mod tests {
 
     #[test]
     fn audience_failure_feedback_contains_only_the_safe_classification() {
-        let detail = audience_failure("slack", "a member lookup", crate::events::NoAnswerClass::Transport);
-        let feedback = unresolved_audience("SlackSend", &detail);
+        use crate::external::NoAnswerReason;
+        // What the source itself said: it reaches the runtime diagnostics, never the model.
+        const SENTINEL: &str = "upstream-said-xyzzy";
+        for (reason, classification) in [
+            (NoAnswerReason::Transport, "the transport failed for an unknown reason"),
+            (
+                NoAnswerReason::NonSuccess {
+                    status: 502,
+                    detail: Some(SENTINEL.to_string()),
+                },
+                "it returned non-success status 502",
+            ),
+        ] {
+            let detail = audience_failure("slack", "a member lookup", (&reason).into());
+            let feedback = unresolved_audience("SlackSend", &detail);
 
-        assert_eq!(
-            feedback,
-            "[appa] SlackSend: audience source slack gave no answer for a member lookup: the transport failed for an unknown reason; retryability is unknown, so ask an operator to inspect the runtime diagnostics; the call was not checked"
-        );
-        assert!(!feedback.contains("propose it again later"));
+            assert!(
+                feedback.starts_with("[appa] SlackSend: audience source slack gave no answer for a member lookup: "),
+                "{feedback}"
+            );
+            assert!(feedback.contains(classification), "{feedback}");
+            assert!(!feedback.contains(SENTINEL), "{feedback}");
+            assert!(!feedback.contains("propose it again later"));
+        }
     }
 
     #[test]

@@ -3054,8 +3054,20 @@ mod tests {
                 Some(Bound::Builtin(name)) if name == builtin
             ));
         };
-        for section in [Section::Authorities, Section::Sanitizers] {
-            for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+        // Each section takes the builtins it owns (`external::builtin_backend`: `hitl` and
+        // the stock `approve` for authorities, the stock redactors for sanitizers, the model
+        // transports for both) and any module name, resolved once modules load.
+        for (section, owned) in [
+            (
+                Section::Authorities,
+                ["hitl", "approve", "claude-code", "llm", "some-module"],
+            ),
+            (
+                Section::Sanitizers,
+                ["redact-email", "redact-secrets", "claude-code", "llm", "some-module"],
+            ),
+        ] {
+            for builtin in owned {
                 accepts(section, builtin);
             }
         }
@@ -4292,27 +4304,22 @@ mod tests {
     #[test]
     fn a_malformed_selector_declaration_is_refused_at_load_naming_the_source_and_template() {
         for (selectors, expected) in [
-            (
-                "[{ template = \"channel//x\" }]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"channel//x\" has an empty segment",
-            ),
-            (
-                "[{ template = \"viewer\", feeds = \"public\" }]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"viewer\" `feeds` names a built-in audience: `self` or `internal`",
-            ),
-            (
-                "[]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"\" `selectors` declares no template",
-            ),
+            ("[{ template = \"channel//x\" }]", "channel//x"),
+            ("[{ template = \"viewer\", feeds = \"public\" }]", "viewer"),
+            ("[]", ""),
         ] {
             let document = format!(
                 "{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n"
             );
             let refused = parse(&document).expect_err("a malformed selector declaration refuses the load");
-            assert_eq!(refused.to_string(), expected);
+            assert!(
+                matches!(&refused, ConfigError::SelectorDeclaration { provider, template, .. }
+                    if provider == "slack" && template == expected),
+                "{refused}"
+            );
             let value: toml::Value = toml::from_str(&document).expect("the document is TOML");
             let described = source_registrations_of(&value).expect_err("the document's sources are refused");
-            assert_eq!(described.to_string(), expected);
+            assert_eq!(described.to_string(), refused.to_string());
         }
     }
 

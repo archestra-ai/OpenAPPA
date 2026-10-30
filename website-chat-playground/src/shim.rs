@@ -531,21 +531,43 @@ mod tests {
 
     #[tokio::test]
     async fn an_underivable_sanitizer_fails_closed_rather_than_passing_the_raw_through() {
-        let world = Arc::new(world("derive", &[System::Crm]));
-        let name = "nobody-registered-this";
-        let answer = sanitize(
-            State(world),
-            Path(name.to_string()),
-            consult(
-                name,
-                1,
-                SanitizerInput {
-                    body: "ask eve@corp.com".to_string(),
-                },
-            ),
-        )
-        .await;
-        assert_eq!(answer.err(), Some(StatusCode::BAD_GATEWAY));
+        let (inference, seen) = crate::derive::tests::counting_provider().await;
+        let derivations = Derivations::new(
+            inference,
+            "openai/gpt-4o".to_string(),
+            [("digest".to_string(), "drop names".to_string())].into(),
+        );
+        derivations.arm("k".to_string());
+        let world = Arc::new(World {
+            derivations: Arc::new(derivations),
+            ..world("derive", &[System::Crm])
+        });
+        let derive = |name: &str| {
+            sanitize(
+                State(world.clone()),
+                Path(name.to_string()),
+                consult(
+                    name,
+                    1,
+                    SanitizerInput {
+                        body: "ask eve@corp.com".to_string(),
+                    },
+                ),
+            )
+        };
+
+        let derived = derive("digest").await.expect("a registered sanitizer derives");
+        assert_eq!(derived.0.answer.body, "derived");
+        let spent = seen.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            derive("nobody-registered-this").await.err(),
+            Some(StatusCode::BAD_GATEWAY)
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            spent,
+            "an unregistered sanitizer never reaches the provider"
+        );
     }
 
     #[tokio::test]

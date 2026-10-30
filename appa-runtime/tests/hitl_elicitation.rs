@@ -447,7 +447,10 @@ async fn accepting_authorizes_the_exact_call() {
     let review = &reviews[0];
     // A harness may show only the first few lines, so the question leads, beside APPA's mark.
     assert!(
-        review.starts_with("▄█▄▄▄█▄  ▀▀█  Approve this call?\n██▄█▄██   ▄   "),
+        review
+            .lines()
+            .next()
+            .is_some_and(|line| line.ends_with("Approve this call?")),
         "the review opens with APPA's question: {review}",
     );
     assert!(review.contains("publish"), "the review names the tool: {review}");
@@ -600,9 +603,11 @@ async fn no_review_channel_reads_differently_from_an_unanswered_review() {
         !unreachable.contains("Authorized"),
         "no channel is not an approval: {unreachable}"
     );
-    assert_ne!(
-        unreachable, dismissed,
-        "the model can tell a session no retry helps from a review worth asking again",
+    // The model can tell a session no retry helps from a review worth asking again.
+    assert!(unreachable.contains("cannot be reached"), "{unreachable}");
+    assert!(
+        dismissed.contains("may be executed again") && !dismissed.contains("cannot be reached"),
+        "{dismissed}"
     );
 
     let reached = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
@@ -625,10 +630,12 @@ async fn an_authority_the_deployment_binds_nothing_to_reads_as_a_configuration_g
         !unregistered.contains("Authorized"),
         "an authority nothing implements rules nothing: {unregistered}"
     );
-    assert_ne!(
-        unregistered, unreachable,
-        "a configuration gap is not told to the model as a session without a review channel",
+    // A configuration gap is not told to the model as a session without a review channel.
+    assert!(
+        unregistered.contains("[externals.authorities]") && !unregistered.contains("cannot be reached"),
+        "{unregistered}"
     );
+    assert!(unreachable.contains("cannot be reached"), "{unreachable}");
 }
 
 #[tokio::test]

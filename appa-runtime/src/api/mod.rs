@@ -5370,11 +5370,15 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         candidate.inventory = ToolInventory {
             tools: vec![ObservedTool {
                 name: "Bash".into(),
-                tool: "builtin:Bash".into(),
+                tool: "Bash".into(),
             }],
             sources: vec![],
         };
-        assert!(runtime.reload(candidate).is_err());
+        let refused = runtime.reload(candidate).unwrap_err().to_string();
+        assert!(
+            refused.contains("host/claude-code/Bash is not covered by policy"),
+            "{refused}"
+        );
         let after = runtime
             .preflight_inventory(None, appa_adapter_claude_code::adapter(), &ToolInventory::default())
             .unwrap();

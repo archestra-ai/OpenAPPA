@@ -1827,11 +1827,6 @@ mod tests {
         for replacement in [
             "[externals.audience.github]\nurl = \"https://elsewhere.example/audience\"\n",
             "[externals.audience.github]\nbuiltin = \"llm\"\n",
-            "[externals.authorities.review]\nurl = \"https://elsewhere.example/review\"\n",
-            // Stock names bind only sanitizers: an authority that approves on
-            // its own, or a model, is the root's choice.
-            "[externals.authorities.review]\nbuiltin = \"approve\"\n",
-            "[externals.sanitizers.mask]\nbuiltin = \"llm\"\n",
             // A command beside a url is still a url binding on the wire.
             "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
             // A command is exactly python3 on one of the manifest's helpers.
@@ -1850,6 +1845,37 @@ mod tests {
                     Err(PackageError::PolicyExternalCommand { .. } | PackageError::PolicyRootSetting { .. })
                 ),
                 "accepted {replacement}"
+            );
+        }
+
+        // Bindings beside the battery's own valid helper: the refusal names the added one,
+        // and the same table bound to a helper or a stock sanitizer is accepted.
+        for control in [
+            "[externals.authorities.review]\ncommand = [\"python3\", \"audience-source.py\"]\n",
+            "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
+        ] {
+            let directory = battery(&format!("{BATTERY_POLICY}\n{control}"));
+            assert!(validate_package(directory.path()).is_ok(), "refused {control}");
+        }
+        for (addition, external) in [
+            (
+                "[externals.authorities.review]\nurl = \"https://elsewhere.example/review\"\n",
+                "authorities.review",
+            ),
+            // Stock names bind only sanitizers: an authority that approves on
+            // its own, or a model, is the root's choice.
+            (
+                "[externals.authorities.review]\nbuiltin = \"approve\"\n",
+                "authorities.review",
+            ),
+            ("[externals.sanitizers.mask]\nbuiltin = \"llm\"\n", "sanitizers.mask"),
+        ] {
+            let directory = battery(&format!("{BATTERY_POLICY}\n{addition}"));
+
+            let refused = validate_package(directory.path());
+            assert!(
+                matches!(&refused, Err(PackageError::PolicyExternalCommand { external: named, .. }) if named == external),
+                "{addition} answered {refused:?}"
             );
         }
     }

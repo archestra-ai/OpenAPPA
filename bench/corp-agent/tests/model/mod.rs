@@ -24,7 +24,7 @@ enum Step {
     /// model would.
     Pursues {
         id: String,
-        nth: usize,
+        offer: Pick,
         arguments: serde_json::Value,
     },
     /// Pursue the first offer the last message lists, or answer `text` and
@@ -33,6 +33,15 @@ enum Step {
         id: String,
         text: String,
     },
+}
+
+/// Which offer of the last feedback a `Pursues` step takes.
+#[derive(Debug)]
+enum Pick {
+    /// The `nth` offer, in the order the block lists them.
+    Nth(usize),
+    /// The one offer whose listing names this text, wherever the block lists it.
+    Naming(String),
 }
 
 impl Provider {
@@ -82,9 +91,24 @@ impl Provider {
         self.pursues_the_nth_offer_with(nth, serde_json::json!({ "label": label }))
     }
 
+    /// Declare a child's return through the plan that names `sanitizer`, with
+    /// the lowest label the parent accepts, `{}` for its own.
+    pub fn declares_the_return_through(&self, sanitizer: &str, label: serde_json::Value) -> &Self {
+        let id = self.next_id();
+        self.push(Step::Pursues {
+            id,
+            offer: Pick::Naming(sanitizer.to_string()),
+            arguments: serde_json::json!({ "label": label }),
+        })
+    }
+
     fn pursues_the_nth_offer_with(&self, nth: usize, arguments: serde_json::Value) -> &Self {
         let id = self.next_id();
-        self.push(Step::Pursues { id, nth, arguments })
+        self.push(Step::Pursues {
+            id,
+            offer: Pick::Nth(nth),
+            arguments,
+        })
     }
 
     /// The most recent tool result containing `needle`, across every request
@@ -126,12 +150,27 @@ impl Provider {
                         .unwrap_or_else(|| panic!("the script ran out; the agent asked again with: {body}"));
                     let message = match step {
                         Step::Says(message) => message,
-                        Step::Pursues { id, nth, mut arguments } => {
+                        Step::Pursues {
+                            id,
+                            offer,
+                            mut arguments,
+                        } => {
                             let offers =
                                 surfaced_offers(&body).unwrap_or_else(|| panic!("no offer id surfaced, in: {body}"));
-                            let offer = offers
-                                .get(nth)
-                                .unwrap_or_else(|| panic!("no offer {nth} surfaced among {offers:?}, in: {body}"));
+                            let picked = match &offer {
+                                Pick::Nth(nth) => offers.get(*nth).map(|(id, _)| id),
+                                Pick::Naming(needle) => {
+                                    let mut naming =
+                                        offers.iter().filter(|(_, listing)| listing.contains(needle.as_str()));
+                                    match (naming.next(), naming.next()) {
+                                        (Some((id, _)), None) => Some(id),
+                                        _ => None,
+                                    }
+                                }
+                            };
+                            let offer = picked.unwrap_or_else(|| {
+                                panic!("no one offer {offer:?} surfaced among {offers:?}, in: {body}")
+                            });
                             arguments["offer_id"] = serde_json::Value::String(offer.clone());
                             WireMessage::assistant_tool_calls(
                                 None,
@@ -186,13 +225,22 @@ fn call_of(id: &str, tool: &str, arguments: &str) -> WireToolCall {
 }
 
 /// The opaque offer ids of the most recent message that lists any, in the
-/// order the block lists them; surrounding presentation copy is deliberately
-/// ignored.
-fn surfaced_offers(request: &serde_json::Value) -> Option<Vec<String>> {
+/// order the block lists them, each beside the listing item that carries it.
+/// Only a `Pick::Naming` step reads the listing.
+fn surfaced_offers(request: &serde_json::Value) -> Option<Vec<(String, String)>> {
     let messages = request["messages"].as_array()?;
     messages.iter().rev().find_map(|message| {
-        let ids = opaque_offer_ids(message.get("content")?.as_str()?);
-        (!ids.is_empty()).then_some(ids)
+        let offers: Vec<(String, String)> = message
+            .get("content")?
+            .as_str()?
+            .split("\n  - ")
+            .flat_map(|listing| {
+                opaque_offer_ids(listing)
+                    .into_iter()
+                    .map(|id| (id, listing.to_string()))
+            })
+            .collect();
+        (!offers.is_empty()).then_some(offers)
     })
 }
 

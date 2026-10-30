@@ -129,7 +129,17 @@ fn masker_offer(feedback: &str) -> OfferId {
         2,
         "the denial offers the plain narrowing and the masker: {feedback}"
     );
-    common::last_offer(feedback)
+    // Each offer's call follows the line that describes it.
+    let lines: Vec<&str> = feedback.lines().collect();
+    let masker: Vec<OfferId> = lines
+        .windows(2)
+        .filter(|pair| pair[0].contains("redact-secrets"))
+        .flat_map(|pair| common::offers(pair[1]))
+        .collect();
+    let [masker] = masker.as_slice() else {
+        panic!("exactly one offer is described as the masker's: {feedback}");
+    };
+    masker.clone()
 }
 
 /// A confined result released through the masker and rendered back as a hook answer, for

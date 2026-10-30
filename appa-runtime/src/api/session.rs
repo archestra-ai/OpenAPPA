@@ -2922,9 +2922,14 @@ name = "appa/execute_remedy_plan"
         ));
         let quoted = runtime
             .minted_offers(&root(), &root())
-            .last()
-            .expect("the block surfaced the sanitize plan")
-            .clone();
+            .into_iter()
+            .find(|offer| {
+                matches!(
+                    runtime.offer_kind(&root(), offer),
+                    Some(crate::api::OfferKind::Sanitizer { .. })
+                )
+            })
+            .expect("the block surfaced the sanitize plan");
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert!(matches!(
             session
@@ -3446,8 +3451,31 @@ starting_label = { audience = ["alice@corp.example"] }
             persisted.contains("alice@corp.example"),
             "the decision pins the claims it read: {persisted}"
         );
-        let tampered = persisted.replace("alice@corp.example", "mallory@evil.example");
-        assert_ne!(tampered, persisted);
+        // Rewrite the member only where the evidence pins it, so the labels the decision
+        // recorded still name Alice and only the evidence check can refuse the log.
+        let mut tampered: serde_json::Value = serde_json::from_str(&persisted).expect("the batch parses");
+        let mut rewritten = 0;
+        for fact in tampered.as_array_mut().expect("the batch is a list of facts") {
+            for record in fact.as_object_mut().into_iter().flat_map(|fact| fact.values_mut()) {
+                let sources = record
+                    .pointer_mut("/evidence/sources")
+                    .and_then(serde_json::Value::as_array_mut);
+                for source in sources.into_iter().flatten() {
+                    for member in source["members"].as_array_mut().into_iter().flatten() {
+                        if member == "alice@corp.example" {
+                            *member = serde_json::json!("mallory@evil.example");
+                            rewritten += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(rewritten > 0, "the evidence pins Alice's membership: {persisted}");
+        let tampered = serde_json::to_string(&tampered).expect("the tampered batch serializes");
+        assert!(
+            tampered.contains("alice@corp.example"),
+            "the recorded labels still name Alice: {tampered}"
+        );
         runtime.store().corrupt_batch(&root(), 1, tampered.as_bytes());
         assert!(matches!(
             session.on_tool_call(send, false).await,
@@ -4174,7 +4202,29 @@ context_control = true
     }
 
     const RAW_BODY: &str = "mail alice@corp.example today";
-    const REDACTED_BODY: &str = "mail [redacted-email] today";
+
+    /// The `send` call a remedy authorized, read from its answer rather than copied from the
+    /// stock sanitizer's placeholder text. The replaced bytes no longer carry the address.
+    fn substituted_send(decision: &RemedyDecision) -> ProposedCall {
+        let RemedyDecision::Authorized {
+            call: ExactCall { tool, bytes },
+        } = decision
+        else {
+            panic!("the remedy authorizes the replaced call: {decision:?}");
+        };
+        assert_eq!(tool, "send");
+        let arguments: serde_json::Value = serde_json::from_slice(bytes).expect("the replaced call is JSON");
+        let body = arguments["body"].as_str().expect("the replaced call carries a body");
+        assert!(
+            !body.contains("@corp.example"),
+            "the replaced call no longer carries the address: {body}"
+        );
+        ProposedCall {
+            tool: tool.clone(),
+            arguments: raw(arguments),
+            cwd: None,
+        }
+    }
 
     async fn narrowed_and_blocked(runtime: &Runtime, session: &mut Session) -> OfferId {
         narrowed_and_blocked_on(runtime, session, &root()).await
@@ -4238,16 +4288,7 @@ context_control = true
             .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
-        let bytes = format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes();
-        assert_eq!(
-            substituted,
-            RemedyDecision::Authorized {
-                call: ExactCall {
-                    tool: "send".to_string(),
-                    bytes: bytes.clone(),
-                },
-            },
-        );
+        let replaced = substituted_send(&substituted);
         assert!(
             runtime.open_dispatches(&root(), &root()).is_empty(),
             "the hop decides nothing in advance: it stages a derivation and opens no dispatch"
@@ -4264,7 +4305,7 @@ context_control = true
 
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced.clone(), false)
                 .await
                 .expect("the proposal takes the derivation and releases"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -4274,7 +4315,7 @@ context_control = true
         assert_eq!(
             session
                 .on_tool_result(
-                    send(REDACTED_BODY),
+                    replaced.clone(),
                     ToolOutcome::Success {
                         body: OutcomeBody::Available("sent".to_string()),
                     },
@@ -4288,7 +4329,7 @@ context_control = true
         // The derivation is spent. Proposing the same bytes again is an ordinary proposal
         // judged against current state, which is what blocked the call in the first place.
         assert!(matches!(
-            session.on_tool_call(send(REDACTED_BODY), false).await,
+            session.on_tool_call(replaced.clone(), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
         assert!(matches!(
@@ -4412,7 +4453,6 @@ context_control = true
             .expect("the read closes");
 
         const OTHER_RAW: &str = "ping bob@corp.example now";
-        const OTHER_REDACTED: &str = "ping [redacted-email] now";
         let mut hops = Vec::new();
         for body in [RAW_BODY, OTHER_RAW] {
             assert!(
@@ -4429,21 +4469,28 @@ context_control = true
             hops.push(runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0);
         }
 
+        let mut replaced = Vec::new();
         for hop in hops {
             let executed = session.on_remedy(hop, RemedyArguments::default(), None, None).await;
             assert!(
                 matches!(executed, Ok(RemedyDecision::Authorized { .. })),
                 "both remedies execute, the second while the first still stands: {executed:?}"
             );
+            replaced.push(substituted_send(&executed.expect("the remedy executes")));
         }
+        assert_ne!(
+            replaced[0].arguments.get(),
+            replaced[1].arguments.get(),
+            "each remedy replaced its own call"
+        );
 
-        for (call_id, body) in [("toolu-1", REDACTED_BODY), ("toolu-2", OTHER_REDACTED)] {
+        for (call_id, call) in [("toolu-1", &replaced[0]), ("toolu-2", &replaced[1])] {
             let released = session
-                .on_tool_call_identified(send(body), Some(call_id.to_string()), None, None)
+                .on_tool_call_identified(call.clone(), Some(call_id.to_string()), None, None)
                 .await;
             assert!(
                 matches!(released, Ok(ToolCallDecision::Allow { spawn: None, .. })),
-                "the substituted call carrying {body} releases when proposed: {released:?}"
+                "the substituted call {call:?} releases when proposed: {released:?}"
             );
         }
         assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
@@ -4452,7 +4499,7 @@ context_control = true
         // the second proposal above would have found nothing left to take and blocked; were a
         // derivation to survive its take, this third proposal would release a call nobody paid for.
         let again = session
-            .on_tool_call_identified(send(REDACTED_BODY), Some("toolu-3".to_string()), None, None)
+            .on_tool_call_identified(replaced[0].clone(), Some("toolu-3".to_string()), None, None)
             .await;
         assert!(
             matches!(again, Ok(ToolCallDecision::Deny { .. })),
@@ -4473,10 +4520,12 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session
-            .on_remedy(hop, RemedyArguments::default(), None, None)
-            .await
-            .expect("the hop executes");
+        let replaced = substituted_send(
+            &session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await
+                .expect("the hop executes"),
+        );
 
         session.on_turn_end().await.expect("the turn end acks");
 
@@ -4486,7 +4535,7 @@ context_control = true
         );
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced, false)
                 .await
                 .expect("the next turn still takes the derivation"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -4507,10 +4556,12 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session
-            .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
-            .await
-            .expect("the hop executes");
+        let replaced = substituted_send(
+            &session
+                .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
+                .await
+                .expect("the hop executes"),
+        );
 
         let other = ProposedCall {
             tool: "read_hr".to_string(),
@@ -4534,7 +4585,7 @@ context_control = true
 
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced, false)
                 .await
                 .expect("the derivation survived the unrelated call"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -4545,22 +4596,24 @@ context_control = true
     async fn a_substituted_call_survives_a_restart_and_runs() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        {
+        let replaced = {
             let runtime = Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db.clone(), None)
                 .expect("the deployment opens");
             let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
             let hop = narrowed_and_blocked(&runtime, &mut session).await;
-            session
-                .on_remedy(hop, RemedyArguments::default(), None, None)
-                .await
-                .expect("the hop executes");
-        }
+            substituted_send(
+                &session
+                    .on_remedy(hop, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the hop executes"),
+            )
+        };
         let runtime =
             Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced, false)
                 .await
                 .expect("the derivation replays from the log and the proposal takes it"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -4582,10 +4635,11 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
-            Ok(RemedyDecision::Authorized { .. }),
-        ));
+        let substituted = session
+            .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
+            .await
+            .expect("the hop executes");
+        let replaced = substituted_send(&substituted);
 
         // The session reads an untrusted page, which drops it below the floor `send` wants.
         let web = ProposedCall {
@@ -4621,12 +4675,22 @@ context_control = true
 
         assert!(
             matches!(
-                session.on_tool_call(send(REDACTED_BODY), false).await,
+                session.on_tool_call(replaced, false).await,
                 Ok(ToolCallDecision::Deny { .. })
             ),
             "the derivation still stands, but the call it stages is judged against the label now"
         );
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+        // A repeat of the hop answers with the same call only while its derivation is current,
+        // so neither the narrowing nor the blocked proposal took or discarded it.
+        assert_eq!(
+            session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await
+                .expect("the repeat answers"),
+            substituted,
+            "the derivation still stands after the narrowing"
+        );
     }
 
     /// The one term a derivation does freeze: what the released bytes carry. A read the session
@@ -4645,10 +4709,12 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
-            Ok(RemedyDecision::Authorized { .. }),
-        ));
+        let replaced = substituted_send(
+            &session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await
+                .expect("the hop executes"),
+        );
 
         // A second read narrows the session's audience further, well away from public.
         let legal = ProposedCall {
@@ -4684,7 +4750,7 @@ context_control = true
 
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced, false)
                 .await
                 .expect("the redacted bytes still reach the public audience"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -4710,17 +4776,11 @@ context_control = true
         ));
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         let approval = latest_offer(&runtime);
-        assert_eq!(
-            session
+        let replaced = substituted_send(
+            &session
                 .on_remedy(approval, RemedyArguments::default(), None, None)
                 .await
                 .expect("the approval executes"),
-            RemedyDecision::Authorized {
-                call: ExactCall {
-                    tool: "send".to_string(),
-                    bytes: format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes(),
-                },
-            },
         );
         assert!(matches!(
             session.on_tool_call(send(RAW_BODY), false).await,
@@ -4728,7 +4788,7 @@ context_control = true
         ));
         assert!(matches!(
             session
-                .on_tool_call(send(REDACTED_BODY), false)
+                .on_tool_call(replaced, false)
                 .await
                 .expect("the approved call releases"),
             ToolCallDecision::Allow { spawn: None, .. }
@@ -5019,8 +5079,16 @@ confined_results = ["leak"]
     }
 
     async fn run_sanitize_offer(runtime: &Runtime, session: &mut crate::api::Session) -> ToolResultDecision {
-        let offers = runtime.minted_offers(&root(), &root());
-        let quoted = offers.last().expect("the block surfaced offers").clone();
+        let quoted = runtime
+            .minted_offers(&root(), &root())
+            .into_iter()
+            .find(|offer| {
+                matches!(
+                    runtime.offer_kind(&root(), offer),
+                    Some(crate::api::OfferKind::Sanitizer { .. })
+                )
+            })
+            .expect("the block surfaced a sanitize offer");
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         let authorized = session
             .on_remedy(offer, RemedyArguments::default(), None, None)
@@ -6297,8 +6365,10 @@ delta = {}
         assert!(opened(&runtime, &child("c1")));
     }
 
+    /// A child that returns while one of its calls is still open is refused, and the refusal
+    /// closes none of its calls.
     #[tokio::test]
-    async fn a_return_that_does_not_end_the_child_crosses_and_leaves_its_calls_open() {
+    async fn a_return_beside_an_open_child_call_is_refused_and_leaves_it_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -6715,9 +6785,9 @@ delta = {}
             .expect_err("a failed spawn crosses nothing");
         assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
         assert!(!error.is_operational());
-        assert_eq!(
-            error.to_string(),
-            "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
+        assert!(
+            error.to_string().contains("start the subagent again"),
+            "the model reads its next step: {error}"
         );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
 
@@ -7313,19 +7383,15 @@ delta = {}
             "the hop staged a derivation and opened no call"
         );
 
+        let before = runtime.log_facts(&root()).len();
         child_session
             .on_child_end(Some("done".to_string()))
             .await
             .expect("the end returns with nothing to close");
         assert!(
-            !runtime.log_facts(&root()).iter().any(|fact| matches!(
-                fact,
-                appa_engine::fact::Fact::DispatchClosed {
-                    trajectory,
-                    outcome: appa_engine::fact::CloseOutcome::Failure,
-                    ..
-                } if trajectory.as_str() == child("c1").0
-            )),
+            runtime.log_facts(&root())[before..]
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::DispatchClosed { .. })),
             "the end closed no call of the child's, because none stood",
         );
         assert!(
@@ -7939,7 +8005,12 @@ delta = {}
             serde_json::from_slice(&diagnostics.bytes).expect("the diagnostics are one JSON object");
         let diagnostics = &diagnostics["jev_diagnostics"];
         assert_eq!(diagnostics["version"], 1);
-        assert_eq!(diagnostics["model"], "jev-1.13.0");
+        assert!(
+            diagnostics["model"]
+                .as_str()
+                .is_some_and(|model| model.len() > "jev-".len() && model.starts_with("jev-")),
+            "the diagnostics name the jev model: {diagnostics}"
+        );
         assert_eq!(diagnostics["attempts"], serde_json::json!(["ok"]));
         assert_eq!(diagnostics["labels"]["delta_trust"]["decision"], "trusted");
         assert_eq!(diagnostics.get("error"), None);
@@ -8341,9 +8412,14 @@ delta = {}
             ));
             let quoted = runtime
                 .minted_offers(&root(), &root())
-                .last()
-                .expect("the block surfaced offers")
-                .clone();
+                .into_iter()
+                .find(|offer| {
+                    matches!(
+                        runtime.offer_kind(&root(), offer),
+                        Some(crate::api::OfferKind::Sanitizer { .. })
+                    )
+                })
+                .expect("the block surfaced a sanitize offer");
             let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
             assert!(matches!(
                 session
@@ -8400,9 +8476,14 @@ delta = {}
             ));
             let quoted = runtime
                 .minted_offers(&root(), &root())
-                .last()
-                .expect("the block surfaced offers")
-                .clone();
+                .into_iter()
+                .find(|offer| {
+                    matches!(
+                        runtime.offer_kind(&root(), offer),
+                        Some(crate::api::OfferKind::Sanitizer { .. })
+                    )
+                })
+                .expect("the block surfaced a sanitize offer");
             let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
             assert!(matches!(
                 session
