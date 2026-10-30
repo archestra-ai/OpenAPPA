@@ -1079,6 +1079,20 @@ OpenAPPA first offers a plan that checks the child's answer without changing it.
 
 The parent supplies `label` to specify the audience and trust limits for the child's answer. `label = {}` uses the parent's current audience and trust rank, so the answer cannot add restrictions to the parent. If a plan uses a sanitizer, the cleaned answer must meet those limits.
 
+#### Declaring the return
+
+A return declaration needs no authority. The agent executes it, and OpenAPPA does not ask a person.
+
+A blocked spawn offers only the return declarations, even when the spawn has other gaps. The agent executes one plan and then calls the subagent tool again. OpenAPPA then checks the other gaps of the spawn. Each gap gets its own remedy plan. Only a plan that names an authority asks for approval. A spawn with no other gap starts after the declaration, with no approval.
+
+The parent can also declare the return before the spawn. It calls `execute_remedy_plan` without `offer_id`, with the same `label` and, for `attest-schema`, `return_schema`:
+
+```json
+{ "label": {} }
+```
+
+This declaration applies to the parent's next single spawn, and to that spawn only. A fan-out spawn does not use it: the parent declares a fan-out spawn's return at its block. The declaration is valid only at the parent's label when it was made. If a tool result changes the parent's label first, the declaration lapses, and the spawn's block says so. Declare the return immediately before the subagent call, with no other tool call between them. The runtime keeps this declaration in memory. After a restart, the spawn is blocked and the parent declares at the block.
+
 In the example below, a child can read internal customer data and pass its answer through `remove_customer_details`. The sanitizer must remove private details before the parent receives the answer:
 
 ```toml
