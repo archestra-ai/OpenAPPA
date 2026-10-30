@@ -291,6 +291,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-file-tracker"
+version = "0.38.1"
+dependencies = [
+ "appa",
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "appa-module-fixture"
 version = "0.0.0"
 dependencies = [

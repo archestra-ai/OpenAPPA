@@ -1,0 +1,242 @@
+# The file-tracker's built-in configuration. A deployment's own
+# `file-tracker.toml` adds path rules and tools to these, and replaces the
+# scalar settings and the sandbox.
+#
+#   store = "file-tracker.json"        # default: $XDG_STATE_HOME/appa/file-tracker.json
+#   settle_wait_ms = 3000              # how long a call on a reserved file waits
+#   reservation_timeout_secs = 300     # when an annotated, never-released call lets go
+#
+# A path rule labels every file whose absolute, resolved path its pattern
+# matches (`*` matches any run of characters, `/` included). The label holds
+# before any recorded write and under every later one: a read returns the
+# meet of the recorded label and every matching rule. `write_trust` and
+# `write_attention` are what a call that writes such a file requires.
+
+# --- the requester's credentials are `self` data, and only a trusted session writes them ---
+[[path]]
+pattern = "*/.env*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.ssh/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.aws/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.azure/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.kube/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.gnupg/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.docker/config.json"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.config/gh/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.config/gcloud/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.password-store/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.netrc"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.git-credentials"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.npmrc"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.pypirc"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.databrickscfg"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.vault-token"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.claude.json"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*_history"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/id_*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.pem"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.key"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.p12"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.pfx"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "/proc/*/environ"
+audience = ["self"]
+
+# --- what a later process reads as instructions or runs as code takes a trusted session ---
+[[path]]
+pattern = "*CLAUDE.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*AGENTS.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.claude/skills/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.claude/agents/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.claude/commands/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.git/hooks/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.bashrc"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.zshrc"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.profile"
+write_trust = "trusted"
+
+# --- the files that can turn the protection off ask the person running the session ---
+[[path]]
+pattern = "*/.claude/settings*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.claude/hooks/*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*.mcp.json"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/appa/appa.toml"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/appa/batteries/*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/appa/file-tracker.*"
+write_attention = ["human-approval"]
+
+# --- the tools the plugin serves, by canonical tool id ---
+[[tool]]
+name = "host/claude-code/Read"
+role = "read"
+path = "file_path"
+
+[[tool]]
+name = "host/claude-code/Write"
+role = "write"
+path = "file_path"
+
+[[tool]]
+name = "host/claude-code/Edit"
+role = "edit"
+path = "file_path"
+
+[[tool]]
+name = "mcp/file-tracker/SafeBash"
+role = "run"
+
+[[tool]]
+name = "host/opencode/read"
+role = "read"
+path = "path"
+
+[[tool]]
+name = "host/opencode/write"
+role = "write"
+path = "path"
+
+[[tool]]
+name = "host/opencode/edit"
+role = "edit"
+path = "path"
+
+[[tool]]
+name = "host/opencode/appa_safebash"
+role = "run"
+
+# SafeBash runs each command in Anthropic's sandbox runtime — the one Claude
+# Code bundles: Seatbelt on macOS, bubblewrap on Linux — with a network proxy
+# that admits only the declared hosts.
+[sandbox]
+command = ["srt"]
+readable = []
+timeout_secs = 600

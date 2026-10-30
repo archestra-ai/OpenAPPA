@@ -42,6 +42,18 @@ Native Edit is a known boundary gap: a Claude Code 2.1.268 probe returned a
 content-dependent match error before `PreToolUse`, with no APPA proposal.
 The plugin cannot prevent that observation by denying the later hook.
 
+### File labels and SafeBash
+
+`file-tracker.appa.toml` is the default policy with Claude Code's `Read`, `Write` and
+`Edit` routed through the `appa-file-tracker` plugin, as both Annotator and recorder,
+and shell commands confined to `mcp/file-tracker/SafeBash`. Copy it over the root
+`appa.toml`, and put `appa-file-tracker` and Anthropic's sandbox runtime `srt` on
+`PATH`. While the policy binds the `file-tracker` recorder, `clappa` starts Claude
+Code with `Bash`, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled and the
+file-tracker's MCP server registered; the policy also blocks those tools at the hook.
+The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
+describes the labels and the sandbox.
+
 ### Capabilities deferred to an inference proxy
 
 For requests actually routed through it, a proxy could:

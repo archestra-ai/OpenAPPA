@@ -2,7 +2,7 @@
 title: Coding agents
 category: Deep Dive
 order: 4
-description: Tool-flow enforcement, shell rules, and checked delegation for coding agents.
+description: Tool-flow enforcement, file labels, SafeBash, shell rules, and checked delegation for coding agents.
 ---
 
 OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools.
@@ -30,4 +30,40 @@ Every Claude Code install includes the [Claude Code tools battery](/battery-clau
 - **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
 - **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
-These contracts label what a command reads or returns; they do not sandbox the command. Use an operating-system sandbox for confinement.
+These contracts label what a command reads or returns; they do not sandbox the command. For confinement, see [SafeBash](#safebash).
+
+## Files that keep their labels
+
+A coding agent writes files that outlive its trajectory. The file-tracker plugin keeps a label on every file a mediated tool call writes, so a later read of that file carries the restriction the write carried. The read can happen in the same session, in a fresh session, or after a resume.
+
+The plugin is a [recorder](/contracts#recorders) and an [annotator](/contracts#annotators) for the same tools:
+
+- As a recorder, it receives the label each released call published: the trajectory's label at release, combined with the call's `forwards` and `delta`. It stores that label on each file the call wrote.
+- As an annotator, it answers a `Read` with the stored label as `delta`. An `Edit` forwards the file's existing label, so the edited file keeps it. A `Write` replaces the file, so the new label replaces the old one.
+
+The plugin's own `file-tracker.toml` gives credential paths such as `.env*` and `~/.ssh/*` the audience `self` before any call touches them. It also sets the trust a write to a control file such as `CLAUDE.md` requires. The plugin never denies a call: the engine checks the annotation's `requires`.
+
+### SafeBash
+
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command runs in Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS. The command can read only its input files and system directories, write only its output files, and connect only to its hosts through the sandbox proxy. Every other file in the home directory, the working directory, or a temporary directory is hidden from it.
+
+The annotator forwards the combined label of the input files. A call with network hosts also lowers trust to the lowest rank and requires `public`. The recorder applies the published label to every output file.
+
+The two-step leak is then refused before it runs. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later `SafeBash` upload of `/tmp/notes.txt` forwards `self`, so its `public` requirement fails, in this session or in any other.
+
+### Per harness
+
+| Harness | File tools | Shell |
+|---|---|---|
+| Claude Code | `Read`, `Write`, `Edit`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` starts Claude Code without `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the policy blocks them. |
+| OpenCode | `read`, `write`, `edit`, and `appa_safebash` use the file-tracker annotator and recorder. | AppenCode removes native `shell` and `patch`. `appa_safebash` runs in a sandbox extension with a proxy. |
+| Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
+
+For Claude Code, use `marketplace/plugins/claude-code/file-tracker.appa.toml` as the root policy, and put `appa-file-tracker` and `srt` on `PATH`.
+
+### Limits
+
+- A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
+- A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
+- The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.
+- Model-provider requests and assistant messages are not mediated.

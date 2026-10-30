@@ -1,0 +1,25 @@
+[package]
+name = "appa-file-tracker"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "OpenAPPA's file-tracker plugin: the Annotator and recorder that keep a label on every file a coding agent touches, and SafeBash, a shell command confined to the files and hosts it declares."
+
+[[bin]]
+name = "appa-file-tracker"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+appa = { path = "../appa-runtime" }
+appa-runtime-api = { path = "../appa-runtime-api" }
+tempfile = "3"
+tokio = { workspace = true }
+
+[lints]
+workspace = true

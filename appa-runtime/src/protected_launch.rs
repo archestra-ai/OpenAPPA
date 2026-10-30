@@ -47,6 +47,7 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     let signals = Signals::install();
     let mut command = Command::new("claude");
     command.arg("--settings").arg(settings);
+    command.args(file_tracking(&crate::init::paths::installed_config_path()));
     if let Some(messaging) = &messaging {
         command
             .arg(MESSAGING_FLAG)
@@ -92,6 +93,38 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     cleanup(&session);
     close(messaging.as_ref());
     terminate_as(status)
+}
+
+/// The tools a file-tracking session never offers: they run commands, or read or write file
+/// content, out of the file-tracker's sight. The policy blocks them at the hook as well.
+const UNMEDIATED_TOOLS: &str = "Bash,PowerShell,Monitor,Grep,NotebookEdit";
+
+/// Claude Code's arguments for a deployment whose policy binds the `file-tracker` recorder:
+/// the unmediated tools disabled, and SafeBash served by the file-tracker in their place.
+/// Each flag carries its value after `=`, so neither list can take in the person's own
+/// arguments. Any other deployment, or a config that does not read, adds nothing: the
+/// runtime loads the same file and refuses what it cannot read.
+fn file_tracking(config: &Path) -> Vec<String> {
+    let bound = fs::read_to_string(config)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| {
+            table
+                .get("externals")
+                .and_then(|externals| externals.get("recorders"))
+                .and_then(|recorders| recorders.get("file-tracker"))
+                .is_some()
+        });
+    match bound {
+        true => vec![
+            format!("--disallowedTools={UNMEDIATED_TOOLS}"),
+            format!(
+                "--mcp-config={}",
+                serde_json::json!({ "mcpServers": { "file-tracker": { "command": "appa-file-tracker", "args": ["mcp"] } } })
+            ),
+        ],
+        false => Vec::new(),
+    }
 }
 
 /// The session a launch forks, as Claude Code's own arguments name it.
@@ -379,6 +412,24 @@ impl Drop for Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped file-tracking policy launches Claude Code without its unmediated tools and
+    /// with SafeBash; the default policy launches it unchanged.
+    #[test]
+    fn only_a_policy_binding_the_file_tracker_disables_the_unmediated_tools() {
+        let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code");
+        let tracking = file_tracking(&plugin.join("file-tracker.appa.toml"));
+        assert_eq!(
+            tracking[0],
+            "--disallowedTools=Bash,PowerShell,Monitor,Grep,NotebookEdit"
+        );
+        let servers: Value = serde_json::from_str(tracking[1].strip_prefix("--mcp-config=").unwrap()).unwrap();
+        assert_eq!(
+            servers["mcpServers"]["file-tracker"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert!(file_tracking(&plugin.join("default.appa.toml")).is_empty());
+    }
 
     /// A signal that lands between spawning Claude Code and storing its pid reaches it once the
     /// pid is stored: the launcher never waits on a child that missed its termination.
