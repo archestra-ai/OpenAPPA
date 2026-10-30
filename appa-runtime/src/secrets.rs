@@ -160,6 +160,19 @@ static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
+/// One scalar of a sanitizer's body: a string or number in a field named for a secret
+/// becomes the placeholder whole, any other string goes through [`redact_secrets`].
+pub(crate) fn redact_secret_leaf(field: Option<&str>, leaf: &mut serde_json::Value) {
+    let secret_field = field.is_some_and(|field| SECRET_FIELD.is_match(field));
+    match leaf {
+        serde_json::Value::String(_) | serde_json::Value::Number(_) if secret_field => {
+            *leaf = serde_json::Value::String(SECRET_PLACEHOLDER.to_string());
+        }
+        serde_json::Value::String(text) => *text = redact_secrets(text),
+        _ => {}
+    }
+}
+
 /// An annotation's `args` as they leave for a model provider: every string through
 /// [`redact_secrets`], and the whole value of a field named for a secret replaced. The
 /// complete call's tool `name` leaves as written.
