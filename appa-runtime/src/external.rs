@@ -27,7 +27,7 @@ use crate::model::archestra::ArchestraBackend;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
-use crate::recorder::ConsultBackend;
+use crate::transcriber::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::Ruling;
@@ -101,7 +101,7 @@ const DIAGNOSTICS_HEADER: &str = "x-appa-diagnostics";
 pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 
 /// What an external wrote about itself beside its answer: a `url` external's
-/// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
+/// diagnostics header, or the tail of a command's stderr. Kept for a consult transcriber;
 /// the runtime reads its last line only as the `detail` of a refusal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Diagnostics {
@@ -517,7 +517,7 @@ impl ExternalServices {
         self.dispatch(consult, None, None, None, Recall::Afresh).await
     }
 
-    /// [`ExternalServices::consult`] for a consult recorder: the outcome, and what the
+    /// [`ExternalServices::consult`] for a consult transcriber: the outcome, and what the
     /// transport saw of it where the backend is one a record names. Only here does a
     /// `url` consult read a non-success body or a `command` consult wait for its stderr.
     pub(crate) async fn consult_transcribed(
@@ -2807,7 +2807,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             }),
             "a body cut short says nothing about the refusal"
         );
-        assert_eq!(recorded, plain, "recording changes no outcome");
+        assert_eq!(recorded, plain, "transcribing changes no outcome");
         assert!(
             elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
             "the stalled body stretched the consult to {elapsed:?}"

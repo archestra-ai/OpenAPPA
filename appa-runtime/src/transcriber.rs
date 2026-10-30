@@ -1,8 +1,8 @@
 //! A host's account of the consults a governed call made: one [`ConsultRecord`] per
-//! external consult a session raised, handed to the [`ConsultRecorder`] the host attached
-//! with [`crate::api::Runtime::recording`].
+//! external consult a session raised, handed to the [`ConsultTranscriber`] the host attached
+//! with [`crate::api::Runtime::transcribing`].
 //!
-//! Like [`crate::events`], a record is never an input to a decision. The recorder is called
+//! Like [`crate::events`], a record is never an input to a decision. The transcriber is called
 //! after the consult's outcome is known, and nothing it does reaches that outcome.
 
 use serde::Serialize;
@@ -13,7 +13,7 @@ use crate::external::{ConsultOutcome, Diagnostics, Transcript};
 
 /// Receives one record per recorded consult. Called on the consult's own task, so an
 /// implementation hands the record off rather than doing work of its own here.
-pub trait ConsultRecorder: Send + Sync {
+pub trait ConsultTranscriber: Send + Sync {
     fn record(&self, record: ConsultRecord);
 }
 

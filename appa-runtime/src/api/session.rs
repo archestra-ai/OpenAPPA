@@ -1888,7 +1888,7 @@ impl Session {
     /// most common reason an agent appears to be stuck for no reason the trajectory's facts
     /// explain, and the duration is only knowable at the await.
     ///
-    /// With a recorder attached, the consult is also transcribed and its record handed over
+    /// With a transcriber attached, the consult is also transcribed and its record handed over
     /// once the outcome is known. `call` is the canonical call an annotation consult judges.
     #[tracing::instrument(target = "appa_telemetry", name = "appa.external.call", skip_all, fields(
         appa.trajectory.root = crate::telemetry::name(&self.root.0),
@@ -1908,7 +1908,7 @@ impl Session {
         let deployment = self.deployment();
         let externals = &deployment.externals;
         let consulting = async {
-            match &self.inner.recorder {
+            match &self.inner.transcriber {
                 // Boxed: the transport future is large, and every drive awaits it deep in the stack.
                 Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
                 None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
@@ -1944,7 +1944,7 @@ impl Session {
                 dispatch: None,
             },
         );
-        if let (Some(recorder), Some(transcript)) = (&self.inner.recorder, transcript) {
+        if let (Some(transcriber), Some(transcript)) = (&self.inner.transcriber, transcript) {
             // The host's code: whatever it does, the outcome below stands.
             let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let context = ConsultContext {
@@ -1960,13 +1960,13 @@ impl Session {
                 if let Some(record) =
                     ConsultRecord::new(consult, &outcome, transcript, started_at, duration_ms, context)
                 {
-                    recorder.record(record);
+                    transcriber.record(record);
                 }
             }));
             if recorded.is_err() {
                 tracing::warn!(
                     external = consult.name,
-                    "the consult recorder panicked; the record is dropped"
+                    "the consult transcriber panicked; the record is dropped"
                 );
             }
         }
@@ -8380,11 +8380,11 @@ delta = {}
         );
     }
 
-    /// A host's recorder: every record, in the order the consults settled.
+    /// A host's transcriber: every record, in the order the consults settled.
     #[derive(Default)]
     struct Collected(std::sync::Mutex<Vec<crate::api::ConsultRecord>>);
 
-    impl crate::api::ConsultRecorder for Collected {
+    impl crate::api::ConsultTranscriber for Collected {
         fn record(&self, record: crate::api::ConsultRecord) {
             self.0.lock().expect("the collector is never poisoned").push(record);
         }
@@ -8432,9 +8432,9 @@ delta = {}
             None,
         )
         .expect("the deployment opens");
-        let recorder = Arc::new(Collected::default());
+        let transcriber = Arc::new(Collected::default());
         let session = runtime
-            .recording(recorder.clone())
+            .transcribing(transcriber.clone())
             .create_session(root(), None)
             .expect("a fresh id opens");
 
@@ -8449,7 +8449,7 @@ delta = {}
             .expect("the call is judged");
         assert!(matches!(decision, ToolCallDecision::Allow { .. }));
 
-        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        let [record] = transcriber.taken().try_into().expect("one consult, one record");
         assert_eq!(record.id.get_version_num(), 7);
         assert_eq!(record.role, crate::api::ExternalRole::Annotator);
         assert_eq!(record.external_name, "gatekeeper");
@@ -8496,8 +8496,8 @@ delta = {}
             ToolCallDecision::Allow { .. }
         ));
         assert!(
-            recorder.taken().is_empty(),
-            "a view without the recorder records nothing"
+            transcriber.taken().is_empty(),
+            "a view without the transcriber transcribes nothing"
         );
     }
 
@@ -8516,9 +8516,9 @@ delta = {}
             None,
         )
         .expect("the deployment opens");
-        let recorder = Arc::new(Collected::default());
+        let transcriber = Arc::new(Collected::default());
         let session = runtime
-            .recording(recorder.clone())
+            .transcribing(transcriber.clone())
             .create_session(root(), None)
             .expect("a fresh id opens");
 
@@ -8535,7 +8535,7 @@ delta = {}
             ToolCallDecision::Allow { .. }
         ));
 
-        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        let [record] = transcriber.taken().try_into().expect("one consult, one record");
         assert_eq!(record.backend, crate::api::ConsultBackend::Command);
         assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
         assert_eq!(record.raw_response.as_deref(), Some(PERMISSIVE_ANSWER.as_bytes()));
@@ -8570,9 +8570,9 @@ delta = {}
         jev.url = url;
         jev.key = crate::config::ProfileKey::Set(crate::config::Token::new("jev-test-key".to_string()));
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
-        let recorder = Arc::new(Collected::default());
+        let transcriber = Arc::new(Collected::default());
         let session = runtime
-            .recording(recorder.clone())
+            .transcribing(transcriber.clone())
             .create_session(root(), None)
             .expect("a fresh id opens");
 
@@ -8589,7 +8589,7 @@ delta = {}
             ToolCallDecision::Allow { .. }
         ));
 
-        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        let [record] = transcriber.taken().try_into().expect("one consult, one record");
         assert_eq!(record.backend, crate::api::ConsultBackend::Jev);
         assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
         assert_eq!(record.http_status, Some(200));
@@ -8618,9 +8618,9 @@ delta = {}
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let recorder = Arc::new(Collected::default());
+        let transcriber = Arc::new(Collected::default());
         let session = runtime
-            .recording(recorder.clone())
+            .transcribing(transcriber.clone())
             .create_session(root(), None)
             .expect("a fresh id opens");
         assert!(matches!(
@@ -8640,7 +8640,7 @@ delta = {}
             RemedyDecision::Authorized { .. }
         ));
 
-        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        let [record] = transcriber.taken().try_into().expect("one consult, one record");
         assert_eq!(record.role, crate::api::ExternalRole::Authority);
         assert_eq!(record.external_name, "approver");
         assert_eq!(record.answer, Some(serde_json::json!({"ruling": "approve"})));
@@ -8649,25 +8649,25 @@ delta = {}
         assert_eq!(record.context.call_digest, None);
     }
 
-    /// A host recorder that fails on every record.
+    /// A host transcriber that fails on every record.
     struct Panicking;
 
-    impl crate::api::ConsultRecorder for Panicking {
+    impl crate::api::ConsultTranscriber for Panicking {
         fn record(&self, _record: crate::api::ConsultRecord) {
-            panic!("the host's recorder fails");
+            panic!("the host's transcriber fails");
         }
     }
 
     #[tokio::test]
-    async fn a_panicking_recorder_leaves_the_consult_outcome_standing() {
+    async fn a_panicking_transcriber_leaves_the_consult_outcome_standing() {
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let mut decisions = Vec::new();
-        for recorder in [None, Some(Arc::new(Panicking) as Arc<dyn crate::api::ConsultRecorder>)] {
+        for transcriber in [None, Some(Arc::new(Panicking) as Arc<dyn crate::api::ConsultTranscriber>)] {
             let dir = tempfile::tempdir().expect("a temp dir is creatable");
             let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
                 .expect("the deployment opens");
-            let runtime = match recorder {
-                Some(recorder) => runtime.recording(recorder),
+            let runtime = match transcriber {
+                Some(transcriber) => runtime.transcribing(transcriber),
                 None => runtime,
             };
             let session = runtime.create_session(root(), None).expect("a fresh id opens");
@@ -8688,7 +8688,7 @@ delta = {}
         }
         let [unrecorded, recorded] = decisions.try_into().expect("two runs");
         assert!(matches!(unrecorded, RemedyDecision::Authorized { .. }));
-        assert_eq!(recorded, unrecorded, "the recorder's panic changes nothing");
+        assert_eq!(recorded, unrecorded, "the transcriber's panic changes nothing");
     }
 
     /// Every delivery a crash can repeat is re-answered from the record: no fact is

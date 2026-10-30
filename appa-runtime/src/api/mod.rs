@@ -22,7 +22,7 @@ pub use crate::engine::{
 };
 pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
 pub use crate::external::Diagnostics;
-pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
+pub use crate::transcriber::{ConsultBackend, ConsultContext, ConsultRecord, ConsultTranscriber};
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
     TrajectoryId,
@@ -1207,7 +1207,7 @@ impl Prepared {
                     spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
-                recorder: None,
+                transcriber: None,
                 #[cfg(feature = "archestra")]
                 archestra_context: None,
                 pinned: None,
@@ -1263,7 +1263,7 @@ struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
-    recorder: Option<Arc<dyn ConsultRecorder>>,
+    transcriber: Option<Arc<dyn ConsultTranscriber>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1401,15 +1401,15 @@ impl Runtime {
     pub fn on(&self, store: Arc<LogStore>) -> Runtime {
         self.view(|view| {
             view.store = store;
-            view.recorder = None;
+            view.transcriber = None;
         })
     }
 
-    /// This view with every consult its sessions make handed to `recorder`, once the
+    /// This view with every consult its sessions make handed to `transcriber`, once the
     /// consult's outcome is known. Deployment probes and [`Runtime::on`] views of it
-    /// record nothing.
-    pub fn recording(&self, recorder: Arc<dyn ConsultRecorder>) -> Runtime {
-        self.view(|view| view.recorder = Some(recorder))
+    /// transcribe nothing.
+    pub fn transcribing(&self, transcriber: Arc<dyn ConsultTranscriber>) -> Runtime {
+        self.view(|view| view.transcriber = Some(transcriber))
     }
 
     /// A request-scoped opaque context returned only to the host's archestra
@@ -1425,7 +1425,7 @@ impl Runtime {
     /// policies from one runtime publishes each to its own line and dispatches each through a
     /// view pinned to that line's head. Once the line moves past the revision the deployment
     /// was published as, the view refuses with a retryable error until the host pins the new
-    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::recording`]
+    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::transcribing`]
     /// views of this one keep the pin.
     ///
     /// A pin selects the policy and its externals, not whose trajectories a view reaches.
@@ -1583,13 +1583,13 @@ impl Runtime {
         }
     }
 
-    /// Another view of this runtime's shared state: this view's store, recorder and pin,
+    /// Another view of this runtime's shared state: this view's store, transcriber and pin,
     /// with what `vary` changes.
     fn view(&self, vary: impl FnOnce(&mut Inner)) -> Runtime {
         let mut inner = Inner {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
-            recorder: self.inner.recorder.clone(),
+            transcriber: self.inner.transcriber.clone(),
             #[cfg(feature = "archestra")]
             archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),
