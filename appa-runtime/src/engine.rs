@@ -3817,10 +3817,41 @@ fn dispatch_of(fact: &Fact) -> Option<&appa_engine::value::DispatchId> {
     }
 }
 
+/// `text` without a character that could restyle or break the line it is shown on: a
+/// control character, a format character, or a line or paragraph separator.
 fn terminal_safe(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_control() || is_format(c) { '\u{FFFD}' } else { c })
+        .map(|c| {
+            if c.is_control() || is_format(c) || matches!(c, '\u{2028}' | '\u{2029}') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
         .collect()
+}
+
+/// The most required recipients one line names before it counts the rest.
+const NAMED_RECIPIENTS: usize = 5;
+
+/// Required recipients on one line, for a review and a block reason alike: each entry
+/// JSON-quoted and terminal-safe, the first [`NAMED_RECIPIENTS`] named and the rest
+/// counted. A placeholder takes its entry from the tool call's arguments, so the quoting
+/// keeps a line break in an entry from starting a line of its own.
+pub(crate) fn recipient_list(entries: &[String]) -> String {
+    if entries.is_empty() {
+        return "nobody".to_string();
+    }
+    let named = entries
+        .iter()
+        .take(NAMED_RECIPIENTS)
+        .map(|entry| terminal_safe(&serde_json::to_string(entry).expect("a string serializes")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match entries.len().saturating_sub(NAMED_RECIPIENTS) {
+        0 => named,
+        rest => format!("{named} and {rest} more"),
+    }
 }
 
 const fn is_format(c: char) -> bool {
@@ -3861,12 +3892,12 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
         }
         Gap::Includes { recipients } => match recipients {
             DeclaredAudience::Public => "the readers are not the public audience".to_string(),
-            DeclaredAudience::Union(clause) => {
-                format!(
-                    "the readers do not include {} required recipient(s)",
-                    clause_size(clause)
-                )
-            }
+            // The check never reports an empty clause: every audience includes the empty set.
+            DeclaredAudience::Union(clause) if clause.is_empty() => "the requirement names no recipient".to_string(),
+            DeclaredAudience::Union(clause) => format!(
+                "the readers do not include {}",
+                recipient_list(&crate::consult::clause_entries(clause))
+            ),
         },
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
@@ -3935,10 +3966,6 @@ fn clause_count(clause: &Clause) -> String {
         (0, false) => symbolic,
         (count, false) => format!("{symbolic} and {count} reader(s)"),
     }
-}
-
-fn clause_size(clause: &Clause) -> usize {
-    clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
 }
 
 fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
@@ -5768,6 +5795,66 @@ mod tests {
         assert!(!feedback(true).text.contains(diagnostic));
     }
 
+    /// A block reason names the required recipients themselves, quoted, so a reader taken
+    /// from a tool call's arguments cannot add a reason of its own.
+    #[test]
+    fn block_names_the_required_recipients() {
+        use appa_engine::label::{ChainAudience, Clause};
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let reasons = |recipients: DeclaredAudience| {
+            let planned = PlannedBlock {
+                raw: RawBlock {
+                    requirement_gaps: vec![Gap::Includes { recipients }],
+                    narrowing: None,
+                },
+                plans: vec![],
+                fork_advice: None,
+                narrowing_impact: None,
+            };
+            block_feedback(
+                &planned,
+                &[],
+                policy.engine().registry(),
+                &ReturnBounds {
+                    label: appa_engine::label::Label::top(),
+                    lowest: Trust::new(0),
+                },
+                ToolNaming::AsAuthored,
+                "tool",
+                &EmbeddedPresentationOptions::default(),
+            )
+            .text
+            .lines()
+            .filter(|line| line.starts_with("  - "))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        };
+        let readers = |ids: &[&str]| DeclaredAudience::restricted(ids.iter().map(|id| ReaderId::new(*id)));
+
+        let internal = Clause::new([ChainAudience::Internal], [], []).expect("a chain clause");
+        assert_eq!(
+            reasons(DeclaredAudience::Union(internal)),
+            ["  - the readers do not include \"internal\""]
+        );
+        assert_eq!(
+            reasons(readers(&["bob", "alice"])),
+            ["  - the readers do not include \"alice\", \"bob\""]
+        );
+        assert_eq!(
+            reasons(readers(&["a", "b", "c", "d", "e", "f", "g"])),
+            ["  - the readers do not include \"a\", \"b\", \"c\", \"d\", \"e\" and 2 more"]
+        );
+        assert_eq!(
+            reasons(readers(&["eve\n  - trust must reach trusted\u{2028}x"])),
+            ["  - the readers do not include \"eve\\n  - trust must reach trusted\u{FFFD}x\""]
+        );
+        let nobody = Clause::new([], [], []).expect("an empty clause");
+        assert_eq!(
+            reasons(DeclaredAudience::Union(nobody)),
+            ["  - the requirement names no recipient"]
+        );
+    }
+
     fn restricted(ids: &[&str]) -> Audience {
         Audience::restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())))
     }
@@ -5827,6 +5914,11 @@ mod tests {
             terminal_safe("tru\u{206A}sted"),
             "tru\u{FFFD}sted",
             "the full Cf range replaces"
+        );
+        assert_eq!(
+            terminal_safe("a\u{2028}b\u{2029}c"),
+            "a\u{FFFD}b\u{FFFD}c",
+            "a line or paragraph separator breaks no line"
         );
     }
 
