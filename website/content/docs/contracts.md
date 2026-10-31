@@ -1083,7 +1083,7 @@ The parent supplies `label` to specify the audience and trust limits for the chi
 
 A return declaration needs no authority. The agent executes it, and OpenAPPA does not ask a person.
 
-A blocked spawn offers only the return declarations, even when the spawn has other gaps. The agent executes one plan and then calls the subagent tool again. OpenAPPA then checks the other gaps of the spawn. Each gap gets its own remedy plan. Only a plan that names an authority asks for approval. A spawn with no other gap starts after the declaration, with no approval.
+A blocked spawn offers only the return declarations, even when the spawn has other gaps. The agent executes one plan and then calls the subagent tool again. OpenAPPA then checks the other gaps of the spawn. Each gap gets its own remedy plan. Only a plan that names an authority asks for approval. A spawn with no other gap starts after the declaration, with no approval. If no plan can lift the other gaps, for example because their only authority denied the call, the block offers no declaration. A declaration covers one spawn: the release that starts the spawn also spends it.
 
 The parent can also declare the return before the spawn. It calls `execute_remedy_plan` without `offer_id`, with the same `label` and, for `attest-schema`, `return_schema`:
 
@@ -1091,7 +1091,7 @@ The parent can also declare the return before the spawn. It calls `execute_remed
 { "label": {} }
 ```
 
-This declaration applies to the parent's next single spawn, and to that spawn only. A fan-out spawn does not use it: the parent declares a fan-out spawn's return at its block. The declaration is valid only at the parent's label when it was made. If a tool result changes the parent's label first, the declaration lapses, and the spawn's block says so. Declare the return immediately before the subagent call, with no other tool call between them. The runtime keeps this declaration in memory. After a restart, the spawn is blocked and the parent declares at the block.
+This declaration applies to the parent's next spawn only. A single spawn uses it. A fan-out spawn discards it, and the parent declares the fan-out spawn's return at its block. The declaration is valid only at the parent's label when it was made, and only until the parent's turn ends. If a tool result changes the parent's label first, the declaration lapses. If no declaration plan of the spawn's block fits the declaration, OpenAPPA does not apply it. In each case, the spawn's block says so. Declare the return immediately before the subagent call, with no other tool call between them. The runtime keeps this declaration in memory. After a restart, the spawn is blocked and the parent declares at the block.
 
 In the example below, a child can read internal customer data and pass its answer through `remove_customer_details`. The sanitizer must remove private details before the parent receives the answer:
 
