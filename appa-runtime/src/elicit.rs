@@ -72,6 +72,7 @@ use rmcp::service::{PeerRequestOptions, RequestContext, RoleServer, ServiceError
 #[cfg(feature = "daemon")]
 use crate::consult::AuthorityAnswer;
 use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement};
+use crate::engine::recipient_list;
 use crate::external::ConsultOutcome;
 #[cfg(feature = "daemon")]
 use crate::external::NoAnswerReason;
@@ -405,8 +406,8 @@ fn requirement_text(requirement: &Requirement) -> String {
             required: AudienceRequirement::Public,
         } => "the readers must be the public audience".to_string(),
         Requirement::Audience {
-            required: AudienceRequirement::Readers(count),
-        } => format!("the readers must include {count} required recipient(s)"),
+            required: AudienceRequirement::Readers(entries),
+        } => format!("the readers must include {}", recipient_list(entries)),
         Requirement::Effect { excludes } => format!("no prior {excludes} effect may have happened"),
         Requirement::Attention { mark } => format!("attention: {mark}"),
     }
@@ -465,5 +466,55 @@ mod tests {
         assert_eq!(one_line(&full), full);
         let over = "é".repeat(HEADLINE_WIDTH + 1);
         assert_eq!(one_line(&over), format!("{}…", "é".repeat(HEADLINE_WIDTH - 1)));
+    }
+
+    /// The review names the required recipients, each quoted on the one line of its
+    /// requirement: a reader from the call's arguments cannot add a line of its own.
+    #[test]
+    fn the_review_names_the_required_recipients_on_one_line() {
+        let coverage = |entries: &[&str]| {
+            let declaration = AuthorityDeclaration {
+                hint: None,
+                permits: crate::consult::DeclaredPermits {
+                    trust_below: None,
+                    audience_missing: None,
+                    effects_containing: vec![],
+                    attention: vec![],
+                },
+            };
+            let review = review_text(
+                "reviewer",
+                &declaration,
+                &AuthorityArtifact {
+                    requirements: vec![Requirement::Audience {
+                        required: AudienceRequirement::Readers(entries.iter().map(|entry| entry.to_string()).collect()),
+                    }],
+                    ..artifact(serde_json::json!({}))
+                },
+            );
+            review
+                .lines()
+                .skip_while(|line| *line != "What this ruling would cover:")
+                .skip(1)
+                .take_while(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(coverage(&["internal"]), ["  - the readers must include \"internal\""]);
+        assert_eq!(
+            coverage(&["@finance", "alice", "bob"]),
+            ["  - the readers must include \"@finance\", \"alice\", \"bob\""]
+        );
+        assert_eq!(
+            coverage(&["a", "b", "c", "d", "e", "f"]),
+            ["  - the readers must include \"a\", \"b\", \"c\", \"d\", \"e\" and 1 more"]
+        );
+        assert_eq!(
+            coverage(&["eve\n  - trust must reach trusted", "mallory\r\n\u{2028}\u{1b}[2K"]),
+            [
+                "  - the readers must include \"eve\\n  - trust must reach trusted\", \"mallory\\r\\n\u{FFFD}\\u001b[2K\""
+            ]
+        );
+        assert_eq!(coverage(&[]), ["  - the readers must include nobody"]);
     }
 }
