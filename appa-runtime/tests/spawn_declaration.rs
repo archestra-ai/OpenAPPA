@@ -257,6 +257,10 @@ async fn a_declaration_ahead_lapses_when_a_read_narrows_the_session_and_the_bloc
         feedback.starts_with("[appa] The return you declared ahead lapsed"),
         "the block says the declaration lapsed: {feedback}"
     );
+    assert!(
+        feedback.contains("changed this session's label. Apply a plan below."),
+        "the lapse points at the declaration plans the block offers at the new label: {feedback}"
+    );
 }
 
 /// The root's own turn ends, as Claude Code's `Stop` hook reports it.

@@ -1214,8 +1214,6 @@ impl Views<'_> {
         })
     }
 
-    /// The approval this exact call may consume right now. Spending one advances its own
-    /// subject, so a spent approval is not current and cannot be found here a second time.
     /// The current approval that only declares this marked spawn's return: no ruling, no
     /// acceptance, no output remedy. It releases the spawn alone only while nothing else blocks
     /// it; otherwise a second approval covers the rest and carries the same declaration.
@@ -1231,6 +1229,8 @@ impl Views<'_> {
             .any(|(_, standing)| standing.declares_only() == declares_only)
     }
 
+    /// The approvals this exact call may consume right now. Spending one advances its own
+    /// subject, so a spent approval is not current and cannot be found here a second time.
     fn current_approvals_for(
         &self,
         call: &ResolvedCall,

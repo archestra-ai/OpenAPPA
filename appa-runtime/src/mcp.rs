@@ -1280,6 +1280,15 @@ mod tests {
         };
         let unvouched = runtime.execute_remedy_plan(args(), None, None, None).await;
         assert!(unvouched.is_error, "no hook vouched for it: {unvouched:?}");
+        // A connection that names its actor declares only what that actor's hook let through,
+        // as it executes only an offer the hook vouched for.
+        let bound = runtime
+            .execute_remedy_plan(args(), None, None, Some(&acting(root.0.as_str())))
+            .await;
+        assert!(
+            bound.is_error && bound.text.contains("not tied to your session"),
+            "no hook vouched for it on the actor's own connection: {bound:?}"
+        );
 
         runtime.vouch(
             &crate::api::declaration_key(&args(), None),

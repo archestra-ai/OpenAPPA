@@ -3261,7 +3261,9 @@ pub struct RemedyReply {
 
 impl Runtime {
     /// The actor a daemon's declaration ahead of the spawn acts for: the one its control hook
-    /// vouched under the declaration's key, held to the actor the connection names.
+    /// vouched under the declaration's key, held to the actor the connection names. With no
+    /// vouch nothing is declared, whether or not the connection names an actor, as an offer
+    /// with no vouch is not executed.
     #[cfg(feature = "daemon")]
     fn declaration_vouch(
         &self,
@@ -3272,8 +3274,7 @@ impl Runtime {
         match (self.take_vouched(&declaration_key(args, call)), expected) {
             (Ok((vouched, _)), Some(expected)) if vouched != *expected => Err(RemedyRefusal::ActorMismatch),
             (Ok((vouched, _)), _) => Ok(vouched),
-            (Err(_), Some(expected)) => Ok(expected.clone()),
-            (Err(_), None) => Err(RemedyRefusal::UnvouchedDeclaration),
+            (Err(_), _) => Err(RemedyRefusal::UnvouchedDeclaration),
         }
     }
 

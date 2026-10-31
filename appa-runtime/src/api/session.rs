@@ -298,9 +298,10 @@ pub struct Session {
     presentation: EmbeddedPresentationOptions,
 }
 
-/// What a spawn's block says when the return its trajectory declared ahead has lapsed.
-const LAPSED_AHEAD: &str = "[appa] The return you declared ahead lapsed: this session's label changed before the \
-    subagent call. Declare it again right before the call, with no tool call between.";
+/// What a spawn's block says when the return its trajectory declared ahead has lapsed. The
+/// block's reason already says to declare right before the subagent call.
+const LAPSED_AHEAD: &str = "[appa] The return you declared ahead lapsed, so it was not applied: a call between it \
+    and this subagent call changed this session's label.";
 
 /// What a spawn's block says when no declaration it offers fits the return declared ahead.
 const UNFIT_AHEAD: &str = "[appa] The return you declared ahead does not fit this call, so it was not applied.";
@@ -732,15 +733,21 @@ impl Session {
                 .find(|offer| policy.engine().offer_declares_only(&view, &self.trajectory, offer));
             (offer, policy.engine().label_of(&view, &self.trajectory))
         };
+        // A lapse is told first: at a changed label no offer may fit, and the cause is the change.
+        if label != Some(held.label) {
+            return Ok(noted(LAPSED_AHEAD, apply));
+        }
         let Some(offer) = offer else {
             return Ok(noted(UNFIT_AHEAD, apply));
         };
-        if label != Some(held.label) {
-            return Ok(noted(LAPSED_AHEAD, ""));
-        }
-        match self.on_remedy(offer, held.arguments, None, None).await? {
-            RemedyDecision::Authorized { .. } => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
-            _ => Ok(noted(UNFIT_AHEAD, apply)),
+        // A declaration that cannot be applied leaves the spawn the block it already met.
+        match self.on_remedy(offer, held.arguments, None, None).await {
+            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
+            Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
+            Err(error) => {
+                tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
+                Ok(noted(UNFIT_AHEAD, apply))
+            }
         }
     }
 
