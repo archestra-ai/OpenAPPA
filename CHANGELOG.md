@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.38.0...v0.38.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **runtime:** name the trust or audience a narrowing remedy leaves the session at ([#761](https://github.com/archestra-ai/OpenAPPA/issues/761)) ([bb6030a](https://github.com/archestra-ai/OpenAPPA/commit/bb6030a026d5bc925252994701ce633432e16538))
+
 ## [0.38.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.37.0...v0.38.0) (2026-10-31)
 
 
