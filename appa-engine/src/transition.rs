@@ -406,6 +406,8 @@ pub struct Blocked {
     pub call: ResolvedCall,
     pub block: PlannedBlock,
     pub block_id: crate::value::BlockId,
+    /// The kind of spawn a marked spawn's block holds, or `None` for an ordinary call.
+    pub spawn: Option<SpawnKind>,
     /// The offer opened for each engine-side plan, paired with the plan it binds. Runtime renders
     /// these to the model and routes `execute_remedy_plan` by them; it mints none of its own.
     pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
@@ -1764,7 +1766,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::BlockReused);
         }
         let expansions = self.recorded_expansions(evidence)?;
-        let menu = self.stage_menu(&views, trajectory, act, call, subject, &expansions)?;
+        let menu = self.stage_menu(&views, trajectory, act, call, subject, plan, &expansions)?;
         self.audit_reads(&expansions);
         if !menu.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
@@ -1784,6 +1786,7 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_menu(
         &self,
         views: &Views,
@@ -1791,6 +1794,7 @@ impl<'a> Sequence<'a> {
         act: &crate::basis::DecidedAct,
         call: &crate::value::CanonicalDigest,
         subject: &crate::basis::SubjectKey,
+        plan: &crate::plan::ExecutableRemedyPlan,
         expansions: &Expansions,
     ) -> Result<Vec<crate::plan::ExecutableRemedyPlan>, TransitionRefusal> {
         // The pins of the record the surfacing act continues are inherited evidence.
@@ -1838,26 +1842,34 @@ impl<'a> Sequence<'a> {
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
                 self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
-                Ok(crate::plan::plan(
-                    self.engine.registry(),
-                    views,
-                    crate::plan::BlockedCall {
-                        call: candidate,
-                        contract: &contract,
-                        raw: &block,
-                        stage: &stage,
-                        role,
-                    },
-                    &context,
-                )
+                let blocked = || crate::plan::BlockedCall {
+                    call: candidate,
+                    contract: &contract,
+                    raw: &block,
+                    stage: &stage,
+                    role,
+                };
                 // A recorded act whose pinned evidence leaves an enumeration read undecided
                 // reconstructed a menu the evidence cannot back.
-                .map_err(TransitionRefusal::from)?
-                .plans
-                .iter()
-                .filter_map(crate::plan::RemedyPlan::executable)
-                .cloned()
-                .collect())
+                let menu: Vec<crate::plan::ExecutableRemedyPlan> =
+                    crate::plan::plan(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?
+                        .plans
+                        .iter()
+                        .filter_map(crate::plan::RemedyPlan::executable)
+                        .cloned()
+                        .collect();
+                // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
+                if !menu.contains(plan)
+                    && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
+                {
+                    let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?;
+                    if bundled.contains(plan) {
+                        return Ok(bundled);
+                    }
+                }
+                Ok(menu)
             }
             crate::basis::SubjectKey::ConfinedResult(dispatch) => {
                 if dispatch.trajectory() != trajectory || dispatch.digest() != call {
@@ -1974,10 +1986,11 @@ impl<'a> Sequence<'a> {
         // One approval per offer, and one current approval per call: a second would leave the
         // release choosing between two plans the agent selected separately, and only one of them
         // is the choice it made.
-        if views.approval(offer).is_some() || views.current_approval(call).is_some() {
+        // A marked spawn's declaration stands beside the approval of its other gaps.
+        let offered = &recorded.plan;
+        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only()) {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
-        let offered = &recorded.plan;
         if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
@@ -1992,8 +2005,18 @@ impl<'a> Sequence<'a> {
         }) {
             return Err(TransitionRefusal::UnbackedApproval);
         }
+        let marked = matches!(
+            views.call_role(&recorded.subject),
+            crate::check::CallRole::MarkedSpawn(_)
+        );
         match (offered.return_step(), return_policy) {
-            (None, None) => {}
+            (None, None) if !marked => {}
+            // The plan of a declared spawn's other gaps carries the declaration that stands.
+            (None, Some(policy))
+                if marked
+                    && views
+                        .declaration(call)
+                        .is_some_and(|(_, declaration)| declaration.return_policy.as_ref() == Some(policy)) => {}
             (Some(step), Some(policy)) => {
                 crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy)
                     .map_err(|_| TransitionRefusal::UnbackedReturnPolicy)?;
@@ -2129,6 +2152,52 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    /// The declaration-only approvals current beside a covering approval that is spent: they
+    /// declare the same return for the same call, and the covering one carried it.
+    fn declarations_beside(
+        &self,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Vec<crate::value::OfferId> {
+        let views = self.projection.view(trajectory);
+        let Some(spent) = views
+            .approval(offer)
+            .filter(|spent| spent.return_policy.is_some() && !spent.declares_only())
+        else {
+            return Vec::new();
+        };
+        views
+            .approvals_for(&spent.call)
+            .filter(|(declared, approval)| {
+                declared != offer
+                    && approval.declares_only()
+                    && approval.return_policy == spent.return_policy
+                    && self.stood(
+                        trajectory,
+                        &crate::basis::SubjectKey::Approval(*declared),
+                        &approval.basis,
+                    )
+            })
+            .map(|(declared, _)| declared)
+            .collect()
+    }
+
+    /// Did a record at `recorded` stand where the act being decided began? The walk that
+    /// derives the act's advance stands there itself; admission reads that point back through
+    /// what the act still owes, as [`Self::may_spend`] does.
+    fn stood(
+        &self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        recorded: &crate::basis::PolicyBasis,
+    ) -> bool {
+        let now = self.projection.view(trajectory).basis_for(subject);
+        match &self.declared {
+            Some(open) => recorded.advanced_by(&open.owed, trajectory, subject) == now,
+            None => *recorded == now,
+        }
+    }
+
     /// A staged candidate is taken the way an approval is spent, except that only its own
     /// subject must have stood still. The flow moves on every admitted value, and a narrowing
     /// must leave the derivation takeable: the proposal that takes it is judged against the
@@ -2244,8 +2313,13 @@ impl<'a> Sequence<'a> {
             } => effect_advance(!effects.is_empty()),
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
-            Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
-                subjects: vec![crate::basis::SubjectKey::Approval(*offer)],
+            // A covering approval carried the declaration that stood beside it, so spending it
+            // spends that declaration too: a declaration covers one spawn.
+            Fact::CallApprovalConsumed { trajectory, offer, .. } => BasisAdvance {
+                subjects: std::iter::once(*offer)
+                    .chain(self.declarations_beside(trajectory, offer))
+                    .map(crate::basis::SubjectKey::Approval)
+                    .collect(),
                 ..BasisAdvance::default()
             },
             Fact::OfferAccepted { trajectory, offer } => match self.projection.view(trajectory).offer(offer) {
@@ -2517,11 +2591,12 @@ impl<'a> Sequence<'a> {
                 views
                     .approvals_for(call)
                     .map(|(offer, approval)| (offer, approval.basis))
-                    .find(|(offer, basis)| {
+                    .filter(|(offer, basis)| {
                         self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
                             .is_ok()
                     })
                     .map(|(offer, _)| offer)
+                    .collect()
             },
             &|views, call, taken| {
                 views

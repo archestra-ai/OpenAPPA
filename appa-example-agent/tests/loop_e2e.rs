@@ -339,6 +339,38 @@ async fn a_child_runs_its_own_trajectory_and_its_final_message_crosses_back() {
 }
 
 #[tokio::test]
+async fn a_return_declared_ahead_releases_the_spawn_at_once() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let provider = Provider::default();
+    provider
+        .calls("execute_remedy_plan", serde_json::json!({"label": {}}))
+        .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("Alice Chen is a Staff Engineer.")
+        .says("The lookup says: Alice Chen is a Staff Engineer.");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, Staff Engineer");
+
+    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate", "read_hr"]).await);
+    let outcome = agent.run(root(), "Find out about Alice.", Default::default()).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Answer("The lookup says: Alice Chen is a Staff Engineer.".to_string()),
+    );
+    let declared = provider.tool_result(1, "call_0");
+    assert!(
+        declared.starts_with("[appa] Declared."),
+        "the control call that quotes no offer declares: {declared}"
+    );
+    assert_eq!(
+        provider.tool_result(4, "call_1"),
+        "Alice Chen is a Staff Engineer.",
+        "the spawn meets no block and its child's return crosses",
+    );
+}
+
+#[tokio::test]
 async fn a_child_that_says_nothing_returns_no_value() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let provider = Provider::default();

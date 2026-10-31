@@ -416,10 +416,17 @@ impl SessionInner {
                 "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
             );
         };
-        match self
-            .tokio
-            .block_on(self.runtime.execute_remedy_with(&self.actor(child), offer, arguments))
-        {
+        // A call that quotes no offer declares the next subagent call's return.
+        let actor = self.actor(child);
+        let outcome = match offer {
+            Some(offer) => self
+                .tokio
+                .block_on(self.runtime.execute_remedy_with(&actor, offer, arguments)),
+            None => self
+                .tokio
+                .block_on(self.runtime.declare_return_ahead(&actor, arguments)),
+        };
+        match outcome {
             RemedyOutcome::Authorized { call } => format!(
                 "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 call.tool,

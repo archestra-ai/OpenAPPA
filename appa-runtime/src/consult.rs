@@ -312,8 +312,7 @@ impl AuthorityArtifact {
 
 /// One requirement a ruling covers, projected from the gap the engine assigned. The
 /// projection carries no state: a trust requirement names the floor, not the current
-/// rank; an audience requirement names how many readers are required, never who; the
-/// recipients may be a directory group's expansion and stay the engine's.
+/// rank; an audience requirement names the required recipients, not the current readers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Requirement {
@@ -323,18 +322,22 @@ pub enum Requirement {
     Attention { mark: String },
 }
 
-/// The required audience of an `includes` gap by shape only.
+/// The required audience of an `includes` gap: `public`, or one union clause's entries in
+/// [`clause_entries`] order. Each entry is spelled as the policy, the tool call's own
+/// arguments, or its annotation wrote it — a static recipient, or what a placeholder or
+/// selector resolved to. A group stays its `@` reference: an entry never comes from a
+/// directory group's members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudienceRequirement {
     Public,
-    Readers(usize),
+    Readers(Vec<String>),
 }
 
 impl Serialize for AudienceRequirement {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             AudienceRequirement::Public => serializer.serialize_str("public"),
-            AudienceRequirement::Readers(count) => serializer.serialize_u64(*count as u64),
+            AudienceRequirement::Readers(entries) => entries.serialize(serializer),
         }
     }
 }
@@ -350,9 +353,7 @@ impl Requirement {
             Gap::Includes { recipients } => Requirement::Audience {
                 required: match recipients {
                     DeclaredAudience::Public => AudienceRequirement::Public,
-                    DeclaredAudience::Union(clause) => AudienceRequirement::Readers(
-                        clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some()),
-                    ),
+                    DeclaredAudience::Union(clause) => AudienceRequirement::Readers(clause_entries(clause)),
                 },
             },
             Gap::NoPrior(effect) => Requirement::Effect {
@@ -1056,8 +1057,8 @@ mod tests {
     #[test]
     fn requirements_project_assigned_gaps_without_state() {
         use appa_engine::fact::EffectKind;
-        use appa_engine::label::ReaderId;
-        use appa_engine::names::MarkName;
+        use appa_engine::label::ChainAudience;
+        use appa_engine::names::{GroupName, MarkName};
 
         let chain = chain();
         let projected = [
@@ -1067,6 +1068,16 @@ mod tests {
             },
             Gap::Includes {
                 recipients: DeclaredAudience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
+            },
+            Gap::Includes {
+                recipients: DeclaredAudience::Union(
+                    Clause::new(
+                        [ChainAudience::Internal],
+                        [GroupRef::Named(GroupName::new("finance"))],
+                        [ReaderId::new("carol")],
+                    )
+                    .expect("a mixed clause"),
+                ),
             },
             Gap::Includes {
                 recipients: DeclaredAudience::Public,
@@ -1081,7 +1092,8 @@ mod tests {
             projected,
             vec![
                 serde_json::json!({"kind": "trust", "required": "trusted"}),
-                serde_json::json!({"kind": "audience", "required": 2}),
+                serde_json::json!({"kind": "audience", "required": ["alice", "bob"]}),
+                serde_json::json!({"kind": "audience", "required": ["internal", "@finance", "carol"]}),
                 serde_json::json!({"kind": "audience", "required": "public"}),
                 serde_json::json!({"kind": "effect", "excludes": "network"}),
                 serde_json::json!({"kind": "attention", "mark": "review"}),

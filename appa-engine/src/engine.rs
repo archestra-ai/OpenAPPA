@@ -681,6 +681,22 @@ impl Engine {
         (0..decided.proposals.len()).any(|position| views.pending_block(&composing.subject(position)).is_some())
     }
 
+    /// Would `policy` stand as this trajectory's return declaration now? The checks a declaration
+    /// at the spawn passes, at the trajectory's current label. A runtime holds a declaration made
+    /// ahead of the spawn by them and applies it through the spawn's own declaration offer.
+    pub fn check_return_declaration(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        policy: &ReturnPolicy,
+    ) -> Result<(), crate::plan::ReturnPolicyRefusal> {
+        let views = view.crossed_to(self);
+        match views.views(trajectory) {
+            Some(views) => plan::declared_return_policy(&self.registry, &views, &policy.route(), policy),
+            None => Err(crate::plan::ReturnPolicyRefusal::RouteMismatch),
+        }
+    }
+
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
         view.views(child)?.fork_of(child).cloned()
@@ -920,21 +936,34 @@ impl Engine {
         let (block_id, offers) = views
             .pending_block(subject)
             .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        let mut block = plan::plan(
+            &self.registry,
+            views,
+            BlockedCall {
+                call: &call,
+                contract: &contract,
+                raw: &raw,
+                stage: &stage,
+                role,
+            },
+            &self.context(act),
+        )?;
+        // A pending offer shows the plan it recorded: a planner that changed since it opened can
+        // number another plan the same.
+        if !offers.is_empty() {
+            let recorded = offers
+                .iter()
+                .filter_map(|(offer, _)| views.offer(offer))
+                .map(|open| plan::RemedyPlan::Executable(open.plan.clone()));
+            block.plans = recorded
+                .chain(block.plans.into_iter().filter(|plan| plan.executable().is_none()))
+                .collect();
+        }
         Ok(Recheck::Blocked(Box::new(Blocked {
-            block: plan::plan(
-                &self.registry,
-                views,
-                BlockedCall {
-                    call: &call,
-                    contract: &contract,
-                    raw: &raw,
-                    stage: &stage,
-                    role,
-                },
-                &self.context(act),
-            )?,
+            block,
             call,
             block_id,
+            spawn: role.spawn(),
             offers,
         })))
     }

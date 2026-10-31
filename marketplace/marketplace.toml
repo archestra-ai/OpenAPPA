@@ -92,8 +92,8 @@ digest = "sha256:a8bbb52ac8e367f7e8308fe154fd4b76eb1d74df1781f6410c51ee9ba635fb2
 
 [packages.plugin.kagent]
 path = "plugins/kagent"
-digest = "sha256:9fde3eb55c0eb2743026b0deb738ee3f275377014a7f4ef21b2dbf7e8eef32ab"
+digest = "sha256:6f8b74b5e234a76dc0f8518e696814cbbbb0c00242d7cc46226355ffe845b220"
 
 [packages.plugin.opencode]
 path = "plugins/opencode"
-digest = "sha256:c23815678d6240645128d9569fe47f8d9d9fdff6bbfd1561c75d63d26022c444"
+digest = "sha256:85d2df30badb415533d4d4931418b340cb437d953213382903d343b9367c54ce"
