@@ -4170,7 +4170,9 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             (needs_approval, Some(narrowing), None) => {
                 let chain = registry.map(Registry::trust_chain);
                 match (needs_approval, SessionNarrowing::of(narrowing, chain)) {
-                    (true, Some(change)) => format!("Submit this call for approval; once approved, {change} for the rest of this session"),
+                    (true, Some(change)) => {
+                        format!("Submit this call for approval; once approved, {change} for the rest of this session")
+                    }
                     (false, Some(change)) => format!("Run this call; {change} for the rest of this session"),
                     (true, None) => "Submit this call for approval".to_string(),
                     (false, None) => "Run this call".to_string(),
