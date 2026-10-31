@@ -507,8 +507,23 @@ struct PinnedParts {
     annotator: AnnotatorName,
     call: crate::value::CanonicalDigest,
     produced: ProducedAnnotation,
+    #[serde(default, skip_serializing_if = "AnnotationOrigin::is_annotator")]
+    origin: AnnotationOrigin,
     #[serde(default, skip_serializing_if = "AnnotationContext::is_empty")]
     context: AnnotationContext,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum AnnotationOrigin {
+    #[default]
+    Annotator,
+    NoAnswerFallback,
+}
+
+impl AnnotationOrigin {
+    fn is_annotator(&self) -> bool {
+        matches!(self, AnnotationOrigin::Annotator)
+    }
 }
 
 /// What the deployment's context providers answered about a call before its Annotator judged
@@ -547,6 +562,21 @@ impl PinnedAnnotation {
             annotator,
             call,
             produced,
+            origin: AnnotationOrigin::Annotator,
+            context: AnnotationContext::default(),
+        }))
+    }
+
+    pub fn no_answer_fallback(
+        annotator: AnnotatorName,
+        call: crate::value::CanonicalDigest,
+        produced: ProducedAnnotation,
+    ) -> Self {
+        PinnedAnnotation(Box::new(PinnedParts {
+            annotator,
+            call,
+            produced,
+            origin: AnnotationOrigin::NoAnswerFallback,
             context: AnnotationContext::default(),
         }))
     }
@@ -570,6 +600,10 @@ impl PinnedAnnotation {
     /// The canonical digest of the exact rendered call the Annotator judged.
     pub fn call(&self) -> &crate::value::CanonicalDigest {
         &self.0.call
+    }
+
+    pub(crate) fn is_no_answer_fallback(&self) -> bool {
+        matches!(self.0.origin, AnnotationOrigin::NoAnswerFallback)
     }
 
     pub fn produced(&self) -> &ProducedAnnotation {
@@ -611,6 +645,8 @@ pub enum ToolDeclaration {
         #[serde(default = "crate::params::ToolParameters::open")]
         parameters: crate::params::ToolParameters,
         annotator: AnnotatorName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_no_answer: Option<ProducedAnnotation>,
     },
 }
 
@@ -658,6 +694,13 @@ impl ToolDeclaration {
         }
     }
 
+    pub fn on_no_answer(&self) -> Option<&ProducedAnnotation> {
+        match self {
+            ToolDeclaration::Annotated { on_no_answer, .. } => on_no_answer.as_ref(),
+            ToolDeclaration::Declared(_) => None,
+        }
+    }
+
     /// The static annotation, when the declaration is one.
     pub fn declared(&self) -> Option<&ToolAnnotation> {
         match self {
@@ -696,6 +739,7 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
+            on_no_answer: None,
         };
         assert_eq!(annotated.annotator().map(|name| name.as_str()), Some("bash-classifier"));
         assert!(annotated.declared().is_none());
@@ -832,6 +876,7 @@ mod tests {
             description: Some("Runs one shell command.".to_string()),
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
+            on_no_answer: None,
         };
         let produced = ProducedAnnotation {
             delta: Delta {
