@@ -1011,6 +1011,7 @@ mod tests {
                     tool: "send_message".to_string(),
                     arguments,
                     requirements: vec![],
+                    narrows: None,
                 },
             },
         }

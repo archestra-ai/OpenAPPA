@@ -610,6 +610,7 @@ impl Engine {
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
                     required: recorded.plan.required.clone(),
+                    narrowing: recorded.plan.narrowing().cloned(),
                 }),
             },
             // No stage stands on a return: it crosses at the child's stop or is refused there.
