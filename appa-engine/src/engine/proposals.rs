@@ -350,6 +350,7 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<(Blocked, Vec<Fact>), TransitionError> {
         let call = blocked.call;
+        let spawn = blocked.role.spawn();
         let planned = plan::plan(&self.registry, views, blocked, &self.context(act))?;
         let (block_id, offers, opened) =
             self.open_offers(views, opening, &call.digest(), &Engine::executable(&planned), act);
@@ -358,6 +359,7 @@ impl Engine {
                 call: call.clone(),
                 block: planned,
                 block_id,
+                spawn,
                 offers,
             },
             opened,

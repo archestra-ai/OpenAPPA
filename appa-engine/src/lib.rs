@@ -50,8 +50,10 @@
 //! declaration**. Declaring asks no authority: a blocked spawn with no declaration is offered
 //! the declarations alone, and the approval one of them prepares releases the spawn when nothing
 //! else blocks it. Otherwise the retry is planned on its remaining gaps, and the approval that
-//! covers them carries the declaration that stands. Like any approval, a declaration stops being
-//! current when the parent's label moves.
+//! covers them carries the declaration that stands; the release that spends it spends the
+//! declaration too, so a declaration covers one spawn. A spawn whose other gaps have no plan
+//! but those naming an authority that denied it is offered no declaration. Like any approval, a
+//! declaration stops being current when the parent's label moves.
 //!
 //! A **fan-out spawn** ([`transition::SpawnKind::FanOut`]) starts any number of children under
 //! the one return declaration its release consumed. Its own fork binds no child. Each child it

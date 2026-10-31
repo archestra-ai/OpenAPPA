@@ -517,6 +517,7 @@ impl<'a> Search<'a> {
                 &context.stage,
                 context.role,
                 context.declaring,
+                &context.denied,
                 context.floor.as_ref(),
                 &membership,
             )? {

@@ -404,6 +404,8 @@ pub struct Blocked {
     pub call: ResolvedCall,
     pub block: PlannedBlock,
     pub block_id: crate::value::BlockId,
+    /// The kind of spawn a marked spawn's block holds, or `None` for an ordinary call.
+    pub spawn: Option<SpawnKind>,
     /// The offer opened for each engine-side plan, paired with the plan it binds. Runtime renders
     /// these to the model and routes `execute_remedy_plan` by them; it mints none of its own.
     pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
@@ -2148,6 +2150,52 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    /// The declaration-only approvals current beside a covering approval that is spent: they
+    /// declare the same return for the same call, and the covering one carried it.
+    fn declarations_beside(
+        &self,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Vec<crate::value::OfferId> {
+        let views = self.projection.view(trajectory);
+        let Some(spent) = views
+            .approval(offer)
+            .filter(|spent| spent.return_policy.is_some() && !spent.declares_only())
+        else {
+            return Vec::new();
+        };
+        views
+            .approvals_for(&spent.call)
+            .filter(|(declared, approval)| {
+                declared != offer
+                    && approval.declares_only()
+                    && approval.return_policy == spent.return_policy
+                    && self.stood(
+                        trajectory,
+                        &crate::basis::SubjectKey::Approval(*declared),
+                        &approval.basis,
+                    )
+            })
+            .map(|(declared, _)| declared)
+            .collect()
+    }
+
+    /// Did a record at `recorded` stand where the act being decided began? The walk that
+    /// derives the act's advance stands there itself; admission reads that point back through
+    /// what the act still owes, as [`Self::may_spend`] does.
+    fn stood(
+        &self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        recorded: &crate::basis::PolicyBasis,
+    ) -> bool {
+        let now = self.projection.view(trajectory).basis_for(subject);
+        match &self.declared {
+            Some(open) => recorded.advanced_by(&open.owed, trajectory, subject) == now,
+            None => *recorded == now,
+        }
+    }
+
     /// A staged candidate is taken the way an approval is spent, except that only its own
     /// subject must have stood still. The flow moves on every admitted value, and a narrowing
     /// must leave the derivation takeable: the proposal that takes it is judged against the
@@ -2263,8 +2311,13 @@ impl<'a> Sequence<'a> {
             } => effect_advance(!effects.is_empty()),
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
-            Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
-                subjects: vec![crate::basis::SubjectKey::Approval(*offer)],
+            // A covering approval carried the declaration that stood beside it, so spending it
+            // spends that declaration too: a declaration covers one spawn.
+            Fact::CallApprovalConsumed { trajectory, offer, .. } => BasisAdvance {
+                subjects: std::iter::once(*offer)
+                    .chain(self.declarations_beside(trajectory, offer))
+                    .map(crate::basis::SubjectKey::Approval)
+                    .collect(),
                 ..BasisAdvance::default()
             },
             Fact::OfferAccepted { trajectory, offer } => match self.projection.view(trajectory).offer(offer) {

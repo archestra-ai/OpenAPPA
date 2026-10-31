@@ -136,8 +136,8 @@ pub struct ExecutableRemedyPlan {
 }
 
 impl ExecutableRemedyPlan {
-    /// Does this plan only declare a marked spawn's return?
-    pub(crate) fn declares_only(&self) -> bool {
+    /// Does this plan only declare a marked spawn's return? Such a plan asks no authority.
+    pub fn declares_only(&self) -> bool {
         matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
     }
 
@@ -370,6 +370,7 @@ pub(crate) fn plan(
         stage,
         role,
         Declaring::of(role, views, call),
+        denied,
         floor.as_ref(),
         context,
     )?
@@ -587,6 +588,7 @@ pub(crate) fn bundled_spawn_menu(
         blocked.stage,
         blocked.role,
         Declaring::Bundled(kind),
+        denied,
         floor_of(registry, views).as_ref(),
         context,
     )?
@@ -614,6 +616,7 @@ pub(crate) fn enumerate_plans(
     stage: &CallStage,
     role: CallRole,
     declaring: Declaring,
+    denied: &BTreeSet<AuthorityName>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
@@ -694,9 +697,16 @@ pub(crate) fn enumerate_plans(
     }
     needs.refuse_if_any()?;
     // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
+    // A plan naming an authority that denied this call does not count: the caller drops it.
     if let Declaring::Separately(kind) = declaring {
         let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
-        if !unblocked && candidates.is_empty() {
+        let planned = candidates.iter().any(|candidate| {
+            !candidate
+                .required
+                .iter()
+                .any(|ruling| denied.contains(&ruling.authority))
+        });
+        if !unblocked && !planned {
             return Ok(Vec::new());
         }
         candidates = return_options(registry, current, floor, kind)

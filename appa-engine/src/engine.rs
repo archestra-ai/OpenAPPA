@@ -935,21 +935,34 @@ impl Engine {
         let (block_id, offers) = views
             .pending_block(subject)
             .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        let mut block = plan::plan(
+            &self.registry,
+            views,
+            BlockedCall {
+                call: &call,
+                contract: &contract,
+                raw: &raw,
+                stage: &stage,
+                role,
+            },
+            &self.context(act),
+        )?;
+        // A pending offer shows the plan it recorded: a planner that changed since it opened can
+        // number another plan the same.
+        if !offers.is_empty() {
+            let recorded = offers
+                .iter()
+                .filter_map(|(offer, _)| views.offer(offer))
+                .map(|open| plan::RemedyPlan::Executable(open.plan.clone()));
+            block.plans = recorded
+                .chain(block.plans.into_iter().filter(|plan| plan.executable().is_none()))
+                .collect();
+        }
         Ok(Recheck::Blocked(Box::new(Blocked {
-            block: plan::plan(
-                &self.registry,
-                views,
-                BlockedCall {
-                    call: &call,
-                    contract: &contract,
-                    raw: &raw,
-                    stage: &stage,
-                    role,
-                },
-                &self.context(act),
-            )?,
+            block,
             call,
             block_id,
+            spawn: role.spawn(),
             offers,
         })))
     }

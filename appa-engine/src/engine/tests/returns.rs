@@ -1548,3 +1548,121 @@ fn a_declaration_ahead_of_the_spawn_is_held_to_the_label_and_the_own_floor() {
     );
     assert_eq!(at(&log, &child, label), Ok(()), "the child's own floor stands");
 }
+
+/// The gapped spawn declared at its first block and blocked again for its gap alone: the log,
+/// and the gap's one offer with its plan.
+fn declared_with_gap_offer(e: &Engine) -> (Vec<Fact>, crate::value::OfferId, plan::ExecutableRemedyPlan) {
+    let log = vec![opened(e)];
+    let blocked = appended_facts(e.handle(&viewing(e, &log), marked("gap-1", "spawn")).unwrap());
+    let offered = opened_offers(&blocked);
+    let log = [log, blocked].concat();
+    let log = [log.clone(), declare_bare(e, &log, &offered)].concat();
+    let retried = appended_facts(e.handle(&viewing(e, &log), marked("gap-2", "spawn")).unwrap());
+    let (offer, plan) = match opened_offers(&retried).as_slice() {
+        [(offer, plan)] => (*offer, plan.clone()),
+        other => panic!("the gap alone is planned, got {other:?}"),
+    };
+    ([log, retried].concat(), offer, plan)
+}
+
+#[test]
+fn the_release_that_spends_the_gap_approval_spends_the_declaration_beside_it() {
+    let e = gapped_spawn_engine();
+    let (log, offer, plan) = declared_with_gap_offer(&e);
+    let label = viewing(&e, &log).views(&traj()).unwrap().current_label();
+    let approved = appended_facts(
+        execute_offer_declaring(
+            &e,
+            &log,
+            offer,
+            OfferOutcome::Approved(evidence_for(offer, &plan, "spawn", label)),
+            None,
+        )
+        .expect("the officer's ruling covers the gap"),
+    );
+    let log = [log, approved].concat();
+    let released = e.handle(&viewing(&e, &log), marked("gap-3", "spawn")).unwrap();
+    assert!(matches!(answered(&released), ([release], []) if release.fork.is_some()));
+    let log = [log, appended_facts(released)].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+
+    let again = appended_facts(e.handle(&viewing(&e, &log), marked("gap-4", "spawn")).unwrap());
+    let offered = opened_offers(&again);
+    assert!(
+        !offered.is_empty() && offered.iter().all(|(_, plan)| plan.declares_only()),
+        "the identical spawn declares again: {offered:?}"
+    );
+    assert_eq!(e.validate_replay(&[log, again].concat()), Ok(()));
+}
+
+#[test]
+fn a_spawn_its_only_authority_denied_is_offered_no_declaration() {
+    let e = gapped_spawn_engine();
+    let (log, offer, plan) = declared_with_gap_offer(&e);
+    let denied = appended_facts(
+        execute_offer_declaring(
+            &e,
+            &log,
+            offer,
+            OfferOutcome::Denied {
+                authority: plan.required[0].authority.clone(),
+            },
+            None,
+        )
+        .expect("the denial records"),
+    );
+    let log = [log, denied].concat();
+    let blocked = e.handle(&viewing(&e, &log), marked("gap-3", "spawn")).unwrap();
+    let ([], [block]) = answered(&blocked) else {
+        panic!("the spawn blocks, got {:?}", answered(&blocked))
+    };
+    assert!(
+        block.offers.is_empty(),
+        "no declaration leads to a plan once the only authority denied the spawn: {:?}",
+        block.offers
+    );
+}
+
+#[test]
+fn a_pending_offer_the_bundled_planner_recorded_shows_its_own_plan() {
+    let e = gapped_spawn_engine();
+    let log: Vec<Fact> = serde_json::from_str(include_str!("fixtures/bundled-spawn-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    // The fixture up to the bundled block of `spawn`, whose offers still stand.
+    let end = log
+        .iter()
+        .rposition(|fact| matches!(fact, Fact::OfferOpened { .. }))
+        .expect("the fixture opens offers")
+        + 1;
+    let log = &log[..end];
+    let bundled: Vec<_> = opened_offers(log)
+        .into_iter()
+        .filter(|(_, plan)| !plan.required.is_empty())
+        .collect();
+    assert!(
+        !bundled.is_empty() && bundled.iter().all(|(_, plan)| plan.return_step().is_some()),
+        "the bundled block asks the authority and declares together: {bundled:?}"
+    );
+
+    let repeated = e
+        .handle(&viewing(&e, log), marked("gap-1", "spawn"))
+        .expect("the recorded batch repeats");
+    let ([], [block]) = answered(&repeated) else {
+        panic!("the repeat reports its block, got {:?}", answered(&repeated))
+    };
+    let shown: Vec<_> = block
+        .offers
+        .iter()
+        .map(|(offer, id)| {
+            let plan = block
+                .block
+                .plans
+                .iter()
+                .filter_map(plan::RemedyPlan::executable)
+                .find(|plan| plan.id == *id)
+                .expect("each pending offer has a plan in its block");
+            (*offer, plan.clone())
+        })
+        .collect();
+    assert_eq!(shown, bundled, "each pending offer shows the plan it recorded");
+}
