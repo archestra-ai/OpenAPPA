@@ -137,6 +137,10 @@ fn remedy_result(reply: RemedyReply) -> CallToolResult {
     }
 }
 
+/// Where Claude Code's MCP client names the tool call its hook saw: the `tool_use_id`, in the
+/// request's `_meta`.
+pub(crate) const CLAUDE_CODE_CALL_META: &str = "claudecode/toolUseId";
+
 /// One `execute_remedy_plan` request. A review that must first be asked ends the call
 /// before anything executes: the vouch is read, not spent, so it stands for the retry
 /// that carries the answer.
@@ -152,11 +156,17 @@ async fn execute_remedy(
             .as_deref()
             .and_then(|offer| runtime.pending_hitl_review(offer))
     };
+    // Read before the elicitation takes the request.
+    let call = request
+        .meta
+        .get(CLAUDE_CODE_CALL_META)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     match Elicitation::open(request, responses, runtime.review_timeout(), pending) {
         Review::Ask(review) => review.into(),
         Review::Proceed(elicitation) => remedy_result(
             runtime
-                .execute_remedy_plan(args, elicitation.as_ref(), expected_actor)
+                .execute_remedy_plan(args, call.as_deref(), elicitation.as_ref(), expected_actor)
                 .await,
         )
         .into(),
@@ -1215,7 +1225,7 @@ mod tests {
             label: None,
             return_schema: None,
         };
-        let reply = runtime.execute_remedy_plan(args, None, None).await;
+        let reply = runtime.execute_remedy_plan(args, None, None, None).await;
         assert!(
             reply.is_error,
             "the attempt is refused while the claim stands: {reply:?}"
@@ -1268,11 +1278,15 @@ mod tests {
             }),
             return_schema: None,
         };
-        let unvouched = runtime.execute_remedy_plan(args(), None, None).await;
+        let unvouched = runtime.execute_remedy_plan(args(), None, None, None).await;
         assert!(unvouched.is_error, "no hook vouched for it: {unvouched:?}");
 
-        runtime.vouch(&crate::api::declaration_key(&args()), &acting(root.0.as_str()), None);
-        let reply = runtime.execute_remedy_plan(args(), None, None).await;
+        runtime.vouch(
+            &crate::api::declaration_key(&args(), None),
+            &acting(root.0.as_str()),
+            None,
+        );
+        let reply = runtime.execute_remedy_plan(args(), None, None, None).await;
         assert!(
             !reply.is_error && reply.text.starts_with("[appa] Declared."),
             "{reply:?}"

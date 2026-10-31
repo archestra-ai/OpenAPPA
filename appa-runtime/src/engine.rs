@@ -1838,6 +1838,7 @@ impl RuntimeEngine {
             bounds,
             self.naming,
             block.call.tool().as_str(),
+            block.spawn,
             presentation,
         );
         let review = self.pending_reviews(block, &offers);
@@ -2336,6 +2337,13 @@ impl RuntimeEngine {
     /// The trajectory's label now, or `None` before it opens.
     pub(crate) fn label_of(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<Label> {
         view.views(trajectory).map(|views| views.current_label())
+    }
+
+    /// Whether this offer only declares a marked spawn's return, and so asks no authority.
+    pub(crate) fn offer_declares_only(&self, view: &EngineView, trajectory: &TrajectoryId, offer: &OfferId) -> bool {
+        parse_offer(offer)
+            .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
+            .is_some_and(|plan| plan.declares_only())
     }
 
     fn return_policy_of_route(
@@ -4355,6 +4363,7 @@ struct RenderedBlock {
     display: RemedyDisplay,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
@@ -4362,6 +4371,7 @@ fn block_feedback(
     bounds: &ReturnBounds,
     naming: ToolNaming,
     target: &str,
+    spawn: Option<appa_engine::transition::SpawnKind>,
     presentation: &EmbeddedPresentationOptions,
 ) -> RenderedBlock {
     let chain = registry.trust_chain();
@@ -4462,14 +4472,19 @@ fn block_feedback(
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
         RemedyPlan::Redispatch(_) => false,
     }) {
-        // Steer toward declaring ahead, so the next spawn meets no block for it.
-        reasons.push(format!(
-            "This call starts a subagent, and this session has not declared what its return may carry. Declare it \
-             first; any other reason here gets its own plan when you call again. Next time, declare right before \
-             the subagent call: {}(label: {}).",
-            control_spelling(naming, presentation),
-            spelling.floor,
-        ));
+        let mut reason = "This call starts a subagent, and this session has not declared what its return may carry. \
+             Declare it first; any other reason here gets its own plan when you call again."
+            .to_string();
+        // Steer toward declaring ahead, so the next spawn meets no block for it. A fan-out spawn
+        // declares at its block.
+        if spawn == Some(appa_engine::transition::SpawnKind::Single) {
+            reason.push_str(&format!(
+                " Next time, declare right before the subagent call: {}(label: {}).",
+                control_spelling(naming, presentation),
+                spelling.floor,
+            ));
+        }
+        reasons.push(reason);
     }
 
     // Name the call the way the model spelled it, never its arguments.
@@ -4758,6 +4773,7 @@ mod tests {
                         },
                         ToolNaming::AsAuthored,
                         "read",
+                        None,
                         &EmbeddedPresentationOptions {
                             supports_delegation,
                             ..EmbeddedPresentationOptions::default()
@@ -5567,6 +5583,7 @@ mod tests {
                     },
                     ToolNaming::AsAuthored,
                     "send_mail",
+                    None,
                     &options,
                 );
                 let label = if required {
@@ -5636,6 +5653,7 @@ mod tests {
                 },
                 ToolNaming::AsAuthored,
                 "send_mail",
+                None,
                 &options,
             )
             .display
@@ -5715,6 +5733,7 @@ mod tests {
             },
             ToolNaming::AsAuthored,
             "tool",
+            None,
             &options,
         );
         assert!(feedback.text.contains("approve_remedy(offer_id"));
@@ -5756,6 +5775,7 @@ mod tests {
                 },
                 ToolNaming::AsAuthored,
                 "tool",
+                None,
                 &EmbeddedPresentationOptions {
                     yell_tool: yell_tool.map(str::to_string),
                     ..EmbeddedPresentationOptions::default()
@@ -5817,6 +5837,7 @@ mod tests {
                 },
                 ToolNaming::AsAuthored,
                 "tool",
+                None,
                 &EmbeddedPresentationOptions::default(),
             )
         };

@@ -268,6 +268,7 @@ async fn declared(runtime: &Runtime, route: Option<&str>, schema: Option<serde_j
     // The reserved tool reads exactly these arguments over MCP.
     let (offer, parsed) =
         appa_runtime::api::parse_control_arguments(&arguments.to_string()).expect("the plugin's arguments parse");
+    let offer = offer.expect("the plugin quotes the offer");
     let declaration = runtime.execute_remedy_with(&acting(), offer, parsed).await;
     assert!(
         matches!(declaration, RemedyOutcome::Authorized { .. }),

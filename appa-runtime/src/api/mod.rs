@@ -327,6 +327,9 @@ pub enum RemedyRefusal {
     InvalidOfferId(OfferIdRefusal),
     /// No preceding control hook vouched for this offer.
     Unvouched,
+    /// No preceding control hook vouched for this declaration ahead of the spawn, under the
+    /// call the request names.
+    UnvouchedDeclaration,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
     /// The offer no longer stands (expired, already terminal, or recorded under an earlier
@@ -343,6 +346,10 @@ impl RemedyRefusal {
         match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
+            Self::UnvouchedDeclaration => {
+                "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
+                 tool now, and apply the declaration plan its block offers."
+            }
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
             Self::Runtime { detail } => detail,
@@ -1305,9 +1312,10 @@ struct Shared {
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
     /// Return declarations made ahead of a spawn, by the root and trajectory that made them.
-    /// The trajectory's next marked single spawn applies one through its block's own
-    /// declaration offer. In this process only: after a restart, or on another replica, the
-    /// spawn meets that block and declares there.
+    /// The trajectory's next marked spawn takes one, and a single spawn applies it through its
+    /// block's own declaration offer; the trajectory's turn end drops one it left. In this
+    /// process only: after a restart, or on another replica, the spawn meets that block and
+    /// declares there.
     held_returns: std::sync::Mutex<std::collections::HashMap<(TrajectoryId, TrajectoryId), HeldReturn>>,
     spawn_holds: spawn_hold::SpawnHolds,
 }
@@ -2979,6 +2987,14 @@ impl Runtime {
         .await
     }
 
+    /// Declare, for an authenticated actor, what its next single subagent call's return may
+    /// carry: the call that quotes no offer. The spawn applies it through its block's own
+    /// declaration offer.
+    pub async fn declare_return_ahead(&self, acting: &Actor, arguments: RemedyArguments) -> RemedyOutcome {
+        self.declare_ahead(acting, arguments, EmbeddedPresentationOptions::default())
+            .await
+    }
+
     /// Executes an embedded remedy plan for an authenticated actor.
     /// Returns a structured `RemedyOutcome`.
     pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyOutcome {
@@ -2997,11 +3013,13 @@ impl Runtime {
             .await
     }
 
-    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply.
+    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply. `call` is the
+    /// tool call the request names, where the host's MCP client names one.
     #[cfg(feature = "daemon")]
     pub(crate) async fn execute_remedy_plan(
         &self,
         args: ExecuteRemedyPlanArgs,
+        call: Option<&str>,
         elicitation: Option<&Elicitation>,
         expected_actor: Option<&Actor>,
     ) -> RemedyReply {
@@ -3009,6 +3027,7 @@ impl Runtime {
             self.execute_remedy_outcome(
                 args,
                 RemedyCaller::Daemon {
+                    call,
                     elicitation,
                     expected_actor,
                 },
@@ -3019,13 +3038,15 @@ impl Runtime {
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
-        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
-            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
+        let (call, elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded { actor, presentation } => (None, None, Some(actor), presentation, true),
             #[cfg(feature = "daemon")]
             RemedyCaller::Daemon {
+                call,
                 elicitation,
                 expected_actor,
             } => (
+                call,
                 elicitation,
                 expected_actor,
                 EmbeddedPresentationOptions::default(),
@@ -3037,7 +3058,7 @@ impl Runtime {
             // control hook recorded for the declaration.
             let acting = match (expected_actor, strict_freshness) {
                 (Some(actor), true) => actor.clone(),
-                _ => match self.declaration_vouch(&args, expected_actor) {
+                _ => match self.declaration_vouch(&args, call, expected_actor) {
                     Ok(actor) => actor,
                     Err(reason) => return RemedyOutcome::Refused { reason },
                 },
@@ -3139,6 +3160,7 @@ enum RemedyCaller<'a> {
     },
     #[cfg(feature = "daemon")]
     Daemon {
+        call: Option<&'a str>,
         elicitation: Option<&'a Elicitation>,
         expected_actor: Option<&'a Actor>,
     },
@@ -3156,15 +3178,16 @@ enum Admission {
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
-/// control tool itself.
-pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
+/// control tool itself. No `offer_id` is a declaration ahead of the spawn, which
+/// [`Runtime::declare_return_ahead`] takes.
+pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
     let offer = args
         .offer_id
         .as_deref()
-        .ok_or_else(|| "execute_remedy_plan offer_id: missing".to_string())
-        .and_then(|offer| OfferId::parse(offer).map_err(|error| format!("execute_remedy_plan offer_id: {error}")))?;
+        .map(|offer| OfferId::parse(offer).map_err(|error| format!("execute_remedy_plan offer_id: {error}")))
+        .transpose()?;
     Ok((offer, RemedyArguments::from(args)))
 }
 
@@ -3173,8 +3196,10 @@ const DECLARED_AHEAD: &str = "[appa] Declared. Call the subagent tool now, befor
      subagent call returns under this floor. A call that changes this session's label first lapses the declaration.";
 
 /// The key the control hook vouches a declaration ahead of the spawn under, and the tool spends
-/// it by: the declaration as both read it, since such a call quotes no offer.
-pub(crate) fn declaration_key(args: &ExecuteRemedyPlanArgs) -> PermitKey {
+/// it by, since such a call quotes no offer: the declaration as both read it, and the tool call
+/// both name where the host's MCP client names it. Two sessions declaring alike share a key
+/// only where no call is named.
+pub(crate) fn declaration_key(args: &ExecuteRemedyPlanArgs, call: Option<&str>) -> PermitKey {
     let label = args.label.as_ref().map(|label| {
         serde_json::json!({
             "trust": label.trust,
@@ -3183,7 +3208,7 @@ pub(crate) fn declaration_key(args: &ExecuteRemedyPlanArgs) -> PermitKey {
     });
     PermitKey::call(
         "execute_remedy_plan",
-        &serde_json::json!({ "label": label, "return_schema": args.return_schema }),
+        &serde_json::json!({ "call": call, "label": label, "return_schema": args.return_schema }),
     )
 }
 
@@ -3236,25 +3261,31 @@ pub struct RemedyReply {
 
 impl Runtime {
     /// The actor a daemon's declaration ahead of the spawn acts for: the one its control hook
-    /// vouched under the declaration's arguments, held to the actor the connection names.
+    /// vouched under the declaration's key, held to the actor the connection names.
     #[cfg(feature = "daemon")]
     fn declaration_vouch(
         &self,
         args: &ExecuteRemedyPlanArgs,
+        call: Option<&str>,
         expected: Option<&Actor>,
     ) -> Result<Actor, RemedyRefusal> {
-        match (self.take_vouched(&declaration_key(args)), expected) {
+        match (self.take_vouched(&declaration_key(args, call)), expected) {
             (Ok((vouched, _)), Some(expected)) if vouched != *expected => Err(RemedyRefusal::ActorMismatch),
             (Ok((vouched, _)), _) => Ok(vouched),
             (Err(_), Some(expected)) => Ok(expected.clone()),
-            (Err(_), None) => Err(RemedyRefusal::Unvouched),
+            (Err(_), None) => Err(RemedyRefusal::UnvouchedDeclaration),
         }
     }
 
     /// Without the daemon no control hook vouches: only an authenticated embedded actor declares.
     #[cfg(not(feature = "daemon"))]
-    fn declaration_vouch(&self, _: &ExecuteRemedyPlanArgs, _: Option<&Actor>) -> Result<Actor, RemedyRefusal> {
-        Err(RemedyRefusal::Unvouched)
+    fn declaration_vouch(
+        &self,
+        _: &ExecuteRemedyPlanArgs,
+        _: Option<&str>,
+        _: Option<&Actor>,
+    ) -> Result<Actor, RemedyRefusal> {
+        Err(RemedyRefusal::UnvouchedDeclaration)
     }
 
     /// A return declaration ahead of the spawn: checked at the acting trajectory's label and
@@ -3698,12 +3729,14 @@ impl Runtime {
         )
     }
 
-    /// This actor's turn is over: its prompt mark and every vouch it still held end here.
+    /// This actor's turn is over: its prompt mark, every vouch it still held, and any return it
+    /// declared ahead end here.
     /// A vouch is recorded when the actor quotes an offer at the control tool's hook and
     /// taken when the tool itself runs, both inside one turn. One still standing at the
     /// turn's end was never spent — the harness declined the call, or the tool never ran —
     /// and nothing later can spend it.
     pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
+        self.inner.take_held_return(&acting.root, acting_trajectory(acting));
         self.inner.append_host(
             &acting.root,
             &HostObservation::TurnEnded {
@@ -5961,6 +5994,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .await;
         assert_eq!(passed["decision"], "pass_control");
         let (offer, args) = parse_control_arguments(&args.to_string()).unwrap();
+        let offer = offer.expect("the control call quotes an offer");
         let actor = Actor {
             root: root.clone(),
             child: None,
