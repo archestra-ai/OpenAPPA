@@ -17,7 +17,7 @@ Protected sessions fail closed: while the runtime is unavailable, every hooked a
 
 When a main agent delegates through Claude Code's `Agent` tool, OpenAPPA first checks that the subagent definition does not declare `maxTurns`. Claude Code bypasses return hooks when that setting is present. OpenAPPA therefore refuses the prompt if project, user, or plugin frontmatter declares it. The scan covers the first 64 KiB. Unclosed or unclassifiable frontmatter fails closed.
 
-OpenAPPA then holds the spawn until the parent declares a return contract. The contract can accept the final message unchanged, bound it to a declared Label, or require a sanitizer. OpenAPPA checks the child's tool calls normally, then validates its final message before the parent can receive it. A refused return keeps the child running until it produces an admissible message.
+OpenAPPA then holds the spawn until the parent declares a return contract. The contract can accept the final message unchanged, bound it to a declared Label, or require a sanitizer. The agent declares the contract itself, right before the `Agent` call, with `execute_remedy_plan` and no `offer_id`. OpenAPPA asks a person only when the spawn has another gap that an authority must approve. OpenAPPA checks the child's tool calls normally, then validates its final message before the parent can receive it. A refused return keeps the child running until it produces an admissible message.
 
 This lets a subagent read a private ticket or credential-adjacent log and return only a result the parent trajectory may hold. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
 

@@ -298,6 +298,21 @@ pub struct Session {
     presentation: EmbeddedPresentationOptions,
 }
 
+/// What a spawn's block says when the return its trajectory declared ahead has lapsed. The
+/// block's reason already says to declare right before the subagent call.
+const LAPSED_AHEAD: &str = "[appa] The return you declared ahead lapsed, so it was not applied: a call between it \
+    and this subagent call changed this session's label.";
+
+/// What a spawn's block says when no declaration it offers fits the return declared ahead.
+const UNFIT_AHEAD: &str = "[appa] The return you declared ahead does not fit this call, so it was not applied.";
+
+/// What a fan-out spawn's block says about a return declared ahead, which it does not apply.
+const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a single subagent call, so it was not applied. \
+    A call that starts several subagents declares at its block.";
+
+/// Follows a notice on a block that offers plans.
+const APPLY_BELOW: &str = " Apply a plan below.";
+
 impl Session {
     pub(super) fn attach(
         inner: Arc<Inner>,
@@ -646,7 +661,97 @@ impl Session {
         self.propose_tool_call(call, call_id, None, None, Some(basis)).await
     }
 
+    /// Check a return declaration made ahead of the spawn at this trajectory's label, and answer
+    /// that label: the declaration stands only there.
+    pub(crate) fn declare_return_ahead(
+        &self,
+        arguments: &RemedyArguments,
+    ) -> Result<appa_engine::label::Label, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        policy
+            .engine()
+            .declare_ahead(&view, &self.trajectory, arguments)
+            .map_err(|detail| EventError::RemedyArguments { detail })
+    }
+
+    /// A return this trajectory declared ahead covers its next spawn, which takes it whatever
+    /// its decision. A blocked single spawn applies it through the block's own declaration
+    /// offer, one that asks no authority, and is proposed again, so it meets only what else
+    /// blocks it. A declaration held at another label has lapsed; one no offer fits, or one a
+    /// fan-out spawn meets, is not applied. The block says which.
     async fn propose_tool_call(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: Option<SpawnKind>,
+        prompt: Option<PromptKey>,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
+        let decision = self
+            .propose_once(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone())
+            .await?;
+        let Some(held) = spawn.and_then(|_| self.inner.take_held_return(&self.root, &self.trajectory)) else {
+            return Ok(decision);
+        };
+        let ToolCallDecision::Deny {
+            feedback,
+            offers,
+            display,
+            review,
+        } = decision
+        else {
+            return Ok(decision);
+        };
+        let noted = |notice: &str, apply: &str| ToolCallDecision::Deny {
+            feedback: format!("{notice}{apply}\n\n{feedback}"),
+            offers: offers.clone(),
+            display: display.clone(),
+            review: review.clone(),
+        };
+        let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
+        if spawn == Some(SpawnKind::FanOut) {
+            return Ok(noted(FAN_OUT_AHEAD, apply));
+        }
+        let route = match held.arguments.return_schema {
+            Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
+                sanitizer: appa_engine::names::SanitizerName::ATTEST_SCHEMA.to_string(),
+            },
+            None => appa_runtime_api::OfferedReturn::AsSpoken,
+        };
+        let (offer, label) = {
+            let log = self.inner.log(&self.root)?;
+            let deployment = self.deployment();
+            let policy = self.inner.resolve_policy(&deployment, &log)?;
+            let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+            let offer = offers
+                .iter()
+                .filter(|offer| offer.returns.as_ref() == Some(&route))
+                .filter_map(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
+                .find(|offer| policy.engine().offer_declares_only(&view, &self.trajectory, offer));
+            (offer, policy.engine().label_of(&view, &self.trajectory))
+        };
+        // A lapse is told first: at a changed label no offer may fit, and the cause is the change.
+        if label != Some(held.label) {
+            return Ok(noted(LAPSED_AHEAD, apply));
+        }
+        let Some(offer) = offer else {
+            return Ok(noted(UNFIT_AHEAD, apply));
+        };
+        // A declaration that cannot be applied leaves the spawn the block it already met.
+        match self.on_remedy(offer, held.arguments, None, None).await {
+            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
+            Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
+            Err(error) => {
+                tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
+                Ok(noted(UNFIT_AHEAD, apply))
+            }
+        }
+    }
+
+    async fn propose_once(
         &self,
         call: ProposedCall,
         call_id: Option<String>,
@@ -8819,7 +8924,7 @@ delta = {}
             let quoted = OfferId(offers[0].id.clone());
             let key = crate::api::PermitKey::offer(&quoted);
             let args = || crate::api::ExecuteRemedyPlanArgs {
-                offer_id: quoted.0.clone(),
+                offer_id: Some(quoted.0.clone()),
                 label: None,
                 return_schema: None,
             };
@@ -8875,7 +8980,7 @@ delta = {}
             runtime.vouch(&key, &actor, None);
             runtime.vouch(&key, &actor, None);
             let args = || crate::api::ExecuteRemedyPlanArgs {
-                offer_id: quoted.0.clone(),
+                offer_id: Some(quoted.0.clone()),
                 label: None,
                 return_schema: None,
             };

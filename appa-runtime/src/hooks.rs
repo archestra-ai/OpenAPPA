@@ -73,7 +73,11 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         yell_tool: served_yell_tool(runtime),
         ..EmbeddedPresentationOptions::default()
     };
-    let handled = handle_internal(runtime, event, presentation).await;
+    let call_ids = match adapter.name {
+        appa_runtime_api::AdapterName::ClaudeCode => ToolCallIds::Named,
+        _ => ToolCallIds::Unnamed,
+    };
+    let handled = handle_internal(runtime, event, presentation, call_ids).await;
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
@@ -444,9 +448,14 @@ const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or outpu
 /// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
 /// reaches — keeps it.
 pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
-    handle_internal(runtime, event, EmbeddedPresentationOptions::default())
-        .await
-        .decision
+    handle_internal(
+        runtime,
+        event,
+        EmbeddedPresentationOptions::default(),
+        ToolCallIds::Unnamed,
+    )
+    .await
+    .decision
 }
 
 /// Dispatches one hook for an embedded host, returning a typed `EmbeddedHookOutcome`.
@@ -460,7 +469,7 @@ pub async fn handle_embedded_with_options(
     event: HookEvent,
     presentation: EmbeddedPresentationOptions,
 ) -> EmbeddedHookOutcome {
-    let handled = handle_internal(runtime, event, presentation).await;
+    let handled = handle_internal(runtime, event, presentation, ToolCallIds::Unnamed).await;
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
@@ -481,15 +490,33 @@ pub(crate) struct Handled {
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
+/// Whether the host's MCP client names, in each tool call it sends this runtime, the call id its
+/// hook carried. Claude Code's does, in the request's `_meta`. A declaration ahead of the spawn
+/// is then vouched under that one call, so two sessions declaring alike never share its key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallIds {
+    Named,
+    Unnamed,
+}
+
 pub(crate) async fn handle_internal(
     runtime: &Runtime,
     event: HookEvent,
     presentation_options: EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 ) -> Handled {
     let (kind, tool) = hook_shape(&event);
     let mut dispatch = None;
     let mut presentation = None;
-    let decision = dispatch_event(runtime, event, &mut dispatch, &mut presentation, &presentation_options).await;
+    let decision = dispatch_event(
+        runtime,
+        event,
+        &mut dispatch,
+        &mut presentation,
+        &presentation_options,
+        call_ids,
+    )
+    .await;
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {
@@ -554,12 +581,14 @@ async fn dispatch_event(
     dispatch: &mut Option<EngineDispatchId>,
     presentation: &mut Option<RemedyPresentation>,
     presentation_options: &EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 ) -> HookDecision {
     let mut dispatcher = Dispatcher {
         runtime,
         dispatch,
         presentation,
         options: presentation_options,
+        call_ids,
     };
     match event {
         HookEvent::SessionStart {
@@ -621,6 +650,7 @@ struct Dispatcher<'a> {
     /// What a denial or a replacement carries for an embedded harness.
     presentation: &'a mut Option<RemedyPresentation>,
     options: &'a EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 }
 
 impl Dispatcher<'_> {
@@ -784,7 +814,8 @@ impl Dispatcher<'_> {
             }
         }
         if is_control_tool(&call.tool) {
-            return control_call(self.runtime, &actor, &call, ruling);
+            let named = call_id.as_deref().filter(|_| self.call_ids == ToolCallIds::Named);
+            return control_call(self.runtime, &actor, &call, named, ruling);
         }
         let sent = match call.tool == SEND_MESSAGE {
             true => match self.runtime.peer_send(&actor.root, &call) {
@@ -1101,10 +1132,28 @@ fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), 
     }
 }
 
-fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: Option<Ruling>) -> HookDecision {
+/// `named` is the call's id where the host's MCP client names it to the tool as well.
+fn control_call(
+    runtime: &Runtime,
+    actor: &Actor,
+    call: &ProposedCall,
+    named: Option<&str>,
+    ruling: Option<Ruling>,
+) -> HookDecision {
     let quoted = match quoted_offer(call) {
         Ok(Some(quoted)) => quoted,
         Ok(None) => {
+            // A declaration ahead of the spawn quotes no offer: its arguments and the call name
+            // it. It can be a root's first call, which opens the root as any root call does.
+            if let Ok(args) = serde_json::from_str::<crate::api::ExecuteRemedyPlanArgs>(call.arguments.get()) {
+                if actor.child.is_none()
+                    && let Err(error) =
+                        open_or_reopen(runtime, &actor.root, None, EmbeddedPresentationOptions::default())
+                {
+                    return fold(error, Refusal::Deny);
+                }
+                runtime.vouch(&crate::api::declaration_key(&args, named), actor, ruling);
+            }
             tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
             return HookDecision::PassControl;
         }
@@ -1887,7 +1936,13 @@ mod tests {
         // The control call is passed through rather than released: the engine never sees it,
         // so its entry names no dispatch, where an ordinary call's names the one it opened.
         let parsed = through_the_codec(&event).expect("the control call parses");
-        let control = handle_internal(&runtime, parsed, EmbeddedPresentationOptions::default()).await;
+        let control = handle_internal(
+            &runtime,
+            parsed,
+            EmbeddedPresentationOptions::default(),
+            ToolCallIds::Unnamed,
+        )
+        .await;
         assert!(
             matches!(control.decision, HookDecision::PassControl),
             "the control tool is passed through, not checked: {:?}",
@@ -1909,6 +1964,7 @@ mod tests {
             &runtime,
             through_the_codec(&call).expect("the call parses"),
             EmbeddedPresentationOptions::default(),
+            ToolCallIds::Unnamed,
         )
         .await;
         assert!(

@@ -122,6 +122,13 @@ pub(crate) struct PreparedApproval {
     pub(crate) evidence: AudienceEvidence,
 }
 
+impl PreparedApproval {
+    /// Does this approval declare a marked spawn's return and nothing else?
+    pub(crate) fn declares_only(&self) -> bool {
+        self.return_policy.is_some() && self.rulings.is_empty() && self.acceptance.is_none() && self.output.is_none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReturnedChild {
     id: ChildReturnId,
@@ -1207,11 +1214,29 @@ impl Views<'_> {
         })
     }
 
-    /// The approval this exact call may consume right now. Spending one advances its own
+    /// The current approval that only declares this marked spawn's return: no ruling, no
+    /// acceptance, no output remedy. It releases the spawn alone only while nothing else blocks
+    /// it; otherwise a second approval covers the rest and carries the same declaration.
+    pub(crate) fn declaration(&self, call: &ResolvedCall) -> Option<(crate::value::OfferId, &PreparedApproval)> {
+        self.current_approvals_for(call)
+            .find(|(_, approval)| approval.declares_only())
+    }
+
+    /// Would a new approval of this call stand beside the current ones? A call holds one current
+    /// approval, and a marked spawn may hold its declaration beside it.
+    pub(crate) fn approval_pending(&self, call: &ResolvedCall, declares_only: bool) -> bool {
+        self.current_approvals_for(call)
+            .any(|(_, standing)| standing.declares_only() == declares_only)
+    }
+
+    /// The approvals this exact call may consume right now. Spending one advances its own
     /// subject, so a spent approval is not current and cannot be found here a second time.
-    pub(crate) fn current_approval(&self, call: &ResolvedCall) -> Option<(crate::value::OfferId, &PreparedApproval)> {
+    fn current_approvals_for(
+        &self,
+        call: &ResolvedCall,
+    ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
         self.approvals_for(call)
-            .find(|(offer, approval)| approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer)))
+            .filter(|(offer, approval)| approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer)))
     }
 
     /// One opened offer, whatever its freshness. `None` means the identity is unknown to

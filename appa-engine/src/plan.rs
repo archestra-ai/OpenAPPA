@@ -136,6 +136,11 @@ pub struct ExecutableRemedyPlan {
 }
 
 impl ExecutableRemedyPlan {
+    /// Does this plan only declare a marked spawn's return? Such a plan asks no authority.
+    pub fn declares_only(&self) -> bool {
+        matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
+    }
+
     /// The narrowing this plan asks the agent to accept, where its route carries one.
     /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
     /// accepts no residual up front and has none here.
@@ -364,6 +369,8 @@ pub(crate) fn plan(
         call,
         stage,
         role,
+        Declaring::of(role, views, call),
+        denied,
         floor.as_ref(),
         context,
     )?
@@ -535,10 +542,69 @@ fn narrowing_impact(
         .then_some(impact)
 }
 
+/// How a call's return declaration enters its plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declaring {
+    /// An ordinary call, or a marked spawn whose declaration stands: no plan declares.
+    No,
+    /// A marked spawn with no declaration: each plan is one return route, with no authority
+    /// and no settlement. The retry is planned on whatever else blocks it.
+    Separately(crate::transition::SpawnKind),
+    /// Every gap plan with every return route: the menu an earlier planner recorded for a
+    /// marked spawn. Read only to replay those offers.
+    Bundled(crate::transition::SpawnKind),
+}
+
+impl Declaring {
+    pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
+        match role {
+            CallRole::MarkedSpawn(kind) if views.declaration(call).is_none() => Declaring::Separately(kind),
+            CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
+        }
+    }
+}
+
+/// The menu an earlier planner recorded for a marked spawn with no declaration: each gap plan
+/// bundled with each return route. Replay reads it for offers recorded under that planner; no
+/// block offers it.
+pub(crate) fn bundled_spawn_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let CallRole::MarkedSpawn(kind) = blocked.role else {
+        return Ok(Vec::new());
+    };
+    let no_denials = BTreeSet::new();
+    let denied = views.denied_authorities(&blocked.call.digest()).unwrap_or(&no_denials);
+    Ok(enumerate_plans(
+        registry,
+        blocked.contract,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        blocked.call,
+        blocked.stage,
+        blocked.role,
+        Declaring::Bundled(kind),
+        denied,
+        floor_of(registry, views).as_ref(),
+        context,
+    )?
+    .into_iter()
+    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .collect())
+}
+
 /// The executable plans of one stage over an explicit state: the branch's label and the
 /// history predicates. The log supplies them for a live block; a recovery route supplies the
 /// state it has reached (RMD-20). A membership read no pinned answer decides refuses the
 /// whole enumeration with the union of every undecided atom, never a smaller menu.
+///
+/// A marked spawn's return declaration is never bundled with a gap's authority: an undeclared
+/// spawn is offered the declarations alone, and once one stands its retry is planned on its
+/// remaining gaps (see [`Declaring`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
@@ -549,6 +615,8 @@ pub(crate) fn enumerate_plans(
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
+    declaring: Declaring,
+    denied: &BTreeSet<AuthorityName>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
@@ -561,7 +629,7 @@ pub(crate) fn enumerate_plans(
         stage,
         context,
     )?;
-    if role == CallRole::Ordinary && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
+    if declaring == Declaring::No && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Ok(Vec::new());
     }
 
@@ -596,10 +664,10 @@ pub(crate) fn enumerate_plans(
             context,
             &mut needs,
         );
-        // An ordinary call declares no return policy; a marked spawn declares exactly one.
-        let returns: Vec<Option<ReturnRoute>> = match role {
-            CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, current, floor, kind)
+        // Only the bundled menu declares beside a gap plan.
+        let returns: Vec<Option<ReturnRoute>> = match declaring {
+            Declaring::No | Declaring::Separately(_) => vec![None],
+            Declaring::Bundled(kind) => return_options(registry, current, floor, kind)
                 .into_iter()
                 .map(Some)
                 .collect(),
@@ -628,6 +696,27 @@ pub(crate) fn enumerate_plans(
         }
     }
     needs.refuse_if_any()?;
+    // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
+    // A plan naming an authority that denied this call does not count: the caller drops it.
+    if let Declaring::Separately(kind) = declaring {
+        let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
+        let planned = candidates.iter().any(|candidate| {
+            !candidate
+                .required
+                .iter()
+                .any(|ruling| denied.contains(&ruling.authority))
+        });
+        if !unblocked && !planned {
+            return Ok(Vec::new());
+        }
+        candidates = return_options(registry, current, floor, kind)
+            .into_iter()
+            .map(|route| PlanCandidate {
+                steps: vec![RemedyStep::Return(route)],
+                required: Vec::new(),
+            })
+            .collect();
+    }
     Ok(least_mandate_first(
         registry,
         &block.requirement_gaps,
