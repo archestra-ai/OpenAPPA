@@ -4170,8 +4170,8 @@ fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, targe
             (needs_approval, Some(narrowing), None) => {
                 let chain = registry.map(Registry::trust_chain);
                 match (needs_approval, SessionNarrowing::of(narrowing, chain)) {
-                    (true, Some(change)) => format!("Submit this call for approval; once approved, {change} for good"),
-                    (false, Some(change)) => format!("Run this call; {change} for good"),
+                    (true, Some(change)) => format!("Submit this call for approval; once approved, {change} for the rest of this session"),
+                    (false, Some(change)) => format!("Run this call; {change} for the rest of this session"),
                     (true, None) => "Submit this call for approval".to_string(),
                     (false, None) => "Run this call".to_string(),
                 }
@@ -5557,9 +5557,9 @@ mod tests {
                     &options,
                 );
                 let label = if required {
-                    format!("Submit this call for approval; once approved, {change} for good")
+                    format!("Submit this call for approval; once approved, {change} for the rest of this session")
                 } else {
-                    format!("Run this call; {change} for good")
+                    format!("Run this call; {change} for the rest of this session")
                 };
                 let text = feedback.text;
                 assert!(text.starts_with("[appa] Blocked: send_mail cannot run yet."), "{text}");

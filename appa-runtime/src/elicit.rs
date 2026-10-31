@@ -344,7 +344,7 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
         None => String::new(),
     };
     let narrows = match &artifact.narrows {
-        Some(change) => format!("Approving also means {change} for good.\n"),
+        Some(change) => format!("Approving also means {change} for the rest of this session.\n"),
         None => String::new(),
     };
     format!(
