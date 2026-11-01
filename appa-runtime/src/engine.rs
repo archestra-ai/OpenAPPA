@@ -1022,15 +1022,22 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open? The runtime asks only of a batch that opens one, and
-    /// only when the host supplied no identity for the new call or an older
-    /// open call has no identity.
-    pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
+    /// dispatch open, not counting `uncounted`? The runtime asks only of a
+    /// batch that opens one, and only when the host supplied no identity for
+    /// the new call or an older open call has no identity.
+    pub(crate) fn opens_a_second_dispatch(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        facts: &[Fact],
+        uncounted: &[EngineDispatchId],
+    ) -> bool {
         let mut open: std::collections::BTreeSet<_> = view
             .views(trajectory)
             .expect("the drive refuses an unopened trajectory before any dispatch bookkeeping")
             .open_dispatches()
             .map(|(dispatch, _)| dispatch.clone())
+            .filter(|dispatch| !uncounted.contains(dispatch))
             .collect();
         for fact in facts {
             match fact {

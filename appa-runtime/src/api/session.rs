@@ -154,6 +154,23 @@ fn classify_report(
     )
 }
 
+/// Whether an open dispatch is a spawn whose child runs on past its parent's turn: an
+/// identified spawn whose fork is bound to a live child. The harness reports its result
+/// under its call id, so a report or a proposal that carries none never concerns it.
+fn child_runs_on<'a>(
+    engine: &crate::engine::RuntimeEngine,
+    view: &EngineView,
+    mut bindings: impl Iterator<Item = appa_eventlog::CallBinding<'a>>,
+    trajectory: &appa_engine::value::TrajectoryId,
+    open: &OpenDispatch,
+) -> bool {
+    bindings.any(|binding| binding.trajectory == trajectory && *binding.dispatch == open.id)
+        && matches!(
+            engine.fork_status(view, &appa_engine::value::ForkId::of(&open.id)),
+            ForkStatus::Bound(child) if engine.liveness(view, &child) == Liveness::Live
+        )
+}
+
 /// What a late child open did: bound the child now, or found the
 /// same pair already bound — the engine's own idempotent answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,7 +400,7 @@ impl Session {
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        let open = self.turn_end_calls()?;
+        let open = self.turn_calls()?;
         if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
@@ -477,11 +494,11 @@ impl Session {
         }
     }
 
-    /// The calls a turn end closes: every carried call except an identified
-    /// spawn whose child is still live. A spawn the harness did not identify
-    /// closes: such a harness runs one call at a time, so the open spawn
-    /// would refuse its next call.
-    fn turn_end_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
+    /// The calls this trajectory carries but a spawn whose child runs on past its turn: the
+    /// calls a turn end closes, and the ones a report or a proposal without a call id can
+    /// concern. A spawn the harness did not identify is among them: such a harness runs one
+    /// call at a time, so the open spawn would refuse its next call.
+    fn turn_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
@@ -490,21 +507,20 @@ impl Session {
         if engine.liveness(&view, &self.trajectory) != Liveness::Live {
             return Ok(Vec::new());
         }
-        let child_runs_on = |open: &OpenDispatch| {
-            let identified = log
-                .call_bindings()
-                .any(|binding| *binding.trajectory == self.trajectory && *binding.dispatch == open.id);
-            identified
-                && matches!(
-                    engine.fork_status(&view, &appa_engine::value::ForkId::of(&open.id)),
-                    ForkStatus::Bound(child) if engine.liveness(&view, &child) == Liveness::Live
-                )
-        };
         Ok(engine
             .open_dispatches(&view, &self.trajectory)
             .into_iter()
-            .filter(|open| !child_runs_on(open))
+            .filter(|open| !child_runs_on(engine, &view, log.call_bindings(), &self.trajectory, open))
             .collect())
+    }
+
+    /// The carried calls a report can name: all of them under a call id, and without one
+    /// only the turn's calls.
+    fn report_calls(&self, call_id: Option<&str>) -> Result<Vec<OpenDispatch>, EventError> {
+        match call_id {
+            Some(_) => self.carried_calls(),
+            None => self.turn_calls(),
+        }
     }
 
     #[cfg(test)]
@@ -905,7 +921,7 @@ impl Session {
         if self.inner.shared.files.is_none() {
             return Err(super::files::refused("file tools are not enabled"));
         }
-        let open = self.carried_calls()?;
+        let open = self.turn_calls()?;
         let [open] = open.as_slice() else {
             return Err(EventError::UnknownDispatch);
         };
@@ -975,7 +991,7 @@ impl Session {
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let open = self.carried_calls()?;
+        let open = self.report_calls(call_id)?;
         let dispatch = match classify_report_identified(
             call,
             call_id,
@@ -1034,7 +1050,7 @@ impl Session {
             let log = self.inner.log(&self.root)?;
             let deployment = self.deployment();
             let policy = self.inner.resolve_policy(&deployment, &log)?;
-            let open = self.carried_calls()?;
+            let open = self.report_calls(call_id.as_deref())?;
             let dispatch = classify_report_identified(
                 &call,
                 call_id.as_deref(),
@@ -1710,11 +1726,22 @@ impl Session {
             // Parallel calls need every one of them to carry an identity, not just the newest.
             // An unidentified call already open cannot be told apart from this one when its
             // outcome arrives, so the second dispatch is refused whichever end is unidentified.
-            if opens_dispatch.is_some()
-                && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
-                && (opening.call_id.is_none() || context.has_unbound_open_dispatch())
-            {
-                return Err(EventError::CallOutstanding);
+            // A spawn whose child runs on past its turn is not counted: its result comes
+            // under its own call id.
+            if opens_dispatch.is_some() {
+                let running: Vec<_> = context
+                    .open_dispatches()
+                    .into_iter()
+                    .filter(|open| context.child_runs_on(open))
+                    .map(|open| open.id)
+                    .collect();
+                if policy
+                    .engine()
+                    .opens_a_second_dispatch(&view, &self.trajectory, facts, &running)
+                    && (opening.call_id.is_none() || context.has_unbound_open_dispatch())
+                {
+                    return Err(EventError::CallOutstanding);
+                }
             }
             let released = facts.iter().find_map(|fact| match fact {
                 appa_engine::fact::Fact::ForkPrepared { kind, .. } => Some(*kind),
@@ -2103,6 +2130,16 @@ impl Decided<'_> {
         self.engine().open_dispatches(self.view, &self.session.trajectory)
     }
 
+    fn child_runs_on(&self, open: &OpenDispatch) -> bool {
+        child_runs_on(
+            self.engine(),
+            self.view,
+            self.log.call_bindings(),
+            &self.session.trajectory,
+            open,
+        )
+    }
+
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
         self.engine().canonical_bytes(call)
     }
@@ -2113,11 +2150,15 @@ impl Decided<'_> {
         call_id: Option<&str>,
     ) -> Result<appa_engine::value::DispatchId, EventError> {
         let open = self.open_dispatches();
+        let named: Vec<OpenDispatch> = match call_id {
+            Some(_) => open.clone(),
+            None => open.iter().filter(|open| !self.child_runs_on(open)).cloned().collect(),
+        };
         match classify_report_identified(
             call,
             call_id,
             || self.canonical_bytes(call),
-            &open,
+            &named,
             self.log.call_bindings(),
             &self.session.trajectory,
         ) {
@@ -7542,6 +7583,67 @@ delta = {}
         assert!(
             runtime.open_dispatches(&root(), &root()).len() == 1,
             "the spawn closed; the parent's own call is still open"
+        );
+    }
+
+    /// A call the harness does not identify is still told apart from a spawn whose child
+    /// runs on past the turn: that spawn's result comes under its own call id. The call
+    /// opens beside it and reports, and the spawn's result still replays the return.
+    #[tokio::test]
+    async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        let subagent = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session.on_turn_end().await.expect("the turn end acks");
+
+        assert!(matches!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+                .await
+                .expect("the call releases beside the spawn"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert_eq!(
+            session
+                .on_tool_result(
+                    fetch(serde_json::json!({"a": 2})),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("body".to_string()),
+                    },
+                )
+                .await
+                .expect("the report names the call, not the spawn"),
+            ToolResultDecision::Keep
+        );
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()).len(),
+            1,
+            "only the spawn is still open"
+        );
+
+        subagent
+            .on_child_end(Some("all done".to_string()))
+            .await
+            .expect("the subagent's return crosses");
+        assert_eq!(
+            session
+                .on_spawn_result_identified(
+                    fetch(serde_json::json!({"a": 1})),
+                    Some("spawn-1".to_string()),
+                    agent_response(),
+                    Some(child("c1")),
+                    Some("all done".to_string()),
+                )
+                .await
+                .expect("the spawn's result replays"),
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
         );
     }
 
