@@ -1161,7 +1161,7 @@ impl Session {
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &opened)?;
         let decision = self.drive(&policy, true, Opening::default(), |context| {
-            let dispatch = context.classify_spawn_report(&call, None)?;
+            let dispatch = context.classify_resume(&call, &child)?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
                 ForkStatus::Bound(bound) if bound == child => {}
@@ -2184,6 +2184,34 @@ impl Decided<'_> {
                 .collect(),
         };
         self.classify_among(call, call_id, &named, &open)
+    }
+
+    /// The spawn a resume names. A resume carries no call id, so the child it names picks
+    /// the spawn whose fork is bound to it, when the call matches that spawn byte for byte;
+    /// with no such spawn open, the resume is classified as any spawn's report.
+    fn classify_resume(
+        &self,
+        call: &ProposedCall,
+        child: &TrajectoryId,
+    ) -> Result<appa_engine::value::DispatchId, EventError> {
+        let open = self.open_dispatches();
+        let bound: Vec<OpenDispatch> = open
+            .iter()
+            .filter(|open| {
+                matches!(
+                    self.fork_status(&appa_engine::value::ForkId::of(&open.id)),
+                    ForkStatus::Bound(bound) if bound == *child
+                )
+            })
+            .cloned()
+            .collect();
+        match bound.as_slice() {
+            [spawn] if is_open_call(call, || self.canonical_bytes(call), spawn) => Ok(spawn.id.clone()),
+            [_] => Err(self
+                .session
+                .refuse_report(UnreportableOutcome::ByteMismatch, call, &open)),
+            _ => self.classify_spawn_report(call, None),
+        }
     }
 
     /// A spawn's own report: its result, or a resume that names it by the call alone. Every
@@ -7717,6 +7745,43 @@ delta = {}
         assert!(
             dispatch_open(&runtime, &root()),
             "the spawn is still open for its result"
+        );
+    }
+
+    /// A resume picks its spawn by the child it names, so another parent call open beside
+    /// the running subagent's spawn does not hide it.
+    #[tokio::test]
+    async fn a_resume_reaches_its_spawn_beside_another_open_parent_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session.on_turn_end().await.expect("the turn end acks");
+        session
+            .on_tool_call_identified(
+                fetch(serde_json::json!({"a": 2})),
+                Some("call-2".to_string()),
+                None,
+                None,
+            )
+            .await
+            .expect("the parent proposes while the subagent runs");
+
+        session
+            .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+            .expect("the resume finds the spawn bound to its child");
+        assert!(matches!(
+            session.on_spawn_resume(fetch(serde_json::json!({"a": 9})), child("c1")),
+            Err(EventError::OutcomeMismatch)
+        ));
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()).len(),
+            2,
+            "the spawn and the other call are still open"
         );
     }
 
