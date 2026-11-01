@@ -376,10 +376,14 @@ impl Session {
     /// effect reservation stands, so a real emission is never dropped
     /// from the ledger on the strength of a missing hook.
     ///
+    /// An identified spawn whose child is still live stays open: the child
+    /// works past its parent's turn, as a background subagent does, and
+    /// the spawn closes when the harness reports its result.
+    ///
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        let open = self.carried_calls()?;
+        let open = self.turn_end_calls()?;
         if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
@@ -457,10 +461,10 @@ impl Session {
         Ok(view.principal().cloned())
     }
 
-    /// The calls a turn end closes. A trajectory that has ended or never
-    /// opened carries none, so a turn end that names one is a no-op
-    /// rather than a refusal — a turn ends for reasons the engine does
-    /// not model.
+    /// The calls this trajectory carries: its open dispatches. A trajectory
+    /// that has ended or never opened carries none, so a turn end that
+    /// names one is a no-op rather than a refusal — a turn ends for reasons
+    /// the engine does not model.
     ///
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
@@ -471,6 +475,36 @@ impl Session {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
             Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
         }
+    }
+
+    /// The calls a turn end closes: every carried call except an identified
+    /// spawn whose child is still live. A spawn the harness did not identify
+    /// closes: such a harness runs one call at a time, so the open spawn
+    /// would refuse its next call.
+    fn turn_end_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let engine = policy.engine();
+        if engine.liveness(&view, &self.trajectory) != Liveness::Live {
+            return Ok(Vec::new());
+        }
+        let child_runs_on = |open: &OpenDispatch| {
+            let identified = log
+                .call_bindings()
+                .any(|binding| *binding.trajectory == self.trajectory && *binding.dispatch == open.id);
+            identified
+                && matches!(
+                    engine.fork_status(&view, &appa_engine::value::ForkId::of(&open.id)),
+                    ForkStatus::Bound(child) if engine.liveness(&view, &child) == Liveness::Live
+                )
+        };
+        Ok(engine
+            .open_dispatches(&view, &self.trajectory)
+            .into_iter()
+            .filter(|open| !child_runs_on(open))
+            .collect())
     }
 
     #[cfg(test)]
@@ -7394,6 +7428,127 @@ delta = {}
             .await
             .expect_err("the closed dispatch takes no outcome");
         assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
+    }
+
+    /// Release a declared single spawn under the harness's `call_id`.
+    async fn release_identified_spawn(session: &Session, spawn: ProposedCall, call_id: &str) {
+        let call = authorize_spawn(session, spawn, None, crate::engine::LabelSpelling::default()).await;
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    call.proposed(),
+                    Some(call_id.to_string()),
+                    Some(SpawnKind::Single),
+                    None
+                )
+                .await
+                .expect("the approved spawn releases"),
+            ToolCallDecision::Allow { spawn: Some(_), .. }
+        ));
+    }
+
+    /// A background subagent works past its parent's turn. The turn end and the settle at
+    /// the next prompt's first call leave its spawn open, so the return it crosses later
+    /// reaches the parent through the spawn's result.
+    #[tokio::test]
+    async fn a_turn_end_leaves_a_running_subagents_spawn_open_for_its_return() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        let subagent = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        session.on_turn_end().await.expect("the turn end acks");
+        session.on_turn_end().await.expect("the next prompt's settle acks");
+        assert!(
+            dispatch_open(&runtime, &root()),
+            "the running subagent's spawn is still open"
+        );
+        session
+            .on_tool_call_identified(
+                fetch(serde_json::json!({"a": 2})),
+                Some("call-2".to_string()),
+                None,
+                None,
+            )
+            .await
+            .expect("the parent proposes while the subagent runs");
+
+        subagent
+            .on_child_end(Some("all done".to_string()))
+            .await
+            .expect("the subagent's return crosses");
+        let decision = session
+            .on_spawn_result_identified(
+                fetch(serde_json::json!({"a": 1})),
+                Some("spawn-1".to_string()),
+                agent_response(),
+                Some(child("c1")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect("the spawn's result is reported after the turn");
+        assert_eq!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
+        );
+        assert!(
+            runtime.open_dispatches(&root(), &root()).len() == 1,
+            "the spawn closed; the parent's own call is still open"
+        );
+    }
+
+    /// The turn end closes a spawn as unreported when its subagent is not running: one
+    /// that never started, one that ended, and one the harness did not identify.
+    #[tokio::test]
+    async fn a_turn_end_closes_a_spawn_whose_subagent_is_not_running() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unstarted spawn");
+        assert!(!dispatch_open(&runtime, &root()), "a spawn no child started closes");
+        session
+            .on_child_start(child("late"), SpawnRef::InFlight)
+            .err()
+            .expect("the closed spawn's fork binds nothing");
+
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 2})), "spawn-2").await;
+        session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .expect("the child opens")
+            .on_child_end(None)
+            .await
+            .expect("the child ends with no return");
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the ended child's spawn");
+        assert!(!dispatch_open(&runtime, &root()), "an ended child's spawn closes");
+
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        session
+            .on_child_start(child("c3"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unidentified spawn");
+        assert!(!dispatch_open(&runtime, &root()), "an unidentified spawn closes");
+        assert!(
+            runtime.live(&root(), &child("c3")).is_ok(),
+            "closing the spawn leaves its child live"
+        );
     }
 
     /// A turn end is not an engine event when nothing is outstanding,

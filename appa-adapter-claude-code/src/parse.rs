@@ -69,7 +69,7 @@
 //! | `PermissionDenied` | `Failure` — auto mode's classifier refused a released call, so it never ran |
 //! | `PostToolUse` with a `tool_response` | `Success` carrying that response's JSON rendering |
 //! | `PostToolUse` with no `tool_response` (absent or null — the wire spells them alike) | `Indeterminate` — no effects commit, the reservation stands |
-//! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd`, or the next `Prompt` when the turn was interrupted and sent no `Stop`, closes it as not run |
+//! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd`, or the next `Prompt` when the turn was interrupted and sent no `Stop`, closes it as not run. A spawn whose subagent is still live stays open for its result |
 //!
 //! The mapping is total over those shapes. It reads no error shape out
 //! of a `tool_response` body: no recorded live example of one exists,
