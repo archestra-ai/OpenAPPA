@@ -601,6 +601,14 @@ pub(crate) enum EventError {
         "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
     )]
     SpawnStopped,
+    /// The harness reported the spawn call as failed, named no child, and no child ever bound
+    /// to its fork: the subagent failed before it started, such as on a provider error at its
+    /// first request. The spawn closes, so the parent can spawn again. The text is the model's
+    /// next step.
+    #[error(
+        "the subagent did not start, so it returned no result. This subagent call is closed. You can start the subagent again. If it does not start again, tell the user that the subagent could not start."
+    )]
+    SpawnNeverStarted,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("external resolution did not settle after {rounds} rounds")]
@@ -689,7 +697,8 @@ impl EventError {
             | EventError::FanOutUnkeyed
             | EventError::SpawnAmbiguous
             | EventError::BindingMismatch
-            | EventError::SpawnStopped => RefusalClass::Spawn,
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => RefusalClass::Spawn,
         }
     }
 
@@ -735,7 +744,8 @@ impl EventError {
             | EventError::UndeclaredSpawn { .. }
             | EventError::PeerMessageTooLarge { .. }
             | EventError::BindingMismatch
-            | EventError::SpawnStopped => false,
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => false,
         }
     }
 }

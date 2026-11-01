@@ -1190,10 +1190,12 @@ impl Session {
                                 child: child.clone(),
                             },
                             // A failure that names no child: the subagent ended before it
-                            // returned, whether or not it had started.
-                            (ForkStatus::Prepared | ForkStatus::Bound(_), None)
-                                if matches!(outcome, ToolOutcome::Failure { .. }) =>
-                            {
+                            // returned. No child bound to a prepared fork, so that subagent
+                            // never started; a bound one stopped.
+                            (ForkStatus::Prepared, None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
+                                SpawnPlan::Close(EventError::SpawnNeverStarted)
+                            }
+                            (ForkStatus::Bound(_), None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
                                 SpawnPlan::Close(EventError::SpawnStopped)
                             }
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
@@ -6936,7 +6938,8 @@ delta = {}
     /// A harness reports a spawn call as failed, and names no child, when its
     /// subagent ended before it returned: on a provider error before the
     /// subagent's first request, or partway through its turn. The spawn
-    /// closes, the model reads its next step, and the parent can spawn again.
+    /// closes, the model reads whether the subagent started and its next
+    /// step, and the parent can spawn again.
     #[tokio::test]
     async fn a_failed_spawn_result_naming_no_child_closes_the_spawn_with_the_next_step() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -6953,11 +6956,13 @@ delta = {}
             .on_spawn_result(fetch(serde_json::json!({"a": 1})), failure(), None, None)
             .await
             .expect_err("a failed spawn crosses nothing");
-        assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(matches!(error, EventError::SpawnNeverStarted), "got {error:?}");
         assert!(!error.is_operational());
+        assert_eq!(error.class(), appa_runtime_api::RefusalClass::Spawn);
         assert!(
-            error.to_string().contains("start the subagent again"),
-            "the model reads its next step: {error}"
+            error.to_string().starts_with("the subagent did not start")
+                && error.to_string().contains("start the subagent again"),
+            "the model reads what happened and its next step: {error}"
         );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
 
@@ -6971,6 +6976,12 @@ delta = {}
             .await
             .expect_err("a failed spawn crosses nothing");
         assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("the subagent stopped before it returned a result"),
+            "the model reads that the subagent stopped: {error}"
+        );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
     }
