@@ -1697,6 +1697,114 @@ mod tests {
         assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
     }
 
+    /// A background subagent runs past its parent's turn. Neither the turn end nor the
+    /// settle at the next prompt's first call closes its identified spawn, so the return the
+    /// subagent crosses later still reaches the parent through the spawn's result.
+    #[tokio::test]
+    async fn the_next_prompts_first_call_leaves_a_running_subagents_spawn_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        let child = TrajectoryId("cc:s1:a1".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let spawn = || HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: spawn_call(),
+            call_id: Some("toolu-spawn".to_string()),
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(&runtime, &root, &offers).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = handle(&runtime, spawn()).await else {
+            panic!("the declared spawn releases with its binding");
+        };
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            handle(&runtime, HookEvent::TurnEnd { actor: actor.clone() }).await,
+            HookDecision::Ack
+        );
+        handle(
+            &runtime,
+            HookEvent::Prompt {
+                actor: actor.clone(),
+                text: "anything new?".into(),
+                settles: None,
+                peer: None,
+                title: None,
+            },
+        )
+        .await;
+        let next = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call: crate::api::ProposedCall {
+                    tool: "host/claude-code/Bash".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
+                },
+                call_id: Some("toolu-ls".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(next, HookDecision::AllowCall { spawn: None });
+        assert!(!runtime.prompted(&actor), "the first call settled the prompt");
+        assert_eq!(
+            runtime.open_dispatches(&root, &root).len(),
+            2,
+            "the settle left the running subagent's spawn open beside the new call"
+        );
+
+        handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root: root.clone(),
+                child: child.clone(),
+                value: Some("found it".to_string()),
+            },
+        )
+        .await;
+        let returned = handle(
+            &runtime,
+            HookEvent::SpawnResult {
+                actor: actor.clone(),
+                call: spawn_call(),
+                call_id: Some("toolu-spawn".to_string()),
+                outcome: appa_runtime_api::ToolOutcome::Success {
+                    body: appa_runtime_api::OutcomeBody::Available(r#"{"agentId":"a1"}"#.to_string()),
+                },
+                child: Some(child),
+                value: Some("found it".to_string()),
+            },
+        )
+        .await;
+        assert_eq!(
+            returned,
+            HookDecision::Ack,
+            "the return replays through the spawn's result"
+        );
+        assert_eq!(runtime.open_dispatches(&root, &root).len(), 1, "the spawn closed");
+    }
+
     /// The user typed while the command ran: Claude Code queues the message
     /// and fires the prompt hook at once, then reports the command's
     /// outcome when it finishes. The result must land on the still-open

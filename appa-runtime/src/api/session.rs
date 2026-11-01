@@ -154,6 +154,39 @@ fn classify_report(
     )
 }
 
+/// Whether an open dispatch is an identified spawn: a spawn the harness named with a call id.
+/// The harness reports its result under that id, so a report or a proposal that carries none
+/// never concerns it, for as long as it is open.
+fn identified_spawn<'a>(
+    engine: &crate::engine::RuntimeEngine,
+    view: &EngineView,
+    mut bindings: impl Iterator<Item = appa_eventlog::CallBinding<'a>>,
+    trajectory: &appa_engine::value::TrajectoryId,
+    open: &OpenDispatch,
+) -> bool {
+    bindings.any(|binding| binding.trajectory == trajectory && *binding.dispatch == open.id)
+        && !matches!(
+            engine.fork_status(view, &appa_engine::value::ForkId::of(&open.id)),
+            ForkStatus::Unprepared
+        )
+}
+
+/// Whether an open dispatch is an identified spawn whose child runs on past its parent's
+/// turn: its fork is bound to a live child.
+fn child_runs_on<'a>(
+    engine: &crate::engine::RuntimeEngine,
+    view: &EngineView,
+    bindings: impl Iterator<Item = appa_eventlog::CallBinding<'a>>,
+    trajectory: &appa_engine::value::TrajectoryId,
+    open: &OpenDispatch,
+) -> bool {
+    identified_spawn(engine, view, bindings, trajectory, open)
+        && matches!(
+            engine.fork_status(view, &appa_engine::value::ForkId::of(&open.id)),
+            ForkStatus::Bound(child) if engine.liveness(view, &child) == Liveness::Live
+        )
+}
+
 /// What a late child open did: bound the child now, or found the
 /// same pair already bound — the engine's own idempotent answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,10 +409,14 @@ impl Session {
     /// effect reservation stands, so a real emission is never dropped
     /// from the ledger on the strength of a missing hook.
     ///
+    /// An identified spawn whose child is still live stays open: the child
+    /// works past its parent's turn, as a background subagent does, and
+    /// the spawn closes when the harness reports its result.
+    ///
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        let open = self.carried_calls()?;
+        let open = self.turn_calls()?;
         if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
@@ -457,10 +494,10 @@ impl Session {
         Ok(view.principal().cloned())
     }
 
-    /// The calls a turn end closes. A trajectory that has ended or never
-    /// opened carries none, so a turn end that names one is a no-op
-    /// rather than a refusal — a turn ends for reasons the engine does
-    /// not model.
+    /// The calls this trajectory carries: its open dispatches. A trajectory
+    /// that has ended or never opened carries none, so a turn end that
+    /// names one is a no-op rather than a refusal — a turn ends for reasons
+    /// the engine does not model.
     ///
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
@@ -471,6 +508,43 @@ impl Session {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
             Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
         }
+    }
+
+    /// The calls a turn end closes: every carried call but a spawn whose child runs on past
+    /// the turn. A spawn the harness did not identify closes: such a harness runs one call at
+    /// a time, so the open spawn would refuse its next call.
+    fn turn_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let engine = policy.engine();
+        if engine.liveness(&view, &self.trajectory) != Liveness::Live {
+            return Ok(Vec::new());
+        }
+        Ok(engine
+            .open_dispatches(&view, &self.trajectory)
+            .into_iter()
+            .filter(|open| !child_runs_on(engine, &view, log.call_bindings(), &self.trajectory, open))
+            .collect())
+    }
+
+    /// The carried calls a report can name: all of them under a call id, and without one every
+    /// call but an identified spawn.
+    fn report_calls(&self, call_id: Option<&str>) -> Result<Vec<OpenDispatch>, EventError> {
+        let open = self.carried_calls()?;
+        if call_id.is_some() || open.is_empty() {
+            return Ok(open);
+        }
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let engine = policy.engine();
+        Ok(open
+            .into_iter()
+            .filter(|open| !identified_spawn(engine, &view, log.call_bindings(), &self.trajectory, open))
+            .collect())
     }
 
     #[cfg(test)]
@@ -871,7 +945,7 @@ impl Session {
         if self.inner.shared.files.is_none() {
             return Err(super::files::refused("file tools are not enabled"));
         }
-        let open = self.carried_calls()?;
+        let open = self.report_calls(None)?;
         let [open] = open.as_slice() else {
             return Err(EventError::UnknownDispatch);
         };
@@ -941,7 +1015,7 @@ impl Session {
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let open = self.carried_calls()?;
+        let open = self.report_calls(call_id)?;
         let dispatch = match classify_report_identified(
             call,
             call_id,
@@ -1000,7 +1074,7 @@ impl Session {
             let log = self.inner.log(&self.root)?;
             let deployment = self.deployment();
             let policy = self.inner.resolve_policy(&deployment, &log)?;
-            let open = self.carried_calls()?;
+            let open = self.report_calls(call_id.as_deref())?;
             let dispatch = classify_report_identified(
                 &call,
                 call_id.as_deref(),
@@ -1087,7 +1161,7 @@ impl Session {
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &opened)?;
         let decision = self.drive(&policy, true, Opening::default(), |context| {
-            let dispatch = context.classify_report(&call, None)?;
+            let dispatch = context.classify_resume(&call, &child)?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
                 ForkStatus::Bound(bound) if bound == child => {}
@@ -1146,7 +1220,7 @@ impl Session {
             let decision = self
                 .drive_with_evidence(
                     |context, evidence| {
-                        let dispatch = context.classify_report(&call, call_id.as_deref())?;
+                        let dispatch = context.classify_spawn_report(&call, call_id.as_deref())?;
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let next = match (context.fork_status(&fork), &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
@@ -1156,10 +1230,12 @@ impl Session {
                                 child: child.clone(),
                             },
                             // A failure that names no child: the subagent ended before it
-                            // returned, whether or not it had started.
-                            (ForkStatus::Prepared | ForkStatus::Bound(_), None)
-                                if matches!(outcome, ToolOutcome::Failure { .. }) =>
-                            {
+                            // returned. No child bound to a prepared fork, so that subagent
+                            // never started; a bound one stopped.
+                            (ForkStatus::Prepared, None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
+                                SpawnPlan::Close(EventError::SpawnNeverStarted)
+                            }
+                            (ForkStatus::Bound(_), None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
                                 SpawnPlan::Close(EventError::SpawnStopped)
                             }
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
@@ -1674,11 +1750,21 @@ impl Session {
             // Parallel calls need every one of them to carry an identity, not just the newest.
             // An unidentified call already open cannot be told apart from this one when its
             // outcome arrives, so the second dispatch is refused whichever end is unidentified.
-            if opens_dispatch.is_some()
-                && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
-                && (opening.call_id.is_none() || context.has_unbound_open_dispatch())
-            {
-                return Err(EventError::CallOutstanding);
+            // An identified spawn is not counted: its result comes under its own call id.
+            if opens_dispatch.is_some() {
+                let spawns: Vec<_> = context
+                    .open_dispatches()
+                    .into_iter()
+                    .filter(|open| context.identified_spawn(open))
+                    .map(|open| open.id)
+                    .collect();
+                if policy
+                    .engine()
+                    .opens_a_second_dispatch(&view, &self.trajectory, facts, &spawns)
+                    && (opening.call_id.is_none() || context.has_unbound_open_dispatch())
+                {
+                    return Err(EventError::CallOutstanding);
+                }
             }
             let released = facts.iter().find_map(|fact| match fact {
                 appa_engine::fact::Fact::ForkPrepared { kind, .. } => Some(*kind),
@@ -2067,6 +2153,16 @@ impl Decided<'_> {
         self.engine().open_dispatches(self.view, &self.session.trajectory)
     }
 
+    fn identified_spawn(&self, open: &OpenDispatch) -> bool {
+        identified_spawn(
+            self.engine(),
+            self.view,
+            self.log.call_bindings(),
+            &self.session.trajectory,
+            open,
+        )
+    }
+
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
         self.engine().canonical_bytes(call)
     }
@@ -2077,11 +2173,70 @@ impl Decided<'_> {
         call_id: Option<&str>,
     ) -> Result<appa_engine::value::DispatchId, EventError> {
         let open = self.open_dispatches();
+        // A report without a call id never names an identified spawn: its result comes under
+        // its own call id.
+        let named: Vec<OpenDispatch> = match call_id {
+            Some(_) => open.clone(),
+            None => open
+                .iter()
+                .filter(|open| !self.identified_spawn(open))
+                .cloned()
+                .collect(),
+        };
+        self.classify_among(call, call_id, &named, &open)
+    }
+
+    /// The spawn a resume names. A resume carries no call id, so the child it names picks
+    /// the spawn whose fork is bound to it, when the call matches that spawn byte for byte;
+    /// with no such spawn open, the resume is classified as any spawn's report.
+    fn classify_resume(
+        &self,
+        call: &ProposedCall,
+        child: &TrajectoryId,
+    ) -> Result<appa_engine::value::DispatchId, EventError> {
+        let open = self.open_dispatches();
+        let bound: Vec<OpenDispatch> = open
+            .iter()
+            .filter(|open| {
+                matches!(
+                    self.fork_status(&appa_engine::value::ForkId::of(&open.id)),
+                    ForkStatus::Bound(bound) if bound == *child
+                )
+            })
+            .cloned()
+            .collect();
+        match bound.as_slice() {
+            [spawn] if is_open_call(call, || self.canonical_bytes(call), spawn) => Ok(spawn.id.clone()),
+            [_] => Err(self
+                .session
+                .refuse_report(UnreportableOutcome::ByteMismatch, call, &open)),
+            _ => self.classify_spawn_report(call, None),
+        }
+    }
+
+    /// A spawn's own report: its result, or a resume that names it by the call alone. Every
+    /// open dispatch can be the one it names.
+    fn classify_spawn_report(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+    ) -> Result<appa_engine::value::DispatchId, EventError> {
+        let open = self.open_dispatches();
+        self.classify_among(call, call_id, &open, &open)
+    }
+
+    fn classify_among(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        named: &[OpenDispatch],
+        open: &[OpenDispatch],
+    ) -> Result<appa_engine::value::DispatchId, EventError> {
         match classify_report_identified(
             call,
             call_id,
             || self.canonical_bytes(call),
-            &open,
+            named,
             self.log.call_bindings(),
             &self.session.trajectory,
         ) {
@@ -2093,9 +2248,9 @@ impl Decided<'_> {
                 Some(dispatch) => Ok(dispatch),
                 None => Err(self
                     .session
-                    .refuse_report(UnreportableOutcome::NoOpenDispatch, call, &open)),
+                    .refuse_report(UnreportableOutcome::NoOpenDispatch, call, open)),
             },
-            Err(case) => Err(self.session.refuse_report(case, call, &open)),
+            Err(case) => Err(self.session.refuse_report(case, call, open)),
         }
     }
 
@@ -4048,6 +4203,37 @@ attention = ["irreversible"]
         ));
         let after = runtime.minted_offers(&root(), &root()).len();
         assert_eq!(after, before, "no new offer names the denying authority");
+    }
+
+    /// The denial leads the call's block with the authority that denied the plan.
+    #[tokio::test]
+    async fn a_denial_names_the_authority_that_denied_the_plan() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
+        let offer = surfaced_offer(&runtime);
+        let RemedyDecision::Declined { presentation } = session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the denial is delivered")
+        else {
+            panic!("a denial declines the plan");
+        };
+        let (lead, block) = presentation
+            .feedback
+            .split_once('\n')
+            .expect("the call's block follows the denial");
+        assert_eq!(lead, "[appa] authority approver denied this plan.");
+        assert!(
+            block.starts_with("[appa] Blocked: wire cannot run."),
+            "the call's block follows: {block}"
+        );
     }
 
     #[tokio::test]
@@ -6871,7 +7057,8 @@ delta = {}
     /// A harness reports a spawn call as failed, and names no child, when its
     /// subagent ended before it returned: on a provider error before the
     /// subagent's first request, or partway through its turn. The spawn
-    /// closes, the model reads its next step, and the parent can spawn again.
+    /// closes, the model reads whether the subagent started and its next
+    /// step, and the parent can spawn again.
     #[tokio::test]
     async fn a_failed_spawn_result_naming_no_child_closes_the_spawn_with_the_next_step() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -6888,11 +7075,13 @@ delta = {}
             .on_spawn_result(fetch(serde_json::json!({"a": 1})), failure(), None, None)
             .await
             .expect_err("a failed spawn crosses nothing");
-        assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(matches!(error, EventError::SpawnNeverStarted), "got {error:?}");
         assert!(!error.is_operational());
+        assert_eq!(error.class(), appa_runtime_api::RefusalClass::Spawn);
         assert!(
-            error.to_string().contains("start the subagent again"),
-            "the model reads its next step: {error}"
+            error.to_string().starts_with("the subagent did not start")
+                && error.to_string().contains("start the subagent again"),
+            "the model reads what happened and its next step: {error}"
         );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
 
@@ -6906,6 +7095,12 @@ delta = {}
             .await
             .expect_err("a failed spawn crosses nothing");
         assert!(matches!(error, EventError::SpawnStopped), "got {error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("the subagent stopped before it returned a result"),
+            "the model reads that the subagent stopped: {error}"
+        );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
     }
@@ -7394,6 +7589,298 @@ delta = {}
             .await
             .expect_err("the closed dispatch takes no outcome");
         assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
+    }
+
+    /// Release a declared single spawn under the harness's `call_id`.
+    async fn release_identified_spawn(session: &Session, spawn: ProposedCall, call_id: &str) {
+        let call = authorize_spawn(session, spawn, None, crate::engine::LabelSpelling::default()).await;
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    call.proposed(),
+                    Some(call_id.to_string()),
+                    Some(SpawnKind::Single),
+                    None
+                )
+                .await
+                .expect("the approved spawn releases"),
+            ToolCallDecision::Allow { spawn: Some(_), .. }
+        ));
+    }
+
+    /// A background subagent works past its parent's turn. The turn end and the settle at
+    /// the next prompt's first call leave its spawn open, so the return it crosses later
+    /// reaches the parent through the spawn's result.
+    #[tokio::test]
+    async fn a_turn_end_leaves_a_running_subagents_spawn_open_for_its_return() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        let subagent = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        session.on_turn_end().await.expect("the turn end acks");
+        session.on_turn_end().await.expect("the next prompt's settle acks");
+        assert!(
+            dispatch_open(&runtime, &root()),
+            "the running subagent's spawn is still open"
+        );
+        session
+            .on_tool_call_identified(
+                fetch(serde_json::json!({"a": 2})),
+                Some("call-2".to_string()),
+                None,
+                None,
+            )
+            .await
+            .expect("the parent proposes while the subagent runs");
+
+        subagent
+            .on_child_end(Some("all done".to_string()))
+            .await
+            .expect("the subagent's return crosses");
+        let decision = session
+            .on_spawn_result_identified(
+                fetch(serde_json::json!({"a": 1})),
+                Some("spawn-1".to_string()),
+                agent_response(),
+                Some(child("c1")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect("the spawn's result is reported after the turn");
+        assert_eq!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
+        );
+        assert!(
+            runtime.open_dispatches(&root(), &root()).len() == 1,
+            "the spawn closed; the parent's own call is still open"
+        );
+    }
+
+    /// A call the harness does not identify is still told apart from a spawn whose child
+    /// runs on past the turn: that spawn's result comes under its own call id. The call
+    /// opens beside it and reports, and the spawn's result still replays the return.
+    #[tokio::test]
+    async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        let subagent = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session.on_turn_end().await.expect("the turn end acks");
+
+        assert!(matches!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+                .await
+                .expect("the call releases beside the spawn"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert_eq!(
+            session
+                .on_tool_result(
+                    fetch(serde_json::json!({"a": 2})),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("body".to_string()),
+                    },
+                )
+                .await
+                .expect("the report names the call, not the spawn"),
+            ToolResultDecision::Keep
+        );
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()).len(),
+            1,
+            "only the spawn is still open"
+        );
+
+        subagent
+            .on_child_end(Some("all done".to_string()))
+            .await
+            .expect("the subagent's return crosses");
+        assert_eq!(
+            session
+                .on_spawn_result_identified(
+                    fetch(serde_json::json!({"a": 1})),
+                    Some("spawn-1".to_string()),
+                    agent_response(),
+                    Some(child("c1")),
+                    Some("all done".to_string()),
+                )
+                .await
+                .expect("the spawn's result replays"),
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
+        );
+    }
+
+    /// A resume names its spawn by the call alone, with no call id. It still reaches an
+    /// identified spawn that a turn end left open for its running child.
+    #[tokio::test]
+    async fn a_resume_reaches_an_identified_spawn_left_open_for_its_running_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session.on_turn_end().await.expect("the turn end acks");
+
+        session
+            .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+            .expect("the resume binds the same pair again");
+        assert!(
+            dispatch_open(&runtime, &root()),
+            "the spawn is still open for its result"
+        );
+    }
+
+    /// A resume picks its spawn by the child it names, so another parent call open beside
+    /// the running subagent's spawn does not hide it.
+    #[tokio::test]
+    async fn a_resume_reaches_its_spawn_beside_another_open_parent_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session.on_turn_end().await.expect("the turn end acks");
+        session
+            .on_tool_call_identified(
+                fetch(serde_json::json!({"a": 2})),
+                Some("call-2".to_string()),
+                None,
+                None,
+            )
+            .await
+            .expect("the parent proposes while the subagent runs");
+
+        session
+            .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+            .expect("the resume finds the spawn bound to its child");
+        assert!(matches!(
+            session.on_spawn_resume(fetch(serde_json::json!({"a": 9})), child("c1")),
+            Err(EventError::OutcomeMismatch)
+        ));
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()).len(),
+            2,
+            "the spawn and the other call are still open"
+        );
+    }
+
+    /// An identified spawn stays out of a report without a call id for its whole open life:
+    /// after its child ends, a call opened beside it without an id still reports, and the
+    /// spawn's own result still closes it.
+    #[tokio::test]
+    async fn a_report_without_an_id_skips_an_identified_spawn_whose_child_ended() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        let subagent = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        assert!(matches!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+                .await
+                .expect("the call releases beside the spawn"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert_eq!(
+            subagent.on_child_end(None).await.expect("an empty stop ends the child"),
+            ChildReturnDecision::NoValue
+        );
+
+        assert_eq!(
+            session
+                .on_tool_result(
+                    fetch(serde_json::json!({"a": 2})),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("body".to_string()),
+                    },
+                )
+                .await
+                .expect("the report names the call, not the spawn"),
+            ToolResultDecision::Keep
+        );
+        session
+            .on_spawn_result_identified(
+                fetch(serde_json::json!({"a": 1})),
+                Some("spawn-1".to_string()),
+                agent_response(),
+                Some(child("c1")),
+                None,
+            )
+            .await
+            .expect("the ended child's spawn closes with nothing to cross");
+        assert!(!dispatch_open(&runtime, &root()), "nothing is left open");
+    }
+
+    /// The turn end closes a spawn as unreported when its subagent is not running: one
+    /// that never started, one that ended, and one the harness did not identify.
+    #[tokio::test]
+    async fn a_turn_end_closes_a_spawn_whose_subagent_is_not_running() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 1})), "spawn-1").await;
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unstarted spawn");
+        assert!(!dispatch_open(&runtime, &root()), "a spawn no child started closes");
+        session
+            .on_child_start(child("late"), SpawnRef::InFlight)
+            .err()
+            .expect("the closed spawn's fork binds nothing");
+
+        release_identified_spawn(&session, fetch(serde_json::json!({"a": 2})), "spawn-2").await;
+        session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .expect("the child opens")
+            .on_child_end(None)
+            .await
+            .expect("the child ends with no return");
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the ended child's spawn");
+        assert!(!dispatch_open(&runtime, &root()), "an ended child's spawn closes");
+
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        session
+            .on_child_start(child("c3"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unidentified spawn");
+        assert!(!dispatch_open(&runtime, &root()), "an unidentified spawn closes");
+        assert!(
+            runtime.live(&root(), &child("c3")).is_ok(),
+            "closing the spawn leaves its child live"
+        );
     }
 
     /// A turn end is not an engine event when nothing is outstanding,
