@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.38.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.38.0...v0.38.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **runtime:** keep a running subagent's spawn open across a turn end ([bede174](https://github.com/archestra-ai/OpenAPPA/commit/bede174b91280eae224ff588e220ca1a6989421a))
+* **runtime:** name the authority that denied a plan ([bede174](https://github.com/archestra-ai/OpenAPPA/commit/bede174b91280eae224ff588e220ca1a6989421a))
+* **runtime:** name the trust or audience a narrowing remedy leaves the session at ([#761](https://github.com/archestra-ai/OpenAPPA/issues/761)) ([bb6030a](https://github.com/archestra-ai/OpenAPPA/commit/bb6030a026d5bc925252994701ce633432e16538))
+* **runtime:** tell a subagent that never started from one that stopped ([bede174](https://github.com/archestra-ai/OpenAPPA/commit/bede174b91280eae224ff588e220ca1a6989421a))
+
 ## [0.38.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.37.0...v0.38.0) (2026-10-31)
 
 
