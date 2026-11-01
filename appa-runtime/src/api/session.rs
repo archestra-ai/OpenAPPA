@@ -4084,6 +4084,37 @@ attention = ["irreversible"]
         assert_eq!(after, before, "no new offer names the denying authority");
     }
 
+    /// The denial leads the call's block with the authority that denied the plan.
+    #[tokio::test]
+    async fn a_denial_names_the_authority_that_denied_the_plan() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
+        let offer = surfaced_offer(&runtime);
+        let RemedyDecision::Declined { presentation } = session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the denial is delivered")
+        else {
+            panic!("a denial declines the plan");
+        };
+        let (lead, block) = presentation
+            .feedback
+            .split_once('\n')
+            .expect("the call's block follows the denial");
+        assert_eq!(lead, "[appa] authority approver denied this plan.");
+        assert!(
+            block.starts_with("[appa] Blocked: wire cannot run."),
+            "the call's block follows: {block}"
+        );
+    }
+
     #[tokio::test]
     async fn a_denial_retires_only_the_owning_trajectorys_offers() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");

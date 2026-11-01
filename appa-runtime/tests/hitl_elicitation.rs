@@ -666,6 +666,10 @@ async fn declining_denies_and_retires_the_offer() {
     let deployment = deployment().await;
     let answer = execute(&deployment, Reviewer::new(ElicitationAction::Decline)).await;
     assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+    assert!(
+        answer.contains("[appa] authority operator denied this plan."),
+        "the denial names the authority that denied the plan: {answer}"
+    );
 
     let again = execute(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
     assert!(
@@ -846,6 +850,10 @@ async fn a_harness_ruling_denies_and_retires_the_offer() {
     let deployment = deployment().await;
     let answer = execute_with(&deployment, Absent, Some(Ruling::Deny)).await;
     assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+    assert!(
+        answer.contains("[appa] authority operator denied this plan."),
+        "the denial names the authority that denied the plan: {answer}"
+    );
 
     let again = execute_with(&deployment, Absent, Some(Ruling::Approve)).await;
     assert!(

@@ -50,7 +50,7 @@ use appa_engine::fact::{
     ReturnRoute, ReturnSanitizer, RootForkOrigin,
 };
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
-use appa_engine::names::MarkName;
+use appa_engine::names::{AuthorityName, MarkName};
 use appa_engine::plan::{
     ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
 };
@@ -2133,6 +2133,10 @@ impl RuntimeEngine {
                 AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
             },
         };
+        let denied_by = match &outcome {
+            OfferOutcome::Denied { authority } => Some(authority.clone()),
+            _ => None,
+        };
         let judged = self.judge_under_audience(
             view.principal(),
             evidence,
@@ -2185,7 +2189,12 @@ impl RuntimeEngine {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Denied { block } | OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
+                Next::PresentToModel(self.offer_block_delivery(
+                    &block,
+                    &self.return_bounds(&views),
+                    presentation,
+                    denied_by.as_ref(),
+                ))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -2270,11 +2279,15 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
+    /// The call's block after an offer ended without approval. A denial leads with the
+    /// authority that denied the plan, as an unanswered consult names the authority that
+    /// gave no answer.
     fn offer_block_delivery(
         &self,
         block: &CoreBlocked,
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
+        denied_by: Option<&AuthorityName>,
     ) -> Presentation {
         let Feedback {
             text,
@@ -2282,8 +2295,12 @@ impl RuntimeEngine {
             display,
             review,
         } = self.block_delivery(block, bounds, presentation);
+        let feedback = match denied_by {
+            Some(authority) => format!("[appa] authority {} denied this plan.\n{text}", authority.as_str()),
+            None => text,
+        };
         Presentation::Blocked {
-            feedback: text,
+            feedback,
             offers,
             review,
             display,
