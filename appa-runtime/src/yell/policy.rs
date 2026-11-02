@@ -214,6 +214,7 @@ static DEPLOYMENT: Table = Table {
         ("provider_run_tools", Rule::Elements(Class::Tool)),
         ("confined_results", Rule::Elements(Class::Tool)),
         ("provider_surfaces", Rule::MapKeys(Class::Surface, &Rule::Keep)),
+        ("hint", Rule::Never),
     ],
 };
 

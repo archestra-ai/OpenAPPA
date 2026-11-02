@@ -16,7 +16,7 @@ digest = "sha256:df31d0373f8bd220e5dcb2581904a63fc323cf3db261f4d34088b707950e63c
 
 [packages.battery.coding]
 path = "batteries/coding"
-digest = "sha256:8e273bb8f1b751c3c66b40175d7783e30eaf13f630c9fb8e3b4cc41af4367008"
+digest = "sha256:ebe7ca225bd026ea87b62ed4e88564270edcf3a28b65c91b2a0bb0ce61352b3b"
 
 [packages.battery.databricks]
 path = "batteries/databricks"
@@ -24,7 +24,7 @@ digest = "sha256:a3822d95a2e05ef8071a8aded9e6a73a47980085d35c3e0a149496c410bfb5c
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:b0dbd5a27e740bb55f7a3ffe138ab974228e42c4db78df88d83460796a60f98e"
+digest = "sha256:afa3d40a3b61e1c612d93e6db44274256489e82ccb9c3db6b9d99ebfa63b1199"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -96,4 +96,4 @@ digest = "sha256:fbc405f90aea47fa66e30b01569e46a75b86c4caaed05baf1add478db722bb1
 
 [packages.plugin.opencode]
 path = "plugins/opencode"
-digest = "sha256:9bc01e3b8fdc32a88cdc37893eb05890818f72c5f7c0facd6b1684a3633b81ed"
+digest = "sha256:305b25cf899d36673c5c2099c78b2b3639da71b28ca49138cfc41cf1078666f7"

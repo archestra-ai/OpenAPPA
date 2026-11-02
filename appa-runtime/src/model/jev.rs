@@ -202,7 +202,7 @@ impl JevBackend {
         let request = JevRequest {
             state,
             model: MODEL,
-            questions: Questions::new(declaration.hint.as_deref()),
+            questions: Questions::new(declaration),
         };
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
@@ -809,6 +809,8 @@ mod tests {
     fn declaration(ranks: &[&str], audiences: &[&str]) -> AnnotationDeclaration {
         AnnotationDeclaration {
             hint: None,
+            deployment_hint: None,
+            context_hints: std::collections::BTreeMap::new(),
             inputs: vec![],
             trust_ranks: ranks.iter().map(ToString::to_string).collect(),
             audiences: AudienceVocabulary::parse_entries(

@@ -8,7 +8,7 @@ use crate::label::{
     Audience, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, SymbolicAtom, Trust,
 };
 use crate::names::{AuthorityName, MarkName, SanitizerName, TagName};
-use crate::registry::MAX_HINT_CHARS;
+use crate::registry::{MAX_CONTEXT_HINT_CHARS, MAX_HINT_CHARS};
 
 /// Trusted deployer prose for a registered component. OpenAPPA includes an Authority or
 /// Sanitizer hint in remedy plans that reference the component. For model-backed components,
@@ -20,18 +20,23 @@ use crate::registry::MAX_HINT_CHARS;
 pub struct Hint(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("hint is {len} characters, over the maximum {MAX_HINT_CHARS}")]
+#[error("hint is {len} characters, over the maximum {max}")]
 pub struct HintTooLong {
     pub len: usize,
+    pub max: usize,
+}
+
+fn bounded(text: impl Into<String>, max: usize) -> Result<String, HintTooLong> {
+    let text = text.into();
+    match text.chars().count() {
+        len if len > max => Err(HintTooLong { len, max }),
+        _ => Ok(text),
+    }
 }
 
 impl Hint {
     pub fn new(text: impl Into<String>) -> Result<Hint, HintTooLong> {
-        let text = text.into();
-        match text.chars().count() {
-            len if len > MAX_HINT_CHARS => Err(HintTooLong { len }),
-            _ => Ok(Hint(text)),
-        }
+        bounded(text, MAX_HINT_CHARS).map(Hint)
     }
 
     pub fn as_str(&self) -> &str {
@@ -44,6 +49,32 @@ impl TryFrom<String> for Hint {
 
     fn try_from(text: String) -> Result<Hint, HintTooLong> {
         Hint::new(text)
+    }
+}
+
+/// Trusted deployer prose an Annotator reads beside the call it judges: how to read one
+/// context provider's facts, or what the deployment's environment and trust boundaries are.
+/// Advisory only, as a [`Hint`] is, and never part of the policy identity. Its length is
+/// bounded by [`MAX_CONTEXT_HINT_CHARS`] characters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ContextHint(String);
+
+impl ContextHint {
+    pub fn new(text: impl Into<String>) -> Result<ContextHint, HintTooLong> {
+        bounded(text, MAX_CONTEXT_HINT_CHARS).map(ContextHint)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ContextHint {
+    type Error = HintTooLong;
+
+    fn try_from(text: String) -> Result<ContextHint, HintTooLong> {
+        ContextHint::new(text)
     }
 }
 
@@ -362,7 +393,8 @@ mod tests {
         assert_eq!(
             Hint::new(overlong.clone()),
             Err(HintTooLong {
-                len: MAX_HINT_CHARS + 1
+                len: MAX_HINT_CHARS + 1,
+                max: MAX_HINT_CHARS
             })
         );
         let decoded: Hint = serde_json::from_value(serde_json::json!(longest)).expect("the longest hint decodes");
@@ -371,6 +403,22 @@ mod tests {
             serde_json::json!(longest)
         );
         assert!(serde_json::from_value::<Hint>(serde_json::json!(overlong)).is_err());
+    }
+
+    #[test]
+    fn a_context_hint_is_bounded_by_its_own_limit() {
+        let longest = "é".repeat(MAX_CONTEXT_HINT_CHARS);
+        assert_eq!(
+            ContextHint::new(longest.clone()).map(|hint| hint.as_str().len()),
+            Ok(longest.len())
+        );
+        assert_eq!(
+            ContextHint::new("é".repeat(MAX_CONTEXT_HINT_CHARS + 1)),
+            Err(HintTooLong {
+                len: MAX_CONTEXT_HINT_CHARS + 1,
+                max: MAX_CONTEXT_HINT_CHARS
+            })
+        );
     }
 
     #[test]

@@ -787,6 +787,8 @@ pub struct RuntimeEngine {
     /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
     /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
+    /// The policy's `[deployment] hint`, which every annotation consult declares.
+    deployment_hint: Option<appa_engine::authority::ContextHint>,
     /// How the deployment this engine decides for names tools, so feedback that tells the
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: an engine of any revision carries the same one.
@@ -914,6 +916,7 @@ impl RuntimeEngine {
                 .annotators()
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
+            deployment_hint: policy.deployment_hint().cloned(),
             naming,
             views: HeldViews::default(),
         }
@@ -928,6 +931,7 @@ impl RuntimeEngine {
                 .clone()
                 .at(deployment.clone(), appa_engine::profile::PolicyRevision::new(revision)),
             annotators: self.annotators.clone(),
+            deployment_hint: self.deployment_hint.clone(),
             naming: self.naming,
             views: HeldViews::default(),
         }
@@ -2806,6 +2810,8 @@ impl RuntimeEngine {
             .expect("a minted call fills every selector placeholder of its annotator's mandate");
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
+            deployment_hint: self.deployment_hint.clone(),
+            context_hints: BTreeMap::new(),
             inputs: binding.inputs.keys().cloned().collect(),
             trust_ranks: mandate
                 .trust_ranks()

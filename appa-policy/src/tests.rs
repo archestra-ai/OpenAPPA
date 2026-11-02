@@ -6,7 +6,7 @@ use appa_engine::contract::{AudienceRequirement, DeltaAudience, RecipientSpec, S
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, GroupName, SanitizerName, TagName};
 use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
-use appa_engine::registry::{LoadError, MAX_HINT_CHARS};
+use appa_engine::registry::{LoadError, MAX_CONTEXT_HINT_CHARS, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
 use crate::{AnnotatorBuiltin, Config, ConfigError};
@@ -627,6 +627,35 @@ fn an_annotator_hint_is_runtime_owned_and_bounded() {
         load(&refused),
         Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
             if context == "annotator classifier" && len == MAX_HINT_CHARS + 1 && max == MAX_HINT_CHARS
+    ));
+}
+
+/// The `[deployment] hint` is runtime-owned prose: it loads beside the profile, is bounded in
+/// characters, and adding, editing or removing it never moves the policy identity.
+#[test]
+fn the_deployment_hint_is_runtime_owned_bounded_and_outside_the_identity() {
+    let hinted = |hint: &str| DECLARATIONS.replace("[deployment]", &format!("[deployment]\nhint = \"{hint}\""));
+    let config = load(&hinted("corp.example and its forge are ours.")).expect("the hinted deployment loads");
+    assert_eq!(
+        config.deployment_hint().map(|hint| hint.as_str()),
+        Some("corp.example and its forge are ours.")
+    );
+    let base = load(DECLARATIONS).expect("loads");
+    assert_eq!(base.deployment_hint(), None);
+    assert_eq!(load(&hinted(" ")).expect("loads").deployment_hint(), None);
+
+    let identity = |source: &str| load(source).expect("loads").engine().identity();
+    assert_eq!(
+        identity(&hinted("corp.example and its forge are ours.")),
+        identity(DECLARATIONS)
+    );
+    assert_eq!(identity(&hinted("only corp.example is ours.")), identity(DECLARATIONS));
+
+    assert!(load(&hinted(&"é".repeat(MAX_CONTEXT_HINT_CHARS))).is_ok());
+    assert!(matches!(
+        load(&hinted(&"é".repeat(MAX_CONTEXT_HINT_CHARS + 1))),
+        Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
+            if context == "deployment" && len == MAX_CONTEXT_HINT_CHARS + 1 && max == MAX_CONTEXT_HINT_CHARS
     ));
 }
 
