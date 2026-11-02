@@ -193,7 +193,7 @@ fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallEr
         ));
     }
     let mut entry = archive.by_index(0).map_err(invalid)?;
-    if entry.name() != "appa.exe"
+    if entry.name().map_err(invalid)? != "appa.exe"
         || !entry.is_file()
         || entry.size() > MAX_BINARY_BYTES
         || entry

@@ -262,13 +262,13 @@ def _python_modules(root: Path, entry: Path) -> tuple[set[Path], list[Path]]:
 
     The entry directory is first to mirror ``python3 path/to/script.py``;
     the battery root is also searched for batteries that rely on it being on
-    ``PYTHONPATH``. Other interpreter paths are included so standard-library
-    and installed imports don't get mistaken for battery-local files.
+    ``PYTHONPATH``. Interpreter paths are deliberately left out: battery-local
+    modules shadow them anyway, and following standard-library and installed
+    packages makes the result depend on the host. ``modulefinder`` crashes on
+    namespace packages such as Debian's ``jaraco`` reached via setuptools.
     """
 
-    search_path = [entry.parent, root]
-    search_path.extend(Path(item or ".").resolve() for item in sys.path)
-    finder = ModuleFinder(path=list(dict.fromkeys(str(path) for path in search_path)))
+    finder = ModuleFinder(path=list(dict.fromkeys(str(path) for path in [entry.parent, root])))
     finder.run_script(str(entry))
 
     local_modules: set[Path] = set()

@@ -1,6 +1,7 @@
 import tempfile
 from pathlib import Path
 import shutil
+import sys
 import unittest
 
 from scripts.lint_batteries import lint_battery
@@ -63,6 +64,20 @@ class BatteryLinterTests(unittest.TestCase):
                     {"entry.py": source},
                 )
                 self.assertIn("unsupported/dynamic command", self.kinds(directory))
+
+    def test_installed_namespace_package_does_not_break_linting(self):
+        # Debian's setuptools brings the `jaraco` namespace package onto sys.path.
+        site = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, site)
+        (site / "appa_fixture_namespace").mkdir()
+        sys.path.insert(0, str(site))
+        self.addCleanup(sys.path.remove, str(site))
+        directory = self.make_battery(
+            [["python3", "entry.py"]],
+            ["entry.py"],
+            {"entry.py": "import appa_fixture_namespace\n"},
+        )
+        self.assertEqual(self.kinds(directory), [])
 
     def test_orphan_python_script_is_reported(self):
         directory = self.make_battery(
