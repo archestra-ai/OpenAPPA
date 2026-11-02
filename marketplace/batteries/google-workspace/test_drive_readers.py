@@ -21,7 +21,7 @@ LIST = {
     "supportsAllDrives": "true",
     "includePermissionsForView": "published",
     "pageSize": 100,
-    "fields": "nextPageToken,permissions(type,emailAddress,domain,deleted)",
+    "fields": "nextPageToken,permissions(type,emailAddress,domain,deleted,view)",
 }
 VIEWER = {"email": "alice@corp.com", "email_verified": True, "hd": "corp.com"}
 FORBIDDEN = SOURCE.Forbidden("403")
@@ -280,6 +280,64 @@ class UpdateTests(unittest.TestCase):
         ]:
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 ANNOTATOR.answer(drive(permissions("D", user("alice@corp.com"))), "update_file", arguments)
+
+
+class ArgumentTests(unittest.TestCase):
+    def test_a_name_the_annotator_does_not_read_refuses_the_call(self):
+        # The connector accepts snake_case names, so `parent_id` would put the
+        # file in a folder this script never asked Drive about.
+        for tool, arguments in [
+            ("create_file", {"title": "diff", "parent_id": "PUB"}),
+            ("create_file", {"parentId": "root", "parent_id": "PUB"}),
+            ("copy_file", {"fileId": "S", "parent_id": "PUB"}),
+            ("copy_file", {"fileId": "DECOY", "file_id": "S", "parentId": "F"}),
+            ("update_file", {"fileId": "D", "parent_id": "PUB"}),
+            ("update_file", {"fileId": "D", "downloadRestriction": {}}),
+        ]:
+            with self.subTest(tool=tool, arguments=arguments), self.assertRaises(ValueError):
+                ANNOTATOR.answer(drive(), tool, arguments)
+
+    def test_arguments_that_change_no_readers_are_admitted(self):
+        answer = ANNOTATOR.answer(
+            drive(permissions("F", user("alice@corp.com"))),
+            "create_file",
+            {"title": "x", "textContent": "y", "contentMimeType": "text/plain", "disableConversionToGoogleType": True, "parentId": "F"},
+        )
+        self.assertEqual(required(answer), ["self"])
+        answer = ANNOTATOR.answer(
+            drive(permissions("D", user("alice@corp.com"))),
+            "update_file",
+            {"fileId": "D", "description": "d", "starred": True, "folderColorRgb": "#ff0000", "readOnly": False, "readOnlyReason": "r"},
+        )
+        self.assertEqual(required(answer), ["self"])
+
+
+class ViewTests(unittest.TestCase):
+    def test_a_view_grant_counts_for_the_target_but_not_for_the_content(self):
+        # A published or metadata view reads no content, so it widens what a
+        # write into the item reaches but never what the item forwards.
+        published = {"type": "anyone", "view": "published"}
+        answer = ANNOTATOR.answer(
+            drive(permissions("S", user("alice@corp.com"), published), permissions("F", user("alice@corp.com"))),
+            "copy_file",
+            {"fileId": "S", "parentId": "F"},
+        )
+        self.assertEqual(answer["forwards"], {"audience": ["self"]})
+
+        limited = {"type": "domain", "domain": "corp.com", "view": "metadata"}
+        answer = ANNOTATOR.answer(
+            drive(
+                permissions("D", user("alice@corp.com"), limited),
+                (f"{DRIVE}/files/D", PARENTS, {"parents": ["P"]}),
+                permissions("P", {"type": "anyone"}),
+            ),
+            "update_file",
+            {"fileId": "D", "inheritedPermissionsDisabled": False},
+        )
+        self.assertEqual(answer["forwards"], {"audience": ["self"]})
+
+        answer = ANNOTATOR.answer(drive(permissions("F", published)), "create_file", {"parentId": "F"})
+        self.assertEqual(required(answer), "public")
 
 
 class ConsultTests(unittest.TestCase):

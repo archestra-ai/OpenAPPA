@@ -39,8 +39,15 @@ reads into a folder the organization reads is refused.
 its parent's readers again, so it is checked as a move into that
 parent; a parent the token cannot see needs `public`. With
 `writersCanShare: true` any writer may share the file with anyone, so
-it needs `public`, as `share_file` does. An `update_file` argument the
-annotator does not know refuses the call.
+it needs `public`, as `share_file` does.
+
+Each write admits only the arguments the annotator reads or knows to
+change no readers. Any other argument refuses the call, including the
+snake_case spellings such as `parent_id` that the connector also
+accepts, and `update_file`'s `downloadRestriction`, since lifting it
+lets readers copy the content out. A published or metadata view counts
+among a target's readers but reads no content, so it never widens what
+a copy or a move forwards.
 
 `trash_file` needs trusted data that `internal` may see. A trashed file
 can be restored, so trashing needs no review. Every write records

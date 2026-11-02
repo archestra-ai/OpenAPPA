@@ -22,8 +22,11 @@ its content reaches the target only when the target's readers do.
 its parent's readers, so it is checked as a move into that parent, and
 a parent the token cannot see could be read by anyone. With
 `writersCanShare: true` any writer may share the file with anyone, so
-it needs public data, as `share_file` does. An `update_file` argument
-this script does not know refuses the call.
+it needs public data, as `share_file` does. An argument this script
+does not read, such as the snake_case `parent_id` the connector also
+accepts, refuses the call. A published or metadata view counts among a
+target's readers but reads no content, so it never widens what a
+source forwards.
 
 Credentials come from APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN: the audience
 source's token, with the drive.metadata.readonly scope added. A 403 is
@@ -56,8 +59,36 @@ PUBLIC = "public"
 CHAIN = [SELF, INTERNAL, PUBLIC]
 # The id Drive accepts for the viewer's My Drive root folder.
 ROOT = "root"
-# The update_file arguments whose effect on readers this script knows.
-UPDATE_ARGUMENTS = {"fileId", "title", "parentId", "inheritedPermissionsDisabled", "writersCanShare"}
+# The arguments of each write whose effect on readers this script knows.
+# The connector also accepts snake_case spellings, such as `parent_id`,
+# which this script does not read, so any other name refuses the call.
+ARGUMENTS = {
+    "create_file": {
+        "title",
+        "mimeType",
+        "contentMimeType",
+        "content",
+        "base64Content",
+        "textContent",
+        "parentId",
+        "disableConversionToGoogleType",
+    },
+    "copy_file": {"fileId", "title", "parentId"},
+    # `downloadRestriction` is left out: lifting it lets readers copy the
+    # content out of Drive.
+    "update_file": {
+        "fileId",
+        "title",
+        "parentId",
+        "inheritedPermissionsDisabled",
+        "writersCanShare",
+        "description",
+        "starred",
+        "folderColorRgb",
+        "readOnly",
+        "readOnlyReason",
+    },
+}
 
 
 def widest(*readers):
@@ -156,7 +187,7 @@ class Drive:
                     supportsAllDrives="true",
                     includePermissionsForView="published",
                     pageSize=100,
-                    fields="nextPageToken,permissions(type,emailAddress,domain,deleted)",
+                    fields="nextPageToken,permissions(type,emailAddress,domain,deleted,view)",
                 )
                 # A deleted account reads nothing.
                 self._permissions[file_id] = [p for p in listing if not p.get("deleted")]
@@ -179,8 +210,9 @@ class Drive:
         """The widest audience every member of which reads a copied or
         moved file: what its content forwards. Everyone only when anyone
         may read it, the Workspace only when the Workspace's domain may;
-        else the viewer, the one reader every readable file has."""
-        permissions = self.permissions(file_id) or []
+        else the viewer, the one reader every readable file has. A
+        published or metadata view reads no content, so it is skipped."""
+        permissions = [p for p in self.permissions(file_id) or [] if not p.get("view")]
         domain = self.viewer()[1]
         if any(p.get("type") == "anyone" for p in permissions):
             return PUBLIC
@@ -233,6 +265,10 @@ def written(readers):
 def answer(drive, tool, arguments):
     """What a write into Drive requires, and what it forwards."""
     forwards = None
+    unknown = set(arguments) - ARGUMENTS.get(tool, set())
+    if tool in ARGUMENTS and unknown:
+        # A name this script does not read may change where the write lands.
+        raise ValueError(f"{tool} arguments {sorted(unknown)} are not ones this annotator labels")
     match tool:
         case "create_file":
             target = drive.readers(file_id(arguments, "parentId", False) or ROOT)
@@ -241,10 +277,6 @@ def answer(drive, tool, arguments):
             forwards = drive.content(source)
             target = drive.readers(file_id(arguments, "parentId", False) or drive.copy_parent(source))
         case "update_file":
-            unknown = set(arguments) - UPDATE_ARGUMENTS
-            if unknown:
-                # A flag this script does not know may change who reads the file.
-                raise ValueError(f"update_file arguments {sorted(unknown)} are not ones this annotator labels")
             moved = file_id(arguments, "fileId", True)
             parent = file_id(arguments, "parentId", False)
             target = drive.readers(moved)
