@@ -122,6 +122,7 @@ RUNS_GIT = re.compile(r"(?<![\w.-])(git|gh)(?![\w@.:/-])")
 GIT_FILE = re.compile(r"(?<![\w-])\.git(?![\w-])|\.gitconfig\b|\bgit/config\b")
 REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
 HEREDOC = re.compile(r"<<(-?)[ \t]*")
+SUBSTITUTION = re.compile(r"\$\((?!\()|`")
 # A redirection operator as the lexer splits it (`>`, `>>`, `>&`, `&>`, `<<`, `>|`) and a
 # file descriptor number written against one (`2>`, `1>&2`, `<&3`).
 REDIRECTION = re.compile(r"[<>&]*[<>][<>&]*\|?")
@@ -766,7 +767,8 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     """Every place on GitHub the command reaches. A subshell or an unquoted command
     substitution is followed inside; its directory and settings end where it closes."""
     # Any program may write a file git reads, by any path the text names.
-    moves = [Moves(f"{found.group(0)} names a file git reads settings or hooks from") for found in GIT_FILE.finditer(command)][:1]
+    found = GIT_FILE.search(command) or GIT_FILE.search(QUOTING.sub("", command))
+    moves = [Moves(f"{found.group(0)} names a file git reads settings or hooks from")] if found else []
     command = without_heredocs(command)
     if any(names_git(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
@@ -798,6 +800,7 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
             words = words[1:]
         if not words and exporting:
             exported = environment
+            ever |= environment.keys()
             continue
         if exporting:
             raise Unfollowable(f"export {' '.join(words)} changes settings this provider cannot follow")
@@ -850,6 +853,8 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     if pushed or any(target.kind != "slug" for target in targets):
         if moves:
             raise Unfollowable(f"{moves[0].change} changes where a push or the checkout's repository goes")
+        if SUBSTITUTION.search(command):
+            raise Unfollowable("a command substitution may name a file git reads in a command whose push or checkout it may change")
         # Any word, a copy's or a redirection's path among them, may expand to a file git reads.
         referenced = set(REFERENCE.findall(command))
         if expanded := referenced & ever or referenced and {name for name in ever if not name.isidentifier()}:

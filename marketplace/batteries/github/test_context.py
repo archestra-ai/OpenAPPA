@@ -300,7 +300,6 @@ class GitTargets(unittest.TestCase):
             "ls -R src && git push",
             "git -c color.ui=never status && git push",
             "git remote -v && git push",
-            "git commit -m \"$(cat <<'EOF'\nfix the parser\nEOF\n)\" && git push",
         ):
             self.assertEqual(self.targets(command), [Target("push", None, "/w")], command)
 
@@ -339,7 +338,7 @@ class ShellShapes(unittest.TestCase):
             ),
             [],
         )
-        self.assertEqual(self.targets("echo $(gh pr view 12 --json title)"), checkout(12))
+        self.assertEqual(self.targets("echo $(gh pr view 12 --json title -R acme/api)"), slug("acme/api", 12))
 
     def test_a_condition_or_a_loop_runs_the_command_after_its_keyword(self):
         self.assertEqual(
@@ -512,6 +511,13 @@ class Unfollowable(unittest.TestCase):
             'for d in .g; do cp /tmp/evil "${d}it/config"; done; git push',
             'read -r d < f; cp /tmp/evil "$d"; git push origin',
             "(files=(a.ts 'b c.ts'); echo $files) && git push origin",
+            "cp /tmp/evil .g''it/config; git push origin",
+            'cp /tmp/evil "$(printf .g)it/config"; git push origin',
+            'export CI=.g NO_COLOR=it; cp /tmp/evil "$CI$NO_COLOR/config"; git push origin',
+            # A command substitution beside a checkout push may name a file git reads.
+            "STATUS=$(git status --porcelain); git push origin",
+            "git commit -m \"$(cat <<'EOF'\nfix the parser\nEOF\n)\" && git push",
+            "echo $(gh pr view 12 --json title)",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -560,7 +566,6 @@ class FollowedSettings(unittest.TestCase):
         for command in (
             "B=x; git push origin",
             "cd /w && N=5 && git log -n 5 && git push origin",
-            "STATUS=$(git status --porcelain); git push origin",
             "python3 - <<'EOF'\nprint('$HOME')\nEOF\ngit push origin",
         ):
             self.assertEqual(self.targets(command), [Target("remote", "origin", "/w")], command)
