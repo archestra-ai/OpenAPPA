@@ -340,12 +340,14 @@ async fn run_command_process(
     if status.success() {
         return Ok(output);
     }
-    let stderr = stderr.and_then(|stderr| stderr.error_line()).unwrap_or_default();
-    tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
+    let detail = stderr.and_then(|stderr| stderr.error_line());
+    let line = detail.as_deref().unwrap_or_default();
+    tracing::warn!(code = ?status.code(), stderr = %line, "the command exited without an answer");
     match status.code().and_then(|code| u16::try_from(code).ok()) {
-        Some(status) => Err(NoAnswerReason::NonSuccess { status, detail: None }),
+        Some(status) => Err(NoAnswerReason::NonSuccess { status, detail }),
         // A signal or another platform-specific status establishes no useful failure
-        // classification. The stderr tail remains confined to logs and the recorder.
+        // classification, so unlike an exit code's, its stderr line stays in logs and the
+        // recorder.
         None => Err(NoAnswerReason::Transport),
     }
 }
