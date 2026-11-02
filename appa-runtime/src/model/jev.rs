@@ -490,9 +490,10 @@ fn json_size(value: &impl Serialize) -> Result<usize, (JevFailure, NoAnswerReaso
 }
 
 /// The artifact of a consult `size` bytes long with its largest provider answers replaced,
-/// one by one, by the reason Jev does not see them, until the consult fits the cap. An
-/// entry's serialized length is its whole share of the consult's, so the size is tracked
-/// without serializing the consult again.
+/// one by one, by the reason Jev does not see them, until the consult fits the cap or no
+/// answer is larger than that reason. The result can still exceed the cap, so the caller
+/// checks its final size. An entry's serialized length is its whole share of the
+/// consult's, so the size is tracked without serializing the consult again.
 fn without_largest_answers(
     artifact: &AnnotationArtifact,
     mut size: usize,
@@ -1413,14 +1414,14 @@ mod tests {
     #[tokio::test]
     async fn context_past_the_input_bound_is_dropped_largest_first_before_the_call_is() {
         let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
-        let mut consult = with_context(call(), json!({"blob": "x".repeat(MAX_CONSULT_BYTES / 2 + 1024)}));
+        let mut consult = with_context(call(), json!({"blob": "x".repeat(MAX_CONSULT_BYTES / 2 - 1024)}));
         let ConsultBody::Annotation { artifact, .. } = &mut consult.body else {
             unreachable!("the fixture is an annotation consult")
         };
         let mut entries = artifact.context.entries().clone();
         entries.insert(
             appa_engine::names::ContextProviderName::new("jira"),
-            ContextEntry::Answer(json!({"blob": "y".repeat(MAX_CONSULT_BYTES / 2 - 1024)})),
+            ContextEntry::Answer(json!({"blob": "y".repeat(MAX_CONSULT_BYTES / 2 + 1024)})),
         );
         entries.insert(
             appa_engine::names::ContextProviderName::new("slack"),
@@ -1435,8 +1436,8 @@ mod tests {
             request["state"]["context"],
             json!({
                 "databricks": {"error": "timeout"},
-                "github": {"error": dropped},
-                "jira": {"answer": {"blob": "y".repeat(MAX_CONSULT_BYTES / 2 - 1024)}},
+                "github": {"answer": {"blob": "x".repeat(MAX_CONSULT_BYTES / 2 - 1024)}},
+                "jira": {"error": dropped},
                 "slack": {"answer": {"channel": "eng"}},
             })
         );
