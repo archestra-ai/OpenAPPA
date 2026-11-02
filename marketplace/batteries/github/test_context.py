@@ -462,6 +462,12 @@ class Unfollowable(unittest.TestCase):
             "git config $KEY https://github.com/acme/public.git && git push origin",
             "git config --edit && git push origin",
             "git config --unknown remote.origin.url x && git push origin",
+            "git config url.https://github.com/acme/public.git.insteadOf https://example.invalid/repo && git push https://example.invalid/repo",
+            "git config extensions.worktreeConfig true && git push origin",
+            "cat > .git/config <<'EOF'\n[remote \"origin\"]\n    url = https://github.com/acme/public\nEOF\ngit push origin",
+            "cp /tmp/evil/config sub/.git/config && git -C sub push origin",
+            "git config credential.helper '!gh api -X POST repos/acme/other/issues -f title=x; :' && git push https://github.com/acme/api.git",
+            "git -c core.pager='gh api repos/acme/other; :' --paginate config --list",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -479,6 +485,7 @@ class Unfollowable(unittest.TestCase):
             "GH_HOST=ghe.example; gh pr view 1 --repo acme/api",
             "HOME=/tmp/evil; git push origin",
             "CDPATH=/other; cd sub && git push origin",
+            "PS4='$(g\\it -C /other push origin)'; set -x; git push origin",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -488,6 +495,7 @@ class Unfollowable(unittest.TestCase):
             "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'https://github.com/acme/public.git'])\nEOF\ngh pr view 1 -R acme/api",
             "cat <<-EOF > run.sh\n\tgh pr create --repo acme/public\n\tEOF\ngit push origin",
             "uv run - <<EOF\nimport os\nos.system('gh pr create --repo acme/public')\nEOF",
+            "cat <<EOF\n$(g''h issue create --repo acme/public --title x)\nEOF\ngit status",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -530,6 +538,8 @@ class FollowedSettings(unittest.TestCase):
         self.assertEqual(self.targets("cat <<EOF > notes.md\nf() { cd /other; }\nEOF\ngit push origin"), [Target("remote", "origin", "/w")])
         self.assertEqual(self.targets("echo $((1 << 2)) && git push origin"), [Target("remote", "origin", "/w")])
         self.assertEqual(self.targets("echo '<<EOF'\ncd /other\nEOF=1\ngit push origin"), [Target("remote", "origin", "/other")])
+        self.assertEqual(self.targets("cat <<<:\nexport GH_REPO=acme/public\n:\ngh issue create --title x"), slug("acme/public"))
+        self.assertEqual(self.targets("g''h issue create --repo acme/public --title x"), slug("acme/public"))
 
     def test_a_single_user_call_with_its_own_token_is_refused(self):
         for command in ("GH_TOKEN=other gh pr view 1 --repo acme/api", "export GITHUB_TOKEN=other; gh pr view 1 --repo acme/api"):

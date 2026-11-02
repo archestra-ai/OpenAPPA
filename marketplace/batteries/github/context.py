@@ -85,11 +85,13 @@ HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", 
 TOKEN_VARIABLES = {"GH_TOKEN", "GITHUB_TOKEN"}
 # Shell variables that git, gh, or the shell itself read, as they are or once exported.
 READ_PREFIXES = ("GIT_", "GH_", "GITHUB_", "XDG_", "LD_", "DYLD_")
-READ_VARIABLES = {"HOME", "PATH", "CDPATH"}
+READ_VARIABLES = {"HOME", "PATH", "CDPATH", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"}
 # git config sections and variables that change which repository a push or the checkout's
 # remotes name (git-config(1), git-push(1)), or run commands in a push's place.
 MOVING_SECTIONS = {"remote", "url", "push", "branch", "include", "includeif"}
-MOVING_VARIABLES = {("core", "sshcommand"), ("core", "gitproxy"), ("core", "hookspath"), ("credential", "url")}
+MOVING_VARIABLES = {
+    ("core", "sshcommand"), ("core", "gitproxy"), ("core", "hookspath"), ("credential", "url"), ("extensions", "worktreeconfig"),
+}
 CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--get-color", "--get-colorbool"}
 CONFIG_WRITES = {"--add", "--replace-all", "--unset", "--unset-all", "--rename-section", "--remove-section"}
 CONFIG_SWITCHES = {
@@ -107,6 +109,10 @@ NUMBER = re.compile(r"^#?(\d+)$")
 BACKTICKS = re.compile(r"`([^`]*)")
 INVOCATION = re.compile(r"\b(git|gh)\s")
 MENTIONS_GIT = re.compile(r"\b(git|gh)\b")
+QUOTING = re.compile(r"[\"'\\]")
+RUNS_GIT = re.compile(r"(?<![\w.-])(git|gh)(?![\w@.:/-])")
+# A word that names a file git reads its settings or hooks from.
+GIT_FILE = re.compile(r"(?:^|[/=])(?:\.git(?:/|$)|\.gitconfig$|git/config$)")
 REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
 HEREDOC = re.compile(r"<<(-?)[ \t]*([^\s;&|<>()]+)")
 
@@ -266,6 +272,17 @@ class Target:
 # ---------------------------------------------------------------- commands
 
 
+def names_git(text):
+    """Whether text names git or gh, as it is or once the shell removes its quotes."""
+    return bool(MENTIONS_GIT.search(text) or MENTIONS_GIT.search(QUOTING.sub("", text)))
+
+
+def runs_git(value):
+    """Whether a setting's value runs git or gh: the program named as a command, not
+    inside a URL such as `git@github.com:` or `acme/api.git`."""
+    return bool(RUNS_GIT.search(QUOTING.sub("", value)))
+
+
 def segments_of(command):
     """The command's simple commands, split at every shell operator and newline, with
     `(` and `)` where a subshell or an unquoted command substitution opens and closes.
@@ -277,7 +294,7 @@ def segments_of(command):
     try:
         for token in lexer:
             if not set(token) <= set(OPERATORS):
-                if "$(" in token and (array or MENTIONS_GIT.search(token)):
+                if "$(" in token and (array or names_git(token)):
                     raise Unfollowable("a quoted command substitution runs a git or gh call this provider cannot follow")
                 if not array:
                     segment.append(token)
@@ -389,6 +406,9 @@ def config_change(arguments):
                 names.append(word)
     if mode == "read" or mode is None and len(names) < 2:
         return None
+    # A helper, pager, or hook setting runs its value in a later call.
+    if any(runs_git(name) for name in names):
+        raise Unfollowable("git config sets a value that runs a git or gh call this provider cannot follow")
     if any(name.partition(".")[0].lower() == "alias" for name in names):
         raise Unfollowable("git config alias.* defines a git command this provider cannot follow")
     moved = next((name for name in names if moving(name)), None)
@@ -408,6 +428,9 @@ def git_target(words, directory):
         elif option not in HARMLESS_GIT_OPTIONS:
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
+            # A setting such as core.pager runs its value in the call it applies to.
+            if index < len(words) and runs_git(words[index]):
+                raise Unfollowable(f"git {option} {words[index]} runs a git or gh call this provider cannot follow")
         index += 1
     if index < len(words):
         computed(words[index])
@@ -609,18 +632,26 @@ def without_heredocs(command):
                 kept.append(character * 2)
                 index += 2
                 continue
-            case "<" if not arithmetic and not command.startswith("<<<", index) and (heredoc := HEREDOC.match(command, index)):
-                pending.append((re.sub(r"[\"'\\]", "", heredoc.group(2)), bool(heredoc.group(1))))
+            case "<" if command.startswith("<<<", index):
+                kept.append("<<<")
+                index += 3
+                continue
+            case "<" if not arithmetic and (heredoc := HEREDOC.match(command, index)):
+                word = heredoc.group(2)
+                pending.append((QUOTING.sub("", word), bool(heredoc.group(1)), word != QUOTING.sub("", word)))
                 kept.append(heredoc.group(0))
                 index = heredoc.end()
                 continue
             case "\n" if pending:
                 kept.append(character)
                 index += 1
-                for delimiter, tabs in pending:
+                for delimiter, tabs, literal in pending:
                     body, index = body_of(command, index, delimiter, tabs)
-                    if MENTIONS_GIT.search(body):
+                    if names_git(body):
                         raise Unfollowable("a here-document hands a command text naming git or gh, which it may run")
+                    # An unquoted delimiter leaves the body's substitutions to run.
+                    if not literal and ("$(" in body or "`" in body):
+                        raise Unfollowable("a here-document runs command substitutions this provider cannot follow")
                 pending = []
                 continue
         kept.append(character)
@@ -647,7 +678,7 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     """Every place on GitHub the command reaches. A subshell or an unquoted command
     substitution is followed inside; its directory and settings end where it closes."""
     command = without_heredocs(command)
-    if any(MENTIONS_GIT.search(inner) for inner in BACKTICKS.findall(command)):
+    if any(names_git(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
     targets, moves, pushed, exported, assigned, directory, scopes = [], [], False, {}, set(), cwd, []
     for words in segments_of(command):
@@ -683,6 +714,7 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
             continue
+        moves += [Moves(f"{word} names a file git reads settings or hooks from") for word in words if GIT_FILE.search(word)]
         wrapper, words = words[0], unwrapped(words)
         if not words:
             continue
@@ -696,12 +728,12 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
             unsafe_settings(words, environment, assigned, deployment)
         match program:
             case "git":
+                pushed |= "push" in words
                 match git_target(words[1:], directory):
                     case Moves() as moved:
                         moves.append(moved)
                     case Target() as target:
                         targets.append(target)
-                        pushed = True
             case "gh":
                 targets += gh_targets(words[1:], environment, directory)
             case "cd" | "pushd" if len(words) == 2:
@@ -821,7 +853,7 @@ def call_targets(artifact, deployment=Deployment.SINGLE_USER):
     if tool.rsplit("/", 1)[-1] != "Bash":
         return []
     command = arguments.get("command")
-    if not isinstance(command, str) or not MENTIONS_GIT.search(command):
+    if not isinstance(command, str) or not names_git(command):
         return []
     cwd = artifact.get("cwd")
     return bash_targets(command, cwd if isinstance(cwd, str) else None, deployment)
