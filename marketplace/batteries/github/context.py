@@ -13,7 +13,8 @@ A multi-user deployment runs `context-multi-user.py` under a GitHub App
 installation token, which has no viewer: its answer has no `viewer` and
 no `viewer_permission`, names every person `"person": "github:<id>"`
 where this one names its `"login"`, and reads the token from
-APPA_PROVIDER_GITHUB_TOKEN alone.
+APPA_PROVIDER_GITHUB_TOKEN alone. Its answer depends on no one's login, so
+a call that sets its own GH_TOKEN or GITHUB_TOKEN is followed there.
 
 Two kinds of call are recognized. A `Bash` call is split into its simple
 commands; each `gh` call and `git push` names its repository by
@@ -80,7 +81,31 @@ REMOTE_CHANGES = {"add", "set-url", "rename", "remove", "rm", "set-head"}
 PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
-HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", "PAGER", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
+HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
+# A pager runs its value as a command; only these values run nothing but a pager.
+PAGER_VARIABLES = {"GH_PAGER", "GIT_PAGER", "PAGER"}
+INERT_PAGERS = {"", "cat", "less", "more"}
+TOKEN_VARIABLES = {"GH_TOKEN", "GITHUB_TOKEN"}
+# Shell variables that git, gh, or the shell itself read, as they are or once exported.
+READ_PREFIXES = ("GIT_", "GH_", "GITHUB_", "XDG_", "LD_", "DYLD_")
+READ_VARIABLES = {
+    "HOME", "PATH", "CDPATH", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV", "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+    "PAGER", "EDITOR", "VISUAL", "BROWSER", "SSH_ASKPASS", "LESSOPEN", "LESSCLOSE",
+}
+# git config sections and variables that change which repository or host a push or the
+# checkout's remotes reach (git-config(1), git-push(1)), or run commands in a push's place.
+MOVING_SECTIONS = {"remote", "url", "push", "branch", "include", "includeif", "http"}
+MOVING_VARIABLES = {
+    ("core", "sshcommand"), ("core", "gitproxy"), ("core", "hookspath"), ("credential", "url"), ("extensions", "worktreeconfig"),
+}
+CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--get-color", "--get-colorbool"}
+CONFIG_WRITES = {"--add", "--replace-all", "--unset", "--unset-all", "--rename-section", "--remove-section"}
+CONFIG_SWITCHES = {
+    "--global", "--system", "--local", "--worktree", "--includes", "--no-includes", "--show-origin", "--show-scope",
+    "--name-only", "-z", "--null", "--bool", "--int", "--bool-or-int", "--path", "--expiry-date", "--fixed-value", "--all",
+}
+CONFIG_OPTIONS_WITH_VALUE = {"-f", "--file", "--blob", "--type", "--default", "--comment", "--value", "--url"}
 
 GITHUB_URL = re.compile(r"^(?:https?://|git@|ssh://git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/(?:pull|issues)/(\d+))?(?:[/#?]|$)")
 API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)(?:/(?:issues|pulls)/(\d+))?")
@@ -91,6 +116,17 @@ NUMBER = re.compile(r"^#?(\d+)$")
 BACKTICKS = re.compile(r"`([^`]*)")
 INVOCATION = re.compile(r"\b(git|gh)\s")
 MENTIONS_GIT = re.compile(r"\b(git|gh)\b")
+QUOTING = re.compile(r"\\\n|[\"'\\]")
+RUNS_GIT = re.compile(r"(?<![\w.-])(git|gh)(?![\w@.:/-])")
+# Text that names a file or directory git reads its settings or hooks from.
+GIT_FILE = re.compile(r"(?<![\w-])\.git(?![\w-])|\.gitconfig\b|\bgit/config\b")
+REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
+HEREDOC = re.compile(r"<<(-?)[ \t]*")
+SUBSTITUTION = re.compile(r"\$\((?!\()|`")
+# A redirection operator as the lexer splits it (`>`, `>>`, `>&`, `&>`, `<<`, `>|`) and a
+# file descriptor number written against one (`2>`, `1>&2`, `<&3`).
+REDIRECTION = re.compile(r"[<>&]*[<>][<>&]*\|?")
+DESCRIPTOR = re.compile(r"\d+(?=[<>])")
 
 # gh commands that act on one repository: `--repo`/`-R`, `GH_REPO`, or the checkout.
 CHECKOUT_COMMANDS = {"api", "browse", "cache", "issue", "label", "pr", "release", "repo", "ruleset", "run", "secret", "variable", "workflow"}
@@ -133,6 +169,71 @@ NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
 
 class Unfollowable(Exception):
     """The command reaches GitHub in a way this provider cannot establish."""
+
+
+def login_of(account):
+    return account.get("login")
+
+
+def github_id_of(account):
+    """`github:<databaseId>` for a user or a bot; `None` for a deleted
+    account, a mannequin, or any other actor the query reads no id for."""
+    match account.get("databaseId"):
+        case int() as number if not isinstance(number, bool) and number > 0:
+            return f"github:{number}"
+        case _:
+            return None
+
+
+class Deployment(Enum):
+    """Whose token the provider holds, which decides how the answer names a
+    person and where the token comes from.
+
+    A single-user deployment's token is a person's: the answer names the
+    viewer, the viewer's permission, and every person by `login`. A
+    multi-user deployment's token is a GitHub App installation's, which
+    has no viewer: every person is `person`, `github:<id>`, and the token
+    comes from the deployment alone."""
+
+    SINGLE_USER = "single-user"
+    MULTI_USER = "multi-user"
+
+    @property
+    def has_viewer(self):
+        return self is Deployment.SINGLE_USER
+
+    @property
+    def key(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return "login"
+            case Deployment.MULTI_USER:
+                return "person"
+
+    def person(self, account):
+        match self:
+            case Deployment.SINGLE_USER:
+                return login_of(account)
+            case Deployment.MULTI_USER:
+                return github_id_of(account)
+
+    def token(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return resolve_token(timeout=within_budget(GH_TIMEOUT_SECONDS))
+            case Deployment.MULTI_USER:
+                return env_token()
+
+    @property
+    def harmless_variables(self):
+        """Variables a git or gh call may carry without changing a fact the answer reports.
+        The repository comes from the command or the checkout, never from the token, so the
+        call's own token matters only to an answer that names the viewer."""
+        match self:
+            case Deployment.SINGLE_USER:
+                return HARMLESS_VARIABLES
+            case Deployment.MULTI_USER:
+                return HARMLESS_VARIABLES | TOKEN_VARIABLES
 
 
 # How faithfully a listing's query repeats the call:
@@ -183,6 +284,17 @@ class Target:
 # ---------------------------------------------------------------- commands
 
 
+def names_git(text):
+    """Whether text names git or gh, as it is or once the shell removes its quotes."""
+    return bool(MENTIONS_GIT.search(text) or MENTIONS_GIT.search(QUOTING.sub("", text)))
+
+
+def runs_git(value):
+    """Whether a setting's value runs git or gh: the program named as a command, not
+    inside a URL such as `git@github.com:` or `acme/api.git`."""
+    return bool(RUNS_GIT.search(QUOTING.sub("", value)))
+
+
 def segments_of(command):
     """The command's simple commands, split at every shell operator and newline, with
     `(` and `)` where a subshell or an unquoted command substitution opens and closes.
@@ -190,16 +302,21 @@ def segments_of(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    segment, array, previous = [], False, ""
+    segment, array, previous, redirected = [], False, "", False
     try:
         for token in lexer:
             if not set(token) <= set(OPERATORS):
-                if "$(" in token and (array or MENTIONS_GIT.search(token)):
+                if "$(" in token and (array or names_git(token)):
                     raise Unfollowable("a quoted command substitution runs a git or gh call this provider cannot follow")
-                if not array:
+                # A redirection's file or here-document delimiter is no word of the command.
+                if not array and not redirected:
                     segment.append(token)
-                previous = token
+                previous, redirected = token, False
                 continue
+            if not array and REDIRECTION.fullmatch(token):
+                redirected = True
+                continue
+            redirected = False
             if "()" in token and segment and not array and not segment[-1].endswith("="):
                 raise Unfollowable(f"{segment[-1]}() defines a function whose calls this provider cannot follow")
             for character in token:
@@ -261,9 +378,66 @@ def url_target(word, directory):
     return Target("slug", f"{match.group(1)}/{match.group(2)}", directory, number)
 
 
+@dataclass(frozen=True)
+class Moves:
+    """A `git config` or `git remote` call that changes where a push, or the
+    checkout's own repository, goes."""
+
+    change: str
+
+
+def moving(name):
+    """Whether a git config key or section changes where a push or the checkout's remotes go."""
+    section, _, rest = name.partition(".")
+    section, variable = section.lower(), rest.rpartition(".")[2].lower()
+    if not rest:
+        return section in MOVING_SECTIONS | {moved for moved, _ in MOVING_VARIABLES}
+    return section in MOVING_SECTIONS or (section, variable) in MOVING_VARIABLES
+
+
+def config_change(arguments):
+    """What one `git config` call changes: `None` for a read or for settings that move
+    no push, such as a credential helper or `user.*`."""
+    names, mode, words = [], None, iter(arguments)
+    for word in words:
+        match word:
+            case _ if "$" in word or "`" in word:
+                raise Unfollowable(f"git config {word} is computed when the command runs")
+            # Options end at the first operand: a later `--get` is a value pattern.
+            case _ if names:
+                names.append(word)
+            case "-e" | "--edit" | "edit":
+                raise Unfollowable("git config --edit changes settings this provider cannot read")
+            case "get" | "list" if not names and mode is None:
+                mode = "read"
+            case "set" | "unset" | "rename-section" | "remove-section" if not names and mode is None:
+                mode = "write"
+            case _ if word in CONFIG_READS:
+                mode = mode or "read"
+            case _ if word in CONFIG_WRITES:
+                mode = "write"
+            case _ if word in CONFIG_SWITCHES or word.partition("=")[0] in CONFIG_OPTIONS_WITH_VALUE and "=" in word:
+                pass
+            case _ if word in CONFIG_OPTIONS_WITH_VALUE:
+                next(words, None)
+            case _ if word.startswith("-"):
+                raise Unfollowable(f"git config {word} is an option this provider cannot read")
+            case _:
+                names.append(word)
+    if mode == "read" or mode is None and len(names) < 2:
+        return None
+    # A helper, pager, or hook setting runs its value in a later call.
+    if any(runs_git(name) for name in names):
+        raise Unfollowable("git config sets a value that runs a git or gh call this provider cannot follow")
+    if any(name.partition(".")[0].lower() == "alias" for name in names):
+        raise Unfollowable("git config alias.* defines a git command this provider cannot follow")
+    moved = next((name for name in names if moving(name)), None)
+    return Moves(f"git config {moved}") if moved else None
+
+
 def git_target(words, directory):
-    """Where one `git` call pushes, or `None` for a call that pushes
-    nothing on GitHub."""
+    """Where one `git` call pushes, a `Moves` for a call that changes where
+    a push goes, or `None` for a call that pushes nothing on GitHub."""
     index, unfollowable = 0, None
     while index < len(words) and words[index].startswith("-"):
         option = words[index]
@@ -274,12 +448,27 @@ def git_target(words, directory):
         elif option not in HARMLESS_GIT_OPTIONS:
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
+            # The value, given apart (`-c k=v`) or attached (`-ck=v`, `--git-dir=d`).
+            match option:
+                case _ if option in GIT_OPTIONS_WITH_VALUE:
+                    value = words[index] if index < len(words) else ""
+                case _ if option.startswith("-c") and not option.startswith("--"):
+                    value = option.removeprefix("-c")
+                case _:
+                    value = option.partition("=")[2]
+            # A setting such as core.pager runs its value in the call it applies to.
+            if option.startswith("--config") or value.lower().startswith("alias.") or runs_git(value) or "$" in value or "`" in value:
+                raise Unfollowable(f"git {option} {value} sets what the call runs, which this provider cannot follow")
         index += 1
+    if index < len(words):
+        computed(words[index])
+    if any("ext::" in word for word in words):
+        raise Unfollowable("git's ext:: transport runs a command this provider cannot follow")
     match words[index : index + 2]:
         case ["config", *_]:
-            raise Unfollowable("git config changes where a later push goes")
+            return config_change(words[index + 1 :])
         case ["remote", change] if change in REMOTE_CHANGES:
-            raise Unfollowable(f"git remote {change} changes where a later push goes")
+            return Moves(f"git remote {change}")
         case ["push", *_]:
             pass
         case _:
@@ -435,12 +624,155 @@ def gh_targets(words, environment, directory):
     return [Target("slug" if slug else "checkout", slug, directory, number, listed)]
 
 
-def bash_targets(command, cwd):
+def body_of(command, index, delimiter, tabs):
+    """A here-document's body from `index`, and where its delimiter line ends; an
+    unterminated body runs to the end, as in bash."""
+    lines = []
+    while index < len(command):
+        end = command.find("\n", index)
+        end = len(command) if end < 0 else end
+        line, index = command[index:end], end + 1
+        if (line.lstrip("\t") if tabs else line) == delimiter:
+            break
+        lines.append(line)
+    return "\n".join(lines), index
+
+
+def delimiter_at(command, index):
+    """A here-document's delimiter word at `index`, as bash compares body lines with it
+    after quote removal; where the word ends; and whether any of it was quoted."""
+    delimiter, quoted, start = [], False, index
+    while index < len(command) and command[index] not in " \t\n;&|<>()":
+        match command[index]:
+            case "'":
+                end = command.find("'", index + 1)
+                if end < 0:
+                    raise Unfollowable("the command does not parse: a here-document delimiter is never closed")
+                delimiter.append(command[index + 1 : end])
+                index, quoted = end + 1, True
+            case '"':
+                index, quoted = index + 1, True
+                while index < len(command) and command[index] != '"':
+                    if command[index] == "\\" and command[index + 1 : index + 2] in ('"', "\\", "$", "`"):
+                        index += 1
+                    delimiter.append(command[index : index + 1])
+                    index += 1
+                if index >= len(command):
+                    raise Unfollowable("the command does not parse: a here-document delimiter is never closed")
+                index += 1
+            case "$" if command[index + 1 : index + 2] in ("'", '"'):
+                raise Unfollowable("a here-document delimiter quoted with $'...' or $\"...\" is one this provider cannot read")
+            case "\\":
+                delimiter.append(command[index + 1 : index + 2])
+                index, quoted = index + 2, True
+            case character:
+                delimiter.append(character)
+                index += 1
+    if index == start:
+        raise Unfollowable("the command does not parse: a here-document has no delimiter")
+    return "".join(delimiter), index, quoted
+
+
+def without_heredocs(command):
+    """The command with each here-document's body left out: it is text a command reads,
+    not shell. A body naming git or gh is refused, as the command reading it may run it."""
+    kept, pending, quote, arithmetic, braces, index = [], [], None, 0, 0, 0
+    while index < len(command):
+        character = command[index]
+        # A substitution parses its own here-documents before the pending ones.
+        if pending and (command.startswith("$(", index) or character == "`"):
+            raise Unfollowable("a command substitution beside a here-document is one this provider cannot follow")
+        match character:
+            case "\\" if quote != "'":
+                kept.append(command[index : index + 2])
+                index += 2
+                continue
+            case "'" | '"' if quote in (None, character):
+                quote = None if quote else character
+            case _ if quote:
+                pass
+            case "#" if not kept or kept[-1][-1] in " \t\n;&|()":
+                end = command.find("\n", index)
+                index = len(command) if end < 0 else end
+                continue
+            # A descriptor number belongs to its redirection, not to the command's words.
+            case _ if (
+                character.isdigit()
+                and not arithmetic
+                and (not kept or kept[-1][-1] in " \t\n;&|()")
+                and (descriptor := DESCRIPTOR.match(command, index))
+            ):
+                index = descriptor.end()
+                continue
+            case "(" | ")" if command.startswith(character * 2, index) and (character == "(" or arithmetic):
+                arithmetic += 1 if character == "(" else -1
+                kept.append(character * 2)
+                index += 2
+                continue
+            case "$" if command.startswith("${", index):
+                braces += 1
+                kept.append("${")
+                index += 2
+                continue
+            case "}" if braces:
+                braces -= 1
+            case "<" if command.startswith("<<<", index):
+                kept.append("<<<")
+                index += 3
+                continue
+            case "<" if braces and command.startswith("<<", index):
+                raise Unfollowable("<< inside a parameter expansion is one this provider cannot follow")
+            case "<" if not arithmetic and (heredoc := HEREDOC.match(command, index)):
+                delimiter, end, literal = delimiter_at(command, heredoc.end())
+                pending.append((delimiter, bool(heredoc.group(1)), literal))
+                kept.append(command[index:end])
+                index = end
+                continue
+            case "\n" if pending:
+                kept.append(character)
+                index += 1
+                for delimiter, tabs, literal in pending:
+                    body, index = body_of(command, index, delimiter, tabs)
+                    if names_git(body):
+                        raise Unfollowable("a here-document hands a command text naming git or gh, which it may run")
+                    # An unquoted delimiter leaves the body's substitutions and line joins to the shell.
+                    if not literal and ("$" in body or "`" in body or "\\\n" in f"{body}\n"):
+                        raise Unfollowable("a here-document's body is expanded in a way this provider cannot follow")
+                pending = []
+                continue
+        kept.append(character)
+        index += 1
+    return "".join(kept)
+
+
+def unsafe_settings(words, environment, assigned, deployment):
+    """Refuses a git or gh call whose environment, or a shell variable the command set,
+    may change what the answer reports. A variable git and gh do not read matters only
+    where the call expands it, which this provider does not do."""
+    harmless = deployment.harmless_variables
+    read = {
+        name
+        for name in assigned - (harmless - {"GH_REPO"})
+        if not name.isidentifier() or name.startswith(READ_PREFIXES) or name in READ_VARIABLES
+    }
+    expanded = {name for word in words for name in REFERENCE.findall(word)} & assigned
+    carried = {
+        name for name, value in environment.items() if name not in harmless and not (name in PAGER_VARIABLES and value in INERT_PAGERS)
+    }
+    if settings := read | expanded | carried:
+        raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
+
+
+def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     """Every place on GitHub the command reaches. A subshell or an unquoted command
     substitution is followed inside; its directory and settings end where it closes."""
-    if any(MENTIONS_GIT.search(inner) for inner in BACKTICKS.findall(command)):
+    # Any program may write a file git reads, by any path the text names.
+    found = GIT_FILE.search(command) or GIT_FILE.search(QUOTING.sub("", command))
+    moves = [Moves(f"{found.group(0)} names a file git reads settings or hooks from")] if found else []
+    command = without_heredocs(command)
+    if any(names_git(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
-    targets, exported, assigned, directory, scopes = [], {}, set(), cwd, []
+    targets, pushed, exported, assigned, ever, directory, scopes = [], False, {}, set(), set(), cwd, []
     for words in segments_of(command):
         match words:
             case "(":
@@ -468,27 +800,35 @@ def bash_targets(command, cwd):
             words = words[1:]
         if not words and exporting:
             exported = environment
+            ever |= environment.keys()
             continue
         if exporting:
             raise Unfollowable(f"export {' '.join(words)} changes settings this provider cannot follow")
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
+            ever |= assigned
             continue
         wrapper, words = words[0], unwrapped(words)
         if not words:
             continue
         program = os.path.basename(words[0])
+        if program in ("for", "select") and len(words) > 1:
+            ever.add(words[1])
         # A wrapper runs a builtin as a child, whose directory ends with it.
         if wrapper in WRAPPERS and program in ("cd", "pushd", "popd"):
             continue
         if program in ("git", "gh") and program != words[0]:
             raise Unfollowable(f"{words[0]} may not be the {program} this provider follows")
-        if program in ("git", "gh") and (settings := assigned | environment.keys() - HARMLESS_VARIABLES):
-            raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
+        if program in ("git", "gh"):
+            unsafe_settings(words, environment, assigned, deployment)
         match program:
             case "git":
-                target = git_target(words[1:], directory)
-                targets += [target] if target else []
+                pushed |= "push" in words
+                match git_target(words[1:], directory):
+                    case Moves() as moved:
+                        moves.append(moved)
+                    case Target() as target:
+                        targets.append(target)
             case "gh":
                 targets += gh_targets(words[1:], environment, directory)
             case "cd" | "pushd" if len(words) == 2:
@@ -499,6 +839,7 @@ def bash_targets(command, cwd):
                 raise Unfollowable(f"{program} runs commands this provider cannot follow")
             case _ if program in SETTERS or program == "printf" and any(word.startswith("-v") for word in words):
                 assigned.add(f"a variable {program} sets")
+                ever |= assigned
             case "[" | "[[" | "test":
                 pass
             case _ if (
@@ -508,6 +849,16 @@ def bash_targets(command, cwd):
                 or any(os.path.basename(word) in ("git", "gh") or INVOCATION.search(word) for word in words)
             ):
                 raise Unfollowable(f"{program} runs a git or gh call this provider cannot follow")
+    # A loop can run a change after the push it precedes, so order does not matter.
+    if pushed or any(target.kind != "slug" for target in targets):
+        if moves:
+            raise Unfollowable(f"{moves[0].change} changes where a push or the checkout's repository goes")
+        if SUBSTITUTION.search(command):
+            raise Unfollowable("a command substitution may name a file git reads in a command whose push or checkout it may change")
+        # Any word, a copy's or a redirection's path among them, may expand to a file git reads.
+        referenced = set(REFERENCE.findall(command))
+        if expanded := referenced & ever or referenced and {name for name in ever if not name.isidentifier()}:
+            raise Unfollowable(f"{', '.join(sorted(expanded))} is expanded in a command whose push or checkout it may change")
     return list(dict.fromkeys(targets))
 
 
@@ -592,7 +943,7 @@ def mcp_target(tool, arguments):
     return Target("slug", f"{owner}/{repo}", None, number, listed(arguments) if listed else None)
 
 
-def call_targets(artifact):
+def call_targets(artifact, deployment=Deployment.SINGLE_USER):
     """What the proposed call reaches, `[]` for a call that reaches nothing
     on GitHub."""
     tool = artifact.get("tool")
@@ -605,10 +956,10 @@ def call_targets(artifact):
     if tool.rsplit("/", 1)[-1] != "Bash":
         return []
     command = arguments.get("command")
-    if not isinstance(command, str) or not MENTIONS_GIT.search(command):
+    if not isinstance(command, str) or not names_git(command):
         return []
     cwd = artifact.get("cwd")
-    return bash_targets(command, cwd if isinstance(cwd, str) else None)
+    return bash_targets(command, cwd if isinstance(cwd, str) else None, deployment)
 
 
 # ---------------------------------------------------------------- checkouts
@@ -749,60 +1100,6 @@ def reached(targets):
 
 
 # ---------------------------------------------------------------- GitHub
-
-def login_of(account):
-    return account.get("login")
-
-
-def github_id_of(account):
-    """`github:<databaseId>` for a user or a bot; `None` for a deleted
-    account, a mannequin, or any other actor the query reads no id for."""
-    match account.get("databaseId"):
-        case int() as number if not isinstance(number, bool) and number > 0:
-            return f"github:{number}"
-        case _:
-            return None
-
-
-class Deployment(Enum):
-    """Whose token the provider holds, which decides how the answer names a
-    person and where the token comes from.
-
-    A single-user deployment's token is a person's: the answer names the
-    viewer, the viewer's permission, and every person by `login`. A
-    multi-user deployment's token is a GitHub App installation's, which
-    has no viewer: every person is `person`, `github:<id>`, and the token
-    comes from the deployment alone."""
-
-    SINGLE_USER = "single-user"
-    MULTI_USER = "multi-user"
-
-    @property
-    def has_viewer(self):
-        return self is Deployment.SINGLE_USER
-
-    @property
-    def key(self):
-        match self:
-            case Deployment.SINGLE_USER:
-                return "login"
-            case Deployment.MULTI_USER:
-                return "person"
-
-    def person(self, account):
-        match self:
-            case Deployment.SINGLE_USER:
-                return login_of(account)
-            case Deployment.MULTI_USER:
-                return github_id_of(account)
-
-    def token(self):
-        match self:
-            case Deployment.SINGLE_USER:
-                return resolve_token(timeout=within_budget(GH_TIMEOUT_SECONDS))
-            case Deployment.MULTI_USER:
-                return env_token()
-
 
 ACCOUNT = "__typename ... on User { databaseId } ... on Bot { databaseId }"
 
@@ -1042,7 +1339,7 @@ def context_of(consult, deployment=Deployment.SINGLE_USER):
     artifact = consult.get("artifact")
     if not isinstance(artifact, dict):
         raise ValueError("the consult carries no artifact")
-    place = reached(call_targets(artifact))
+    place = reached(call_targets(artifact, deployment))
     if place is None:
         return None
     payload = graphql(deployment.token(), query_of(deployment), variables_of(*place))
