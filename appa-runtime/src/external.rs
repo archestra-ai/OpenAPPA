@@ -1323,6 +1323,23 @@ mod tests {
         assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
     }
 
+    /// A command is told how long it has, the time already spent on the consult deducted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_reads_the_budget_it_has_left() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = r#"cat >/dev/null; printf '{"version":1,"answer":{"budget":%s}}' "$APPA_CONSULT_TIMEOUT_MS""#;
+        let ConsultOutcome::Answer(answer) =
+            resolve_command(&command_services(dir.path(), script, budget_ms(), 1024)).await
+        else {
+            panic!("the command answers");
+        };
+        let budget = answer["budget"]
+            .as_u64()
+            .expect("the budget is a number of milliseconds");
+        assert!(0 < budget && budget <= budget_ms(), "{budget} ms of {}", budget_ms());
+    }
+
     #[cfg(unix)]
     async fn resolve_command(services: &ExternalServices) -> ConsultOutcome {
         services
@@ -1348,7 +1365,7 @@ mod tests {
             r#"cat > request.json
 printf '%s' "$1" > argument.txt
 pwd > cwd.txt
-env | grep '^APPA_' > appa-env.txt
+env | grep '^APPA_' | grep -v '^APPA_CONSULT_TIMEOUT_MS=' > appa-env.txt
 printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             2000,
             65_536,
@@ -1386,7 +1403,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
             "APPA_PROVIDER_TEST_TOKEN=provider-credential\n",
             "a command inherits the one credential its binding names — not the runtime's own \
-             variables, and not another binding's credential in the same namespace"
+             variables, and not another binding's credential in the same namespace; its budget \
+             has its own test"
         );
 
         // The same command serves an authority: the transport is kind-agnostic.

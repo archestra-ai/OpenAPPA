@@ -262,6 +262,9 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
 /// `parent` without the runtime's own namespace. A consult child starts from exactly this,
 /// its environment cleared first: filtering one read of the environment, rather than
 /// removing names from the live one, leaves no gap for a variable set in between.
+/// The variable a command reads the milliseconds it has to answer from.
+pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
+
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
@@ -295,12 +298,15 @@ async fn run_command_process(
         .kill_on_drop(true);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
     // variable, reaches the child. The binding's own provider credentials are put back
-    // afterwards, so a command inherits the variables it reads and no other's.
+    // afterwards, so a command inherits the variables it reads and no other's, and the
+    // budget it has left, so it can answer within it.
     let parent: Vec<_> = std::env::vars_os().collect();
+    let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
     configured
         .env_clear()
         .envs(without_runtime_variables(parent))
-        .envs(credentials);
+        .envs(credentials)
+        .env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
 
     let mut process = CommandProcess::spawn(&mut configured)?;
     let tail = process.child_mut().stderr.take().map(stderr_tail);

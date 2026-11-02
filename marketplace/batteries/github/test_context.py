@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -114,13 +115,14 @@ ISSUE_PAYLOAD = {
 class Loopback:
     """One stdlib HTTP server standing in for GitHub's GraphQL endpoint."""
 
-    def __init__(self, status, answer):
+    def __init__(self, status, answer, delay=0):
         seen = []
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 seen.append((self.path, self.headers.get("Authorization"), body["variables"]))
+                time.sleep(delay)
                 encoded = json.dumps(answer).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -774,6 +776,15 @@ class Envelope(unittest.TestCase):
         result = self.run_script(consult(bash('bash -c "gh pr view 1"')), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
+
+    def test_a_github_slower_than_the_consult_budget_is_given_up_within_it(self):
+        artifact = {"tool": "mcp/github/pull_request_read", "arguments": {"owner": "acme", "repo": "widget", "pullNumber": 12}}
+        with Loopback(200, PULL_REQUEST_PAYLOAD, delay=3) as github:
+            started = time.monotonic()
+            result = self.run_script(consult(artifact), {**github.env(), "APPA_CONSULT_TIMEOUT_MS": "1000"})
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertLess(elapsed, 2)
 
     def test_a_missing_token_is_a_failure(self):
         artifact = {"tool": "mcp/github/get_file_contents", "arguments": {"owner": "acme", "repo": "api"}}

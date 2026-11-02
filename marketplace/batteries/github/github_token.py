@@ -27,13 +27,13 @@ def api_hostname(environ):
     return "github.com" if host == "api.github.com" else host
 
 
-def gh_token(environ):
+def gh_token(environ, timeout=GH_TIMEOUT_SECONDS):
     try:
         completed = subprocess.run(
             ["gh", "auth", "token", "--hostname", api_hostname(environ)],
             capture_output=True,
             text=True,
-            timeout=GH_TIMEOUT_SECONDS,
+            timeout=timeout,
             env=environ,
             check=False,
         )
@@ -54,12 +54,13 @@ def env_token(environ=None):
     return token
 
 
-def resolve_token(environ=None):
+def resolve_token(environ=None, timeout=GH_TIMEOUT_SECONDS):
+    """The token; `timeout` bounds the wait for the GitHub CLI's login."""
     environ = os.environ if environ is None else environ
     token = (environ.get(TOKEN_VAR) or "").strip()
     if token:
         return token
-    token = gh_token(environ)
+    token = gh_token(environ, timeout)
     if token:
         return token
     raise RuntimeError(

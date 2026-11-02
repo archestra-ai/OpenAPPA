@@ -39,6 +39,8 @@ read (`truncated`). A command this provider cannot follow (a shell, a
 subshell, a computed target, a setting that moves git), a repository the
 token cannot see, or any GitHub error exits nonzero: the runtime hands
 the annotator an error entry, and the call itself is never refused here.
+Every GitHub and git wait ends inside APPA_CONSULT_TIMEOUT_MS, the budget
+the runtime gives the consult, when it sets one.
 """
 
 from dataclasses import dataclass
@@ -49,15 +51,21 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_token import api_root, env_token, resolve_token  # noqa: E402
+from github_token import GH_TIMEOUT_SECONDS, api_root, env_token, resolve_token  # noqa: E402
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 TIMEOUT_SECONDS = 10
 GIT_TIMEOUT_SECONDS = 4
+CONSULT_TIMEOUT = "APPA_CONSULT_TIMEOUT_MS"
+# What is kept of the consult's budget for the answer to reach the runtime.
+# The clock starts after interpreter start-up, which the margin also covers.
+ANSWER_MARGIN_SECONDS = 0.5
+STARTED = time.monotonic()
 
 OPERATORS = "();<>&|\n"
 PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
@@ -609,12 +617,24 @@ def push_repository(config, branch):
     return remote_repository(config, remote)
 
 
+def within_budget(limit):
+    """`limit` seconds, or what is left of the consult's budget when the runtime set one
+    and less is left."""
+    budget = os.environ.get(CONSULT_TIMEOUT, "")
+    if not budget.isdigit():
+        return limit
+    left = STARTED + int(budget) / 1000 - ANSWER_MARGIN_SECONDS - time.monotonic()
+    if left <= 0:
+        raise RuntimeError(f"the consult's {budget} ms budget ran out")
+    return min(limit, left)
+
+
 def git(directory, *arguments):
     completed = subprocess.run(
         ["git", "-C", directory, *arguments],
         capture_output=True,
         text=True,
-        timeout=GIT_TIMEOUT_SECONDS,
+        timeout=within_budget(GIT_TIMEOUT_SECONDS),
         check=False,
     )
     return completed.stdout if completed.returncode == 0 else None
@@ -717,7 +737,7 @@ class Deployment(Enum):
     def token(self):
         match self:
             case Deployment.SINGLE_USER:
-                return resolve_token()
+                return resolve_token(timeout=within_budget(GH_TIMEOUT_SECONDS))
             case Deployment.MULTI_USER:
                 return env_token()
 
@@ -810,8 +830,13 @@ def graphql(token, query, variables):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return json.load(response)
+        with urllib.request.urlopen(request, timeout=within_budget(TIMEOUT_SECONDS)) as response:
+            # The socket timeout bounds each read; the budget bounds them all.
+            body = bytearray()
+            while chunk := response.read1(64 * 1024):
+                body += chunk
+                within_budget(TIMEOUT_SECONDS)
+            return json.loads(body)
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"GitHub GraphQL failed: {error.code}") from error
 
