@@ -321,7 +321,7 @@ class ShellShapes(unittest.TestCase):
             self.targets("(cd sub && git push origin) && git push upstream"),
             [Target("remote", "origin", "/w/sub"), Target("remote", "upstream", "/w")],
         )
-        self.assertEqual(self.targets("(files=(a.ts 'b c.ts'); echo $files) && git push origin"), [Target("remote", "origin", "/w")])
+        self.assertEqual(self.targets("(files=(a.ts 'b c.ts'); ls a.ts) && git push origin"), [Target("remote", "origin", "/w")])
         self.assertEqual(
             self.targets(
                 "cd /home/node/workspace && (test -d repo && cd repo && git fetch -q origin 4bdea9bd || "
@@ -507,6 +507,11 @@ class Unfollowable(unittest.TestCase):
             "git -ccore.pager=$P --paginate log && git push origin",
             "git --config=alias.p=push p https://github.com/acme/public.git",
             "git --config-env core.pager=P --paginate log",
+            'D=.g; T=it; cp /tmp/evil "$D$T/config"; git push origin',
+            "D=.g; cat /tmp/evil > ${D}it/config && gh pr view 12",
+            'for d in .g; do cp /tmp/evil "${d}it/config"; done; git push',
+            'read -r d < f; cp /tmp/evil "$d"; git push origin',
+            "(files=(a.ts 'b c.ts'); echo $files) && git push origin",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -519,6 +524,8 @@ class Unfollowable(unittest.TestCase):
             "cat <<EOF\n$(g''h issue create --repo acme/public --title x)\nEOF\ngit status",
             "cat <<true\ntr\\\nue\nexport GIT_CONFIG_COUNT=1\ntrue\ngit push origin",
             "cat <<$'EOF'\nhello\nEOF\ncd /other\n$EOF\ngit push origin",
+            "COMMAND='push https://github.com/acme/public'; python3 - <<EOF\nimport os\nos.system(\"g\" + \"it $COMMAND\")\nEOF\ngit push origin",
+            "python3 - <<EOF\nimport os\nos.system('$COMMAND')\nEOF\ngit push origin",
             "git -c alias.p='push https://github.com/acme/other.git HEAD' p && gh pr view 1 -R acme/api",
             "git config protocol.ext.allow always; git fetch 'ext::gh api -X POST repos/acme/public/issues'; gh repo view acme/private",
             "git config remote.origin.url https://github.com/acme/public --get && git push origin HEAD",
@@ -554,8 +561,11 @@ class FollowedSettings(unittest.TestCase):
             "B=x; git push origin",
             "cd /w && N=5 && git log -n 5 && git push origin",
             "STATUS=$(git status --porcelain); git push origin",
+            "python3 - <<'EOF'\nprint('$HOME')\nEOF\ngit push origin",
         ):
             self.assertEqual(self.targets(command), [Target("remote", "origin", "/w")], command)
+        # A command reaching only named repositories depends on no checkout file.
+        self.assertEqual(self.targets('N=12; echo "$N" > n.txt; gh pr view 12 -R acme/api'), slug("acme/api", 12))
 
     def test_an_inert_pager_or_an_attached_harmless_setting_is_followed(self):
         for command in ("GH_PAGER=cat gh pr view 1 -R acme/api", "export PAGER=less GIT_PAGER=; gh pr view 1 -R acme/api"):

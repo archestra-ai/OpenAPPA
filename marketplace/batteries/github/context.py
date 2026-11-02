@@ -735,7 +735,7 @@ def without_heredocs(command):
                     if names_git(body):
                         raise Unfollowable("a here-document hands a command text naming git or gh, which it may run")
                     # An unquoted delimiter leaves the body's substitutions and line joins to the shell.
-                    if not literal and ("$(" in body or "`" in body or "\\\n" in f"{body}\n"):
+                    if not literal and ("$" in body or "`" in body or "\\\n" in f"{body}\n"):
                         raise Unfollowable("a here-document's body is expanded in a way this provider cannot follow")
                 pending = []
                 continue
@@ -770,7 +770,7 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     command = without_heredocs(command)
     if any(names_git(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
-    targets, pushed, exported, assigned, directory, scopes = [], False, {}, set(), cwd, []
+    targets, pushed, exported, assigned, ever, directory, scopes = [], False, {}, set(), set(), cwd, []
     for words in segments_of(command):
         match words:
             case "(":
@@ -803,11 +803,14 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
             raise Unfollowable(f"export {' '.join(words)} changes settings this provider cannot follow")
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
+            ever |= assigned
             continue
         wrapper, words = words[0], unwrapped(words)
         if not words:
             continue
         program = os.path.basename(words[0])
+        if program in ("for", "select") and len(words) > 1:
+            ever.add(words[1])
         # A wrapper runs a builtin as a child, whose directory ends with it.
         if wrapper in WRAPPERS and program in ("cd", "pushd", "popd"):
             continue
@@ -833,6 +836,7 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
                 raise Unfollowable(f"{program} runs commands this provider cannot follow")
             case _ if program in SETTERS or program == "printf" and any(word.startswith("-v") for word in words):
                 assigned.add(f"a variable {program} sets")
+                ever |= assigned
             case "[" | "[[" | "test":
                 pass
             case _ if (
@@ -843,8 +847,13 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
             ):
                 raise Unfollowable(f"{program} runs a git or gh call this provider cannot follow")
     # A loop can run a change after the push it precedes, so order does not matter.
-    if moves and (pushed or any(target.kind != "slug" for target in targets)):
-        raise Unfollowable(f"{moves[0].change} changes where a push or the checkout's repository goes")
+    if pushed or any(target.kind != "slug" for target in targets):
+        if moves:
+            raise Unfollowable(f"{moves[0].change} changes where a push or the checkout's repository goes")
+        # Any word, a copy's or a redirection's path among them, may expand to a file git reads.
+        referenced = set(REFERENCE.findall(command))
+        if expanded := referenced & ever or referenced and {name for name in ever if not name.isidentifier()}:
+            raise Unfollowable(f"{', '.join(sorted(expanded))} is expanded in a command whose push or checkout it may change")
     return list(dict.fromkeys(targets))
 
 
