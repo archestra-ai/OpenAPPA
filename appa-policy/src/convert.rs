@@ -398,7 +398,8 @@ pub(crate) fn parse_hint(hint: Option<String>, context: &str) -> Result<Option<H
 }
 
 pub(crate) fn parse_context_hint(hint: Option<String>, context: &str) -> Result<Option<ContextHint>, ConfigError> {
-    hint.map(ContextHint::new)
+    hint.filter(|hint| !hint.trim().is_empty())
+        .map(ContextHint::new)
         .transpose()
         .map_err(|too_long| hint_too_long(too_long, context))
 }

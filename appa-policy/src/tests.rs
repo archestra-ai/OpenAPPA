@@ -642,6 +642,7 @@ fn the_deployment_hint_is_runtime_owned_bounded_and_outside_the_identity() {
     );
     let base = load(DECLARATIONS).expect("loads");
     assert_eq!(base.deployment_hint(), None);
+    assert_eq!(load(&hinted(" ")).expect("loads").deployment_hint(), None);
 
     let identity = |source: &str| load(source).expect("loads").engine().identity();
     assert_eq!(

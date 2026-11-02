@@ -2257,7 +2257,7 @@ fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContex
     let mut hints = BTreeMap::new();
     for (name, entry) in raw {
         let (binding, hint) = entry.split();
-        if let Some(hint) = hint {
+        if let Some(hint) = hint.filter(|hint| !hint.trim().is_empty()) {
             let hint = ContextHint::new(hint).map_err(|HintTooLong { len, max }| ConfigError::ContextHintTooLong {
                 name: name.clone(),
                 len,
@@ -4847,6 +4847,13 @@ mod tests {
         assert!(config.externals.context.contains_key("github"));
         let unhinted = MINIMAL.to_string() + "\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\n";
         assert!(parse(&unhinted).expect("loads").externals.context_hints.is_empty());
+        assert!(
+            parse(&provider("  "))
+                .expect("loads")
+                .externals
+                .context_hints
+                .is_empty()
+        );
 
         let max = appa_engine::registry::MAX_CONTEXT_HINT_CHARS;
         assert!(parse(&provider(&"é".repeat(max))).is_ok());
