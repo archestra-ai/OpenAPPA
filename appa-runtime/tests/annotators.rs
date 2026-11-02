@@ -789,6 +789,70 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
     );
 }
 
+/// The deployment hint reaches every annotation consult, and a provider's hint reaches it only
+/// when that provider has an entry in the call's context: an answer or an error, never a
+/// `null` answer. No hint enters a provider's consult or its answer.
+#[tokio::test]
+async fn the_annotator_reads_the_deployer_hints_of_the_providers_in_its_context() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, service) = serve_annotator().await;
+    context_service(&service);
+    let config = ["repo", "quiet", "down"]
+        .into_iter()
+        .fold(context_policy(&url), |config, provider| {
+            config.replace(
+                &format!("[externals.context.{provider}]\n"),
+                &format!("[externals.context.{provider}]\nhint = \"{provider} hint\"\n"),
+            )
+        })
+        + "\n[policy.deployment]\nhint = \"deployment hint\"\n";
+    let runtime = open_runtime(&dir, &config).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let requests = service.requests();
+    let (asked, annotations): (Vec<_>, Vec<_>) = requests.iter().partition(|request| request["kind"] == "context");
+    assert_eq!(asked.len(), 3);
+    for request in &asked {
+        assert_eq!(request["declaration"], serde_json::json!({}));
+    }
+    let [annotation] = annotations.as_slice() else {
+        panic!("the annotator is asked once");
+    };
+    assert_eq!(annotation["declaration"]["deployment_hint"], "deployment hint");
+    assert_eq!(
+        annotation["declaration"]["context_hints"],
+        serde_json::json!({ "down": "down hint", "repo": "repo hint" })
+    );
+    assert_eq!(
+        annotation["artifact"]["context"]["repo"],
+        serde_json::json!({ "answer": { "visibility": "private" } })
+    );
+}
+
+#[tokio::test]
+async fn an_annotation_without_deployer_hints_declares_neither_layer() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, service) = serve_annotator().await;
+    context_service(&service);
+    let runtime = open_runtime(&dir, &context_policy(&url)).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let requests = service.requests();
+    let annotation = requests
+        .iter()
+        .find(|request| request["kind"] == "annotation")
+        .expect("the annotator is asked");
+    let declaration = annotation["declaration"].as_object().expect("a declaration object");
+    assert!(!declaration.contains_key("deployment_hint"));
+    assert!(!declaration.contains_key("context_hints"));
+}
+
 #[tokio::test]
 async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

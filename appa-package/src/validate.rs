@@ -971,6 +971,9 @@ fn check_binding(
             // audience entry; the loader resolves the name in the composed config.
             "lookup"
                 if external.starts_with("audience.") && value.as_str().is_some_and(|target| !target.is_empty()) => {}
+            // A context provider carries the deployer's hint on reading its answers; the loader
+            // bounds its length.
+            "hint" if external.starts_with("context.") && value.is_str() => {}
             _ => return Err(refuse()),
         }
     }
@@ -1876,6 +1879,29 @@ mod tests {
             assert!(
                 matches!(&refused, Err(PackageError::PolicyExternalCommand { external: named, .. }) if named == external),
                 "{addition} answered {refused:?}"
+            );
+        }
+    }
+
+    /// A context provider carries the deployer's hint on reading its answers;
+    /// no other external, and no value but a string, carries one.
+    #[test]
+    fn a_context_binding_may_carry_a_hint() {
+        let provider = "[externals.context.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        let hinted = format!("{BATTERY_POLICY}\n{provider}hint = \"Private repositories are internal.\"\n");
+        assert!(validate_package(battery(&hinted).path()).is_ok());
+
+        let audience = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        for refused in [
+            format!("{BATTERY_POLICY}\n{provider}hint = 3\n"),
+            BATTERY_POLICY.replace(audience, &format!("{audience}hint = \"h\"\n")),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&refused).path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted {refused}"
             );
         }
     }

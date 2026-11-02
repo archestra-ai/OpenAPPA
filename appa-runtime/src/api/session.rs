@@ -2051,6 +2051,9 @@ impl Session {
                     self.timed_consult(consult, None, None, occasion, Some(call))
                 })
                 .await;
+                let declaration = declaration
+                    .clone()
+                    .with_context_hints(&context, &deployment.config.externals.context_hints);
                 let consult = Consult {
                     name: annotator.clone(),
                     body: ConsultBody::Annotation {
@@ -2062,7 +2065,7 @@ impl Session {
                     },
                 };
                 let answer = match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
-                    ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
+                    ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, &declaration)
                         .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };

@@ -941,6 +941,7 @@ mod tests {
             annotators,
             audience,
             context: BTreeMap::new(),
+            context_hints: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
             jev: None,
@@ -1044,6 +1045,8 @@ mod tests {
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
+                    deployment_hint: None,
+                    context_hints: std::collections::BTreeMap::new(),
                     inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&[

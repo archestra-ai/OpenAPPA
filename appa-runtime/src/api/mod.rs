@@ -2217,6 +2217,7 @@ impl Runtime {
         let consults = deployment.externals.context_consults(&context);
         let context =
             session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
+        let declaration = declaration.with_context_hints(&context, &deployment.config.externals.context_hints);
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
