@@ -394,7 +394,10 @@ def config_change(arguments):
         match word:
             case _ if "$" in word or "`" in word:
                 raise Unfollowable(f"git config {word} is computed when the command runs")
-            case "-e" | "--edit" | "edit" if not names:
+            # Options end at the first operand: a later `--get` is a value pattern.
+            case _ if names:
+                names.append(word)
+            case "-e" | "--edit" | "edit":
                 raise Unfollowable("git config --edit changes settings this provider cannot read")
             case "get" | "list" if not names and mode is None:
                 mode = "read"
@@ -443,6 +446,8 @@ def git_target(words, directory):
         index += 1
     if index < len(words):
         computed(words[index])
+    if any("ext::" in word for word in words):
+        raise Unfollowable("git's ext:: transport runs a command this provider cannot follow")
     match words[index : index + 2]:
         case ["config", *_]:
             return config_change(words[index + 1 :])
@@ -655,9 +660,12 @@ def delimiter_at(command, index):
 def without_heredocs(command):
     """The command with each here-document's body left out: it is text a command reads,
     not shell. A body naming git or gh is refused, as the command reading it may run it."""
-    kept, pending, quote, arithmetic, index = [], [], None, 0, 0
+    kept, pending, quote, arithmetic, braces, index = [], [], None, 0, 0, 0
     while index < len(command):
         character = command[index]
+        # A substitution parses its own here-documents before the pending ones.
+        if pending and (command.startswith("$(", index) or character == "`"):
+            raise Unfollowable("a command substitution beside a here-document is one this provider cannot follow")
         match character:
             case "\\" if quote != "'":
                 kept.append(command[index : index + 2])
@@ -676,10 +684,19 @@ def without_heredocs(command):
                 kept.append(character * 2)
                 index += 2
                 continue
+            case "$" if command.startswith("${", index):
+                braces += 1
+                kept.append("${")
+                index += 2
+                continue
+            case "}" if braces:
+                braces -= 1
             case "<" if command.startswith("<<<", index):
                 kept.append("<<<")
                 index += 3
                 continue
+            case "<" if braces and command.startswith("<<", index):
+                raise Unfollowable("<< inside a parameter expansion is one this provider cannot follow")
             case "<" if not arithmetic and (heredoc := HEREDOC.match(command, index)):
                 delimiter, end, literal = delimiter_at(command, heredoc.end())
                 pending.append((delimiter, bool(heredoc.group(1)), literal))

@@ -507,6 +507,10 @@ class Unfollowable(unittest.TestCase):
             "cat <<true\ntr\\\nue\nexport GIT_CONFIG_COUNT=1\ntrue\ngit push origin",
             "cat <<$'EOF'\nhello\nEOF\ncd /other\n$EOF\ngit push origin",
             "git -c alias.p='push https://github.com/acme/other.git HEAD' p && gh pr view 1 -R acme/api",
+            "git config protocol.ext.allow always; git fetch 'ext::gh api -X POST repos/acme/public/issues'; gh repo view acme/private",
+            "git config remote.origin.url https://github.com/acme/public --get && git push origin HEAD",
+            ": <<OUT $(cat <<:\nx\n:\n)\nbody\nOUT\ncd /other\n:\ngit push origin",
+            ": ${v:-<<: }\ncd /other\n:\ngit push origin",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
